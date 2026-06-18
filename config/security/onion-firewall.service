@@ -7,12 +7,11 @@ Wants=network-pre.target
 
 [Service]
 Type=oneshot
-ExecStartPre=/sbin/modprobe nf_tables
-ExecStartPre=/sbin/modprobe nf_conntrack
-ExecStartPre=/sbin/modprobe nf_conntrack_inet
+ExecStartPre=-/sbin/modprobe nf_tables
+ExecStartPre=-/sbin/modprobe nf_conntrack
 ExecStartPre=-/sbin/nft flush ruleset
-ExecStart=/usr/sbin/nft -f /etc/nftables.conf
-ExecReload=/usr/sbin/nft -f /etc/nftables.conf
+ExecStart=-/usr/sbin/nft -f /etc/nftables.conf
+ExecReload=-/usr/sbin/nft -f /etc/nftables.conf
 RemainAfterExit=yes
 
 [Install]

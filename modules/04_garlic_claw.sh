@@ -14,7 +14,7 @@
 #   首次配置向导、防火墙规则、systemd 用户服务
 #
 # 关键步骤：
-#   1. 安装 Node.js >= v22
+#   1. 安装 Node.js（优先 v22，失败时回退到 Debian 稳定版）
 #   2. 执行 OpenClaw 官方安装脚本
 #   3. 创建 garlic-claw 命令别名与 PATH 集成
 #   4. 创建 .desktop 启动器（TUI 模式）
@@ -33,32 +33,46 @@ install_nodejs() {
     if command -v node &>/dev/null; then
         local node_version
         node_version=$(node -v | sed 's/v//' | cut -d. -f1)
-        if [[ ${node_version} -ge 22 ]]; then
+        if [[ ${node_version} -ge 20 ]]; then
             echo "Node.js $(node -v) 已安装，满足要求。"
             return 0
         fi
     fi
 
-    echo "安装 Node.js v22 LTS..."
+    echo "安装 Node.js..."
 
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - 2>/dev/null || true
-    apt install -y nodejs 2>/dev/null || true
+    if timeout 180 bash -c 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -' 2>/dev/null; then
+        timeout 180 apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends nodejs 2>/dev/null || true
+    fi
 
     if ! command -v node &>/dev/null; then
-        echo "[WARN] NodeSource 安装失败，尝试从 Debian Backports 安装..."
-        apt install -y -t bookworm-backports nodejs 2>/dev/null || true
+        echo "[WARN] NodeSource 安装失败，尝试从 Debian 仓库安装..."
+        rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource*.gpg 2>/dev/null || true
+        rm -f /var/lib/apt/lists/*nodesource* 2>/dev/null || true
+        apt-get update 2>/dev/null || true
+        timeout 180 apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends nodejs npm 2>/dev/null || true
     fi
 
     if ! command -v node &>/dev/null; then
         echo "[WARN] Node.js 安装失败，创建占位脚本..."
-        echo "[WARN] 用户可后续手动安装: curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs"
+        echo "[WARN] 用户可后续手动安装: apt install -y nodejs npm"
         return 0
     fi
 
     local node_version
     node_version=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [[ ${node_version} -lt 22 ]]; then
-        echo "[WARN] Node.js 版本 $(node -v) 低于 v22，部分功能可能受限。"
+    if [[ ${node_version} -lt 20 ]]; then
+        echo "[WARN] Node.js 版本 $(node -v) 低于 v20，部分功能可能受限。"
+    elif [[ ${node_version} -lt 22 ]]; then
+        echo "[INFO] 当前使用 Debian 稳定版 Node.js $(node -v)。"
     fi
 
     echo "Node.js $(node -v) 安装完成"
@@ -282,7 +296,7 @@ sleep 5
 # 欢迎界面
 zenity --info \\
     --title="欢迎使用 Onion OS" \\
-    --text="欢迎使用 Onion OS 26.1.0 Home Edition！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
+        --text="欢迎使用 Onion OS 26.2.0 Home Edition！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
     --width=450 \\
     --ok-label="开始配置" \\
     --extra-button="跳过" \\

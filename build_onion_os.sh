@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 26.1.0 Home Edition - 主构建脚本
+# Onion OS 26.2.0 Home Edition - 主构建脚本
 # ============================================================================
 # 设计意图：
-#   在 Debian 12 (Bookworm) 宿主系统上，通过 debootstrap 构建一个完整的
+#   在 Debian 13 (Trixie) 宿主系统上，通过 debootstrap 构建一个完整的
 #   Onion OS 根文件系统，依次调用模块脚本完成系统定制，最终生成可启动 ISO。
 #
 # 输入：
@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly ONION_OS_NAME="Onion OS"
-readonly ONION_OS_VERSION="26.1.0"
+readonly ONION_OS_VERSION="26.2.0"
 readonly ONION_OS_EDITION="Home"
 readonly ONION_OS_CODENAME="onion"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
-readonly DEBIAN_SUITE="bookworm"
+readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/onion-os-build"
@@ -134,7 +134,7 @@ install_build_deps() {
 }
 # ======================== debootstrap 构建基础系统 ========================
 run_debootstrap() {
-    log_step "执行 debootstrap 构建 ${DEBIAN_SUITE} 娡础系统"
+    log_step "执行 debootstrap 构建 ${DEBIAN_SUITE} 基础系统"
     if [[ -d "${CHROOT_DIR}" ]]; then
         log_warn "chroot 目录已存在，清除旧数据..."
         umount_chroot || true
@@ -282,10 +282,8 @@ insmod jpeg
 search --no-floppy --file --set=root /live/vmlinuz
 set prefix=(\$root)/boot/grub
 
-if [ -f /boot/grub/fonts/unicode.pf2 ]; then
-    loadfont /boot/grub/fonts/unicode.pf2
-    terminal_output gfxterm
-fi
+loadfont /boot/grub/fonts/unicode.pf2
+terminal_output gfxterm
 
 set color_normal=white/black
 set color_highlight=black/light-gray
@@ -296,42 +294,42 @@ set menu_color_highlight=black/white
 set gfxmode=auto
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} ${ONION_OS_EDITION}" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet splash
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (兼容模式 / VirtualBox)" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet splash nomodeset vga=791
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset vga=791
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (低分辨率 1024x768 / 老旧显卡)" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=792
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=792
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (最低分辨率 800x600 / 极旧显卡)" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=788 video=800x600
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=788 video=800x600
     initrd /live/initrd
 }
 
 menuentry "${ONION_OS_NAME} 安全模式" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet nomodeset vga=normal noapic noacpi
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet nomodeset vga=normal noapic noacpi
     initrd /live/initrd
 }
 
 menuentry "${ONION_OS_NAME} 调试模式" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 debug nomodeset vga=normal
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 debug nomodeset vga=normal
     initrd /live/initrd
 }
 
 menuentry "安装 ${ONION_OS_NAME} 到硬盘" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 quiet splash nomodeset install
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset install
     initrd /live/initrd
 }
 
 menuentry "低内存模式 (1.0GB)" {
-    linux /live/vmlinuz boot=live components locales=zh_CN.UTF-8 nomodeset mem=1024M
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 nomodeset mem=1024M
     initrd /live/initrd
 }
 
@@ -354,14 +352,14 @@ GRUBCFG
     log_info "生成 ISO 镜像文件..."
     local iso_name="onion-os-${ONION_OS_VERSION}-${ONION_OS_EDITION,,}-amd64.iso"
 
-    ${GRUB_MKRESCUE:-grub-mkrescue} \
-        --output="${OUTPUT_DIR}/${iso_name}" \
-        "${ISO_DIR}" \
-        2>&1 || true
+    build_iso_manual "${iso_name}"
 
     if [[ ! -f "${OUTPUT_DIR}/${iso_name}" ]]; then
-        log_warn "grub-mkrescue 未生成 ISO，尝试手动用 xorriso 构建..."
-        build_iso_manual "${iso_name}"
+        log_warn "手动 GRUB ISO 构建未生成 ISO，尝试 grub-mkrescue 回退..."
+        ${GRUB_MKRESCUE:-grub-mkrescue} \
+            --output="${OUTPUT_DIR}/${iso_name}" \
+            "${ISO_DIR}" \
+            2>&1 || true
     fi
 
     if [[ -f "${OUTPUT_DIR}/${iso_name}" ]]; then
@@ -388,15 +386,6 @@ build_iso_manual() {
 
     mkdir -p "${iso_workdir}/EFI/BOOT"
 
-    if [[ -f /usr/lib/shim/shimx64.efi.signed ]]; then
-        cp /usr/lib/shim/shimx64.efi.signed "${iso_workdir}/EFI/BOOT/BOOTX64.EFI"
-        cp /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi "${iso_workdir}/EFI/BOOT/grubx64.efi"
-        log_info "已安装 EFI 引导文件 (shim + grubx64)"
-    elif [[ -f /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi ]]; then
-        cp /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi "${iso_workdir}/EFI/BOOT/BOOTX64.EFI"
-        log_info "已安装 EFI 引导文件 (grubx64 as BOOTX64)"
-    fi
-
     mkdir -p "${iso_workdir}/boot/grub/x86_64-efi"
     if [[ -d /usr/lib/grub/x86_64-efi ]]; then
         cp /usr/lib/grub/x86_64-efi/*.mod "${iso_workdir}/boot/grub/x86_64-efi/"
@@ -404,18 +393,62 @@ build_iso_manual() {
         cp /usr/lib/grub/x86_64-efi/*.efi "${iso_workdir}/boot/grub/x86_64-efi/" 2>/dev/null || true
     fi
 
-    # 准备嵌入式早期配置
+    mkdir -p "${iso_workdir}/boot/grub/i386-pc"
+    if [[ -d /usr/lib/grub/i386-pc ]]; then
+        cp /usr/lib/grub/i386-pc/*.mod "${iso_workdir}/boot/grub/i386-pc/" 2>/dev/null || true
+        cp /usr/lib/grub/i386-pc/*.lst "${iso_workdir}/boot/grub/i386-pc/" 2>/dev/null || true
+    fi
+
+    # Both BIOS and UEFI fallback boot images embed this tiny config. Without it
+    # GRUB can start but stop at the "Welcome to GRUB" prompt instead of loading
+    # the Onion OS menu.
     cat > "${iso_workdir}/boot/grub/early-grub.cfg" << 'EOF'
 search --no-floppy --file --set=root /live/vmlinuz
 set prefix=($root)/boot/grub
+configfile ($root)/boot/grub/grub.cfg
 EOF
 
-    if [[ -f /usr/lib/grub/i386-pc/cdboot.img ]] && [[ -f /usr/lib/grub/i386-pc/boot.img ]]; then
+    if command -v grub-mkimage &>/dev/null && [[ -d /usr/lib/grub/x86_64-efi ]]; then
+        grub-mkimage \
+            -O x86_64-efi \
+            -p /boot/grub \
+            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -o "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" \
+            part_gpt part_msdos fat iso9660 udf all_video font gfxterm normal configfile \
+            search search_fs_file linux chain boot 2>/dev/null || true
+    fi
+
+    if [[ ! -f "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" ]] && [[ -f /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi ]]; then
+        cp /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi "${iso_workdir}/EFI/BOOT/BOOTX64.EFI"
+        log_warn "使用未嵌入 early-grub.cfg 的 monolithic UEFI GRUB 作为回退"
+    fi
+
+    if [[ -f "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" ]]; then
+        log_info "已生成 EFI 引导文件 (BOOTX64.EFI with early config)"
+    fi
+
+    if command -v grub-mkimage &>/dev/null && [[ -f /usr/lib/grub/i386-pc/cdboot.img ]]; then
+        grub-mkimage \
+            -O i386-pc \
+            -p /boot/grub \
+            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -o "${iso_workdir}/boot/grub/i386-pc/core.img" \
+            biosdisk iso9660 udf part_gpt part_msdos normal configfile search search_fs_file \
+            linux all_video font gfxterm boot 2>/dev/null || true
+
+        if [[ -f "${iso_workdir}/boot/grub/i386-pc/core.img" ]]; then
+            cat /usr/lib/grub/i386-pc/cdboot.img \
+                "${iso_workdir}/boot/grub/i386-pc/core.img" \
+                > "${iso_workdir}/boot/grub/i386-pc/eltorito.img"
+        fi
+    fi
+
+    if [[ -f "${iso_workdir}/boot/grub/i386-pc/eltorito.img" ]]; then
         log_info "使用 xorriso 手动构建可引导 ISO (BIOS + UEFI)..."
 
         local efi_data=""
         if [[ -f "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" ]]; then
-            efi_data="--efi-boot boot/grub/efi.img"
+            efi_data="-eltorito-alt-boot -e boot/grub/efi.img -no-emul-boot"
             local efi_img="${iso_workdir}/boot/grub/efi.img"
             local efi_tmpdir
             efi_tmpdir="$(mktemp -d)"
@@ -431,6 +464,24 @@ EOF
             rm -rf "${efi_tmpdir}"
         fi
 
+        local isohybrid_mbr=""
+        local hybrid_mbr_args=()
+        for candidate in \
+            /usr/lib/grub/i386-pc/isohdpfx.bin \
+            /usr/lib/ISOLINUX/isohdpfx.bin \
+            /usr/lib/syslinux/bios/isohdpfx.bin; do
+            if [[ -f "${candidate}" ]]; then
+                isohybrid_mbr="${candidate}"
+                break
+            fi
+        done
+        if [[ -n "${isohybrid_mbr}" ]]; then
+            hybrid_mbr_args=(-isohybrid-mbr "${isohybrid_mbr}")
+            log_info "使用 isohybrid MBR: ${isohybrid_mbr}"
+        else
+            log_warn "未找到 isohdpfx.bin，ISO 仍可通过 BIOS/UEFI 引导，但可能不支持部分 USB-HDD 混合启动模式"
+        fi
+
         xorriso -as mkisofs \
             -iso-level 3 \
             -full-iso9660-filenames \
@@ -441,9 +492,8 @@ EOF
             -boot-load-size 4 \
             -boot-info-table \
             ${efi_data} \
-            -no-emul-boot \
             -isohybrid-gpt-basdat \
-            -isohybrid-mbr /usr/lib/grub/i386-pc/isohdpfx.bin \
+            "${hybrid_mbr_args[@]}" \
             -output "${OUTPUT_DIR}/${iso_name}" \
             "${iso_workdir}" \
             2>&1

@@ -29,13 +29,12 @@ install_security_tools() {
 
     echo "nf_tables" >> /etc/modules
     echo "nf_conntrack" >> /etc/modules
-    echo "nf_conntrack_inet" >> /etc/modules
     echo "nft_ct" >> /etc/modules
     echo "nft_counter" >> /etc/modules
 
     mkdir -p /etc/modprobe.d
     cat > /etc/modprobe.d/onion-nftables.conf << MODPROBE
-softdep nf_tables pre: nf_conntrack nf_conntrack_inet
+softdep nf_tables pre: nf_conntrack
 MODPROBE
 }
 
@@ -54,6 +53,7 @@ deploy_onion_master() {
     
     # 复制防火墙服务文件
     cp /tmp/onion-build/config/security/onion-firewall.service /etc/systemd/system/
+    chmod 0644 /etc/systemd/system/onion-firewall.service
     systemctl enable onion-firewall 2>/dev/null || true
     
     # 创建桌面快捷方式

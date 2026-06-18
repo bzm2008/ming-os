@@ -1,187 +1,91 @@
-# Onion OS 26.1.0 - 执行指南
+# Onion OS 26.2.0 - 执行指南
 
-## 重要说明
+## 当前目标
 
-**当前开发/构建环境：Windows + WSL Debian**  
-Onion OS 的 ISO 构建需要在 Linux 环境中执行（推荐 Debian 12 / Ubuntu 22.04+；本机使用 WSL Debian 完成构建）。Windows 工作区只保存源码与最终复制出的 ISO。
+26.2.0 是一次面向真实用户反馈的维护发布：修复 ISO 启动直接进入 `Welcome to GRUB` 的问题，把系统底座推进到 Debian 13/Trixie，并针对“2GB 内存 + 微信好友/群组较多”场景做系统和应用双层优化。
 
-## 26.1.0 已完成的工作
+## 本轮改动清单
 
-### 1. 版本目标
+| 文件 | 重点 |
+| --- | --- |
+| `build_onion_os.sh` | 版本升至 26.2.0；Debian suite 改为 `trixie`；BIOS/UEFI 手工 ISO fallback 内嵌 early GRUB 配置 |
+| `modules/01_base.sh` | Trixie 源、zram、earlyoom、irqbalance、运行时内存 profile、日志限容 |
+| `modules/02_apps.sh` | 官方微信 Linux deb、`onion-wechat` 低内存包装器、星火应用商店 |
+| `modules/03_desktop.sh` | Dock/菜单入口改为 Onion 设置任务面板、星火商店和官方微信；低内存时关闭重动画并缩小界面 |
+| `modules/06_ota_update.sh` | OTA 客户端重试、JSON 校验、SHA256/size 校验、pending artifact 识别、GRUB OTA 启动项 |
+| `config/preseed.cfg` | 安装源切换到 Trixie |
 
-26.1.0 基于 26.0.6 开发，重点解决历史版本“桌面美化没有真正应用到安装后系统”的问题，并将桌面体验升级为更接近 macOS 的开箱即用风格。
+## 构建环境
 
-核心目标：
-- 类 macOS 顶部细菜单栏 + 底部 Dock；
-- Plank 真 Dock，支持悬停放大、弹跳动画与玻璃风主题；
-- Picom 主线兼容配置，提供 dual_kawase 模糊、圆角、柔光阴影、渐入渐出；
-- `/etc/skel` 配置固化，确保 Calamares 创建的新用户继承主题、壁纸、Dock 与自启动项；
-- `onion-apply-appearance` 登录自愈，逐显示器强制应用壁纸、主题、Picom、Plank 与缩放；
-- 自动 HiDPI / 小屏 / 超宽屏适配；
-- 保留老旧显卡、低分辨率、安全模式、低内存模式等启动入口。
+- Linux 宿主：Debian 13、Debian 12、Ubuntu 22.04+ 或 WSL Debian
+- 权限：root
+- 磁盘：至少 30GB 可用空间
+- 内存：推荐 8GB；构建机最低不建议低于 4GB
+- 网络：需要访问 Debian 镜像、腾讯微信 deb、WPS、星火应用商店发布页
 
-### 2. 新增/重点文件
-
-| 文件路径 | 说明 |
-|---------|------|
-| `modules/07_finalize.sh` | 构建收尾模块：同步用户配置到 `/etc/skel`，校验关键美化资源，防止安装后丢失主题/Dock |
-| `modules/03_desktop.sh` | 26.1.0 桌面核心：Onion-Glass 主题、Plank Dock、Picom、壁纸、欢迎引导、自动缩放、登录自愈 |
-| `repackage_2610_iso.sh` | 本地临时重封装脚本，用于在 chroot 热修补后重新生成 26.1.0 ISO |
-| `build-logs/build-26.1.0-20260606-014925.log` | 本机构建日志，记录完整构建成功与 `BUILD_EXIT_CODE=0` |
-
-### 3. 更新的文件
-
-| 文件路径 | 修改内容 |
-|---------|---------|
-| `build_onion_os.sh` | 版本更新为 `26.1.0`，构建流程加入 `07_finalize.sh` |
-| `README.md` | 更新为 26.1.0 功能说明、桌面布局、构建产物路径 |
-| `EXECUTION_GUIDE.md` | 本文档，更新当前构建与验证口径 |
-| `modules/02_apps.sh` | 安装 Plank、Picom、显示/音频/硬件适配相关工具 |
-| `modules/03_desktop.sh` | 重写桌面体验，确保美化写入用户配置并可同步到 `/etc/skel` |
-
-## 在 Linux/WSL 中构建
-
-### 前置要求
-
-1. **宿主系统**：Debian 12/13、Ubuntu 22.04+ 或 WSL Debian；
-2. **磁盘空间**：至少 15GB 可用空间，推荐 30GB+；
-3. **内存**：至少 4GB RAM，推荐 8GB+；
-4. **权限**：需要 root 权限；
-5. **网络**：构建时需要访问 Debian 镜像源和第三方软件源。
-
-### 构建步骤
+## 构建命令
 
 ```bash
-# 1. 进入项目目录
 cd onion-os
-
-# 2. 赋予脚本执行权限
 chmod +x build_onion_os.sh modules/*.sh
-
-# 3. 执行构建（需要 root 权限）
 sudo ./build_onion_os.sh
 ```
 
-### 构建产物
-
-构建成功后，ISO 镜像会复制到本地工作区：
+成功后应得到：
 
 ```text
-output/onion-os-26.1.0-home-amd64.iso
+output/onion-os-26.2.0-home-amd64.iso
 ```
 
-本机当前镜像绝对路径：
+本轮最终验证镜像：
 
 ```text
-e:\llinux os\onion-os\output\onion-os-26.1.0-home-amd64.iso
+SHA256: ecca3e1ee619a2cb34d918029468434db9f0e66b34430d1d023f3a338f42bbd2
 ```
 
-> 注意：`output/` 和 `*.iso` 已被 `.gitignore` 排除，ISO 文件不会直接提交到 GitHub。GitHub 仓库只保存源码、构建脚本和文档。
+## 验证重点
 
-## 本次构建验证结果
+构建后至少检查：
 
-本机 26.1.0 构建日志：
+- ISO 内存在 `/live/vmlinuz`、`/live/initrd`、`/live/filesystem.squashfs`。
+- ISO 内存在 `/boot/grub/grub.cfg`，菜单包含 `启动 Onion OS 26.2.0 Home`。
+- UEFI `EFI/BOOT/BOOTX64.EFI` 可加载 GRUB 菜单。
+- BIOS fallback 存在 `boot/grub/i386-pc/eltorito.img`。
+- QEMU/VirtualBox 启动不再停在 `Welcome to GRUB`。
+- Ventoy/Live 不再要求手动输入用户名密码：LightDM 自动登录 `onion`，tty1/ttyS0 文本控制台也兜底自动登录。
+- 串口验证应看到 `onion-os login: onion (automatic login)`。
+- `onion-firewall.service` 应显示 OK，不应在 Live 启动日志里标红失败。
+- Live 桌面能自动弹出 Calamares。
+- Dock 和开始菜单的设置入口优先打开 Onion 设置任务面板，而不是原版 Xfce Settings Manager。
+- Onion 设置里常见操作必须是按钮：检查更新、修复界面显示、连接网络、安装微信、微信省内存、清理微信缓存、网页版微信、修复应用商店、查看内存策略。
+- 2GB 虚拟机中 Picom 使用 fallback、Dock 不放大、微信启动器提示省内存模式。
+- `onion-update check` 能从 Scallion 返回 JSON，而不是 PHP 源码或前端 HTML。
+
+## OTA 发布流程
+
+1. 构建 ISO。
+2. 上传到线上 Scallion：
 
 ```text
-build-logs/build-26.1.0-20260606-014925.log
+/www/wwwroot/scallion.uno/public/iso/onion-os-26.2.0-home-amd64.iso
 ```
 
-关键结果：
-
-- `07_finalize.sh` 已执行；
-- `/etc/skel` 同步完成；
-- 关键美化资源校验通过：`全部关键美化资源就位 ✓`；
-- `grub-mkrescue` 成功生成 ISO；
-- ISO 已复制到 Windows 输出目录；
-- 日志结尾包含 `BUILD_EXIT_CODE=0`。
-
-已验证当前 ISO 中包含：
-
-- `/live/filesystem.squashfs`；
-- `/boot/grub/grub.cfg`；
-- `启动 Onion OS 26.1.0 Home` GRUB 菜单字符串。
-
-## 启动与安装
-
-### 1. U 盘安装
-
-使用 Rufus、Ventoy 或 Linux `dd` 将 ISO 写入 U 盘：
+3. 线上接口应返回 `ready: true`、`has_update: true`、有效 `checksum` 和 `size`：
 
 ```bash
-sudo dd if=output/onion-os-26.1.0-home-amd64.iso of=/dev/sdX bs=4M status=progress
+curl -s "https://scallion.uno/api/onion-update/check?version=26.1.0&channel=stable"
 ```
 
-从 U 盘启动后，系统会进入 Live 桌面并自动弹出 Calamares 图形化安装器。
-
-### 2. 虚拟机体验
-
-推荐配置：
-
-- 2 核 CPU；
-- 4GB 内存（最低 2GB）；
-- 20GB+ 虚拟硬盘；
-- 显卡优先使用默认 VMSVGA/VMware SVGA；
-- 如黑屏或分辨率异常，选择 GRUB 中的兼容模式/低分辨率模式。
-
-QEMU 示例：
+4. 客户端下载后执行：
 
 ```bash
-qemu-system-x86_64 -cdrom output/onion-os-26.1.0-home-amd64.iso -m 4G -enable-kvm
+sudo onion-update install
 ```
 
-## 桌面体验说明
+该命令不会粗暴覆盖当前系统文件，而是校验 ISO 结构后写入 GRUB 的 `Onion OS 26.2.0 OTA Installer` 启动项，重启后进入新系统安装器。
 
-26.1.0 默认桌面结构：
+## 用户反馈口径
 
-- 顶部：Xfce 细菜单栏，左侧 Onion 菜单，右侧网络/音量/电池/时钟；
-- 底部：Plank Dock，包含浏览器、文件管理器、应用商店、微信、Garlic Claw、系统更新、设置；
-- 背景：Onion OS 紫色渐变壁纸；
-- 视觉：Onion-Glass 深紫液态玻璃主题；
-- 动画：Plank 悬停放大/弹跳 + Picom 模糊/圆角/淡入淡出；
-- 首次登录：欢迎向导 + Wi-Fi 引导；
-- 每次登录：`onion-apply-appearance` 自动修正主题、壁纸、Dock 与缩放。
+对 2GB 内存用户需要说清楚：Onion OS 本身会尽量轻量运行，但微信好友和群组过多时，微信才是主要内存压力源。26.2.0 会通过 zram、earlyoom、轻量合成器、低优先级启动、微信缓存限制和网页版入口尽量缓解；如果用户账号群组特别多，2GB 机器仍建议优先使用网页版微信或升级内存。
 
-## 常见问题
-
-### Q: 为什么 ISO 不上传 GitHub？
-
-A: ISO 体积约 1.4GB，属于构建产物，已通过 `.gitignore` 排除。GitHub 仓库只同步源码、脚本和文档；ISO 留在本机 `output/` 目录，后续如需发布应上传到专门的下载/OTA 存储。
-
-### Q: 为什么之前美化没有应用？
-
-A: 历史版本主要把配置写进 live 用户家目录，安装后 Calamares 新建用户不会继承；此外 Picom 配置包含主线版本不支持的动画语法，可能导致合成器启动失败。26.1.0 通过 `/etc/skel`、`07_finalize.sh` 和 `onion-apply-appearance` 解决这些问题。
-
-### Q: 如果启动后没有 Dock 怎么办？
-
-A: 先等待 2-5 秒，Plank 会在登录后延迟启动。如果仍未出现，可在终端执行：
-
-```bash
-onion-apply-appearance
-plank &
-```
-
-### Q: 如果老旧显卡动画卡顿怎么办？
-
-A: 使用 GRUB 的兼容模式/低分辨率模式启动，Picom 会自动回退到 xrender fallback 配置，保留基本阴影和淡入淡出。
-
-## 文件清单
-
-```text
-onion-os/
-├── build_onion_os.sh              # 主构建脚本（26.1.0）
-├── modules/
-│   ├── 01_base.sh                 # 基础系统/内核/网络/硬件适配
-│   ├── 02_apps.sh                 # Xfce/Plank/Picom/应用/字体/工具
-│   ├── 03_desktop.sh              # 桌面、Dock、主题、壁纸、欢迎向导、登录自愈
-│   ├── 04_garlic_claw.sh          # Garlic Claw AI 助手
-│   ├── 05_security_tools.sh       # 安全工具模块
-│   ├── 06_ota_update.sh           # OTA 更新系统
-│   └── 07_finalize.sh             # 收尾固化与美化资源校验
-├── config/
-│   ├── preseed.cfg
-│   └── security/
-├── output/                        # 本机构建产物（git 忽略）
-│   └── onion-os-26.1.0-home-amd64.iso
-├── README.md
-└── EXECUTION_GUIDE.md
-```
+对“不会用命令”的用户，默认说法应是：打开 Dock 里的 `Onion 设置`，点对应按钮完成操作。命令行只作为高级排障方式写在文档后面，不作为普通用户的第一路径。

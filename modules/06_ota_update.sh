@@ -41,7 +41,9 @@ install_ota_dependencies() {
         zenity \
         yad \
         libnotify-bin \
-        policykit-1
+        pkexec \
+        polkitd \
+        lxpolkit
 }
 
 # ======================== OTA CLI 工具 ========================
@@ -52,11 +54,11 @@ deploy_ota_cli() {
     cat > /usr/local/bin/onion-update << 'OTACLI'
 #!/usr/bin/env bash
 # Onion OS OTA 更新客户端
-# 版本: 1.0.0
+# 版本: 1.1.0
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly CONFIG_DIR="/etc/onion-update"
 readonly CACHE_DIR="/var/cache/onion-update"
 readonly STATE_FILE="${CONFIG_DIR}/state.json"
@@ -92,6 +94,8 @@ init_config() {
     "channel": "stable",
     "auto_check": true,
     "auto_download": false,
+    "verify_checksum": true,
+    "download_retries": 3,
     "notify_enabled": true,
     "last_check": "",
     "current_version": "$(cat /etc/onion-version 2>/dev/null || echo 'unknown')"
@@ -124,8 +128,12 @@ set_config() {
 
 # 检查网络连接
 check_network() {
-    if ! curl -s --head --fail "${UPDATE_SERVER}" >/dev/null 2>&1; then
-        log_error "无法连接到更新服务器 (${UPDATE_SERVER})"
+    local server
+    server=$(get_config '.update_server')
+    server=${server:-${UPDATE_SERVER}}
+    if ! curl -fsSL --connect-timeout 8 --max-time 15 "${server}/api/health" >/dev/null 2>&1 \
+        && ! curl -fsSL --connect-timeout 8 --max-time 15 "${server}" >/dev/null 2>&1; then
+        log_error "无法连接到更新服务器 (${server})"
         return 1
     fi
     return 0
@@ -149,12 +157,46 @@ check_update() {
     log_info "正在连接更新服务器..."
     
     # 调用 API 检查更新
-    local api_url="${UPDATE_SERVER}${API_ENDPOINT}/check?version=${current_version}&channel=stable"
+    local server endpoint channel
+    server=$(get_config '.update_server')
+    endpoint=$(get_config '.api_endpoint')
+    channel=$(get_config '.channel')
+    server=${server:-${UPDATE_SERVER}}
+    endpoint=${endpoint:-${API_ENDPOINT}}
+    channel=${channel:-stable}
+    local api_url="${server}${endpoint}/check?version=${current_version}&channel=${channel}"
     local response
     
-    if ! response=$(curl -s --max-time 30 "${api_url}" 2>/dev/null); then
+    if ! response=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 45 "${api_url}" 2>/dev/null); then
         log_error "无法获取更新信息"
         return 1
+    fi
+
+    if ! echo "${response}" | jq -e . >/dev/null 2>&1; then
+        log_error "更新服务器返回了无效 JSON"
+        return 1
+    fi
+
+    local server_error
+    server_error=$(echo "${response}" | jq -r '.error // ""')
+    if [[ -n "${server_error}" ]]; then
+        log_error "更新服务器错误: ${server_error}"
+        return 1
+    fi
+
+    local manifest_status ready update_known
+    manifest_status=$(echo "${response}" | jq -r '.status // ""')
+    ready=$(echo "${response}" | jq -r '.ready // true')
+    update_known=$(echo "${response}" | jq -r '.update_available // false')
+    if [[ "${update_known}" == "true" && "${ready}" != "true" ]]; then
+        local latest_version message
+        latest_version=$(echo "${response}" | jq -r '.version // .latest_version // "unknown"')
+        message=$(echo "${response}" | jq -r '.message // "新版本清单已发布，ISO 正在上传或校验中。"')
+        log_warn "服务器已登记 Onion OS ${latest_version}，但更新包尚未就绪 (${manifest_status:-pending})"
+        log_warn "${message}"
+        rm -f "${CACHE_DIR}/update_info.json"
+        set_config '.last_check' "$(date -Iseconds)"
+        return 0
     fi
     
     # 解析响应
@@ -163,6 +205,7 @@ check_update() {
     
     if [[ "${has_update}" != "true" ]]; then
         log_info "当前已是最新版本！"
+        rm -f "${CACHE_DIR}/update_info.json"
         set_config '.last_check' "$(date -Iseconds)"
         return 0
     fi
@@ -218,7 +261,7 @@ download_update() {
     local download_url
     download_url=$(echo "${update_info}" | jq -r '.download_url // ""')
     
-    if [[ -z "${download_url}" ]]; then
+    if [[ -z "${download_url}" || "${download_url}" == "null" ]]; then
         log_error "下载链接无效"
         return 1
     fi
@@ -231,8 +274,14 @@ download_update() {
     log_info "开始下载 Onion OS ${new_version}..."
     log_info "下载地址: ${download_url}"
     
+    local retries
+    retries=$(get_config '.download_retries')
+    if ! [[ "${retries}" =~ ^[0-9]+$ ]]; then
+        retries=3
+    fi
+
     # 使用 wget 下载，支持断点续传
-    if wget -c --show-progress -O "${iso_file}.tmp" "${download_url}"; then
+    if wget -c --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress -O "${iso_file}.tmp" "${download_url}"; then
         mv "${iso_file}.tmp" "${iso_file}"
         log_info "下载完成: ${iso_file}"
         
@@ -240,7 +289,7 @@ download_update() {
         local expected_checksum
         expected_checksum=$(echo "${update_info}" | jq -r '.checksum // ""')
         
-        if [[ -n "${expected_checksum}" ]]; then
+        if [[ "${expected_checksum}" =~ ^[a-fA-F0-9]{64}$ ]]; then
             log_info "验证文件完整性..."
             local actual_checksum
             actual_checksum=$(sha256sum "${iso_file}" | awk '{print $1}')
@@ -254,6 +303,20 @@ download_update() {
             fi
             
             log_info "校验和验证通过"
+        else
+            log_warn "更新清单未提供有效 SHA256，已跳过校验。正式发布时应上传 ISO 后生成 checksum。"
+        fi
+
+        local expected_size
+        expected_size=$(echo "${update_info}" | jq -r '.size // 0')
+        if [[ "${expected_size}" =~ ^[0-9]+$ && "${expected_size}" -gt 0 ]]; then
+            local actual_size
+            actual_size=$(stat -c '%s' "${iso_file}" 2>/dev/null || wc -c < "${iso_file}")
+            if [[ "${actual_size}" -lt "${expected_size}" ]]; then
+                log_error "下载文件大小异常，预期至少 ${expected_size} 字节，实际 ${actual_size} 字节"
+                rm -f "${iso_file}"
+                return 1
+            fi
         fi
         
         # 保存状态
@@ -262,6 +325,8 @@ download_update() {
     "status": "downloaded",
     "version": "${new_version}",
     "iso_path": "${iso_file}",
+    "download_url": "${download_url}",
+    "checksum": "${expected_checksum}",
     "download_time": "$(date -Iseconds)"
 }
 STATEJSON
@@ -317,9 +382,14 @@ install_update() {
         return 0
     fi
     
-    log_info "开始安装 Onion OS ${new_version}..."
-    
-    # 挂载 ISO
+    log_info "开始准备 Onion OS ${new_version} OTA 启动项..."
+
+    if [[ $EUID -ne 0 ]]; then
+        log_error "安装/写入 GRUB 启动项需要 root 权限，请使用 sudo onion-update install"
+        return 1
+    fi
+
+    # 挂载 ISO 进行结构校验
     local mount_point="/mnt/onion-update"
     mkdir -p "${mount_point}"
     
@@ -328,41 +398,63 @@ install_update() {
         return 1
     fi
     
-    # 执行更新（这里可以根据实际需求定制）
-    # 方案1: 对于 Live 系统，更新 squashfs
-    # 方案2: 对于安装后的系统，使用 rsync 同步文件
-    
-    log_info "更新文件系统..."
-    
-    # 示例：更新内核和 initramfs
-    if [[ -f "${mount_point}/live/vmlinuz" ]]; then
-        cp "${mount_point}/live/vmlinuz" /boot/vmlinuz-onion-update
-        log_info "内核已更新"
+    if [[ ! -f "${mount_point}/live/vmlinuz" || ! -f "${mount_point}/live/initrd" || ! -f "${mount_point}/live/filesystem.squashfs" ]]; then
+        umount "${mount_point}" || true
+        rmdir "${mount_point}" || true
+        log_error "ISO 结构不完整，缺少 live/vmlinuz、live/initrd 或 live/filesystem.squashfs"
+        return 1
     fi
-    
-    if [[ -f "${mount_point}/live/initrd" ]]; then
-        cp "${mount_point}/live/initrd" /boot/initrd-onion-update
-        log_info "initramfs 已更新"
-    fi
-    
+
     # 卸载 ISO
     umount "${mount_point}" || true
     rmdir "${mount_point}" || true
-    
-    # 更新版本信息
-    echo "${new_version}" > /etc/onion-version
-    
-    # 清理缓存
-    rm -f "${STATE_FILE}" "${CACHE_DIR}/update_info.json"
-    
-    log_info "更新安装完成！"
-    log_info "请重启系统以应用更新"
+
+    local custom_cfg="/boot/grub/custom.cfg"
+    mkdir -p /boot/grub
+    local tmp_cfg
+    tmp_cfg="$(mktemp)"
+    if [[ -f "${custom_cfg}" ]]; then
+        sed '/^### BEGIN ONION OTA ###$/,/^### END ONION OTA ###$/d' "${custom_cfg}" > "${tmp_cfg}"
+    else
+        : > "${tmp_cfg}"
+    fi
+
+    cat >> "${tmp_cfg}" << GRUBMENU
+### BEGIN ONION OTA ###
+menuentry "Onion OS ${new_version} OTA Installer" {
+    set iso_path="${iso_path}"
+    search --no-floppy --file --set=root \${iso_path}
+    loopback loop (\$root)\${iso_path}
+    linux (loop)/live/vmlinuz boot=live components live-config username=onion user-fullname=Onion_OS_User hostname=onion-os findiso=\${iso_path} locales=zh_CN.UTF-8 quiet splash
+    initrd (loop)/live/initrd
+}
+### END ONION OTA ###
+GRUBMENU
+    install -m 0644 "${tmp_cfg}" "${custom_cfg}"
+    rm -f "${tmp_cfg}"
+
+    cat > "${STATE_FILE}" << STATEJSON
+{
+    "status": "staged",
+    "version": "${new_version}",
+    "iso_path": "${iso_path}",
+    "grub_entry": "Onion OS ${new_version} OTA Installer",
+    "staged_time": "$(date -Iseconds)"
+}
+STATEJSON
+
+    if command -v update-grub >/dev/null 2>&1; then
+        update-grub || true
+    fi
+
+    log_info "OTA 启动项已写入: ${custom_cfg}"
+    log_info "请重启，并在 GRUB 中选择 Onion OS ${new_version} OTA Installer 进入新系统安装器"
     
     # 发送通知
     if command -v notify-send >/dev/null 2>&1; then
         notify-send -i system-reboot \
             "Onion OS 更新完成" \
-            "系统将在下次启动时应用更新" \
+            "已写入 OTA 启动项，重启后可进入新系统安装器" \
             2>/dev/null || true
     fi
     
@@ -377,7 +469,7 @@ show_status() {
     current_version=$(cat /etc/onion-version 2>/dev/null || echo "unknown")
     
     echo "当前版本: ${current_version}"
-    echo "更新服务器: ${UPDATE_SERVER}"
+    echo "更新服务器: $(get_config '.update_server' || echo "${UPDATE_SERVER}")"
     
     if [[ -f "${CONFIG_FILE}" ]]; then
         local last_check
@@ -835,9 +927,9 @@ HOME_URL="https://scallion.uno"
 SUPPORT_URL="https://scallion.uno/support"
 BUG_REPORT_URL="https://scallion.uno/bugs"
 VERSION_CODENAME=onion
-DEBIAN_CODENAME=bookworm
+DEBIAN_CODENAME=trixie
 OTA_ENABLED=true
-OTA_VERSION=1.0.0
+OTA_VERSION=1.1.0
 RELEASefile
 
     chmod 644 /etc/onion-release

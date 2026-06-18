@@ -4,7 +4,7 @@
 # ============================================================================
 # 设计意图：
 #   安装桌面环境核心组件、中文输入法、预装应用（WPS/微信/Firefox）、
-#   应用商店（GNOME Software + Flatpak）以及中文字体。
+#   星火应用商店以及中文字体。
 #   所有安装均在 chroot 中以非交互模式完成。
 #
 # 输入：
@@ -18,9 +18,9 @@
 #   2. 安装 LightDM 显示管理器（自动登录）
 #   3. 安装 Firefox ESR 浏览器
 #   4. 安装 WPS Office（官方 deb）及字体依赖
-#   5. 安装微信（deepin-wine 方案）
+#   5. 安装微信（腾讯官方 Linux 版 + Onion 低内存包装器）
 #   6. 安装 Fcitx5 中文输入法
-#   7. 安装 GNOME Software + Flatpak（应用商店）
+#   7. 安装星火应用商店（按需安装应用，避免低内存设备后台批量装软件）
 #   8. 安装中文字体
 # ============================================================================
 
@@ -45,6 +45,8 @@ install_xfce_desktop() {
         xfce4-whiskermenu-plugin \
         xfce4-taskmanager \
         xfce4-notifyd \
+        python3-gi \
+        gir1.2-gtk-3.0 \
         thunar \
         thunar-archive-plugin \
         thunar-media-tags-plugin \
@@ -149,6 +151,11 @@ PICOMFALLBACK
 CONF="${HOME}/.config/picom/picom.conf"
 FALLBACK="/etc/xdg/picom/picom-fallback.conf"
 PICOM_BIN=$(command -v picom 2>/dev/null || echo "picom")
+MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
+
+if [ "${MEM_MB}" -le 2600 ]; then
+    exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
+fi
 
 HAS_GPU=0
 if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/card1 ]; then
@@ -246,12 +253,25 @@ PLYMOUTHSCRIPT
     systemctl enable lightdm 2>/dev/null || true
 
     install_vbox_guest_and_display
+
+    mkdir -p /etc/live/config.conf.d
+    cat > /etc/live/config.conf.d/onion-autologin.conf << LIVECONFIG
+# Keep Ventoy/Live boots on the same default account as the installed system.
+LIVE_USERNAME="${ONION_USER}"
+LIVE_USER_FULLNAME="Onion OS User"
+LIVE_HOSTNAME="onion-os"
+LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video plugdev netdev powerdev scanner bluetooth sudo adm lpadmin nopasswdlogin autologin"
+LIVECONFIG
+
     mkdir -p /etc/lightdm/lightdm.conf.d
-    cat > /etc/lightdm/lightdm.conf.d/01-autologin.conf << AUTOLOGIN
+    cat > /etc/lightdm/lightdm.conf.d/50-onion-autologin.conf << AUTOLOGIN
 [Seat:*]
 autologin-user=${ONION_USER}
 autologin-user-timeout=0
+autologin-session=xfce
 user-session=xfce
+greeter-session=lightdm-gtk-greeter
+allow-guest=false
 AUTOLOGIN
 
     cat > /etc/lightdm/lightdm-gtk-greeter.conf << GREETERCFG
@@ -262,6 +282,123 @@ font-name = WenQuanYi Micro Hei 11
 background = /usr/share/backgrounds/onion-os/default.png
 user-background = false
 GREETERCFG
+
+    cat > /usr/local/bin/onion-autologin-setup << 'AUTOLOGINSETUP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+is_live_environment() {
+    grep -qw "boot=live" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "live-config" /proc/cmdline 2>/dev/null && return 0
+    [ -d /lib/live/mount/medium ] && return 0
+    [ -f /.disk/info ] && return 0
+    return 1
+}
+
+target_user=""
+if is_live_environment && id onion >/dev/null 2>&1; then
+    target_user="onion"
+fi
+if [[ -z "${target_user}" ]]; then
+    target_user="$(awk -F: '$3 >= 1000 && $3 < 60000 && $1 != "nobody" && $1 != "onion" {print $1; exit}' /etc/passwd)"
+fi
+if [[ -z "${target_user}" ]] && id onion >/dev/null 2>&1; then
+    target_user="onion"
+fi
+
+if [[ -z "${target_user}" ]]; then
+    exit 0
+fi
+
+for grp in nopasswdlogin autologin; do
+    getent group "${grp}" >/dev/null 2>&1 || groupadd -r "${grp}" 2>/dev/null || true
+    usermod -aG "${grp}" "${target_user}" 2>/dev/null || true
+done
+
+mkdir -p /etc/lightdm/lightdm.conf.d
+cat > /etc/lightdm/lightdm.conf.d/50-onion-autologin.conf << AUTOLOGIN
+[Seat:*]
+autologin-user=${target_user}
+autologin-user-timeout=0
+autologin-session=xfce
+user-session=xfce
+greeter-session=lightdm-gtk-greeter
+allow-guest=false
+AUTOLOGIN
+
+    chmod 0644 /etc/lightdm/lightdm.conf.d/50-onion-autologin.conf
+AUTOLOGINSETUP
+    chmod +x /usr/local/bin/onion-autologin-setup
+
+    cat > /usr/local/bin/onion-getty-autologin << 'GETTYAUTO'
+#!/usr/bin/env bash
+set -euo pipefail
+
+tty_name="${1:-tty1}"
+term="${2:-linux}"
+
+is_live_environment() {
+    grep -qw "boot=live" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "live-config" /proc/cmdline 2>/dev/null && return 0
+    [ -d /lib/live/mount/medium ] && return 0
+    [ -f /.disk/info ] && return 0
+    return 1
+}
+
+agetty_args=(--noclear)
+case "${tty_name}" in
+    ttyS*|hvc*|xvc*|hvsi*)
+        agetty_args=(--keep-baud 115200,38400,9600 --noclear)
+        ;;
+esac
+
+if is_live_environment && id onion >/dev/null 2>&1; then
+    agetty_args=(--autologin onion "${agetty_args[@]}")
+fi
+
+exec /sbin/agetty "${agetty_args[@]}" "${tty_name}" "${term}"
+GETTYAUTO
+    chmod +x /usr/local/bin/onion-getty-autologin
+
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat > /etc/systemd/system/getty@tty1.service.d/10-onion-live-autologin.conf << 'GETTYTTY1'
+[Unit]
+After=live-config.service onion-autologin-setup.service
+Wants=onion-autologin-setup.service
+
+[Service]
+ExecStart=
+ExecStart=-/usr/local/bin/onion-getty-autologin %I linux
+GETTYTTY1
+
+    mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+    cat > /etc/systemd/system/serial-getty@ttyS0.service.d/10-onion-live-autologin.conf << 'GETTYSERIAL'
+[Unit]
+After=live-config.service onion-autologin-setup.service
+Wants=onion-autologin-setup.service
+
+[Service]
+ExecStart=
+ExecStart=-/usr/local/bin/onion-getty-autologin %I vt102
+GETTYSERIAL
+
+    cat > /etc/systemd/system/onion-autologin-setup.service << 'AUTOLOGINSVC'
+[Unit]
+Description=Onion OS automatic desktop login setup
+After=local-fs.target live-config.service
+Before=lightdm.service display-manager.service
+ConditionPathExists=/etc/lightdm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/onion-autologin-setup
+
+[Install]
+WantedBy=multi-user.target graphical.target
+AUTOLOGINSVC
+
+    systemctl enable onion-autologin-setup.service 2>/dev/null || true
+    /usr/local/bin/onion-autologin-setup 2>/dev/null || true
 }
 
 # ======================== VirtualBox / 虚拟机显示 ========================
@@ -311,8 +448,25 @@ install_firefox() {
 # ======================== WPS Office ========================
 
 install_wps_office() {
-    local wps_url="https://wps-linux-personal.wpscdn.cn/wps/download/ep/Linux2019/11723/wps-office_11.1.0.11723_amd64.deb"
+    local wps_page="https://linux.wps.cn/"
+    local wps_url=""
     local wps_deb="/tmp/wps-office.deb"
+
+    wps_url=$(curl -fsSL "${wps_page}" 2>/dev/null \
+        | grep -oE "https://wps-linux-personal\.wpscdn\.cn/wps/download/ep/[^']+_amd64\.deb" \
+        | head -n1 || true)
+    if [[ -z "${wps_url}" ]]; then
+        wps_url="https://wps-linux-personal.wpscdn.cn/wps/download/ep/Linux2023/26885/wps-office_12.1.2.26885.AK.preread.sw.Personal_715971_amd64.deb"
+    fi
+
+    # WPS Linux downloads are protected by a public time+md5 token used by the
+    # official download page. Generate the same token so unattended ISO builds
+    # do not fail with "secure-time-arg-time-not-found".
+    local wps_path timestamp token
+    wps_path="${wps_url#https://wps-linux-personal.wpscdn.cn}"
+    timestamp="$(date +%s)"
+    token="$(printf '7f8faaaa468174dc1c9cd62e5f218a5b%s%s' "${wps_path}" "${timestamp}" | md5sum | awk '{print $1}')"
+    wps_url="${wps_url}?t=${timestamp}&k=${token}"
 
     echo "下载 WPS Office..."
     if wget -q --show-progress -O "${wps_deb}" "${wps_url}" 2>/dev/null; then
@@ -334,57 +488,139 @@ install_wps_office() {
     fi
 }
 
-# ======================== 微信 (deepin-wine) ========================
+# ======================== 微信 (官方 Linux 版 + 低内存包装器) ========================
 
 install_wechat() {
-    dpkg --add-architecture i386
-    apt update 2>/dev/null || true
-
-    local dwine_repo="deb [trusted=yes] https://mirrors.huaweicloud.com/deepin stable main contrib non-free"
-
-    echo "${dwine_repo}" > /etc/apt/sources.list.d/deepin-wine.list
-    apt update 2>/dev/null || true
-
-    apt install -y --no-install-recommends \
-        deepin-wine5 \
-        deepin-wine-helper \
-        deepin-wine-plugin \
-        deepin-libwine \
-        deepin-libwine:i386 \
-        deepin-fonts-wine \
-        fonts-wqy-microhei:i386 2>/dev/null || true
-
-    local wechat_url="https://mirrors.huaweicloud.com/deepin/pool/non-free/d/deepin.com.wechat/"
+    local wechat_url="https://dldir1.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
     local wechat_deb="/tmp/wechat.deb"
 
-    echo "下载微信 (deepin-wine 版)..."
-    local wechat_latest
-    wechat_latest=$(curl -sL "${wechat_url}" 2>/dev/null | grep -oP 'href="[^"]*amd64\.deb"' | tail -1 | sed 's/href="//;s/"//')
-
-    if [[ -n "${wechat_latest}" ]]; then
-        wget -q --show-progress -O "${wechat_deb}" "${wechat_url}${wechat_latest}" 2>/dev/null || true
-        if [[ -f "${wechat_deb}" && -s "${wechat_deb}" ]]; then
-            dpkg -i "${wechat_deb}" || apt install -y -f
-            rm -f "${wechat_deb}"
-        else
-            echo "[WARN] 微信 deb 下载失败，跳过。"
-            rm -f "${wechat_deb}"
-        fi
+    echo "下载微信官方 Linux 版..."
+    if wget -q --show-progress -O "${wechat_deb}" "${wechat_url}" 2>/dev/null; then
+        apt install -y "${wechat_deb}" || apt install -y -f
+        rm -f "${wechat_deb}"
     else
-        echo "[WARN] 无法获取微信下载链接，跳过。用户可后续手动安装。"
+        echo "[WARN] 微信官方 deb 下载失败，跳过。用户可后续运行 onion-install-wechat 安装。"
+        rm -f "${wechat_deb}"
     fi
 
-    rm -f /etc/apt/sources.list.d/deepin-wine.list
-    apt update 2>/dev/null || true
+    cat > /usr/local/bin/onion-install-wechat << 'WECHATINSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+url="https://dldir1.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
+deb="/tmp/WeChatLinux_x86_64.deb"
+echo "Downloading official WeChat for Linux..."
+wget -c --show-progress -O "${deb}" "${url}"
+sudo apt install -y "${deb}" || sudo apt install -y -f
+rm -f "${deb}"
+echo "WeChat installed."
+WECHATINSTALL
+    chmod +x /usr/local/bin/onion-install-wechat
+
+    cat > /usr/local/bin/onion-wechat << 'WECHATWRAP'
+#!/usr/bin/env bash
+set -uo pipefail
+
+find_wechat_bin() {
+    for bin in \
+        /usr/bin/wechat \
+        /usr/bin/weixin \
+        /opt/wechat/wechat \
+        /opt/weixin/weixin \
+        /opt/apps/com.tencent.wechat/files/wechat \
+        /opt/apps/com.tencent.wechat/files/bin/wechat; do
+        if [[ -x "${bin}" ]]; then
+            echo "${bin}"
+            return 0
+        fi
+    done
+    command -v wechat 2>/dev/null || command -v weixin 2>/dev/null || return 1
+}
+
+mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
+mode="${ONION_WECHAT_MODE:-auto}"
+wechat_bin="$(find_wechat_bin || true)"
+
+if [[ -z "${wechat_bin}" ]]; then
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --question \
+            --title="微信未安装" \
+            --text="未找到微信。是否现在下载安装官方 Linux 版？" \
+            --ok-label="安装" --cancel-label="取消" 2>/dev/null || exit 1
+    fi
+    pkexec /usr/local/bin/onion-install-wechat || sudo /usr/local/bin/onion-install-wechat || exit 1
+    wechat_bin="$(find_wechat_bin || true)"
+fi
+
+mkdir -p "${HOME}/.cache/onion-os"
+
+if [[ "${mode}" == "auto" && "${mem_mb}" -le 2600 ]]; then
+    mode="light"
+fi
+
+if [[ "${mode}" == "light" ]]; then
+    note="${HOME}/.config/onion-os/wechat-low-memory-note"
+    if [[ ! -f "${note}" ]] && command -v zenity >/dev/null 2>&1; then
+        mkdir -p "$(dirname "${note}")"
+        if ! zenity --question \
+            --title="微信省内存模式" \
+            --text="检测到本机内存约 ${mem_mb}MB。\n\n微信好友和群组较多时会明显占用内存。Onion OS 会用低缓存、低优先级方式启动微信；如果仍然卡顿，可以改用网页版。" \
+            --ok-label="省内存启动" \
+            --cancel-label="改用网页版" \
+            --width=460 2>/dev/null; then
+            echo "shown" > "${note}"
+            exec /usr/local/bin/onion-wechat-web
+        fi
+        echo "shown" > "${note}"
+    fi
+
+    find "${HOME}/.cache" -maxdepth 3 \( -iname '*wechat*' -o -iname '*weixin*' \) \
+        -type f -size +16M -delete 2>/dev/null || true
+    export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu-shader-disk-cache --disable-accelerated-video-decode --disable-background-networking --disk-cache-size=67108864 --media-cache-size=33554432"
+    export ELECTRON_DISABLE_SECURITY_WARNINGS=1
+    export GDK_BACKEND=x11
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -i wechat "微信省内存模式" "已启用低缓存、低优先级和桌面保护策略。" 2>/dev/null || true
+    fi
+
+    if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        exec systemd-run --user --scope \
+            -p MemoryHigh=1050M \
+            -p MemoryMax=1450M \
+            -p CPUWeight=60 \
+            -p IOWeight=50 \
+            nice -n 8 ionice -c3 "${wechat_bin}" "$@"
+    fi
+
+    exec nice -n 8 ionice -c3 "${wechat_bin}" "$@"
+fi
+
+exec "${wechat_bin}" "$@"
+WECHATWRAP
+    chmod +x /usr/local/bin/onion-wechat
+
+    cat > /usr/local/bin/onion-wechat-web << 'WECHATWEB'
+#!/usr/bin/env bash
+set -e
+url="https://wx.qq.com/"
+if command -v firefox-esr >/dev/null 2>&1; then
+    exec firefox-esr --new-window "${url}"
+elif command -v xdg-open >/dev/null 2>&1; then
+    exec xdg-open "${url}"
+else
+    echo "${url}"
+fi
+WECHATWEB
+    chmod +x /usr/local/bin/onion-wechat-web
 
     mkdir -p /home/${ONION_USER}/Desktop
     cat > /home/${ONION_USER}/Desktop/wechat.desktop << WECHATDESKTOP
 [Desktop Entry]
 Name=微信
 Name[zh_CN]=微信
-Comment=WeChat for Linux (deepin-wine)
-Exec=env WINEPREFIX=~/.deepinwine/Deepin-WeChat deepin-wine5 "c:\\Program Files\\Tencent\\WeChat\\WeChat.exe"
-Icon=deepin.com.wechat
+Comment=Official WeChat for Linux with Onion low-memory guard
+Exec=/usr/local/bin/onion-wechat
+Icon=wechat
 Terminal=false
 Type=Application
 Categories=Network;InstantMessaging;
@@ -393,8 +629,31 @@ WECHATDESKTOP
     chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/wechat.desktop"
     chmod +x "/home/${ONION_USER}/Desktop/wechat.desktop"
 
-    # 同步到系统应用目录，供 Plank Dock / Whisker 菜单解析
-    cp /home/${ONION_USER}/Desktop/wechat.desktop /usr/share/applications/deepin.com.wechat.desktop
+    cat > /usr/share/applications/onion-wechat.desktop << WECHATDESKTOPSYS
+[Desktop Entry]
+Name=微信
+Name[zh_CN]=微信
+Comment=Official WeChat for Linux with Onion low-memory guard
+Exec=/usr/local/bin/onion-wechat
+Icon=wechat
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;
+StartupNotify=true
+WECHATDESKTOPSYS
+
+    cat > /usr/share/applications/onion-wechat-web.desktop << WECHATWEBDESKTOP
+[Desktop Entry]
+Name=微信网页版
+Name[zh_CN]=微信网页版
+Comment=Use web WeChat when memory is too limited for the desktop client
+Exec=/usr/local/bin/onion-wechat-web
+Icon=wechat
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;
+StartupNotify=true
+WECHATWEBDESKTOP
 }
 
 # ======================== Fcitx5 中文输入法 ========================
@@ -438,57 +697,49 @@ Layout=
 FCITX5PROFILE'
 }
 
-# ======================== 应用商店 (GNOME Software + Flatpak) ========================
+# ======================== 应用商店 (星火应用商店) ========================
 
 install_app_store() {
     apt install -y --no-install-recommends \
-        gnome-software \
-        gnome-software-plugin-flatpak \
-        gnome-software-plugin-snap \
-        flatpak \
+        jq \
+        apt-transport-https \
+        xdg-utils \
         xdg-desktop-portal \
-        xdg-desktop-portal-gtk
+        xdg-desktop-portal-gtk \
+        libnotify-bin
 
-    flatpak remote-add --if-not-exists flathub \
-        "https://flathub.org/repo/flathub.flatpakrepo" 2>/dev/null || true
+    cat > /usr/local/bin/onion-install-spark-store << 'SPARKINSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
 
-    # 添加 Flathub 南大镜像 beta 加速源（中国用户下载更快）
-    flatpak remote-add --if-not-exists flathub-cn \
-        "https://mirror.nju.edu.cn/flathub/flathub.flatpakrepo" 2>/dev/null || true
+api="https://gitee.com/api/v5/repos/spark-store-project/spark-store/releases/latest"
+fallback="https://gitee.com/spark-store-project/spark-store/releases/download/5.1.1/spark-store_5.1.1_amd64.deb"
+deb="/tmp/spark-store.deb"
 
-    flatpak update --appstream 2>/dev/null || true
+echo "Resolving latest Spark Store release..."
+url="$(curl -fsSL "${api}" 2>/dev/null | jq -r '.assets[]? | select(.name | test("_amd64\\.deb$")) | .browser_download_url' | head -n1 || true)"
+if [[ -z "${url}" || "${url}" == "null" ]]; then
+    url="${fallback}"
+fi
 
-    # 配置 Flatpak 系统级安装目录
-    mkdir -p /etc/flatpak/installations.d
-    cat > /etc/flatpak/installations.d/onion.conf << FLATPAKCONF
-[Onion OS System]
-Path=/var/lib/flatpak
-DisplayName=Onion OS System Applications
-StorageType=harddisk
-FLATPAKCONF
+echo "Downloading Spark Store: ${url}"
+wget -c --show-progress -O "${deb}" "${url}"
+mkdir -p /root/.config "${HOME:-/root}/.config"
+touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
+sudo apt install -y "${deb}" || sudo apt install -y -f
+rm -f "${deb}"
+echo "Spark Store installed."
+SPARKINSTALL
+    chmod +x /usr/local/bin/onion-install-spark-store
 
-    # GNOME Software GSettings 覆盖（静默更新、不弹upgrade横幅）
-    mkdir -p /usr/share/glib-2.0/schemas
-    cat > /usr/share/glib-2.0/schemas/onion-gnome-software.gschema.override << GSOVERRIDE
-[org.gnome.software]
-download-updates=false
-download-updates-notify=false
-first-run=false
-check-timestamp=0
-show-ratings=true
-show-nonfree-prompt=false
-show-upgrade-prerelease=false
+    if ! /usr/local/bin/onion-install-spark-store; then
+        echo "[WARN] 星火应用商店安装失败，保留 onion-install-spark-store 供用户联网后重试。"
+    fi
 
-[org.gnome.software.external-appstream]
-enabled=false
-GSOVERRIDE
-
-    glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
-
-    # 部署 Gnome Software 自动推荐安装脚本（首次启动后台安装推荐应用）
+    # 推荐应用改为打开星火商店，避免在 2GB 设备上首次登录就后台批量安装。
     cat > /usr/local/bin/onion-app-recommend << 'RECOMMEND'
 #!/usr/bin/env bash
-# Onion OS 推荐应用安装脚本 - 首次启动后台静默安装常用 Flatpaks
+# Onion OS 推荐应用入口 - 低内存机器不做后台批量安装
 
 MARKER="${HOME}/.config/onion-os/app-recommend-done"
 if [[ -f "${MARKER}" ]]; then
@@ -497,32 +748,8 @@ fi
 
 mkdir -p "$(dirname "${MARKER}")"
 
-NOTIFY_TITLE="Onion OS 推荐应用"
-RECOMMENDED=(
-    "org.videolan.VLC"
-    "com.visualstudio.code"
-    "com.obsproject.Studio"
-    "org.gimp.GIMP"
-    "org.libreoffice.LibreOffice"
-    "org.onlyoffice.desktopeditors"
-)
-
-INSTALLED_ANY=false
-for app in "${RECOMMENDED[@]}"; do
-    if flatpak list 2>/dev/null | grep -q "${app}"; then
-        continue
-    fi
-    if zenity --question \
-        --title="${NOTIFY_TITLE}" \
-        --text="检测到可选应用「${app}」尚未安装。\n\n是否现在安装？（可跳过，稍后从应用商店安装）" \
-        --ok-label="安装" --cancel-label="跳过" \
-        --width=420 2>/dev/null; then
-        flatpak install -y --noninteractive flathub "${app}" 2>/dev/null && INSTALLED_ANY=true || true
-    fi
-done
-
-if [[ "${INSTALLED_ANY}" == "true" ]]; then
-    notify-send -i onion-app-store "${NOTIFY_TITLE}" "推荐应用安装完成！" 2>/dev/null || true
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -i onion-app-store "Onion OS 应用商店" "常用软件请从星火应用商店按需安装，2GB 设备不会后台批量装应用。" 2>/dev/null || true
 fi
 
 echo "done" > "${MARKER}"
@@ -532,38 +759,51 @@ RECOMMEND
 
     # 创建应用商店桌面快捷方式
     mkdir -p /home/${ONION_USER}/Desktop
-    cat > /home/${ONION_USER}/Desktop/gnome-software.desktop << GSDESKTOP
+    cat > /home/${ONION_USER}/Desktop/spark-store.desktop << SPARKDESKTOP
 [Desktop Entry]
-Name=应用商店
-Name[zh_CN]=应用商店
-Comment=安装和管理应用程序
-Comment[zh_CN]=浏览、安装和管理海量免费与开源软件
-Exec=gnome-software --mode=updates
+Name=星火应用商店
+Name[zh_CN]=星火应用商店
+Comment=Install Chinese Linux applications on demand
+Comment[zh_CN]=按需安装适合中文用户的 Linux 应用
+Exec=spark-store
 Icon=onion-app-store
 Terminal=false
 Type=Application
 Categories=System;PackageManager;
-Keywords=software;store;app;install;flatpak;应用;商店;软件;安装;
+Keywords=software;store;app;install;spark;应用;商店;软件;星火;安装;
 StartupNotify=true
-GSDESKTOP
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/gnome-software.desktop"
-    chmod +x "/home/${ONION_USER}/Desktop/gnome-software.desktop"
+SPARKDESKTOP
+    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/spark-store.desktop"
+    chmod +x "/home/${ONION_USER}/Desktop/spark-store.desktop"
 
     # 同样更新 system 级 desktop（菜单用）
-    cat > /usr/share/applications/gnome-software.desktop << GSSYSDESKTOP
+    cat > /usr/share/applications/spark-store.desktop << SPARKSYSDESKTOP
 [Desktop Entry]
-Name=应用商店
-Name[zh_CN]=应用商店
-Comment=安装和管理应用程序
-Comment[zh_CN]=浏览、安装和管理海量免费与开源软件
-Exec=gnome-software --mode=updates
+Name=星火应用商店
+Name[zh_CN]=星火应用商店
+Comment=Install Chinese Linux applications on demand
+Comment[zh_CN]=按需安装适合中文用户的 Linux 应用
+Exec=spark-store
 Icon=onion-app-store
 Terminal=false
 Type=Application
 Categories=System;PackageManager;
-Keywords=software;store;app;install;flatpak;应用;商店;软件;安装;
+Keywords=software;store;app;install;spark;应用;商店;软件;星火;安装;
 StartupNotify=true
-GSSYSDESKTOP
+SPARKSYSDESKTOP
+
+    cat > /usr/share/applications/onion-install-spark-store.desktop << SPARKINSTALLDESKTOP
+[Desktop Entry]
+Name=修复星火应用商店
+Name[zh_CN]=修复星火应用商店
+Comment=Download and install Spark Store if it was not bundled during image build
+Exec=pkexec /usr/local/bin/onion-install-spark-store
+Icon=onion-app-store
+Terminal=true
+Type=Application
+Categories=System;PackageManager;
+StartupNotify=true
+SPARKINSTALLDESKTOP
 
     # 推荐应用首次启动项
     mkdir -p "/home/${ONION_USER}/.config/autostart"
@@ -585,11 +825,10 @@ APPRECAUTOSTART
 Description=Onion OS App Store Readiness
 After=network-online.target NetworkManager.service
 Wants=network-online.target
-Before=gnome-software.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'while ! nm-online -t 5 -q; do sleep 2; done; flatpak update --appstream 2>/dev/null; exit 0'
+ExecStart=/bin/sh -c 'command -v spark-store >/dev/null 2>&1 || /usr/local/bin/onion-install-spark-store || true'
 TimeoutStartSec=90
 RemainAfterExit=yes
 
@@ -598,15 +837,6 @@ WantedBy=multi-user.target
 SVCUNIT
 
     systemctl enable onion-appstore-ready.service 2>/dev/null || true
-
-    cat > "/home/${ONION_USER}/.config/autostart/onion-appstream-refresh.desktop" << APPASTREAM
-[Desktop Entry]
-Type=Application
-Name=Onion AppStream Refresh
-Exec=/bin/sh -c 'sleep 15 && flatpak update --appstream 2>/dev/null'
-X-GNOME-Autostart-Phase=Applications
-APPASTREAM
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/autostart/onion-appstream-refresh.desktop"
 }
 
 # ======================== 附加实用工具 ========================
@@ -631,8 +861,9 @@ install_utilities() {
         gvfs-backends \
         udisks2 \
         udisks2-btrfs \
+        pkexec \
         polkitd \
-        policykit-1-gnome \
+        lxpolkit \
         upower \
         dmidecode \
         x11-xserver-utils \
