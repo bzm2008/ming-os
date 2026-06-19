@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 26.2.0 Home Edition - 主构建脚本
+# Onion OS 26.2.5 Home Edition - 主构建脚本
 # ============================================================================
 # 设计意图：
 #   在 Debian 13 (Trixie) 宿主系统上，通过 debootstrap 构建一个完整的
@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly ONION_OS_NAME="Onion OS"
-readonly ONION_OS_VERSION="26.2.0"
+readonly ONION_OS_VERSION="26.2.5"
 readonly ONION_OS_EDITION="Home"
 readonly ONION_OS_CODENAME="onion"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
@@ -294,22 +294,22 @@ set menu_color_highlight=black/white
 set gfxmode=auto
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} ${ONION_OS_EDITION}" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 splash
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (兼容模式 / VirtualBox)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset vga=791
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 splash nomodeset vga=791
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (低分辨率 1024x768 / 老旧显卡)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=792
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog splash nomodeset xforcevesa vga=792
     initrd /live/initrd
 }
 
 menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (最低分辨率 800x600 / 极旧显卡)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset xforcevesa vga=788 video=800x600
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false splash nomodeset xforcevesa vga=788 video=800x600
     initrd /live/initrd
 }
 
@@ -324,12 +324,12 @@ menuentry "${ONION_OS_NAME} 调试模式" {
 }
 
 menuentry "安装 ${ONION_OS_NAME} 到硬盘" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet splash nomodeset install
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false splash nomodeset install
     initrd /live/initrd
 }
 
-menuentry "低内存模式 (1.0GB)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 nomodeset mem=1024M
+menuentry "低内存模式 (2GB 老电脑)" {
+    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog nomodeset onion.lowmem=1
     initrd /live/initrd
 }
 

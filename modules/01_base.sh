@@ -577,6 +577,72 @@ TOUCHPADCONF
     systemctl enable acpid 2>/dev/null || true
 }
 
+# ======================== 开机加速（26.2.5） ========================
+
+configure_boot_speed() {
+    echo "配置开机加速..."
+
+    # 蓝牙：等桌面就绪后再启动（延迟 5s），不卡 boot sequence
+    mkdir -p /etc/systemd/system/bluetooth.service.d
+    cat > /etc/systemd/system/bluetooth.service.d/delay.conf << 'EOF'
+[Unit]
+After=graphical.target
+[Service]
+ExecStartPre=/bin/sleep 5
+EOF
+
+    # 打印：改为 socket 按需激活，开机不自启
+    systemctl disable cups 2>/dev/null || true
+    systemctl disable cups-browsed 2>/dev/null || true
+
+    # Avahi mDNS：延迟到桌面就绪后
+    mkdir -p /etc/systemd/system/avahi-daemon.service.d
+    cat > /etc/systemd/system/avahi-daemon.service.d/delay.conf << 'EOF'
+[Unit]
+After=graphical.target
+EOF
+
+    # Tracker 索引：全部屏蔽，用户搜索时不需要实时索引
+    for svc in tracker-miner-fs-3.service tracker-extract-3.service tracker-writeback-3.service \
+               tracker-miner-fs.service tracker-extract.service; do
+        systemctl mask "${svc}" 2>/dev/null || true
+    done
+
+    # ModemManager：无 SIM 卡设备不需要
+    systemctl disable ModemManager 2>/dev/null || true
+
+    # 应用商店后台刷新：延迟 90s，不阻塞第一屏
+    for svc in spark-store-refresh.service; do
+        if [[ -f "/usr/lib/systemd/system/${svc}" ]] || [[ -f "/etc/systemd/system/${svc}" ]]; then
+            mkdir -p "/etc/systemd/system/${svc}.d"
+            printf '[Service]\nExecStartPre=/bin/sleep 90\n' > "/etc/systemd/system/${svc}.d/delay.conf"
+        fi
+    done
+
+    # OTA 后台检查：延迟 120s
+    mkdir -p /etc/systemd/system/onion-update-check.service.d
+    printf '[Service]\nExecStartPre=/bin/sleep 120\n' \
+        > /etc/systemd/system/onion-update-check.service.d/delay.conf
+
+    # 缩短 systemd 启动/停止超时（默认 90s 太长）
+    mkdir -p /etc/systemd/system.conf.d
+    cat > /etc/systemd/system.conf.d/onion-timeouts.conf << 'EOF'
+[Manager]
+DefaultTimeoutStartSec=15s
+DefaultTimeoutStopSec=10s
+EOF
+
+    # NetworkManager-wait-online：最多等 5s，避免无网络时卡启动
+    mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
+    cat > /etc/systemd/system/NetworkManager-wait-online.service.d/timeout.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/nm-online -s -q --timeout=5
+EOF
+
+    echo "开机加速配置完成"
+}
+
 # ======================== 主流程 ========================
 
 main() {
@@ -591,6 +657,7 @@ main() {
     configure_network
     configure_os_identity
     optimize_system
+    configure_boot_speed
 
     echo "=====> [01_base] 基础系统配置完成 <====="
 }

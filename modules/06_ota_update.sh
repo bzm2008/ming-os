@@ -268,19 +268,36 @@ download_update() {
     
     local new_version
     new_version=$(echo "${update_info}" | jq -r '.version // "unknown"')
-    
+
     local iso_file="${CACHE_DIR}/onion-os-${new_version}.iso"
-    
+
     log_info "开始下载 Onion OS ${new_version}..."
     log_info "下载地址: ${download_url}"
-    
+
+    # 下载前磁盘空间检查（26.2.5）
+    local expected_size
+    expected_size=$(echo "${update_info}" | jq -r '.size // 0')
+    if [[ "${expected_size}" =~ ^[0-9]+$ && "${expected_size}" -gt 0 ]]; then
+        local free_bytes
+        free_bytes=$(df --output=avail -B1 "${CACHE_DIR}" 2>/dev/null | tail -1 | tr -d ' ')
+        local need_bytes=$(( expected_size + 536870912 ))  # ISO size + 512MB buffer
+        if [[ "${free_bytes:-0}" -lt "${need_bytes}" ]]; then
+            local free_mb=$(( ${free_bytes:-0} / 1048576 ))
+            local need_mb=$(( need_bytes / 1048576 ))
+            log_error "磁盘空间不足：需要至少 ${need_mb}MB，当前仅剩 ${free_mb}MB。"
+            log_error "请清理磁盘后重试：sudo onion-cleanup 或手动清理 ${CACHE_DIR}"
+            return 1
+        fi
+        log_info "磁盘空间检查通过（空闲 $(( ${free_bytes} / 1048576 ))MB）"
+    fi
+
     local retries
     retries=$(get_config '.download_retries')
     if ! [[ "${retries}" =~ ^[0-9]+$ ]]; then
         retries=3
     fi
 
-    # 使用 wget 下载，支持断点续传
+    # 使用 wget 下载，支持断点续传（.tmp 保留以便下次续传）
     if wget -c --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress -O "${iso_file}.tmp" "${download_url}"; then
         mv "${iso_file}.tmp" "${iso_file}"
         log_info "下载完成: ${iso_file}"
@@ -374,6 +391,7 @@ install_update() {
     
     log_warn "安装更新将需要重启系统"
     log_warn "请确保已保存所有工作"
+    log_info "提示：安装后 GRUB 会保留旧版本启动项，若新版本启动异常可在开机时选择旧版本回滚。"
     echo ""
     read -p "是否继续安装? (y/N): " confirm
     

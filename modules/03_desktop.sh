@@ -1907,6 +1907,13 @@ if [[ "${1:-}" == "--watch" ]]; then
         fi
         sync_apps
         /usr/local/bin/onion-disk-hub >/tmp/onion-disk-hub.log 2>&1 || true
+        # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
+        for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
+            if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+                gtk-update-icon-cache -q -t -f "${icon_dir}" 2>/dev/null || true
+            fi
+        done
+        xdg-desktop-menu forceupdate 2>/dev/null || true
     done
 fi
 DESKORG
@@ -2442,6 +2449,51 @@ fade-out-step = 0.06;
 inactive-opacity = 0.95;
 active-opacity = 1.0;
 PICOMFALLBACK
+
+    # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
+    cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'
+backend = "glx";
+vsync = true;
+unredir-if-possible = true;
+glx-no-stencil = true;
+glx-no-rebind-pixmap = true;
+use-damage = true;
+
+# 不启用 blur（blur 是 GPU/内存消耗大户）
+blur-background = false;
+
+# 轻阴影
+shadow = true;
+shadow-radius = 8;
+shadow-opacity = 0.20;
+shadow-offset-x = -6;
+shadow-offset-y = -6;
+shadow-exclude = [
+  "window_type = 'dock'",
+  "window_type = 'desktop'",
+];
+
+# 圆角保留（纯 CPU 开销极低）
+corner-radius = 10;
+rounded-corners-exclude = [
+  "window_type = 'dock'",
+  "window_type = 'desktop'",
+];
+
+# 渐入渐出（transform/opacity 动画，不触发 layout）
+fading = true;
+fade-in-step = 0.05;
+fade-out-step = 0.05;
+fade-delta = 5;
+
+inactive-opacity = 0.95;
+active-opacity = 1.0;
+frame-opacity = 0.95;
+
+detect-rounded-corners = true;
+detect-client-opacity = true;
+detect-transient = true;
+PICOMLOWMEM
 
     chown -R "${ONION_USER}:${ONION_USER}" /home/${ONION_USER}/.config/picom
 }

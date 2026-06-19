@@ -145,21 +145,43 @@ detect-client-leader = true;
 detect-transient = true;
 PICOMFALLBACK
 
-    # Picom 启动包装器（自动探测 GLX 可用性，回退 xrender）
+    # Picom 启动包装器（自动探测 GLX 可用性，低内存/老显卡回退）
     cat > /usr/local/bin/onion-picom << 'PICOMWRAP'
 #!/usr/bin/env bash
 CONF="${HOME}/.config/picom/picom.conf"
+LOWMEM="/etc/xdg/picom/picom-lowmem.conf"
 FALLBACK="/etc/xdg/picom/picom-fallback.conf"
 PICOM_BIN=$(command -v picom 2>/dev/null || echo "picom")
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 
+# <=2600MB: 无 blur, 无重阴影, 仅 fade (最省 GPU/内存)
 if [ "${MEM_MB}" -le 2600 ]; then
     exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
+fi
+
+# 2601-4200MB: 低内存轻动画配置（无 blur, 轻阴影）
+if [ "${MEM_MB}" -le 4200 ]; then
+    if [ -f "${LOWMEM}" ]; then
+        exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
+    fi
 fi
 
 HAS_GPU=0
 if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/card1 ]; then
     HAS_GPU=1
+fi
+if [ "$HAS_GPU" -eq 0 ] && command -v glxinfo &>/dev/null; then
+    if glxinfo 2>/dev/null | grep -q "direct rendering: Yes"; then
+        HAS_GPU=1
+    fi
+fi
+
+if [ "$HAS_GPU" -eq 1 ]; then
+    exec ${PICOM_BIN} --config "${CONF}" -b "$@"
+else
+    exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
+fi
+PICOMWRAP
 fi
 if [ "$HAS_GPU" -eq 0 ] && command -v glxinfo &>/dev/null; then
     if glxinfo 2>/dev/null | grep -q "direct rendering: Yes"; then
@@ -654,6 +676,67 @@ Type=Application
 Categories=Network;InstantMessaging;
 StartupNotify=true
 WECHATWEBDESKTOP
+
+    # 省内存图形管理工具（26.2.5）
+    cat > /usr/local/bin/onion-wechat-manager << 'WECHATMGR'
+#!/usr/bin/env bash
+# Onion OS 微信省内存管理器
+set -uo pipefail
+
+mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
+wechat_mem_kb=$(ps aux 2>/dev/null | awk '/[Ww]e[Cc]hat|[Ww]eixin/ && !/awk/{sum+=$6} END{print int(sum)}')
+wechat_mem_mb=$((wechat_mem_kb / 1024))
+cache_size=$(du -sm "${HOME}/.cache/wechat" "${HOME}/.cache/weixin" "${HOME}/.cache/tencent/wechat" 2>/dev/null | awk '{sum+=$1} END{print sum+0}')
+
+msg="系统总内存：${mem_mb} MB\n"
+if [[ "${wechat_mem_mb}" -gt 0 ]]; then
+    msg+="微信当前占用：${wechat_mem_mb} MB\n"
+else
+    msg+="微信当前未运行\n"
+fi
+msg+="微信缓存大小：约 ${cache_size} MB\n\n请选择操作："
+
+choice=$(zenity --list \
+    --title="微信省内存管理" \
+    --text="${msg}" \
+    --column="操作" \
+    "清理微信缓存" \
+    "省内存模式启动微信" \
+    "切换到网页版微信" \
+    "关闭微信进程" \
+    --width=420 --height=340 2>/dev/null) || exit 0
+
+case "${choice}" in
+    "清理微信缓存")
+        find "${HOME}/.cache" -maxdepth 4 \( -iname '*wechat*' -o -iname '*weixin*' -o -iname '*tencent*' \) \
+            -type f -size +1M -delete 2>/dev/null || true
+        zenity --info --title="微信缓存清理" --text="缓存已清理完成。" --width=300 2>/dev/null || true
+        ;;
+    "省内存模式启动微信")
+        ONION_WECHAT_MODE=light /usr/local/bin/onion-wechat &
+        ;;
+    "切换到网页版微信")
+        /usr/local/bin/onion-wechat-web &
+        ;;
+    "关闭微信进程")
+        pkill -f '[Ww]e[Cc]hat|[Ww]eixin' 2>/dev/null || true
+        zenity --info --title="已关闭微信" --text="微信进程已终止。" --width=300 2>/dev/null || true
+        ;;
+esac
+WECHATMGR
+    chmod +x /usr/local/bin/onion-wechat-manager
+
+    cat > /usr/share/applications/onion-wechat-manager.desktop << 'WECHATMGRDESKTOP'
+[Desktop Entry]
+Name=微信内存管理
+Name[zh_CN]=微信内存管理
+Comment=查看微信内存占用、清理缓存、省内存启动或切换网页版
+Exec=/usr/local/bin/onion-wechat-manager
+Icon=wechat
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;System;
+WECHATMGRDESKTOP
 }
 
 # ======================== Fcitx5 中文输入法 ========================
