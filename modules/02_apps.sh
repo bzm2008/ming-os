@@ -958,6 +958,42 @@ install_utilities() {
         redshift
 }
 
+# ======================== 护眼模式（26.2.5） ========================
+
+deploy_eyecare() {
+    cat > /usr/local/bin/onion-eyecare << 'EOF'
+#!/usr/bin/env bash
+# Onion OS 护眼模式 - 切换屏幕色温（暖色/正常）
+STATE="${HOME}/.config/onion-os/eyecare-enabled"
+if [[ -f "${STATE}" ]]; then
+    pkill -f redshift 2>/dev/null || true
+    rm -f "${STATE}"
+    # 重置为正常色温
+    redshift -O 6500 -b 1.0 2>/dev/null && sleep 0.3 && pkill -f redshift 2>/dev/null || true
+    notify-send -i display-brightness-symbolic "护眼模式" "已关闭，屏幕恢复正常色温" 2>/dev/null || true
+else
+    mkdir -p "$(dirname "${STATE}")"
+    touch "${STATE}"
+    # 4000K 暖色温，亮度 0.9
+    redshift -O 4000 -b 0.9 2>/dev/null &
+    notify-send -i display-brightness-symbolic "护眼模式" "已开启，屏幕切换为暖色调（4000K）" 2>/dev/null || true
+fi
+EOF
+    chmod +x /usr/local/bin/onion-eyecare
+
+    cat > /usr/share/applications/onion-eyecare.desktop << 'EOF'
+[Desktop Entry]
+Name=护眼模式
+Name[zh_CN]=护眼模式
+Comment=切换屏幕暖色调，减少蓝光
+Exec=onion-eyecare
+Icon=display-brightness-symbolic
+Terminal=false
+Type=Application
+Categories=System;Settings;
+EOF
+}
+
 # ======================== 主流程 ========================
 
 main() {
@@ -971,6 +1007,7 @@ main() {
     install_fcitx5
     install_app_store
     install_utilities
+    deploy_eyecare
 
     echo "=====> [02_apps] 应用软件安装完成 <====="
 }
