@@ -44,7 +44,7 @@ output/onion-os-26.2.0-home-amd64.iso
 当前已验证发布候选：
 
 ```text
-SHA256: ecca3e1ee619a2cb34d918029468434db9f0e66b34430d1d023f3a338f42bbd2
+SHA256: f96bb22b7840c186a1f089a44698ce26e44521a5dfed47525edd4033794dcf82
 ```
 
 最终镜像已检查 BIOS/UEFI El Torito 引导结构，QEMU BIOS/UEFI 可进入 Onion OS 26.2.0 GRUB 菜单，不再停在裸 `Welcome to GRUB`。Live/ Ventoy 场景同时启用 LightDM 图形自动登录和 tty1/ttyS0 文本控制台兜底自动登录，串口验证结果为 `onion-os login: onion (automatic login)`。

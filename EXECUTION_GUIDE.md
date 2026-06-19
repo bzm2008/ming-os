@@ -40,7 +40,7 @@ output/onion-os-26.2.0-home-amd64.iso
 本轮最终验证镜像：
 
 ```text
-SHA256: ecca3e1ee619a2cb34d918029468434db9f0e66b34430d1d023f3a338f42bbd2
+SHA256: f96bb22b7840c186a1f089a44698ce26e44521a5dfed47525edd4033794dcf82
 ```
 
 ## 验证重点

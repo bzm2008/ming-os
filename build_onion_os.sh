@@ -414,7 +414,7 @@ EOF
             -p /boot/grub \
             -c "${iso_workdir}/boot/grub/early-grub.cfg" \
             -o "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" \
-            part_gpt part_msdos fat iso9660 udf all_video font gfxterm normal configfile \
+            part_gpt part_msdos fat ntfs exfat iso9660 udf ext2 all_video font gfxterm normal configfile \
             search search_fs_file linux chain boot 2>/dev/null || true
     fi
 
@@ -427,6 +427,24 @@ EOF
         log_info "已生成 EFI 引导文件 (BOOTX64.EFI with early config)"
     fi
 
+    if command -v "${GRUB_MKRESCUE:-grub-mkrescue}" &>/dev/null; then
+        log_info "使用 grub-mkrescue 构建 GRUB2 hybrid ISO (Rufus ISO/DD + Ventoy)"
+        local rescue_src="${iso_workdir}.grubrescue"
+        rm -rf "${rescue_src}"
+        cp -a "${iso_workdir}" "${rescue_src}"
+        if [[ -f "${rescue_src}/EFI/BOOT/BOOTX64.EFI" ]]; then
+            mkdir -p "${rescue_src}/efi/boot"
+            cp "${rescue_src}/EFI/BOOT/BOOTX64.EFI" "${rescue_src}/efi/boot/bootx64.efi"
+            rm -rf "${rescue_src}/EFI"
+        fi
+        rm -f "${rescue_src}/boot/grub/efi.img" "${rescue_src}/boot/grub/boot.cat"
+        if ${GRUB_MKRESCUE:-grub-mkrescue} --output="${OUTPUT_DIR}/${iso_name}" "${rescue_src}" 2>&1; then
+            rm -rf "${rescue_src}"
+            return 0
+        fi
+        rm -rf "${rescue_src}"
+        log_warn "grub-mkrescue hybrid 构建失败，回退到手动 xorriso"
+    fi
     if command -v grub-mkimage &>/dev/null && [[ -f /usr/lib/grub/i386-pc/cdboot.img ]]; then
         grub-mkimage \
             -O i386-pc \
