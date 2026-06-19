@@ -932,101 +932,99 @@ THEMEINDEX
 setup_wallpaper() {
     mkdir -p /usr/share/backgrounds/onion-os
 
-    # 主壁纸 - 深紫渐变 + 洋葱图标
-    cat > /usr/share/backgrounds/onion-os/default.svg << WALLPAPERSVG
+    # 主壁纸 - 扁平深绿洋葱同心圆风格 (26.2.5 新设计)
+    cat > /usr/share/backgrounds/onion-os/default.svg << 'WALLPAPERSVG'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1A0F2E;stop-opacity:1" />
-      <stop offset="35%" style="stop-color:#2D1B4E;stop-opacity:1" />
-      <stop offset="65%" style="stop-color:#4A235A;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#1A0F2E;stop-opacity:1" />
+      <stop offset="0%" stop-color="#002B27"/>
+      <stop offset="100%" stop-color="#00453E"/>
     </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="40%" r="50%">
-      <stop offset="0%" style="stop-color:#8E44AD;stop-opacity:0.15" />
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0" />
-    </radialGradient>
-    <filter id="softShadow">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="4"/>
-      <feOffset dx="0" dy="2"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
   </defs>
+  <!-- 背景 -->
   <rect width="1920" height="1080" fill="url(#bg)"/>
-  <rect width="1920" height="1080" fill="url(#glow)"/>
-
-  <!-- 装饰性几何线条 -->
-  <line x1="0" y1="0" x2="480" y2="1080" stroke="#6C3483" stroke-width="0.5" opacity="0.15"/>
-  <line x1="1920" y1="0" x2="1440" y2="1080" stroke="#6C3483" stroke-width="0.5" opacity="0.15"/>
-  <circle cx="960" cy="400" r="220" fill="none" stroke="#7D3C98" stroke-width="1" opacity="0.2"/>
-  <circle cx="960" cy="400" r="160" fill="none" stroke="#8E44AD" stroke-width="1" opacity="0.25"/>
-  <circle cx="960" cy="400" r="100" fill="none" stroke="#9B59B6" stroke-width="1" opacity="0.3"/>
-
-  <!-- 洋葱图标 -->
-  <path d="M960 180 Q1000 320 960 400 Q920 320 960 180Z" fill="#9B59B6" opacity="0.4"/>
-  <path d="M900 240 Q960 350 960 400 Q920 350 900 240Z" fill="#8E44AD" opacity="0.3"/>
-  <path d="M1020 240 Q960 350 960 400 Q1000 350 1020 240Z" fill="#8E44AD" opacity="0.3"/>
-  <path d="M870 300 Q950 370 960 400 Q920 370 870 300Z" fill="#7D3C98" opacity="0.25"/>
-  <path d="M1050 300 Q970 370 960 400 Q1000 370 1050 300Z" fill="#7D3C98" opacity="0.25"/>
-
+  <!-- 六边形网格（扁平装饰） -->
+  <g stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35">
+    <path d="M0,54 l27,-27 l27,27 l0,54 l-27,27 l-27,-27Z" transform="translate(0,0)"/>
+    <use href="#hex" x="108" y="0"/>
+    <use href="#hex" x="54" y="81"/>
+    <!-- 铺满用 pattern 更高效 -->
+  </g>
+  <defs>
+    <pattern id="hexgrid" x="0" y="0" width="108" height="162" patternUnits="userSpaceOnUse">
+      <polygon points="54,2 105,27 105,81 54,106 3,81 3,27" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
+      <polygon points="0,83 27,68 27,122 0,137" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
+      <polygon points="108,83 81,68 81,122 108,137" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
+    </pattern>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#hexgrid)"/>
+  <!-- 洋葱同心圆（横截面）- 中央偏左上 -->
+  <circle cx="700" cy="480" r="320" fill="#0A5A54"/>
+  <circle cx="700" cy="480" r="314" fill="#002B27"/>
+  <circle cx="700" cy="480" r="260" fill="#0F6B64"/>
+  <circle cx="700" cy="480" r="254" fill="#002B27"/>
+  <circle cx="700" cy="480" r="200" fill="#147D74"/>
+  <circle cx="700" cy="480" r="194" fill="#002B27"/>
+  <circle cx="700" cy="480" r="140" fill="#1A9088"/>
+  <circle cx="700" cy="480" r="134" fill="#002B27"/>
+  <circle cx="700" cy="480" r="80"  fill="#1FA89E"/>
+  <circle cx="700" cy="480" r="74"  fill="#002B27"/>
+  <circle cx="700" cy="480" r="32"  fill="#31C476"/>
+  <!-- 右下装饰小同心圆 -->
+  <circle cx="1700" cy="920" r="130" fill="#0A5A54" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="126" fill="#002B27" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="90"  fill="#0F6B64" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="86"  fill="#002B27" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="50"  fill="#147D74" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="46"  fill="#002B27" opacity="0.5"/>
+  <circle cx="1700" cy="920" r="20"  fill="#31C476" opacity="0.5"/>
   <!-- 品牌文字 -->
-  <text x="960" y="660" text-anchor="middle" fill="#E8DAEF" font-family="sans-serif" font-size="72" font-weight="bold" letter-spacing="8">Onion OS</text>
-  <text x="960" y="720" text-anchor="middle" fill="#D7BDE2" font-family="sans-serif" font-size="24">${ONION_OS_VERSION} Home Edition</text>
-  <text x="960" y="760" text-anchor="middle" fill="#BB8FCE" font-family="sans-serif" font-size="16" letter-spacing="4">层层精简 · 层层用心</text>
-
-  <!-- 底部装饰线 -->
-  <line x1="760" y1="790" x2="1160" y2="790" stroke="#8E44AD" stroke-width="1" opacity="0.4"/>
+  <text x="1200" y="430" font-family="sans-serif" font-size="96" font-weight="300" fill="white" letter-spacing="12" opacity="0.95">Onion OS</text>
+  <text x="1200" y="490" font-family="sans-serif" font-size="28" font-weight="300" fill="#31C476" letter-spacing="4">26.2.5 Home Edition</text>
+  <text x="1200" y="535" font-family="sans-serif" font-size="18" font-weight="300" fill="#D9DBD6" letter-spacing="3" opacity="0.75">层层精简 · 层层用心</text>
+  <!-- 分割线 -->
+  <line x1="1200" y1="410" x2="1700" y2="410" stroke="#31C476" stroke-width="1.5" opacity="0.6"/>
 </svg>
 WALLPAPERSVG
 
-    # 1366x768 壁纸变体 - 深紫渐变 + 洋葱图标 (尺寸适配)
+    # 1366x768 壁纸变体
     cat > /usr/share/backgrounds/onion-os/default-1366x768.svg << 'WALLPAPERSVG1366'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1366" height="768" viewBox="0 0 1366 768">
   <defs>
-    <linearGradient id="bg1366" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1A0F2E;stop-opacity:1" />
-      <stop offset="35%" style="stop-color:#2D1B4E;stop-opacity:1" />
-      <stop offset="65%" style="stop-color:#4A235A;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#1A0F2E;stop-opacity:1" />
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#002B27"/>
+      <stop offset="100%" stop-color="#00453E"/>
     </linearGradient>
-    <radialGradient id="glow1366" cx="50%" cy="40%" r="50%">
-      <stop offset="0%" style="stop-color:#8E44AD;stop-opacity:0.15" />
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0" />
-    </radialGradient>
-    <filter id="softShadow1366">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
-      <feOffset dx="0" dy="1"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
+    <pattern id="hexgrid" x="0" y="0" width="108" height="162" patternUnits="userSpaceOnUse">
+      <polygon points="54,2 105,27 105,81 54,106 3,81 3,27" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
+    </pattern>
   </defs>
-  <rect width="1366" height="768" fill="url(#bg1366)"/>
-  <rect width="1366" height="768" fill="url(#glow1366)"/>
-
-  <!-- 装饰性几何线条 -->
-  <line x1="0" y1="0" x2="341" y2="768" stroke="#6C3483" stroke-width="0.5" opacity="0.15"/>
-  <line x1="1366" y1="0" x2="1025" y2="768" stroke="#6C3483" stroke-width="0.5" opacity="0.15"/>
-  <circle cx="683" cy="284" r="156" fill="none" stroke="#7D3C98" stroke-width="1" opacity="0.2"/>
-  <circle cx="683" cy="284" r="114" fill="none" stroke="#8E44AD" stroke-width="1" opacity="0.25"/>
-  <circle cx="683" cy="284" r="71" fill="none" stroke="#9B59B6" stroke-width="1" opacity="0.3"/>
-
-  <!-- 洋葱图标 -->
-  <path d="M683 128 Q711 227 683 284 Q655 227 683 128Z" fill="#9B59B6" opacity="0.4"/>
-  <path d="M640 171 Q683 249 683 284 Q655 249 640 171Z" fill="#8E44AD" opacity="0.3"/>
-  <path d="M726 171 Q683 249 683 284 Q711 249 726 171Z" fill="#8E44AD" opacity="0.3"/>
-  <path d="M619 213 Q676 263 683 284 Q655 263 619 213Z" fill="#7D3C98" opacity="0.25"/>
-  <path d="M747 213 Q690 263 683 284 Q711 263 747 213Z" fill="#7D3C98" opacity="0.25"/>
-
-  <!-- 品牌文字 -->
-  <text x="683" y="469" text-anchor="middle" fill="#E8DAEF" font-family="sans-serif" font-size="48" font-weight="bold" letter-spacing="5">Onion OS</text>
-  <text x="683" y="512" text-anchor="middle" fill="#D7BDE2" font-family="sans-serif" font-size="16">${ONION_OS_VERSION} Home Edition</text>
-  <text x="683" y="540" text-anchor="middle" fill="#BB8FCE" font-family="sans-serif" font-size="11" letter-spacing="3">层层精简 · 层层用心</text>
-
-  <!-- 底部装饰线 -->
-  <line x1="540" y1="562" x2="826" y2="562" stroke="#8E44AD" stroke-width="1" opacity="0.4"/>
+  <rect width="1366" height="768" fill="url(#bg)"/>
+  <rect width="1366" height="768" fill="url(#hexgrid)"/>
+  <circle cx="500" cy="340" r="228" fill="#0A5A54"/>
+  <circle cx="500" cy="340" r="224" fill="#002B27"/>
+  <circle cx="500" cy="340" r="185" fill="#0F6B64"/>
+  <circle cx="500" cy="340" r="181" fill="#002B27"/>
+  <circle cx="500" cy="340" r="142" fill="#147D74"/>
+  <circle cx="500" cy="340" r="138" fill="#002B27"/>
+  <circle cx="500" cy="340" r="100" fill="#1A9088"/>
+  <circle cx="500" cy="340" r="96"  fill="#002B27"/>
+  <circle cx="500" cy="340" r="57"  fill="#1FA89E"/>
+  <circle cx="500" cy="340" r="53"  fill="#002B27"/>
+  <circle cx="500" cy="340" r="23"  fill="#31C476"/>
+  <circle cx="1210" cy="650" r="90" fill="#0A5A54" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="87" fill="#002B27" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="64" fill="#0F6B64" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="61" fill="#002B27" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="35" fill="#147D74" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="32" fill="#002B27" opacity="0.45"/>
+  <circle cx="1210" cy="650" r="14" fill="#31C476" opacity="0.45"/>
+  <line x1="840" y1="290" x2="1300" y2="290" stroke="#31C476" stroke-width="1.5" opacity="0.6"/>
+  <text x="840" y="330" font-family="sans-serif" font-size="68" font-weight="300" fill="white" letter-spacing="8" opacity="0.95">Onion OS</text>
+  <text x="840" y="370" font-family="sans-serif" font-size="20" font-weight="300" fill="#31C476" letter-spacing="3">26.2.5 Home Edition</text>
+  <text x="840" y="403" font-family="sans-serif" font-size="14" font-weight="300" fill="#D9DBD6" letter-spacing="2" opacity="0.75">层层精简 · 层层用心</text>
 </svg>
 WALLPAPERSVG1366
 

@@ -201,24 +201,203 @@ GARLICCLAWCMD
     chmod +x /usr/local/bin/garlic-claw
 }
 
+# ======================== Garlic Claw 桌面 GUI 应用（26.2.5） ========================
+
+install_garlic_claw_gui() {
+    # 依赖：python3-gi 已由 03_desktop.sh 安装；补充 VTE 终端组件
+    apt install -y --no-install-recommends python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-vte-2.91 xterm 2>/dev/null || true
+
+    cat > /usr/local/bin/garlic-claw-app << 'GARLICAPP'
+#!/usr/bin/env python3
+"""Garlic Claw - Onion OS AI 电脑助手（面向数码难民）"""
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, GLib, Pango
+import subprocess, threading, shutil, os
+
+APP_COLOR  = "#00453E"
+MINT       = "#31C476"
+
+SYSTEM_CMDS = [
+    ("🧹 清理磁盘缓存",  "bleachbit --clean system.cache apt.autoclean; read -p '按回车关闭'"),
+    ("💾 查看内存使用",   "free -h; echo; vmstat -s | head -12; read -p '按回车关闭'"),
+    ("🌐 修复网络连接",   "nmcli dev status; echo; nmcli networking off; sleep 1; nmcli networking on; read -p '按回车关闭'"),
+    ("🔄 检查系统更新",   "/usr/local/bin/onion-update-gui"),
+    ("📊 进程管理",       "htop"),
+    ("ℹ️  系统信息",      "neofetch 2>/dev/null || lsb_release -a; uname -r; read -p '按回车关闭'"),
+]
+
+OFFICE_CMDS = [
+    ("📁 文件管理器", "thunar"),
+    ("📸 截图",       "xfce4-screenshooter"),
+    ("🖥️  终端",      "xfce4-terminal"),
+    ("📝 文字处理",   "wps 2>/dev/null || libreoffice --writer 2>/dev/null || mousepad"),
+]
+
+def run_cmd(cmd):
+    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad","/usr/local/bin/onion-update-gui"]):
+        subprocess.Popen(cmd.split(None, 1) if ' ' not in cmd else ["sh","-c",cmd])
+    else:
+        subprocess.Popen(["xterm", "-fa", "Monospace", "-fs", "11", "-bg", "#0d1117", "-fg", "#c9d1d9",
+                          "-title", "Garlic Claw", "-e", f"bash -c {cmd!r}"])
+
+class GarlicClaw(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Garlic Claw · AI 电脑助手")
+        self.set_default_size(860, 580)
+        self.set_border_width(0)
+
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.add(hbox)
+
+        # 左侧导航栏
+        sidebar = Gtk.StackSidebar()
+        sidebar.set_size_request(140, -1)
+        sidebar.get_style_context().add_class("sidebar")
+        hbox.pack_start(sidebar, False, False, 0)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        hbox.pack_start(sep, False, False, 0)
+
+        stack = Gtk.Stack()
+        stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        sidebar.set_stack(stack)
+        hbox.pack_start(stack, True, True, 0)
+
+        stack.add_titled(self._build_chat(),   "chat",   "💬 AI 对话")
+        stack.add_titled(self._build_system(), "system", "🔧 系统管理")
+        stack.add_titled(self._build_office(), "office", "📁 办公辅助")
+
+    def _build_chat(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        vbox.set_border_width(12)
+
+        # 对话历史
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.chat_buf = Gtk.TextBuffer()
+        tv = Gtk.TextView(buffer=self.chat_buf, editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                          left_margin=8, right_margin=8, top_margin=8, bottom_margin=8)
+        tv.override_font(Pango.FontDescription("Monospace 10"))
+        scroll.add(tv)
+        vbox.pack_start(scroll, True, True, 0)
+        self.chat_scroll = scroll
+
+        # 输入行
+        hbox = Gtk.Box(spacing=6)
+        hbox.set_border_width(6)
+        self.entry = Gtk.Entry()
+        self.entry.set_placeholder_text("输入问题，按回车发送…")
+        self.entry.connect("activate", self._send)
+        send_btn = Gtk.Button(label="发送")
+        send_btn.connect("clicked", self._send)
+        hbox.pack_start(self.entry, True, True, 0)
+        hbox.pack_start(send_btn, False, False, 0)
+        vbox.pack_end(hbox, False, False, 0)
+
+        # 是否有 claude CLI
+        if not shutil.which("claude") and not shutil.which("garlic-claw"):
+            self._append("\n⚠️  未检测到 claude / garlic-claw 命令。\n"
+                         "请先运行 /usr/local/bin/onion-garlic-setup 完成安装。\n\n"
+                         "安装后重新打开此窗口即可使用 AI 对话。\n")
+        else:
+            self._append("👋 你好！我是 Garlic Claw，Onion OS 的 AI 电脑助手。\n"
+                         "有什么我可以帮你的？（电脑问题、文件操作、办公辅助都可以问）\n\n")
+        return vbox
+
+    def _append(self, text):
+        end = self.chat_buf.get_end_iter()
+        self.chat_buf.insert(end, text)
+        GLib.idle_add(lambda: self.chat_scroll.get_vadjustment().set_value(
+            self.chat_scroll.get_vadjustment().get_upper()))
+
+    def _send(self, *_):
+        msg = self.entry.get_text().strip()
+        if not msg:
+            return
+        self.entry.set_text("")
+        self._append(f"你：{msg}\n")
+        self._append("Garlic Claw：正在思考...\n")
+        threading.Thread(target=self._ask, args=(msg,), daemon=True).start()
+
+    def _ask(self, msg):
+        cli = shutil.which("claude") or shutil.which("garlic-claw")
+        if not cli:
+            GLib.idle_add(self._append, "（请先安装 claude CLI）\n\n")
+            return
+        try:
+            result = subprocess.run([cli, msg], capture_output=True, text=True, timeout=120)
+            reply = (result.stdout or result.stderr or "（无输出）").strip()
+        except subprocess.TimeoutExpired:
+            reply = "（请求超时，请检查网络和 API Key 配置）"
+        except Exception as e:
+            reply = f"（调用失败：{e}）"
+        # 替换掉"正在思考..."那行
+        GLib.idle_add(self._replace_last_thinking, reply)
+
+    def _replace_last_thinking(self, reply):
+        text = self.chat_buf.get_text(self.chat_buf.get_start_iter(), self.chat_buf.get_end_iter(), False)
+        if "正在思考..." in text:
+            start = self.chat_buf.get_start_iter()
+            end = self.chat_buf.get_end_iter()
+            new_text = text.replace("Garlic Claw：正在思考...\n", f"Garlic Claw：{reply}\n\n", 1)
+            self.chat_buf.set_text(new_text)
+
+    def _build_system(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        vbox.set_border_width(16)
+        label = Gtk.Label(label="<b>系统管理</b>", use_markup=True, xalign=0)
+        vbox.pack_start(label, False, False, 0)
+        grid = Gtk.Grid(row_spacing=8, column_spacing=8)
+        for i, (name, cmd) in enumerate(SYSTEM_CMDS):
+            btn = Gtk.Button(label=name)
+            btn.set_size_request(180, 48)
+            btn.connect("clicked", lambda _, c=cmd: run_cmd(c))
+            grid.attach(btn, i % 2, i // 2, 1, 1)
+        vbox.pack_start(grid, False, False, 0)
+        return vbox
+
+    def _build_office(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        vbox.set_border_width(16)
+        label = Gtk.Label(label="<b>办公辅助</b>", use_markup=True, xalign=0)
+        vbox.pack_start(label, False, False, 0)
+        box = Gtk.Box(spacing=8)
+        for name, cmd in OFFICE_CMDS:
+            btn = Gtk.Button(label=name)
+            btn.set_size_request(160, 56)
+            btn.connect("clicked", lambda _, c=cmd: run_cmd(c))
+            box.pack_start(btn, True, True, 0)
+        vbox.pack_start(box, False, False, 0)
+        return vbox
+
+class GarlicApp(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="uno.scallion.garlic-claw")
+    def do_activate(self):
+        win = GarlicClaw(self)
+        win.show_all()
+
+GarlicApp().run(None)
+GARLICAPP
+    chmod +x /usr/local/bin/garlic-claw-app
+}
+
 # ======================== .desktop 启动器 ========================
 
 create_desktop_entry() {
-    # 设计意图：创建 Garlic Claw 的 .desktop 文件
-    # 在独立终端窗口中启动 TUI 模式，完全脱离浏览器
-
     cat > /usr/share/applications/garlic-claw.desktop << GCDESKTOP
 [Desktop Entry]
 Name=Garlic Claw
-Name[zh_CN]=Garlic Claw AI 助手
-Comment=Onion OS 标志性 AI 助手
-Comment[zh_CN]=基于 OpenClaw 的独立 AI 对话客户端
-Exec=xfce4-terminal --title="Garlic Claw" -e "garlic-claw"
+Name[zh_CN]=Garlic Claw 电脑助手
+Comment=AI-powered computer assistant for everyday users
+Comment[zh_CN]=面向数码难民的 AI 电脑援助平台
+Exec=garlic-claw-app
 Icon=utilities-terminal
 Terminal=false
 Type=Application
-Categories=System;Utility;AI;
-Keywords=ai;chat;assistant;openclaw;garlic;
+Categories=System;Utility;
+Keywords=ai;chat;assistant;garlic;
 StartupNotify=true
 StartupWMClass=garlic-claw
 GCDESKTOP
@@ -390,6 +569,7 @@ main() {
     install_nodejs
     install_openclaw
     create_garlic_claw_command
+    install_garlic_claw_gui
     create_desktop_entry
     configure_gateway_service
     configure_firewall

@@ -337,6 +337,9 @@ DISTRIB_RELEASE=${ONION_OS_VERSION}
 DISTRIB_CODENAME=onion
 DISTRIB_DESCRIPTION="Onion OS ${ONION_OS_VERSION} Home Edition"
 LSBRELEASE
+
+    # 确保 /etc/debian_version 显示 Debian 13 (Trixie)，而非历史遗留的12
+    echo "trixie/sid" > /etc/debian_version
 }
 
 # ======================== 系统优化 ========================

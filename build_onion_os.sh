@@ -414,7 +414,19 @@ EOF
             -p /boot/grub \
             -c "${iso_workdir}/boot/grub/early-grub.cfg" \
             -o "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" \
-            part_gpt part_msdos fat ntfs exfat iso9660 udf ext2 all_video font gfxterm normal configfile \
+            part_gpt part_msdos fat ntfs exfat iso9660 udf ext2 all_video font gfxterm gfxmenu \
+            normal configfile search search_fs_file search_label search_fs_uuid loadenv \
+            linux chain boot jpeg png 2>/dev/null || true
+    fi
+
+    # 32位UEFI（部分老旧平板/上网本，如Bay Trail）
+    if command -v grub-mkimage &>/dev/null && [[ -d /usr/lib/grub/i386-efi ]]; then
+        grub-mkimage \
+            -O i386-efi \
+            -p /boot/grub \
+            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -o "${iso_workdir}/EFI/BOOT/BOOTIA32.EFI" \
+            part_gpt part_msdos fat iso9660 udf ext2 all_video font gfxterm normal configfile \
             search search_fs_file linux chain boot 2>/dev/null || true
     fi
 
@@ -472,10 +484,14 @@ EOF
             efi_tmpdir="$(mktemp -d)"
             mkdir -p "${efi_tmpdir}/EFI/BOOT"
             cp "${iso_workdir}/EFI/BOOT/"* "${efi_tmpdir}/EFI/BOOT/"
-            dd if=/dev/zero of="${efi_img}" bs=1M count=4 2>/dev/null
+            # 8MB：容纳 BOOTX64.EFI + BOOTIA32.EFI（32位UEFI老机器）
+            dd if=/dev/zero of="${efi_img}" bs=1M count=8 2>/dev/null
             mkfs.vfat -F 12 "${efi_img}" 2>/dev/null
             mmd -i "${efi_img}" ::EFI ::EFI/BOOT 2>/dev/null
             mcopy -i "${efi_img}" "${efi_tmpdir}/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI 2>/dev/null
+            if [[ -f "${efi_tmpdir}/EFI/BOOT/BOOTIA32.EFI" ]]; then
+                mcopy -i "${efi_img}" "${efi_tmpdir}/EFI/BOOT/BOOTIA32.EFI" ::EFI/BOOT/BOOTIA32.EFI 2>/dev/null
+            fi
             if [[ -f "${efi_tmpdir}/EFI/BOOT/grubx64.efi" ]]; then
                 mcopy -i "${efi_img}" "${efi_tmpdir}/EFI/BOOT/grubx64.efi" ::EFI/BOOT/grubx64.efi 2>/dev/null
             fi

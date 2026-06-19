@@ -665,10 +665,8 @@ deploy_gui_tool() {
     cat > /usr/local/bin/onion-update-gui << 'OTAGUI'
 #!/usr/bin/env bash
 # Onion OS OTA 更新 GUI 工具
-# 使用 zenity 提供图形化界面
 
-set -e
-
+# 不用 set -e：任何 zenity 取消（退出码1）都不应让脚本崩溃
 readonly CONFIG_DIR="/etc/onion-update"
 readonly CACHE_DIR="/var/cache/onion-update"
 
