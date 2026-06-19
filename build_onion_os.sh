@@ -195,6 +195,11 @@ prepare_chroot_scripts() {
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/onion-build/modules/"
     cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}/tmp/onion-build/config/"
     chmod +x "${CHROOT_DIR}/tmp/onion-build/modules/"*.sh
+    # 复制 assets（含 AI 生成壁纸 PNG）
+    if [[ -d "${SCRIPT_DIR}/assets" ]]; then
+        mkdir -p "${CHROOT_DIR}/tmp/onion-build/assets"
+        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/onion-build/assets/" 2>/dev/null || true
+    fi
 }
 # ======================== 模块脚本执行 ========================
 run_modules() {

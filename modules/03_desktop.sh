@@ -932,7 +932,23 @@ THEMEINDEX
 setup_wallpaper() {
     mkdir -p /usr/share/backgrounds/onion-os
 
-    # 主壁纸 - 扁平深绿洋葱同心圆风格 (26.2.5 新设计)
+    # 优先使用 assets/ 目录中的 AI 生成 PNG（26.2.5）
+    local asset_png="/tmp/onion-build/assets/wallpaper-default.png"
+    if [[ -f "${asset_png}" ]]; then
+        cp "${asset_png}" /usr/share/backgrounds/onion-os/default.png
+        # 缩放出1366x768变体（若有 ImageMagick）
+        if command -v convert &>/dev/null; then
+            convert -resize 1366x768! /usr/share/backgrounds/onion-os/default.png \
+                /usr/share/backgrounds/onion-os/default-1366x768.png 2>/dev/null || \
+            cp /usr/share/backgrounds/onion-os/default.png \
+                /usr/share/backgrounds/onion-os/default-1366x768.png
+        else
+            cp /usr/share/backgrounds/onion-os/default.png \
+                /usr/share/backgrounds/onion-os/default-1366x768.png
+        fi
+    fi
+
+    # 主壁纸 SVG（作为备用 / PNG 缺失时渲染）
     cat > /usr/share/backgrounds/onion-os/default.svg << 'WALLPAPERSVG'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
