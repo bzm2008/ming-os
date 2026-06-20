@@ -182,29 +182,6 @@ else
     exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
 fi
 PICOMWRAP
-fi
-if [ "$HAS_GPU" -eq 0 ] && command -v glxinfo &>/dev/null; then
-    if glxinfo 2>/dev/null | grep -q "direct rendering: Yes"; then
-        HAS_GPU=1
-    fi
-fi
-if [ "$HAS_GPU" -eq 0 ]; then
-    if ${PICOM_BIN} --config "${CONF}" --backend glx --no-fading-openclose 2>/dev/null &
-        PICOM_PID=$!
-        sleep 1
-        kill "${PICOM_PID}" 2>/dev/null
-        wait "${PICOM_PID}" 2>/dev/null
-    then
-        HAS_GPU=1
-    fi
-fi
-
-if [ "$HAS_GPU" -eq 1 ]; then
-    exec ${PICOM_BIN} --config "${CONF}" -b "$@"
-else
-    exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
-fi
-PICOMWRAP
     chmod +x /usr/local/bin/onion-picom
 
     echo "lightdm lightdm/default-display-manager select lightdm" | debconf-set-selections

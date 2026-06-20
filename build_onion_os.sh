@@ -265,6 +265,7 @@ build_iso() {
         -comp xz \
         -Xbcj x86 \
         -b 1M \
+        -no-xattrs \
         -no-progress
 
     cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBCFG
