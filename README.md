@@ -1,95 +1,79 @@
-# Onion OS 26.2.0 Home Edition
+# Onion OS 26.2.6-r2 Home Edition
 
-> 层层精简，层层用心
+Onion OS is a Debian 13 / Trixie based desktop system for older PCs and Chinese desktop users. The current public release is `26.2.6-r2`, a bootfix and desktop experience rebuild that replaces the earlier 26.2.5 and 26.2.6 images.
 
-Onion OS 是面向老旧电脑和中文桌面用户的 Debian 定制系统。26.2.0 以 Debian 13/Trixie 为底座，重点修复 ISO 启动卡在 `Welcome to GRUB` 的问题，并围绕 2GB 内存设备、微信重负载、OTA 更新和桌面辨识度做了一轮系统级整理。
+## Current Release
 
-## 26.2.0 重点
-
-- **启动修复**：BIOS 和 UEFI 引导镜像内嵌 early GRUB 配置，启动时直接寻找 `/live/vmlinuz` 并加载 Onion OS 菜单，避免落入 GRUB 命令行。
-- **Debian 13/Trixie**：APT 源、preseed、系统标识和 OTA release 信息统一为 Trixie。
-- **官方微信**：移除 deepin-wine 方案，改用腾讯官方 Linux deb，并提供 `onion-wechat` 低内存包装器。
-- **2GB 内存策略**：按真实内存动态调整 zram、swappiness、Picom、Dock 缩放和微信启动方式，优先保证桌面不被微信拖死。
-- **星火应用商店**：替换 GNOME Software/Flatpak 默认入口，改为按需安装，减少首次登录后台负担。
-- **OTA 健全化**：客户端验证 JSON、支持重试和校验和；线上 Scallion 服务器提供权威 `/api/onion-update` 清单。
-- **按钮化桌面**：Onion Control Center 把更新、修复显示、连接网络、安装微信、清理微信缓存、修复应用商店等常见任务做成按钮，减少手动输入指令。
-
-## 项目概览
-
-| 项目 | 说明 |
+| Item | Value |
 | --- | --- |
-| 版本 | 26.2.0 Home Edition |
-| 底层系统 | Debian 13 (Trixie) |
-| 桌面环境 | Xfce + Plank Dock |
-| 窗口合成器 | Picom，低内存/老显卡自动回退 xrender |
-| 默认语言 | 简体中文 (`zh_CN.UTF-8`) |
-| 应用入口 | Onion Control Center、Firefox ESR、WPS、官方微信、星火应用商店、Garlic Claw、系统更新 |
-| OTA 服务器 | `https://scallion.uno/api/onion-update` |
+| Version | 26.2.6-r2 Home Edition |
+| Base | Debian 13 / Trixie |
+| Desktop | Xfce + Plank Dock + Onion desktop tools |
+| ISO | `onion-os-26.2.6-r2-home-amd64-f2823efa.iso` |
+| Size | `2568552448` bytes |
+| SHA256 | `f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25` |
+| Official download | `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso` |
+| OTA check | `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable` |
+| GitHub release | `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2` |
 
-## 构建
+## What Changed In 26.2.6-r2
 
-推荐在 Debian 13、Debian 12、Ubuntu 22.04+ 或 WSL Debian 中构建，需 root 权限、稳定网络和 30GB 以上可用空间。
+- Fixed the bad 26.2.5 boot chain that could show `invalid magic number` / `you need to load the kernel first`.
+- Kept the 26.2.6 bootfix ISO layout: BIOS + UEFI El Torito, isohybrid MBR, stable volume label `ONION_OS_2626`.
+- Rebuilt the desktop experience so the Onion wallpaper is applied by default instead of the Debian wallpaper.
+- Removed broad opaque PNG icon overrides that caused white square borders on desktop and Dock icons.
+- Fixed Onion Security Manager startup by using a stable wrapper and readable logs.
+- Rebranded the Live installer from Debian to Onion OS: desktop entry, Calamares branding, and installed system identity.
+- Added installed-system identity repair so a completed install presents itself as Onion OS rather than Debian.
+- Added HDD/SSD runtime tuning for schedulers, read-ahead, and writeback behavior.
+- Continued the Android-like app folders, "All Disks" entry, low-command workflow, Dock-only desktop, update button flow, and low-memory WeChat strategy.
 
-```bash
-chmod +x build_onion_os.sh modules/*.sh
-sudo ./build_onion_os.sh
-```
+## GitHub Assets
 
-构建产物：
+GitHub Release assets are split because the ISO is larger than the practical single-asset limit used by previous releases.
+
+Download these files from the release page:
 
 ```text
-output/onion-os-26.2.0-home-amd64.iso
+onion-os-26.2.6-r2-home-amd64.iso.part01
+onion-os-26.2.6-r2-home-amd64.iso.part02
+onion-os-26.2.6-r2-home-amd64.iso.sha256
+SHA256SUMS
 ```
 
-当前已验证发布候选：
-
-```text
-SHA256: f96bb22b7840c186a1f089a44698ce26e44521a5dfed47525edd4033794dcf82
-```
-
-最终镜像已检查 BIOS/UEFI El Torito 引导结构，QEMU BIOS/UEFI 可进入 Onion OS 26.2.0 GRUB 菜单，不再停在裸 `Welcome to GRUB`。Live/ Ventoy 场景同时启用 LightDM 图形自动登录和 tty1/ttyS0 文本控制台兜底自动登录，串口验证结果为 `onion-os login: onion (automatic login)`。
-
-## 安装
+Merge on Linux, macOS, or WSL:
 
 ```bash
-sudo dd if=output/onion-os-26.2.0-home-amd64.iso of=/dev/sdX bs=4M status=progress
+cat onion-os-26.2.6-r2-home-amd64.iso.part01 onion-os-26.2.6-r2-home-amd64.iso.part02 > onion-os-26.2.6-r2-home-amd64.iso
+sha256sum -c onion-os-26.2.6-r2-home-amd64.iso.sha256
 ```
 
-从 U 盘或虚拟机启动后进入 Live 桌面，系统会自动弹出 Calamares 图形化安装器。若显卡较旧，可在 GRUB 菜单选择兼容模式、低分辨率模式或安全模式。
+Merge on Windows PowerShell:
 
-Live 默认用户为 `onion`，正常情况下无需输入用户名和密码；如果显卡或虚拟机导致图形桌面未及时启动，文本控制台也会自动登录到 `onion`，避免用户卡在登录提示符前。
+```powershell
+cmd /c copy /b onion-os-26.2.6-r2-home-amd64.iso.part01+onion-os-26.2.6-r2-home-amd64.iso.part02 onion-os-26.2.6-r2-home-amd64.iso
+Get-FileHash onion-os-26.2.6-r2-home-amd64.iso -Algorithm SHA256
+```
 
-## 低内存与微信
+The merged file must match:
 
-2GB 内存可以运行 Onion OS，但微信在好友和群组较多时会成为主要压力源。26.2.0 的处理方式是“保护系统优先”：
+```text
+f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25
+```
 
-- `onion-memory-profile` 在启动早期按内存重写 zram 和 sysctl：2GB 设备使用 100% zram、较高 swappiness 和更激进脏页回写。
-- `earlyoom` 优先处理微信、浏览器、WPS 等重应用，避免 Xfce、LightDM、NetworkManager 被误杀。
-- `onion-picom` 在 2.6GB 以下自动使用 xrender fallback，关闭重模糊负担。
-- `onion-scale` 在低内存设备缩小 Dock、关闭 Dock 放大动画，并写入内存 profile。
-- `onion-wechat` 清理大缓存、降低 CPU/IO 权重，并在 systemd user scope 中给微信设置内存高水位和上限。
-- 用户仍可从菜单启动“微信网页版”，适合群组很多但机器只有 2GB 的情况。
+## Install
 
-## 桌面界面
+For most users, download the complete ISO from the official website and write it with Rufus, Ventoy, or `dd`.
 
-26.2.0 不再把原版 Xfce 设置管理器作为主要入口。Dock 和开始菜单会优先打开 `Onion 设置`，以 Onion 风格的任务按钮集中处理：
+```bash
+sudo dd if=onion-os-26.2.6-r2-home-amd64-f2823efa.iso of=/dev/sdX bs=4M status=progress conv=fsync
+```
 
-- 检查系统更新
-- 修复界面显示
-- 连接网络
-- 安装微信
-- 微信省内存启动
-- 清理微信缓存
-- 打开网页版微信
-- 打开或修复应用商店
-- 查看低内存策略
-- 调节声音、电源、外观
-
-底层 Xfce 工具仍保留在“高级设置”中，方便排障，但普通用户不需要记住命令。
+Live mode should auto-login as `onion`. The desktop installer is branded as `Install Onion OS` / `安装 Onion OS`; it should no longer appear as `Install Debian`.
 
 ## OTA
 
-普通用户从 `Onion 设置` 点击“检查系统更新”即可。高级用户也可以使用：
+Normal users should click the desktop update button. Advanced users can still use:
 
 ```bash
 onion-update check
@@ -97,21 +81,39 @@ onion-update download
 sudo onion-update install
 ```
 
-更新清单由线上 Scallion 服务生成。ISO 未上传完成时接口会返回 `pending_artifact`，客户端只提示“更新包尚未就绪”；ISO 上传后会返回下载地址、大小和 SHA256，客户端再允许下载并写入 GRUB OTA 启动项。
+The public OTA endpoint currently returns:
 
-## 目录
+```json
+{
+  "version": "26.2.6-r2",
+  "ready": true,
+  "download_url": "https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso",
+  "checksum": "f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25",
+  "size": 2568552448
+}
+```
+
+## Low-Memory Notes
+
+Onion OS itself is designed to stay usable on low-memory machines, but WeChat can still be the main pressure source when an account has many friends or group chats. Onion OS uses zram, earlyoom, lower-cost desktop effects, cache cleanup, and a low-memory WeChat launcher to protect the system first. For very heavy WeChat accounts on 2GB RAM machines, Web WeChat or a memory upgrade is still recommended.
+
+## Build
+
+Recommended build host: Debian 13, Debian 12, Ubuntu 22.04+, or WSL Debian, with root privileges and at least 30GB free space.
+
+```bash
+chmod +x build_onion_os.sh modules/*.sh
+sudo ./build_onion_os.sh
+```
+
+Important source areas:
 
 ```text
-onion-os/
-├── build_onion_os.sh
-├── modules/
-│   ├── 01_base.sh          # Debian/Trixie 基础系统、网络、zram、earlyoom
-│   ├── 02_apps.sh          # Xfce、WPS、官方微信、Fcitx5、星火商店
-│   ├── 03_desktop.sh       # 主题、Dock、Picom、壁纸、欢迎引导、低内存视觉策略
-│   ├── 04_garlic_claw.sh   # Garlic Claw AI 助手
-│   ├── 05_security_tools.sh
-│   ├── 06_ota_update.sh
-│   └── 07_finalize.sh
-├── config/
-└── output/                 # ISO 构建产物，git 忽略
+build_onion_os.sh          ISO build and boot chain checks
+modules/01_base.sh         Debian/Trixie base, identity, memory profile
+modules/02_apps.sh         WeChat, WPS, Spark Store, Chinese desktop apps
+modules/03_desktop.sh      Xfce/Dock desktop, wallpaper, app folders, website handoff docs
+modules/05_security_tools.sh
+modules/06_ota_update.sh   OTA CLI and GUI updater
+repack_2626_r2_desktopfix.sh
 ```
