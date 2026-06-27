@@ -14,7 +14,21 @@ wget-log*
 
 # Local build logs and one-off helper scripts
 build-logs/
+*.log
+*.exit
 repackage_*.sh
+repack_*.sh
+resume-build.log
+resume_build.sh
+qemu_verify_*.sh
+make_bootable_iso.sh
+make-bootable.log
+
+# Local migration/backups and Python caches
+.rebrand-backup/
+__pycache__/
+**/__pycache__/
+*.pyc
 
 # OS files
 .DS_Store

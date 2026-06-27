@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 26.2.5 Home Edition - 主构建脚本
+# Ming OS 26.3.0 Home Edition - 主构建脚本
 # ============================================================================
 # 设计意图：
 #   在 Debian 13 (Trixie) 宿主系统上，通过 debootstrap 构建一个完整的
-#   Onion OS 根文件系统，依次调用模块脚本完成系统定制，最终生成可启动 ISO。
+#   Ming OS 根文件系统，依次调用模块脚本完成系统定制，最终生成可启动 ISO。
 #
 # 输入：
 #   无（所有参数通过常量定义在本脚本头部）
 #
 # 输出：
-#   ${OUTPUT_DIR}/onion-os-${ONION_OS_VERSION}-home-amd64.iso
+#   ${OUTPUT_DIR}/ming-os-${MING_OS_VERSION}-home-amd64.iso
 #
 # 关键步骤：
 #   1. 环境检查与依赖安装
@@ -20,28 +20,30 @@
 #   5. 打包为 ISO 镜像
 #
 # 使用方法：
-#   sudo ./build_onion_os.sh
+#   sudo ./build_ming_os.sh
 # ============================================================================
 
 set -euo pipefail
 
 # ======================== 项目常量 ========================
-readonly ONION_OS_NAME="Onion OS"
-readonly ONION_OS_VERSION="26.2.5"
-readonly ONION_OS_EDITION="Home"
-readonly ONION_OS_CODENAME="onion"
+readonly MING_OS_NAME="Ming OS"
+readonly MING_OS_VERSION="26.3.0"
+readonly MING_OS_BUILD_SUFFIX="r4"
+readonly MING_OS_EDITION="Home"
+readonly MING_OS_CODENAME="ming"
+readonly ISO_VOLUME_ID="MING_OS_2630"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly LINUX_WORKDIR="/var/tmp/onion-os-build"
+readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
 readonly CHROOT_DIR="${LINUX_WORKDIR}/chroot"
 readonly OUTPUT_DIR="${LINUX_WORKDIR}/output"
 readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
-readonly ONION_USER="onion"
-readonly ONION_USER_PASS="onion"
+readonly MING_USER="user"
+readonly MING_USER_PASS="user"
 readonly ROOT_PASS="root"
 # 日志颜色
 readonly RED='\033[0;31m'
@@ -88,16 +90,9 @@ check_host_environment() {
     require_cmd debootstrap "dnf install debootstrap (EPEL) 或 apt install debootstrap"
     require_cmd mksquashfs "dnf install squashfs-tools 或 apt install squashfs-tools"
     require_cmd xorriso "dnf install xorriso 或 apt install xorriso"
-    if command -v grub-mkrescue &>/dev/null; then
-        GRUB_MKRESCUE="grub-mkrescue"
-    elif command -v grub2-mkrescue &>/dev/null; then
-        GRUB_MKRESCUE="grub2-mkrescue"
-    else
-        log_error "缺少 grub-mkrescue 或 grub2-mkrescue"
-        log_error "安装方法: dnf install grub2-tools-extra 或 apt install grub-pc-bin grub-efi-amd64-bin"
-        exit 1
-    fi
-    export GRUB_MKRESCUE
+    require_cmd grub-mkimage "dnf install grub2-tools-extra 或 apt install grub-pc-bin grub-efi-amd64-bin"
+    require_cmd mkfs.vfat "dnf install dosfstools 或 apt install dosfstools"
+    require_cmd mcopy "dnf install mtools 或 apt install mtools"
     require_cmd chroot "系统内置"
     if [[ ! -d /proc/sys ]]; then
         log_error "请确保 /proc 已挂载"
@@ -108,7 +103,7 @@ check_host_environment() {
     if [[ ${free_gb} -lt 15 ]]; then
         log_warn "磁盘剩余空间不足 15GB (当前 ${free_gb}GB)，构建可能失败"
     fi
-    log_info "宿主系统环境检查通过 (GRUB: ${GRUB_MKRESCUE})"
+    log_info "宿主系统环境检查通过 (manual xorriso + grub-mkimage)"
 }
 install_build_deps() {
     log_step "安装构建依赖"
@@ -181,24 +176,24 @@ chroot_exec() {
         HOME="/root" \
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin" \
         TERM="linux" \
-        ONION_OS_VERSION="${ONION_OS_VERSION}" \
-        ONION_USER="${ONION_USER}" \
-        ONION_USER_PASS="${ONION_USER_PASS}" \
+        MING_OS_VERSION="${MING_OS_VERSION}" \
+        MING_USER="${MING_USER}" \
+        MING_USER_PASS="${MING_USER_PASS}" \
         ROOT_PASS="${ROOT_PASS}" \
         "$@"
 }
 # 将模块脚本和配置文件复制到 chroot 中
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
-    mkdir -p "${CHROOT_DIR}/tmp/onion-build/modules"
-    mkdir -p "${CHROOT_DIR}/tmp/onion-build/config"
-    cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/onion-build/modules/"
-    cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}/tmp/onion-build/config/"
-    chmod +x "${CHROOT_DIR}/tmp/onion-build/modules/"*.sh
+    mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
+    mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
+    cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
+    cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/config/"
+    chmod +x "${CHROOT_DIR}/tmp/ming-build/modules/"*.sh
     # 复制 assets（含 AI 生成壁纸 PNG）
     if [[ -d "${SCRIPT_DIR}/assets" ]]; then
-        mkdir -p "${CHROOT_DIR}/tmp/onion-build/assets"
-        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/onion-build/assets/" 2>/dev/null || true
+        mkdir -p "${CHROOT_DIR}/tmp/ming-build/assets"
+        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || true
     fi
 }
 # ======================== 模块脚本执行 ========================
@@ -212,10 +207,11 @@ run_modules() {
         "04_garlic_claw.sh"
         "05_security_tools.sh"
         "06_ota_update.sh"
+        "08_settings_hub.sh"
         "07_finalize.sh"
     )
     for mod in "${modules[@]}"; do
-        local mod_path="/tmp/onion-build/modules/${mod}"
+        local mod_path="/tmp/ming-build/modules/${mod}"
         if [[ -f "${CHROOT_DIR}${mod_path}" ]]; then
             log_step "执行模块: ${mod}"
             chroot_exec bash "${mod_path}"
@@ -232,7 +228,7 @@ clean_chroot() {
     log_step "清理 chroot 环境"
     chroot_exec bash -c "apt clean"
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
-    chroot_exec bash -c "rm -rf /tmp/onion-build"
+    chroot_exec bash -c "rm -rf /tmp/ming-build"
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
     chroot_exec bash -c "rm -f /var/cache/debconf/*-old"
     chroot_exec bash -c "> /etc/machine-id"
@@ -245,32 +241,307 @@ generate_initramfs() {
     log_info "initramfs 生成完成"
 }
 # ======================== ISO 镜像打包 ========================
-build_iso() {
-    log_step "构建 ISO 镜像"
-    rm -rf "${ISO_DIR}" "${OUTPUT_DIR}"
-    mkdir -p "${ISO_DIR}" "${OUTPUT_DIR}"
-    mkdir -p "${ISO_DIR}/boot/grub"
-    mkdir -p "${ISO_DIR}/live"
+select_latest_kernel() {
+    find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' \
+        | sed 's/^vmlinuz-//' \
+        | sort -V \
+        | tail -n 1
+}
 
-    local kernel_version
-    kernel_version=$(ls "${CHROOT_DIR}/boot/vmlinuz-"* | head -1 | xargs basename)
-    local kernel_path="${CHROOT_DIR}/boot/${kernel_version}"
-    local initrd_path
-    initrd_path=$(ls "${CHROOT_DIR}/boot/initrd.img-"* | head -1)
-    cp "${kernel_path}" "${ISO_DIR}/live/vmlinuz"
-    cp "${initrd_path}" "${ISO_DIR}/live/initrd"
+validate_linux_kernel() {
+    local kernel_path="$1"
+    local label="$2"
 
-    log_info "生成 squashfs 文件系统..."
-    mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
-        -comp xz \
-        -Xbcj x86 \
-        -b 1M \
-        -no-xattrs \
-        -no-progress
+    if [[ ! -s "${kernel_path}" ]]; then
+        log_error "${label} is missing or empty: ${kernel_path}"
+        return 1
+    fi
 
+    local file_info
+    file_info=$(file -b "${kernel_path}" 2>/dev/null || true)
+    if [[ "${file_info}" != *"Linux kernel"* ]]; then
+        log_error "${label} is not a Linux kernel: ${file_info}"
+        return 1
+    fi
+
+    local boot_sig setup_sig
+    boot_sig=$(dd if="${kernel_path}" bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    setup_sig=$(dd if="${kernel_path}" bs=1 skip=514 count=4 2>/dev/null)
+    if [[ "${boot_sig}" == "0000" || "${setup_sig}" != "HdrS" ]]; then
+        log_error "${label} failed bzImage signature check (boot=${boot_sig}, setup=${setup_sig})"
+        return 1
+    fi
+
+    if dd if="${kernel_path}" bs=1 count=4096 2>/dev/null | tr -d '\000' | head -c 1 | grep -q .; then
+        log_info "${label} kernel validation passed: ${file_info}"
+    else
+        log_error "${label} appears to be all zero bytes"
+        return 1
+    fi
+}
+
+validate_iso_kernel() {
+    local iso_path="$1"
+    local expected_sha="$2"
+    local tmp_dir extracted_sha
+
+    tmp_dir="$(mktemp -d)"
+
+    xorriso -osirrox on -indev "${iso_path}" -extract /live/vmlinuz "${tmp_dir}/vmlinuz" >/dev/null 2>&1
+    validate_linux_kernel "${tmp_dir}/vmlinuz" "ISO /live/vmlinuz" || {
+        rm -rf "${tmp_dir}"
+        return 1
+    }
+
+    extracted_sha=$(sha256sum "${tmp_dir}/vmlinuz" | awk '{print $1}')
+    if [[ "${extracted_sha}" != "${expected_sha}" ]]; then
+        log_error "ISO kernel SHA256 mismatch"
+        log_error "expected: ${expected_sha}"
+        log_error "actual:   ${extracted_sha}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    log_info "ISO /live/vmlinuz SHA256 matches source: ${extracted_sha}"
+    rm -rf "${tmp_dir}"
+}
+
+validate_calamares_config() {
+    log_info "Validating Calamares installer configuration..."
+    python3 - "${CHROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+errors = []
+
+def load_yaml(relative_path):
+    path = root / relative_path
+    if not path.is_file():
+        errors.append(f"missing {relative_path}")
+        return {}
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8", errors="replace")) or {}
+    except Exception as exc:
+        errors.append(f"{relative_path} YAML parse failed: {exc}")
+        return {}
+
+settings = load_yaml("etc/calamares/settings.conf")
+if settings.get("branding") != "ming":
+    errors.append("settings.conf branding is not ming")
+if settings.get("dont-chroot") is not False:
+    errors.append(f"settings.conf dont-chroot must be boolean false, got {settings.get('dont-chroot')!r}")
+
+exec_steps = []
+for phase in settings.get("sequence", []) or []:
+    if isinstance(phase, dict) and "exec" in phase:
+        exec_steps = phase.get("exec") or []
+        break
+expected_steps = [
+    "partition", "mount", "unpackfs", "machineid", "fstab", "locale",
+    "keyboard", "localecfg", "users", "displaymanager", "networkcfg",
+    "hwclock", "initramfs", "grubcfg", "bootloader", "shellprocess@ming-identity",
+    "umount",
+]
+for step in expected_steps:
+    if step not in exec_steps:
+        errors.append(f"settings.conf exec sequence missing {step}")
+blocked_debian_steps = {
+    "luksbootkeyfile", "dpkg-unsafe-io", "sources-media", "services-systemd",
+    "bootloader-config", "packages", "plymouthcfg", "initramfscfg",
+    "dpkg-unsafe-io-undo", "sources-media-unmount", "sources-final",
+}
+for step in blocked_debian_steps.intersection(exec_steps):
+    errors.append(f"settings.conf still contains Debian installer step {step}")
+
+instances = settings.get("instances") or []
+if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
+    errors.append("settings.conf missing ming-identity instance")
+
+unpack = load_yaml("etc/calamares/modules/unpackfs.conf")
+items = unpack.get("unpack") or []
+if not items:
+    errors.append("unpackfs.conf has no unpack entries")
+else:
+    item = items[0]
+    if item.get("sourcefs") != "squashfs":
+        errors.append("unpackfs.conf sourcefs must be squashfs")
+    if item.get("destination") != "":
+        errors.append("unpackfs.conf destination must be empty string for root target")
+    if item.get("source") != "/run/ming-installer/filesystem.squashfs":
+        errors.append(f"unpackfs.conf must use the stable Ming runtime source, got {item.get('source')!r}")
+
+locale = load_yaml("etc/calamares/modules/locale.conf")
+if locale.get("region") != "Asia" or locale.get("zone") != "Shanghai":
+    errors.append("locale.conf does not default to Asia/Shanghai")
+if locale.get("locale") != "zh_CN.UTF-8":
+    errors.append("locale.conf does not default to zh_CN.UTF-8")
+if locale.get("useSystemTimezone") is not True or locale.get("adjustLiveTimezone") is not True:
+    errors.append("locale.conf must use the preflight-pinned Asia/Shanghai system timezone")
+
+localecfg = load_yaml("etc/calamares/modules/localecfg.conf")
+locale_conf = localecfg.get("localeConf") or {}
+if locale_conf.get("LANG") != "zh_CN.UTF-8":
+    errors.append("localecfg.conf must write zh_CN.UTF-8 LANG")
+
+keyboard = load_yaml("etc/calamares/modules/keyboard.conf")
+if keyboard.get("layout") != "us":
+    errors.append("keyboard.conf must keep physical keyboard layout as us")
+
+users = load_yaml("etc/calamares/modules/users.conf")
+if users.get("allowWeakPasswords") is not True:
+    errors.append("users.conf must allow weak passwords to avoid pwquality dictionary install blockers")
+requirements = users.get("passwordRequirements") or {}
+libpwquality = requirements.get("libpwquality") or []
+libpwquality_text = "\n".join(str(item) for item in libpwquality)
+if "dictcheck=0" not in libpwquality_text or "enforcing=0" not in libpwquality_text:
+    errors.append("users.conf must disable libpwquality dictionary enforcement")
+
+for relative_path in [
+    "usr/local/sbin/ming-calamares-preflight",
+    "usr/local/bin/ming-calamares-launcher",
+    "usr/local/bin/ming-live-installer.sh",
+    "usr/local/bin/ming-installer-session",
+]:
+    path = root / relative_path
+    if not path.is_file() or path.stat().st_size == 0:
+        errors.append(f"{relative_path} missing or empty")
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if relative_path.endswith("ming-calamares-preflight") and "Asia/Shanghai" not in text:
+            errors.append(f"{relative_path} missing Asia/Shanghai runtime enforcement")
+        if relative_path.endswith("ming-calamares-preflight"):
+            if "/run/ming-installer/filesystem.squashfs" not in text:
+                errors.append(f"{relative_path} missing stable unpackfs runtime source")
+            if "ln -s" not in text and "mount --bind" not in text:
+                errors.append(f"{relative_path} must create a stable unpackfs source before Calamares starts")
+        if relative_path.endswith("ming-calamares-launcher"):
+            if "ming-calamares-preflight" not in text or "calamares -d" not in text:
+                errors.append(f"{relative_path} must run preflight before calamares")
+            if "is_live_or_installer" not in text:
+                errors.append(f"{relative_path} must refuse to run outside Live/installer sessions")
+        if relative_path.endswith(("ming-live-installer.sh", "ming-installer-session")) and "ming-calamares-launcher" not in text:
+            errors.append(f"{relative_path} must launch Calamares through ming-calamares-launcher")
+
+for relative_path in [
+    "usr/share/applications/calamares.desktop",
+    "home/user/.config/autostart/calamares-live.desktop",
+    "usr/share/xsessions/ming-installer.desktop",
+]:
+    path = root / relative_path
+    if path.is_file():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "calamares" in text and "ming-calamares-launcher" not in text and "ming-installer-session" not in text:
+            errors.append(f"{relative_path} can bypass Ming Calamares preflight")
+        if relative_path.endswith("calamares-live.desktop") and "ming-live-installer.sh" not in text:
+            errors.append(f"{relative_path} must keep Live-session guard through ming-live-installer.sh")
+
+if errors:
+    for error in errors:
+        print(f"CALAMARES_CONFIG_ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+    log_info "Calamares installer configuration validation passed"
+}
+
+validate_r4_compatibility() {
+    log_info "Validating Ming OS r4 legacy hardware and Settings Hub integration..."
+    python3 - "${CHROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+errors = []
+
+def require_file(relative_path, marker=None):
+    path = root / relative_path
+    if not path.is_file() or path.stat().st_size == 0:
+        errors.append(f"missing or empty {relative_path}")
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if marker and marker not in text:
+        errors.append(f"{relative_path} missing marker {marker!r}")
+    return text
+
+settings = require_file("usr/local/bin/ming-settings", "硬件与诊断")
+for marker in [
+    "ming-network-repair",
+    "ming-driver-diagnose",
+    "ming-diagnostic-bundle",
+    "ming-surface-support",
+    "ming-classic-mode",
+    "system-config-printer",
+]:
+    if marker not in settings:
+        errors.append(f"ming-settings does not expose {marker}")
+
+for helper in [
+    "usr/local/bin/ming-network-repair",
+    "usr/local/bin/ming-driver-diagnose",
+    "usr/local/bin/ming-diagnostic-bundle",
+    "usr/local/bin/ming-surface-support",
+    "usr/local/bin/ming-classic-mode",
+]:
+    require_file(helper)
+
+require_file("usr/sbin/cupsd")
+if not any((root / candidate).is_file() for candidate in [
+    "usr/bin/system-config-printer",
+    "usr/share/system-config-printer/system-config-printer.py",
+]):
+    errors.append("missing system-config-printer GUI entry")
+
+nm_backend = root / "etc/NetworkManager/conf.d/wifi-backend.conf"
+if nm_backend.exists():
+    text = nm_backend.read_text(encoding="utf-8", errors="replace")
+    if "wifi.backend=iwd" in text:
+        errors.append("NetworkManager defaults to iwd; r4 must default to wpa_supplicant for old Wi-Fi")
+
+pwquality = require_file("etc/security/pwquality.conf", "dictcheck = 0")
+if "minlen = 1" not in pwquality and "minlen=1" not in pwquality:
+    errors.append("pwquality.conf must keep installer password policy lenient")
+
+desktop_names = [
+    "ming-network-repair.desktop",
+    "ming-driver-diagnose.desktop",
+    "ming-diagnostic-bundle.desktop",
+    "ming-surface-support.desktop",
+    "ming-classic-mode.desktop",
+]
+for base in ["usr/share/applications", "home/user/Desktop", "etc/skel/Desktop"]:
+    for name in desktop_names:
+        if (root / base / name).exists():
+            errors.append(f"{base}/{name} should not exist; tools must stay inside Ming Settings")
+
+if errors:
+    for error in errors:
+        print(f"R4_COMPAT_ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+    local elf_hits
+    elf_hits=$(find "${CHROOT_DIR}/usr/local/bin" "${CHROOT_DIR}/usr/local/sbin" -type f -perm -111 -print0 2>/dev/null \
+        | xargs -0 -r file 2>/dev/null \
+        | awk -F: '/ELF/ {print $1}' \
+        | while IFS= read -r elf; do
+            if objdump -d "${elf}" 2>/dev/null | grep -Eiq '\b(vzeroupper|vinsert|vextract|vbroadcast|vperm|ymm[0-9]|zmm[0-9]|avx2)\b'; then
+                echo "${elf#${CHROOT_DIR}/}"
+            fi
+          done)
+    if [[ -n "${elf_hits}" ]]; then
+        log_error "Found AVX/AVX2-looking instructions in locally shipped executables:"
+        echo "${elf_hits}" >&2
+        return 1
+    fi
+    log_info "Ming OS r4 legacy hardware and Settings Hub validation passed"
+}
+
+write_grub_config() {
     cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBCFG
 set default=0
-set timeout=12
+set timeout=8
+set pager=1
 
 insmod part_gpt
 insmod part_msdos
@@ -281,10 +552,10 @@ insmod gfxterm
 insmod png
 insmod font
 insmod search
-insmod gfxmenu
-insmod gfxterm_background
-insmod jpeg
+insmod search_label
+insmod search_fs_file
 
+search --no-floppy --label ${ISO_VOLUME_ID} --set=root
 search --no-floppy --file --set=root /live/vmlinuz
 set prefix=(\$root)/boot/grub
 
@@ -295,54 +566,80 @@ set color_normal=white/black
 set color_highlight=black/light-gray
 set menu_color_normal=white/black
 set menu_color_highlight=black/white
-
-# 1920x1080 仅在支持时使用，否则自动回退
 set gfxmode=auto
 
-menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} ${ONION_OS_EDITION}" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 splash
+# Ming OS is an installer-only image: the boot menu offers a single "安装 Ming OS"
+# entry plus a safe-graphics fallback for old hardware. The ming.installer=1 flag
+# tells the booted session to launch Calamares directly instead of a live desktop.
+menuentry "安装 Ming OS ${MING_OS_VERSION}  (Install Ming OS)" {
+    linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 splash ming.installer=1 install
     initrd /live/initrd
 }
 
-menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (兼容模式 / VirtualBox)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 splash nomodeset vga=791
+menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphics)" {
+    linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 install nomodeset vga=791
     initrd /live/initrd
 }
 
-menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (低分辨率 1024x768 / 老旧显卡)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog splash nomodeset xforcevesa vga=792
+menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
+    linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 install nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
     initrd /live/initrd
 }
 
-menuentry "启动 ${ONION_OS_NAME} ${ONION_OS_VERSION} (最低分辨率 800x600 / 极旧显卡)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false splash nomodeset xforcevesa vga=788 video=800x600
-    initrd /live/initrd
-}
-
-menuentry "${ONION_OS_NAME} 安全模式" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet nomodeset vga=normal noapic noacpi
-    initrd /live/initrd
-}
-
-menuentry "${ONION_OS_NAME} 调试模式" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 debug nomodeset vga=normal
-    initrd /live/initrd
-}
-
-menuentry "安装 ${ONION_OS_NAME} 到硬盘" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false splash nomodeset install
-    initrd /live/initrd
-}
-
-menuentry "低内存模式 (2GB 老电脑)" {
-    linux /live/vmlinuz boot=live components live-config username=${ONION_USER} user-fullname=Onion_OS_User hostname=onion-os locales=zh_CN.UTF-8 quiet loglevel=3 systemd.show_status=false nowatchdog nomodeset onion.lowmem=1
-    initrd /live/initrd
-}
-
-menuentry "内存检测 Memtest86+" {
+menuentry "内存检测 Memory Test (Memtest86+)" {
     linux /boot/memtest86+x64.efi
 }
 GRUBCFG
+}
+
+
+build_iso() {
+    log_step "构建 ISO 镜像"
+    rm -rf "${ISO_DIR}" "${OUTPUT_DIR}"
+    mkdir -p "${ISO_DIR}" "${OUTPUT_DIR}"
+    mkdir -p "${ISO_DIR}/boot/grub"
+    mkdir -p "${ISO_DIR}/live"
+
+    local kernel_version kernel_path kernel_sha
+    kernel_version=$(select_latest_kernel)
+    if [[ -z "${kernel_version}" ]]; then
+        log_error "未找到 chroot 内核: ${CHROOT_DIR}/boot/vmlinuz-*"
+        exit 1
+    fi
+    kernel_path="${CHROOT_DIR}/boot/vmlinuz-${kernel_version}"
+    local initrd_path
+    initrd_path="${CHROOT_DIR}/boot/initrd.img-${kernel_version}"
+    if [[ ! -s "${initrd_path}" ]]; then
+        initrd_path=$(find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'initrd.img-*' | sort -V | tail -n 1)
+    fi
+    if [[ ! -s "${initrd_path}" ]]; then
+        log_error "未找到 initrd: ${CHROOT_DIR}/boot/initrd.img-*"
+        exit 1
+    fi
+
+    validate_linux_kernel "${kernel_path}" "source ${kernel_version}"
+    kernel_sha=$(sha256sum "${kernel_path}" | awk '{print $1}')
+
+    cp "${kernel_path}" "${ISO_DIR}/live/vmlinuz"
+    cp "${initrd_path}" "${ISO_DIR}/live/initrd"
+    cmp -s "${kernel_path}" "${ISO_DIR}/live/vmlinuz" || {
+        log_error "复制到 ISO 工作目录的 vmlinuz 与源内核不一致"
+        exit 1
+    }
+    validate_linux_kernel "${ISO_DIR}/live/vmlinuz" "ISO workdir /live/vmlinuz"
+    validate_calamares_config
+    validate_r4_compatibility
+    log_info "使用内核 ${kernel_version}, SHA256=${kernel_sha}"
+
+    log_info "生成 squashfs 文件系统..."
+    mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
+        -comp xz \
+        -Xbcj x86 \
+        -b 1M \
+        -no-xattrs \
+        -no-progress
+
+    write_grub_config
 
     log_info "配置 GRUB 字体..."
     mkdir -p "${ISO_DIR}/boot/grub/fonts"
@@ -356,19 +653,12 @@ GRUBCFG
     fi
 
     log_info "生成 ISO 镜像文件..."
-    local iso_name="onion-os-${ONION_OS_VERSION}-${ONION_OS_EDITION,,}-amd64.iso"
+    local iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${MING_OS_BUILD_SUFFIX}.iso"
 
     build_iso_manual "${iso_name}"
 
-    if [[ ! -f "${OUTPUT_DIR}/${iso_name}" ]]; then
-        log_warn "手动 GRUB ISO 构建未生成 ISO，尝试 grub-mkrescue 回退..."
-        ${GRUB_MKRESCUE:-grub-mkrescue} \
-            --output="${OUTPUT_DIR}/${iso_name}" \
-            "${ISO_DIR}" \
-            2>&1 || true
-    fi
-
     if [[ -f "${OUTPUT_DIR}/${iso_name}" ]]; then
+        validate_iso_kernel "${OUTPUT_DIR}/${iso_name}" "${kernel_sha}"
         local iso_size
         iso_size=$(du -sh "${OUTPUT_DIR}/${iso_name}" | cut -f1)
         log_info "ISO 镜像生成成功: ${OUTPUT_DIR}/${iso_name} (${iso_size})"
@@ -389,6 +679,7 @@ GRUBCFG
 build_iso_manual() {
     local iso_name="$1"
     local iso_workdir="${ISO_DIR}"
+    local early_cfg="${iso_workdir}/boot/grub/early-grub.cfg"
 
     mkdir -p "${iso_workdir}/EFI/BOOT"
 
@@ -405,24 +696,24 @@ build_iso_manual() {
         cp /usr/lib/grub/i386-pc/*.lst "${iso_workdir}/boot/grub/i386-pc/" 2>/dev/null || true
     fi
 
-    # Both BIOS and UEFI fallback boot images embed this tiny config. Without it
-    # GRUB can start but stop at the "Welcome to GRUB" prompt instead of loading
-    # the Onion OS menu.
-    cat > "${iso_workdir}/boot/grub/early-grub.cfg" << 'EOF'
+    # Both BIOS and UEFI boot images embed this tiny config. Without it GRUB can
+    # start but stop at the prompt instead of loading the Ming OS menu.
+    cat > "${early_cfg}" << EOF
+search --no-floppy --label ${ISO_VOLUME_ID} --set=root
 search --no-floppy --file --set=root /live/vmlinuz
-set prefix=($root)/boot/grub
-configfile ($root)/boot/grub/grub.cfg
+set prefix=(\$root)/boot/grub
+configfile (\$root)/boot/grub/grub.cfg
 EOF
 
     if command -v grub-mkimage &>/dev/null && [[ -d /usr/lib/grub/x86_64-efi ]]; then
         grub-mkimage \
             -O x86_64-efi \
             -p /boot/grub \
-            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -c "${early_cfg}" \
             -o "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" \
             part_gpt part_msdos fat ntfs exfat iso9660 udf ext2 all_video font gfxterm gfxmenu \
             normal configfile search search_fs_file search_label search_fs_uuid loadenv \
-            linux chain boot jpeg png 2>/dev/null || true
+            linux linux16 chain boot jpeg png 2>/dev/null || true
     fi
 
     # 32位UEFI（部分老旧平板/上网本，如Bay Trail）
@@ -430,10 +721,10 @@ EOF
         grub-mkimage \
             -O i386-efi \
             -p /boot/grub \
-            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -c "${early_cfg}" \
             -o "${iso_workdir}/EFI/BOOT/BOOTIA32.EFI" \
             part_gpt part_msdos fat iso9660 udf ext2 all_video font gfxterm normal configfile \
-            search search_fs_file linux chain boot 2>/dev/null || true
+            search search_fs_file search_label linux linux16 chain boot 2>/dev/null || true
     fi
 
     if [[ ! -f "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" ]] && [[ -f /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi ]]; then
@@ -445,32 +736,14 @@ EOF
         log_info "已生成 EFI 引导文件 (BOOTX64.EFI with early config)"
     fi
 
-    if command -v "${GRUB_MKRESCUE:-grub-mkrescue}" &>/dev/null; then
-        log_info "使用 grub-mkrescue 构建 GRUB2 hybrid ISO (Rufus ISO/DD + Ventoy)"
-        local rescue_src="${iso_workdir}.grubrescue"
-        rm -rf "${rescue_src}"
-        cp -a "${iso_workdir}" "${rescue_src}"
-        if [[ -f "${rescue_src}/EFI/BOOT/BOOTX64.EFI" ]]; then
-            mkdir -p "${rescue_src}/efi/boot"
-            cp "${rescue_src}/EFI/BOOT/BOOTX64.EFI" "${rescue_src}/efi/boot/bootx64.efi"
-            rm -rf "${rescue_src}/EFI"
-        fi
-        rm -f "${rescue_src}/boot/grub/efi.img" "${rescue_src}/boot/grub/boot.cat"
-        if ${GRUB_MKRESCUE:-grub-mkrescue} --output="${OUTPUT_DIR}/${iso_name}" "${rescue_src}" 2>&1; then
-            rm -rf "${rescue_src}"
-            return 0
-        fi
-        rm -rf "${rescue_src}"
-        log_warn "grub-mkrescue hybrid 构建失败，回退到手动 xorriso"
-    fi
     if command -v grub-mkimage &>/dev/null && [[ -f /usr/lib/grub/i386-pc/cdboot.img ]]; then
         grub-mkimage \
             -O i386-pc \
             -p /boot/grub \
-            -c "${iso_workdir}/boot/grub/early-grub.cfg" \
+            -c "${early_cfg}" \
             -o "${iso_workdir}/boot/grub/i386-pc/core.img" \
             biosdisk iso9660 udf part_gpt part_msdos normal configfile search search_fs_file \
-            linux all_video font gfxterm boot 2>/dev/null || true
+            search_label linux linux16 all_video font gfxterm boot 2>/dev/null || true
 
         if [[ -f "${iso_workdir}/boot/grub/i386-pc/core.img" ]]; then
             cat /usr/lib/grub/i386-pc/cdboot.img \
@@ -524,6 +797,7 @@ EOF
 
         xorriso -as mkisofs \
             -iso-level 3 \
+            -V "${ISO_VOLUME_ID}" \
             -full-iso9660-filenames \
             -R -J -joliet-long \
             -c boot/grub/boot.cat \
@@ -538,21 +812,15 @@ EOF
             "${iso_workdir}" \
             2>&1
     else
-        log_warn "缺少 BIOS 引导文件，使用 xorriso 简单模式..."
-        xorriso -as mkisofs \
-            -iso-level 3 \
-            -full-iso9660-filenames \
-            -R -J \
-            -o "${OUTPUT_DIR}/${iso_name}" \
-            "${iso_workdir}" \
-            2>&1
+        log_error "缺少 BIOS 引导文件 boot/grub/i386-pc/eltorito.img，拒绝生成不可启动 ISO"
+        return 1
     fi
 }
 # ======================== 主流程 ========================
 main() {
     echo -e "${GREEN}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║     Onion OS ${ONION_OS_VERSION} Home Edition         ║"
+    echo "  ║     Ming OS ${MING_OS_VERSION} Home Edition         ║"
     echo "  ║     层层精简，层层用心                    ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -577,7 +845,7 @@ main() {
     local seconds=$(( duration % 60 ))
     echo -e "${GREEN}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║   Onion OS 构建完成！                     ║"
+    echo "  ║   Ming OS 构建完成！                     ║"
     echo "  ║   耗时: ${minutes}分${seconds}秒                            ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"

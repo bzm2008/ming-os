@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 模块 03: 桌面定制与美化 (26.2.0 macOS Dock + 低内存自适应版)
+# Ming OS 模块 03: 桌面定制与美化 (26.3.0 Dock + 低内存自适应版)
 # ============================================================================
 # 设计意图：
-#   将 Xfce 深度定制为 Onion OS 独特风格 —— 丝滑动画、简洁面板、
+#   将 Xfce 深度定制为 Ming OS 独特风格 —— 丝滑动画、简洁面板、
 #   自动 HiDPI 缩放、品牌化视觉、开箱即用的完整体验。
 #
 # 核心改进 (vs 26.0.6)：
 #   1. 真·macOS Dock：底部 Plank 程序坞（悬停放大），顶部细菜单栏放托盘/时钟
 #   2. 美化必达：配置同步进 /etc/skel，安装后的新用户也继承（见 07_finalize.sh）
 #   3. Picom 改用主线 10.x 兼容写法，杜绝因解析失败导致美化无效
-#   4. 登录自愈 onion-apply-appearance：逐显示器强制套用壁纸/主题/Dock
+#   4. 登录自愈 ming-apply-appearance：逐显示器强制套用壁纸/主题/Dock
 #   5. 自动分辨率检测 → 自适应 DPI/顶栏/Dock 图标/字体缩放
-#   6. Onion 品牌化液态玻璃主题 (紫色系) + 多分辨率壁纸生成
+#   6. Ming 品牌化轻量纸感主题 (玉绿主色) + 多分辨率壁纸生成
 # ============================================================================
 
 set -uo pipefail
 
-readonly ONION_PURPLE="#8E44AD"
-readonly ONION_PURPLE_DARK="#6C3483"
-readonly ONION_BG="#2D1B4E"
-readonly ONION_ACCENT="#9B59B6"
+readonly MING_GREEN="#1FA89E"
+readonly MING_GREEN_DARK="#0E5C54"
+readonly MING_BG="#F6F8F6"
+readonly MING_ACCENT="#1FA89E"
 
 # ======================== HiDPI 自动缩放 ========================
 
 configure_hidpi_autoscale() {
-    cat > /usr/local/bin/onion-scale << 'ONIONSCALE'
+    cat > /usr/local/bin/ming-scale << 'MINGSCALE'
 #!/usr/bin/env bash
-# Onion OS 自动缩放 - 覆盖所有屏幕比例与分辨率
+# Ming OS 自动缩放 - 覆盖所有屏幕比例与分辨率
 # 支持: 5:4 / 4:3 / 16:9 / 16:10 / 21:9 / 32:9 及纵向旋转
 
-SCALE_CONFIG="${HOME}/.config/onion-os/scale-done"
+SCALE_CONFIG="${HOME}/.config/ming-os/scale-done"
 if [[ -f "${SCALE_CONFIG}" ]]; then
     exit 0
 fi
@@ -128,7 +128,7 @@ if [[ "${MENU_HEIGHT}" -lt 360 ]]; then MENU_HEIGHT=360; fi
 xfconf-query -c xfce4-panel -p /plugins/plugin-1/menu-height -s "${MENU_HEIGHT}" 2>/dev/null || true
 
 if [[ "${LOW_MEMORY}" -eq 1 ]]; then
-    cat > "${HOME}/.config/onion-os/memory-profile" << PROFILE
+    cat > "${HOME}/.config/ming-os/memory-profile" << PROFILE
 profile=low-memory
 mem_mb=${MEM_MB}
 picom=xrender
@@ -136,7 +136,7 @@ wechat=light
 dock_zoom=false
 PROFILE
 else
-    cat > "${HOME}/.config/onion-os/memory-profile" << PROFILE
+    cat > "${HOME}/.config/ming-os/memory-profile" << PROFILE
 profile=balanced
 mem_mb=${MEM_MB}
 picom=auto
@@ -146,108 +146,108 @@ PROFILE
 fi
 
 echo "done" > "${SCALE_CONFIG}"
-ONIONSCALE
+MINGSCALE
 
-    chmod +x /usr/local/bin/onion-scale
+    chmod +x /usr/local/bin/ming-scale
 
     # 创建自启动项
-    mkdir -p "/home/${ONION_USER}/.config/autostart"
-    cat > "/home/${ONION_USER}/.config/autostart/onion-scale.desktop" << SCALEAUTOSTART
+    mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > "/home/${MING_USER}/.config/autostart/ming-scale.desktop" << SCALEAUTOSTART
 [Desktop Entry]
 Type=Application
-Name=Onion Display Scale
+Name=Ming Display Scale
 Comment=Auto-configure display scaling
-Exec=/usr/local/bin/onion-scale
+Exec=/usr/local/bin/ming-scale
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 SCALEAUTOSTART
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/autostart/onion-scale.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-scale.desktop"
 }
 
-# ======================== Onion OS 品牌图标生成 (SVG) ========================
+# ======================== Ming OS 品牌图标生成 (SVG) ========================
 
-generate_onion_icons() {
+generate_ming_icons() {
     local icon_base="/usr/share/icons/hicolor"
     mkdir -p "${icon_base}/32x32/apps" "${icon_base}/48x48/apps" \
              "${icon_base}/64x64/apps" "${icon_base}/128x128/apps" \
              "${icon_base}/scalable/apps"
 
     # 菜单图标 (32x32)
-    cat > "${icon_base}/32x32/apps/onion-os-menu.svg" << 'MENUICON'
+    cat > "${icon_base}/32x32/apps/ming-os-menu.svg" << 'MENUICON'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
-    <linearGradient id="onionGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+    <linearGradient id="mingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="glow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.6"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.6"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
-  <rect width="32" height="32" rx="6" fill="url(#onionGrad)"/>
+  <rect width="32" height="32" rx="6" fill="url(#mingGrad)"/>
   <rect width="32" height="32" rx="6" fill="url(#glow)"/>
-  <ellipse cx="16" cy="13" rx="7" ry="5" fill="none" stroke="#E8DAEF" stroke-width="1.5" opacity="0.9"/>
-  <ellipse cx="16" cy="9" rx="5" ry="3.5" fill="none" stroke="#D7BDE2" stroke-width="1.2" opacity="0.8"/>
-  <path d="M13 6 Q16 2 19 6 Q16 8 13 6Z" fill="#E8DAEF" opacity="0.7"/>
-  <path d="M14 20 Q16 18 18 20 L18 24 Q16 25 14 24Z" fill="#D7BDE2" opacity="0.5"/>
-  <circle cx="16" cy="13" r="2" fill="#E8DAEF" opacity="0.4"/>
+  <ellipse cx="16" cy="13" rx="7" ry="5" fill="none" stroke="#D4F7F1" stroke-width="1.5" opacity="0.9"/>
+  <ellipse cx="16" cy="9" rx="5" ry="3.5" fill="none" stroke="#9FE7D7" stroke-width="1.2" opacity="0.8"/>
+  <path d="M13 6 Q16 2 19 6 Q16 8 13 6Z" fill="#D4F7F1" opacity="0.7"/>
+  <path d="M14 20 Q16 18 18 20 L18 24 Q16 25 14 24Z" fill="#9FE7D7" opacity="0.5"/>
+  <circle cx="16" cy="13" r="2" fill="#D4F7F1" opacity="0.4"/>
 </svg>
 MENUICON
 
     # 48x48
-    cp "${icon_base}/32x32/apps/onion-os-menu.svg" "${icon_base}/48x48/apps/onion-os-menu.svg"
+    cp "${icon_base}/32x32/apps/ming-os-menu.svg" "${icon_base}/48x48/apps/ming-os-menu.svg"
     # 实际 48x48 版本
-    cat > "${icon_base}/48x48/apps/onion-os-menu.svg" << 'MENUICON48'
+    cat > "${icon_base}/48x48/apps/ming-os-menu.svg" << 'MENUICON48'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
-    <linearGradient id="onionGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+    <linearGradient id="mingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="glow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.5"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
-  <rect width="48" height="48" rx="8" fill="url(#onionGrad)"/>
+  <rect width="48" height="48" rx="8" fill="url(#mingGrad)"/>
   <rect width="48" height="48" rx="8" fill="url(#glow)"/>
-  <ellipse cx="24" cy="19" rx="10" ry="7" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <ellipse cx="24" cy="13" rx="7" ry="5" fill="none" stroke="#D7BDE2" stroke-width="1.5" opacity="0.8"/>
-  <ellipse cx="24" cy="8" rx="4.5" ry="3.2" fill="none" stroke="#BB8FCE" stroke-width="1.2" opacity="0.7"/>
-  <path d="M19 9 Q24 3 29 9 Q24 11 19 9Z" fill="#E8DAEF" opacity="0.6"/>
-  <circle cx="24" cy="19" r="3" fill="#E8DAEF" opacity="0.3"/>
+  <ellipse cx="24" cy="19" rx="10" ry="7" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <ellipse cx="24" cy="13" rx="7" ry="5" fill="none" stroke="#9FE7D7" stroke-width="1.5" opacity="0.8"/>
+  <ellipse cx="24" cy="8" rx="4.5" ry="3.2" fill="none" stroke="#6DCFC4" stroke-width="1.2" opacity="0.7"/>
+  <path d="M19 9 Q24 3 29 9 Q24 11 19 9Z" fill="#D4F7F1" opacity="0.6"/>
+  <circle cx="24" cy="19" r="3" fill="#D4F7F1" opacity="0.3"/>
 </svg>
 MENUICON48
 
     # 系统 Logo (128x128)
-    cat > "${icon_base}/128x128/apps/onion-os-logo.svg" << 'LOGOICON'
+    cat > "${icon_base}/128x128/apps/ming-os-logo.svg" << 'LOGOICON'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
     <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#2D1B4E"/>
-      <stop offset="100%" style="stop-color:#1A0F2E"/>
+      <stop offset="0%" style="stop-color:#37B99B"/>
+      <stop offset="100%" style="stop-color:#1E7F70"/>
     </linearGradient>
     <radialGradient id="logoGlow" cx="50%" cy="40%" r="50%">
-      <stop offset="0%" style="stop-color:#9B59B6;stop-opacity:0.4"/>
-      <stop offset="100%" style="stop-color:#6C3483;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.36"/>
+      <stop offset="100%" style="stop-color:#CFECE2;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="128" height="128" rx="24" fill="url(#logoGrad)"/>
   <rect width="128" height="128" rx="24" fill="url(#logoGlow)"/>
-  <circle cx="64" cy="52" r="30" fill="none" stroke="#7D3C98" stroke-width="1.5" opacity="0.5"/>
-  <circle cx="64" cy="52" r="22" fill="none" stroke="#8E44AD" stroke-width="1.5" opacity="0.6"/>
-  <circle cx="64" cy="52" r="14" fill="none" stroke="#9B59B6" stroke-width="1.5" opacity="0.7"/>
-  <path d="M64 18 Q72 44 64 52 Q56 44 64 18Z" fill="#9B59B6" opacity="0.5"/>
-  <path d="M51 32 Q64 44 64 52 Q56 44 51 32Z" fill="#8E44AD" opacity="0.35"/>
-  <path d="M77 32 Q64 44 64 52 Q72 44 77 32Z" fill="#8E44AD" opacity="0.35"/>
-  <circle cx="64" cy="34" r="5" fill="#D7BDE2" opacity="0.4"/>
-  <circle cx="64" cy="52" r="4" fill="#E8DAEF" opacity="0.25"/>
-  <text x="64" y="98" text-anchor="middle" fill="#D7BDE2" font-family="sans-serif" font-size="11" font-weight="bold" opacity="0.8">ONION OS</text>
+  <circle cx="64" cy="52" r="30" fill="none" stroke="#EAFBF6" stroke-width="1.5" opacity="0.42"/>
+  <circle cx="64" cy="52" r="22" fill="none" stroke="#EAFBF6" stroke-width="1.5" opacity="0.58"/>
+  <circle cx="64" cy="52" r="14" fill="none" stroke="#FFFFFF" stroke-width="1.5" opacity="0.72"/>
+  <path d="M64 18 Q72 44 64 52 Q56 44 64 18Z" fill="#FFFFFF" opacity="0.42"/>
+  <path d="M51 32 Q64 44 64 52 Q56 44 51 32Z" fill="#EAFBF6" opacity="0.34"/>
+  <path d="M77 32 Q64 44 64 52 Q72 44 77 32Z" fill="#EAFBF6" opacity="0.34"/>
+  <circle cx="64" cy="34" r="5" fill="#FFFFFF" opacity="0.38"/>
+  <circle cx="64" cy="52" r="4" fill="#FFFFFF" opacity="0.28"/>
+  <text x="64" y="98" text-anchor="middle" fill="#EAFBF6" font-family="sans-serif" font-size="11" font-weight="bold" opacity="0.86">MING OS</text>
 </svg>
 LOGOICON
 
@@ -257,19 +257,19 @@ LOGOICON
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="filesGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="filesGlow" cx="50%" cy="30%" r="55%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.5"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="32" height="32" rx="7" fill="url(#filesGrad)"/>
   <rect width="32" height="32" rx="7" fill="url(#filesGlow)"/>
-  <path d="M4 9 L4 25 Q4 27 6 27 L26 27 Q28 27 28 25 L28 11 Q28 9 26 9 L15 9 L13 6 L5 6 Q4 6 4 7Z" fill="none" stroke="#E8DAEF" stroke-width="1.5" opacity="0.9"/>
-  <path d="M4 9 L15 9 L13 6 L5 6 Q4 6 4 7Z" fill="#D7BDE2" opacity="0.3"/>
-  <rect x="6" y="11" width="20" height="14" rx="1.5" fill="#E8DAEF" opacity="0.12"/>
+  <path d="M4 9 L4 25 Q4 27 6 27 L26 27 Q28 27 28 25 L28 11 Q28 9 26 9 L15 9 L13 6 L5 6 Q4 6 4 7Z" fill="none" stroke="#D4F7F1" stroke-width="1.5" opacity="0.9"/>
+  <path d="M4 9 L15 9 L13 6 L5 6 Q4 6 4 7Z" fill="#9FE7D7" opacity="0.3"/>
+  <rect x="6" y="11" width="20" height="14" rx="1.5" fill="#D4F7F1" opacity="0.12"/>
 </svg>
 FILESICON32
 
@@ -279,19 +279,19 @@ FILESICON32
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="filesGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="filesGlow" cx="50%" cy="30%" r="55%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.45"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.45"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#filesGrad)"/>
   <rect width="48" height="48" rx="10" fill="url(#filesGlow)"/>
-  <path d="M6 13 L6 37 Q6 40 9 40 L39 40 Q42 40 42 37 L42 17 Q42 14 39 14 L22 14 L19 9 L7 9 Q6 9 6 10Z" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <path d="M6 13 L22 13 L19 9 L7 9 Q6 9 6 10Z" fill="#D7BDE2" opacity="0.28"/>
-  <rect x="9" y="16" width="30" height="21" rx="2" fill="#E8DAEF" opacity="0.10"/>
+  <path d="M6 13 L6 37 Q6 40 9 40 L39 40 Q42 40 42 37 L42 17 Q42 14 39 14 L22 14 L19 9 L7 9 Q6 9 6 10Z" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <path d="M6 13 L22 13 L19 9 L7 9 Q6 9 6 10Z" fill="#9FE7D7" opacity="0.28"/>
+  <rect x="9" y="16" width="30" height="21" rx="2" fill="#D4F7F1" opacity="0.10"/>
 </svg>
 FILESICON48
 
@@ -301,21 +301,21 @@ FILESICON48
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="browserGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="browserGlow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.5"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="32" height="32" rx="7" fill="url(#browserGrad)"/>
   <rect width="32" height="32" rx="7" fill="url(#browserGlow)"/>
-  <circle cx="16" cy="16" r="10" fill="none" stroke="#E8DAEF" stroke-width="1.5" opacity="0.85"/>
-  <ellipse cx="16" cy="16" rx="10" ry="4" fill="none" stroke="#D7BDE2" stroke-width="1" opacity="0.6"/>
-  <ellipse cx="16" cy="16" rx="4" ry="10" fill="none" stroke="#D7BDE2" stroke-width="1" opacity="0.6"/>
-  <line x1="6" y1="16" x2="26" y2="16" stroke="#D7BDE2" stroke-width="0.8" opacity="0.5"/>
-  <circle cx="16" cy="16" r="3" fill="#E8DAEF" opacity="0.25"/>
+  <circle cx="16" cy="16" r="10" fill="none" stroke="#D4F7F1" stroke-width="1.5" opacity="0.85"/>
+  <ellipse cx="16" cy="16" rx="10" ry="4" fill="none" stroke="#9FE7D7" stroke-width="1" opacity="0.6"/>
+  <ellipse cx="16" cy="16" rx="4" ry="10" fill="none" stroke="#9FE7D7" stroke-width="1" opacity="0.6"/>
+  <line x1="6" y1="16" x2="26" y2="16" stroke="#9FE7D7" stroke-width="0.8" opacity="0.5"/>
+  <circle cx="16" cy="16" r="3" fill="#D4F7F1" opacity="0.25"/>
 </svg>
 BROWSERICON32
 
@@ -325,21 +325,21 @@ BROWSERICON32
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="browserGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="browserGlow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.45"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.45"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#browserGrad)"/>
   <rect width="48" height="48" rx="10" fill="url(#browserGlow)"/>
-  <circle cx="24" cy="24" r="15" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.85"/>
-  <ellipse cx="24" cy="24" rx="15" ry="6" fill="none" stroke="#D7BDE2" stroke-width="1.2" opacity="0.55"/>
-  <ellipse cx="24" cy="24" rx="6" ry="15" fill="none" stroke="#D7BDE2" stroke-width="1.2" opacity="0.55"/>
-  <line x1="9" y1="24" x2="39" y2="24" stroke="#D7BDE2" stroke-width="1" opacity="0.4"/>
-  <circle cx="24" cy="24" r="4.5" fill="#E8DAEF" opacity="0.2"/>
+  <circle cx="24" cy="24" r="15" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.85"/>
+  <ellipse cx="24" cy="24" rx="15" ry="6" fill="none" stroke="#9FE7D7" stroke-width="1.2" opacity="0.55"/>
+  <ellipse cx="24" cy="24" rx="6" ry="15" fill="none" stroke="#9FE7D7" stroke-width="1.2" opacity="0.55"/>
+  <line x1="9" y1="24" x2="39" y2="24" stroke="#9FE7D7" stroke-width="1" opacity="0.4"/>
+  <circle cx="24" cy="24" r="4.5" fill="#D4F7F1" opacity="0.2"/>
 </svg>
 BROWSERICON48
 
@@ -349,21 +349,21 @@ BROWSERICON48
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="storeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="storeGlow" cx="50%" cy="30%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.5"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="32" height="32" rx="7" fill="url(#storeGrad)"/>
   <rect width="32" height="32" rx="7" fill="url(#storeGlow)"/>
-  <path d="M8 10 L8 25 Q8 27 10 27 L22 27 Q24 27 24 25 L24 10Z" fill="none" stroke="#E8DAEF" stroke-width="1.5" opacity="0.9"/>
-  <path d="M11 10 Q11 5 16 5 Q21 5 21 10" fill="none" stroke="#E8DAEF" stroke-width="1.5" opacity="0.85"/>
-  <line x1="8" y1="14" x2="24" y2="14" stroke="#D7BDE2" stroke-width="1" opacity="0.5"/>
-  <circle cx="13" cy="20" r="1.5" fill="#E8DAEF" opacity="0.5"/>
-  <circle cx="19" cy="20" r="1.5" fill="#E8DAEF" opacity="0.5"/>
+  <path d="M8 10 L8 25 Q8 27 10 27 L22 27 Q24 27 24 25 L24 10Z" fill="none" stroke="#D4F7F1" stroke-width="1.5" opacity="0.9"/>
+  <path d="M11 10 Q11 5 16 5 Q21 5 21 10" fill="none" stroke="#D4F7F1" stroke-width="1.5" opacity="0.85"/>
+  <line x1="8" y1="14" x2="24" y2="14" stroke="#9FE7D7" stroke-width="1" opacity="0.5"/>
+  <circle cx="13" cy="20" r="1.5" fill="#D4F7F1" opacity="0.5"/>
+  <circle cx="19" cy="20" r="1.5" fill="#D4F7F1" opacity="0.5"/>
 </svg>
 STOREICON32
 
@@ -373,152 +373,152 @@ STOREICON32
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="storeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
     <radialGradient id="storeGlow" cx="50%" cy="30%" r="50%">
-      <stop offset="0%" style="stop-color:#D7BDE2;stop-opacity:0.45"/>
-      <stop offset="100%" style="stop-color:#8E44AD;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.45"/>
+      <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#storeGrad)"/>
   <rect width="48" height="48" rx="10" fill="url(#storeGlow)"/>
-  <path d="M11 14 L11 38 Q11 41 14 41 L34 41 Q37 41 37 38 L37 14Z" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <path d="M16 14 Q16 7 24 7 Q32 7 32 14" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.85"/>
-  <line x1="11" y1="21" x2="37" y2="21" stroke="#D7BDE2" stroke-width="1.2" opacity="0.45"/>
-  <circle cx="19" cy="31" r="2.5" fill="#E8DAEF" opacity="0.45"/>
-  <circle cx="29" cy="31" r="2.5" fill="#E8DAEF" opacity="0.45"/>
+  <path d="M11 14 L11 38 Q11 41 14 41 L34 41 Q37 41 37 38 L37 14Z" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <path d="M16 14 Q16 7 24 7 Q32 7 32 14" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.85"/>
+  <line x1="11" y1="21" x2="37" y2="21" stroke="#9FE7D7" stroke-width="1.2" opacity="0.45"/>
+  <circle cx="19" cy="31" r="2.5" fill="#D4F7F1" opacity="0.45"/>
+  <circle cx="29" cy="31" r="2.5" fill="#D4F7F1" opacity="0.45"/>
 </svg>
 STOREICON48
 
     # 应用商店图标 (48x48)
-    cat > "${icon_base}/48x48/apps/onion-app-store.svg" << STOREICON
+    cat > "${icon_base}/48x48/apps/ming-app-store.svg" << STOREICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="storeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#storeGrad)"/>
-  <rect x="10" y="14" width="28" height="24" rx="3" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <line x1="10" y1="22" x2="38" y2="22" stroke="#E8DAEF" stroke-width="1.5" opacity="0.7"/>
-  <circle cx="16" cy="33" r="2" fill="#E8DAEF" opacity="0.7"/>
-  <circle cx="24" cy="33" r="2" fill="#E8DAEF" opacity="0.7"/>
-  <circle cx="32" cy="33" r="2" fill="#E8DAEF" opacity="0.7"/>
-  <circle cx="16" cy="27" r="1.5" fill="#D7BDE2" opacity="0.5"/>
-  <circle cx="24" cy="27" r="1.5" fill="#D7BDE2" opacity="0.5"/>
-  <path d="M18 14 L16 6 L20 6Z" fill="#E8DAEF" opacity="0.5"/>
-  <path d="M30 14 L28 6 L32 6Z" fill="#E8DAEF" opacity="0.5"/>
-  <line x1="20" y1="10" x2="28" y2="10" stroke="#E8DAEF" stroke-width="1.5" opacity="0.4"/>
+  <rect x="10" y="14" width="28" height="24" rx="3" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <line x1="10" y1="22" x2="38" y2="22" stroke="#D4F7F1" stroke-width="1.5" opacity="0.7"/>
+  <circle cx="16" cy="33" r="2" fill="#D4F7F1" opacity="0.7"/>
+  <circle cx="24" cy="33" r="2" fill="#D4F7F1" opacity="0.7"/>
+  <circle cx="32" cy="33" r="2" fill="#D4F7F1" opacity="0.7"/>
+  <circle cx="16" cy="27" r="1.5" fill="#9FE7D7" opacity="0.5"/>
+  <circle cx="24" cy="27" r="1.5" fill="#9FE7D7" opacity="0.5"/>
+  <path d="M18 14 L16 6 L20 6Z" fill="#D4F7F1" opacity="0.5"/>
+  <path d="M30 14 L28 6 L32 6Z" fill="#D4F7F1" opacity="0.5"/>
+  <line x1="20" y1="10" x2="28" y2="10" stroke="#D4F7F1" stroke-width="1.5" opacity="0.4"/>
 </svg>
 STOREICON
 
     # 安全管家图标
-    cat > "${icon_base}/48x48/apps/onion-security.svg" << SECICON
+    cat > "${icon_base}/48x48/apps/ming-security.svg" << SECICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="secGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#6C3483"/>
-      <stop offset="100%" style="stop-color:#4A235A"/>
+      <stop offset="0%" style="stop-color:#0E5C54"/>
+      <stop offset="100%" style="stop-color:#1E7F70"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#secGrad)"/>
-  <path d="M24 4 L38 12 L38 26 Q38 36 24 44 Q10 36 10 26 L10 12Z" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <path d="M24 16 L20 22 L28 22 L24 30" fill="none" stroke="#D7BDE2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
+  <path d="M24 4 L38 12 L38 26 Q38 36 24 44 Q10 36 10 26 L10 12Z" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <path d="M24 16 L20 22 L28 22 L24 30" fill="none" stroke="#9FE7D7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
 </svg>
 SECICON
 
     # 缩放显示图标
-    cat > "${icon_base}/48x48/apps/onion-display.svg" << DISPICON
+    cat > "${icon_base}/48x48/apps/ming-display.svg" << DISPICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="dispGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#8E44AD"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#dispGrad)"/>
-  <rect x="6" y="8" width="36" height="26" rx="3" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <rect x="10" y="12" width="28" height="18" rx="1" fill="#2D1B4E" opacity="0.5"/>
-  <line x1="6" y1="36" x2="18" y2="44" stroke="#E8DAEF" stroke-width="2" opacity="0.7"/>
-  <line x1="42" y1="36" x2="30" y2="44" stroke="#E8DAEF" stroke-width="2" opacity="0.7"/>
-  <line x1="16" y1="40" x2="32" y2="40" stroke="#D7BDE2" stroke-width="1.5" opacity="0.5"/>
+  <rect x="6" y="8" width="36" height="26" rx="3" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <rect x="10" y="12" width="28" height="18" rx="1" fill="#F6FAF8" opacity="0.28"/>
+  <line x1="6" y1="36" x2="18" y2="44" stroke="#D4F7F1" stroke-width="2" opacity="0.7"/>
+  <line x1="42" y1="36" x2="30" y2="44" stroke="#D4F7F1" stroke-width="2" opacity="0.7"/>
+  <line x1="16" y1="40" x2="32" y2="40" stroke="#9FE7D7" stroke-width="1.5" opacity="0.5"/>
 </svg>
 DISPICON
 
     # 更新管理器图标
-    cat > "${icon_base}/48x48/apps/onion-update-icon.svg" << UPDICON
+    cat > "${icon_base}/48x48/apps/ming-update-icon.svg" << UPDICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="updGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9B59B6"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="0%" style="stop-color:#1FA89E"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#updGrad)"/>
-  <path d="M24 8 L24 16" stroke="#E8DAEF" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
-  <path d="M18 14 L24 6 L30 14" fill="none" stroke="#E8DAEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
-  <circle cx="24" cy="28" r="12" fill="none" stroke="#D7BDE2" stroke-width="2" opacity="0.7"/>
-  <path d="M24 22 L24 30 M20 28 L28 28" stroke="#E8DAEF" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+  <path d="M24 8 L24 16" stroke="#D4F7F1" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
+  <path d="M18 14 L24 6 L30 14" fill="none" stroke="#D4F7F1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
+  <circle cx="24" cy="28" r="12" fill="none" stroke="#9FE7D7" stroke-width="2" opacity="0.7"/>
+  <path d="M24 22 L24 30 M20 28 L28 28" stroke="#D4F7F1" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
 </svg>
 UPDICON
 
     # 系统设置图标
-    cat > "${icon_base}/48x48/apps/onion-settings.svg" << SETICON
+    cat > "${icon_base}/48x48/apps/ming-settings.svg" << SETICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <rect width="48" height="48" rx="10" fill="#6C3483"/>
-  <circle cx="24" cy="24" r="5" fill="none" stroke="#E8DAEF" stroke-width="2" opacity="0.9"/>
-  <path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="#E8DAEF" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
-  <path d="M10 10 L16 16 M32 32 L38 38 M38 10 L32 16 M10 38 L16 32" stroke="#D7BDE2" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
-  <circle cx="24" cy="24" r="12" fill="none" stroke="#8E44AD" stroke-width="1" opacity="0.3"/>
+  <rect width="48" height="48" rx="10" fill="#0E5C54"/>
+  <circle cx="24" cy="24" r="5" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
+  <path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="#D4F7F1" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+  <path d="M10 10 L16 16 M32 32 L38 38 M38 10 L32 16 M10 38 L16 32" stroke="#9FE7D7" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+  <circle cx="24" cy="24" r="12" fill="none" stroke="#1FA89E" stroke-width="1" opacity="0.3"/>
 </svg>
 SETICON
 
-    cat > "${icon_base}/48x48/apps/onion-control-center.svg" << CONTROLICON
+    cat > "${icon_base}/48x48/apps/ming-control-center.svg" << CONTROLICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="ctrlGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1F8A8A"/>
-      <stop offset="55%" style="stop-color:#6C3483"/>
-      <stop offset="100%" style="stop-color:#2D1B4E"/>
+      <stop offset="0%" style="stop-color:#37B99B"/>
+      <stop offset="55%" style="stop-color:#1F8A8A"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#ctrlGrad)"/>
-  <rect x="9" y="11" width="30" height="26" rx="5" fill="#170A28" opacity="0.55"/>
+  <rect x="9" y="11" width="30" height="26" rx="5" fill="#FFFFFF" opacity="0.18"/>
   <circle cx="18" cy="20" r="4" fill="none" stroke="#9FE7D7" stroke-width="2"/>
-  <path d="M28 18h7M28 22h5M13 31h22" stroke="#E8DAEF" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
-  <path d="M15 9l4-5 4 5" fill="none" stroke="#D7BDE2" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+  <path d="M28 18h7M28 22h5M13 31h22" stroke="#D4F7F1" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
+  <path d="M15 9l4-5 4 5" fill="none" stroke="#9FE7D7" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
 </svg>
 CONTROLICON
 
-    cat > "${icon_base}/48x48/apps/onion-terminal.svg" << TERMICON
+    cat > "${icon_base}/48x48/apps/ming-terminal.svg" << TERMICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <rect width="48" height="48" rx="10" fill="#171326"/>
-  <rect x="7" y="9" width="34" height="30" rx="5" fill="#24123A" stroke="#1F8A8A" stroke-width="1.5"/>
+  <rect width="48" height="48" rx="10" fill="#1D2421"/>
+  <rect x="7" y="9" width="34" height="30" rx="5" fill="#24332E" stroke="#2FAE8F" stroke-width="1.5"/>
   <path d="M15 20l5 4-5 4" fill="none" stroke="#9FE7D7" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M24 29h9" stroke="#E8DAEF" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M24 29h9" stroke="#D4F7F1" stroke-width="2.2" stroke-linecap="round"/>
 </svg>
 TERMICON
 
-    cat > "${icon_base}/48x48/apps/onion-app-library.svg" << APPLIBICON
+    cat > "${icon_base}/48x48/apps/ming-app-library.svg" << APPLIBICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="appLibGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#9FE7D7"/>
       <stop offset="48%" style="stop-color:#1F8A8A"/>
-      <stop offset="100%" style="stop-color:#6C3483"/>
+      <stop offset="100%" style="stop-color:#0E5C54"/>
     </linearGradient>
   </defs>
-  <rect width="48" height="48" rx="10" fill="#120820"/>
+  <rect width="48" height="48" rx="10" fill="#1D2421"/>
   <rect x="5" y="5" width="38" height="38" rx="9" fill="url(#appLibGrad)" opacity="0.88"/>
   <g fill="#FFFFFF" opacity="0.92">
     <rect x="13" y="13" width="7" height="7" rx="2"/>
@@ -537,32 +537,33 @@ APPLIBICON
     # Update gtk icon cache
     gtk-update-icon-cache "${icon_base}" 2>/dev/null || true
 
-    # 安装 assets/icons/ 中的 AI 生成 PNG 图标（26.2.5，覆盖 SVG 版本）
-    local assets="/tmp/onion-build/assets/icons"
+    # MCP 生成的 macOS 风格图标（已是 squircle 圆角，直接缩放复制）
+    local assets="/tmp/ming-build/assets/icons"
     if [[ -d "${assets}" ]]; then
         for size in 48 64 128 256; do
             mkdir -p "${icon_base}/${size}x${size}/apps"
         done
-        local -A MAP=(
-            [security]="onion-security onion-master"
-            [update]="onion-update-icon"
-            [settings]="onion-settings"
-            [terminal]="onion-terminal utilities-terminal xfce4-terminal"
-            [files]="thunar system-file-manager"
+
+        # 资产名 -> 目标图标名（一对多用空格分隔）
+        local -A png_map=(
+            [settings]="ming-settings ming-control-center"
+            [files]="ming-files"
+            [terminal]="ming-terminal"
+            [update]="ming-update-icon"
+            [store]="ming-app-store spark-store"
+            [app-library]="ming-app-library"
+            [wechat-mgr]="ming-wechat-manager wechat"
             [garlic-claw]="garlic-claw"
-            [store]="onion-app-store onion-app-library"
-            [wechat-mgr]="onion-wechat-manager"
-            [browser]="firefox-esr org.mozilla.firefox"
-            [control]="onion-control-center onion-display"
         )
-        for src_name in "${!MAP[@]}"; do
+        for src_name in "${!png_map[@]}"; do
             local src_file="${assets}/${src_name}.png"
             [[ -f "${src_file}" ]] || continue
-            for dest_name in ${MAP[$src_name]}; do
+            for dest_name in ${png_map[$src_name]}; do
                 for size in 48 64 128 256; do
                     local dest="${icon_base}/${size}x${size}/apps/${dest_name}.png"
                     if command -v convert &>/dev/null; then
-                        convert -resize "${size}x${size}" "${src_file}" "${dest}" 2>/dev/null || cp "${src_file}" "${dest}"
+                        convert "${src_file}" -resize "${size}x${size}" "${dest}" 2>/dev/null || \
+                            cp "${src_file}" "${dest}"
                     else
                         cp "${src_file}" "${dest}"
                     fi
@@ -570,9 +571,84 @@ APPLIBICON
             done
         done
         gtk-update-icon-cache "${icon_base}" 2>/dev/null || true
-        echo "AI-generated PNG icons installed."
+        echo "Ming SVG icons kept; optional PNG icons transparentized."
     fi
+
+    generate_squircle_icons "${icon_base}" "${assets}"
 }
+
+# 把核心软件图标重塑为 macOS/Deepin 风格的 Squircle（超椭圆圆角平滑）瓷砖图标。
+# 用 librsvg 渲染超椭圆遮罩，将去白底的彩色图标居中合成到带柔光的 squircle 上。
+generate_squircle_icons() {
+    local icon_base="$1"
+    local assets="$2"
+    command -v rsvg-convert &>/dev/null || command -v convert &>/dev/null || return 0
+    [[ -d "${assets}" ]] || return 0
+
+    local work; work="$(mktemp -d)"
+    # squircle 遮罩（超椭圆形状，IM 也能正确渲染 path）。颜色瓷砖单独用
+    # ImageMagick 原生渐变生成——IM 的 SVG delegate 不渲染 linearGradient 会掉色，
+    # rsvg 在 chroot 内可用但不强依赖它。
+    cat > "${work}/mask.svg" << 'MASKSVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <path fill="#ffffff" d="M512 8
+    C 180 8 8 180 8 512 C 8 844 180 1016 512 1016
+    C 844 1016 1016 844 1016 512 C 1016 180 844 8 512 8 Z"/>
+</svg>
+MASKSVG
+
+    command -v convert &>/dev/null || { rm -rf "${work}"; return 0; }
+
+    # 颜色瓷砖：青葱深绿对角渐变（优先 rsvg 渲染 SVG 渐变，回退 IM 原生渐变）
+    if command -v rsvg-convert &>/dev/null; then
+        cat > "${work}/tile.svg" << 'TILESVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="t" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#1FA89E"/><stop offset="100%" stop-color="#0E5C54"/>
+  </linearGradient></defs><rect width="1024" height="1024" fill="url(#t)"/>
+</svg>
+TILESVG
+        rsvg-convert -w 1024 -h 1024 "${work}/tile.svg" -o "${work}/tile.png" 2>/dev/null
+        rsvg-convert -w 1024 -h 1024 "${work}/mask.svg" -o "${work}/mask.png" 2>/dev/null
+    fi
+    [[ -s "${work}/tile.png" ]] || convert -size 1024x1024 gradient:'#1FA89E'-'#0E5C54' "${work}/tile.png" 2>/dev/null
+    [[ -s "${work}/mask.png" ]] || convert -background none "${work}/mask.svg" "${work}/mask.png" 2>/dev/null
+    [[ -s "${work}/tile.png" && -s "${work}/mask.png" ]] || { rm -rf "${work}"; return 0; }
+
+    # 核心软件: 资产名 -> 目标图标名
+    local -A sq_map=(
+        [browser]="ming-browser"
+        [files]="ming-files"
+        [control]="ming-control-center"
+        [settings]="ming-settings"
+        [security]="ming-security"
+        [store]="ming-app-store"
+        [terminal]="ming-terminal"
+        [update]="ming-update-icon"
+    )
+
+    for src_name in "${!sq_map[@]}"; do
+        local src="${assets}/${src_name}.png"
+        [[ -f "${src}" ]] || continue
+        local dest_name="${sq_map[$src_name]}"
+        # 去白底 -> 缩到 ~62% 居中 -> 贴到 squircle 瓷砖 -> 用 squircle 遮罩裁形
+        convert "${src}" -fuzz 8% -transparent white -trim +repage \
+            -resize 620x620 -background none -gravity center -extent 1024x1024 \
+            "${work}/fg.png" 2>/dev/null || continue
+        convert "${work}/tile.png" "${work}/fg.png" -gravity center -compose over -composite \
+            "${work}/mask.png" -alpha set -compose DstIn -composite \
+            "${work}/sq.png" 2>/dev/null || continue
+        for size in 48 64 128 256; do
+            mkdir -p "${icon_base}/${size}x${size}/apps"
+            convert "${work}/sq.png" -resize "${size}x${size}" \
+                "${icon_base}/${size}x${size}/apps/${dest_name}.png" 2>/dev/null || true
+        done
+    done
+    gtk-update-icon-cache "${icon_base}" 2>/dev/null || true
+    rm -rf "${work}"
+    echo "Squircle 核心图标已生成。"
+}
+
 
 # ======================== 主题与图标 ========================
 
@@ -583,9 +659,9 @@ install_themes() {
         papirus-icon-theme \
         numix-icon-theme-circle
 
-    # 生成 Onion 品牌化 GTK3 CSS 覆盖（深绿强调色，26.2.5 新配色）
+    # 生成 Ming 品牌化 GTK3 CSS 覆盖（26.3.0 深绿强调色）
     mkdir -p /usr/share/themes/Arc-Darker/gtk-3.0
-    cat > /usr/share/themes/Arc-Darker/gtk-3.0/gtk-onion.css << 'ONIONGTKCSS'
+    cat > /usr/share/themes/Arc-Darker/gtk-3.0/gtk-ming.css << 'MINGGTKCSS'
 @define-color theme_selected_bg_color #31C476;
 @define-color theme_selected_fg_color #ffffff;
 @define-color theme_selected_bg_color_rgba rgba(49,196,118,0.85);
@@ -616,12 +692,12 @@ window decoration {
 headerbar {
     border-radius: 10px 10px 0 0;
 }
-ONIONGTKCSS
+MINGGTKCSS
 
-    mkdir -p "/home/${ONION_USER}/.config/gtk-3.0"
-    cat > "/home/${ONION_USER}/.config/gtk-3.0/settings.ini" << 'GTKSETTINGS'
+    mkdir -p "/home/${MING_USER}/.config/gtk-3.0"
+    cat > "/home/${MING_USER}/.config/gtk-3.0/settings.ini" << 'GTKSETTINGS'
 [Settings]
-gtk-theme-name=Onion-Glass
+gtk-theme-name=Ming-Glass
 gtk-icon-theme-name=Papirus
 gtk-font-name=WenQuanYi Micro Hei 11
 gtk-cursor-theme-name=Adwaita
@@ -636,8 +712,8 @@ gtk-application-prefer-dark-theme=0
 gtk-decoration-layout=close,minimize,maximize:
 GTKSETTINGS
 
-    cat > "/home/${ONION_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
-gtk-theme-name="Onion-Glass"
+    cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
+gtk-theme-name="Ming-Glass"
 gtk-icon-theme-name="Papirus"
 gtk-font-name="WenQuanYi Micro Hei 11"
 gtk-cursor-theme-name="Adwaita"
@@ -648,22 +724,23 @@ gtk-menu-images=0
 gtk-enable-event-sounds=0
 gtk-enable-input-feedback-sounds=0
 GTK2SETTINGS
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/gtk-3.0/settings.ini" "/home/${ONION_USER}/.gtkrc-2.0"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/gtk-3.0/settings.ini" "/home/${MING_USER}/.gtkrc-2.0"
 
-    # Onion-Glass GTK3 液态玻璃主题
-    mkdir -p /usr/share/themes/Onion-Glass/gtk-3.0
-    cat > /usr/share/themes/Onion-Glass/gtk-3.0/gtk.css << 'ONIONGLASSCSS'
-@define-color theme_bg_color rgba(26, 10, 46, 0.85);
-@define-color theme_fg_color #ffffff;
-@define-color theme_selected_bg_color #8E44AD;
+    # Ming-Glass GTK3 轻量纸感主题：参考 Lingmo/deepin/macOS 的统一浅色层级，
+    # 但避免高成本模糊和重发光，优先照顾老电脑。
+    mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0
+    cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'
+@define-color theme_bg_color #F6F8F6;
+@define-color theme_fg_color #1D2421;
+@define-color theme_selected_bg_color #2FAE8F;
 @define-color theme_selected_fg_color #ffffff;
-@define-color borders rgba(142, 68, 173, 0.3);
-@define-color theme_base_color rgba(26, 10, 46, 0.75);
-@define-color theme_text_color #ffffff;
-@define-color insensitive_bg_color rgba(26, 10, 46, 0.5);
-@define-color insensitive_fg_color rgba(255, 255, 255, 0.4);
-@define-color unfocused_bg_color rgba(26, 10, 46, 0.7);
-@define-color unfocused_fg_color rgba(255, 255, 255, 0.7);
+@define-color borders rgba(31, 98, 84, 0.14);
+@define-color theme_base_color #FFFFFF;
+@define-color theme_text_color #1D2421;
+@define-color insensitive_bg_color #EEF2EF;
+@define-color insensitive_fg_color #9AA6A0;
+@define-color unfocused_bg_color #F1F4F2;
+@define-color unfocused_fg_color #66736D;
 
 * {
   -GtkWidget-cursor-aspect-ratio: 0.05;
@@ -671,32 +748,34 @@ GTK2SETTINGS
 
 window {
   background-color: @theme_bg_color;
-  border-radius: 12px;
+  color: @theme_fg_color;
+  border-radius: 10px;
 }
 
 window decoration {
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(30, 70, 58, 0.16);
   margin: 6px;
 }
 
 button {
   border-radius: 8px;
-  padding: 6px 16px;
+  padding: 6px 14px;
   border: 1px solid @borders;
-  background-color: rgba(142, 68, 173, 0.2);
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.82);
   color: @theme_fg_color;
   transition: all 200ms ease;
   min-height: 28px;
 }
 
 button:hover {
-  background-color: rgba(142, 68, 173, 0.4);
-  border-color: #9B59B6;
+  background-color: #FFFFFF;
+  border-color: rgba(47, 174, 143, 0.42);
 }
 
 button:active {
-  background-color: rgba(142, 68, 173, 0.6);
+  background-color: #E7F4EF;
 }
 
 button:disabled {
@@ -704,28 +783,45 @@ button:disabled {
   color: @insensitive_fg_color;
 }
 
+button.suggested-action {
+  background-image: linear-gradient(to bottom, #37B99B, #218A78);
+  border-color: rgba(24, 103, 89, 0.42);
+  color: #FFFFFF;
+}
+
+button.suggested-action:hover {
+  background-image: linear-gradient(to bottom, #45C5A8, #26977F);
+}
+
+button.destructive-action {
+  color: #B23B48;
+  border-color: rgba(178, 59, 72, 0.24);
+  background-color: rgba(255, 247, 247, 0.92);
+}
+
 entry {
   border-radius: 8px;
   padding: 6px 12px;
   border: 1px solid @borders;
-  background-color: rgba(26, 10, 46, 0.5);
+  background-color: rgba(255, 255, 255, 0.92);
   color: @theme_fg_color;
   min-height: 28px;
 }
 
 entry:focus {
-  border-color: #9B59B6;
+  border-color: #2FAE8F;
+  box-shadow: 0 0 0 2px rgba(47, 174, 143, 0.14);
 }
 
 notebook header {
-  background-color: rgba(26, 10, 46, 0.6);
+  background-color: rgba(246, 248, 246, 0.92);
   border: none;
 }
 
 notebook tab {
   border-radius: 8px 8px 0 0;
   padding: 6px 16px;
-  background-color: rgba(26, 10, 46, 0.4);
+  background-color: rgba(238, 244, 241, 0.82);
   color: @unfocused_fg_color;
   border: 1px solid transparent;
   border-bottom: none;
@@ -733,35 +829,36 @@ notebook tab {
 }
 
 notebook tab:checked {
-  background-color: rgba(142, 68, 173, 0.3);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   border-color: @borders;
 }
 
 scrollbar slider {
   border-radius: 6px;
-  background-color: rgba(142, 68, 173, 0.5);
+  background-color: rgba(71, 111, 98, 0.38);
   min-width: 8px;
   min-height: 24px;
 }
 
 scrollbar slider:hover {
-  background-color: rgba(142, 68, 173, 0.7);
+  background-color: rgba(47, 174, 143, 0.58);
 }
 
 tooltip {
   border-radius: 8px;
-  background-color: rgba(26, 10, 46, 0.95);
-  color: @theme_fg_color;
-  border: 1px solid @borders;
+  background-color: rgba(28, 39, 35, 0.96);
+  color: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   padding: 6px 10px;
 }
 
 menu, .menu {
-  background-color: rgba(26, 10, 46, 0.9);
+  background-color: rgba(255, 255, 255, 0.96);
   border: 1px solid @borders;
   border-radius: 10px;
   padding: 4px;
+  box-shadow: 0 12px 30px rgba(30, 70, 58, 0.12);
 }
 
 menuitem {
@@ -772,88 +869,89 @@ menuitem {
 }
 
 menuitem:hover {
-  background-color: rgba(142, 68, 173, 0.3);
+  background-color: rgba(47, 174, 143, 0.12);
 }
 
 headerbar {
-  background-color: rgba(26, 10, 46, 0.7);
+  background-color: rgba(255, 255, 255, 0.78);
   border: none;
-  border-radius: 12px 12px 0 0;
+  border-bottom: 1px solid rgba(31, 98, 84, 0.10);
+  border-radius: 10px 10px 0 0;
   padding: 4px 8px;
   min-height: 36px;
 }
 
 toolbar {
-  background-color: rgba(26, 10, 46, 0.6);
+  background-color: rgba(255, 255, 255, 0.74);
   border: none;
 }
 
 .separator {
-  color: rgba(142, 68, 173, 0.2);
+  color: rgba(31, 98, 84, 0.12);
 }
 
 switch {
   border-radius: 16px;
-  background-color: rgba(255, 255, 255, 0.15);
+  background-color: #D8E1DD;
   border: 1px solid @borders;
 }
 
 switch:checked {
-  background-color: #8E44AD;
-  border-color: #9B59B6;
+  background-color: #2FAE8F;
+  border-color: #2FAE8F;
 }
 
 scale slider {
   border-radius: 50%;
-  background-color: #8E44AD;
-  border: 2px solid #9B59B6;
+  background-color: #2FAE8F;
+  border: 2px solid #2FAE8F;
   min-width: 16px;
   min-height: 16px;
 }
 
 scale trough {
   border-radius: 4px;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(31, 98, 84, 0.12);
   min-height: 6px;
 }
 
 progressbar trough {
   border-radius: 6px;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(31, 98, 84, 0.10);
   min-height: 8px;
 }
 
 progressbar progress {
   border-radius: 6px;
-  background-color: #8E44AD;
+  background-color: #2FAE8F;
 }
 
 checkbutton check, radiobutton radio {
   border-radius: 4px;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(255, 255, 255, 0.82);
   border: 1px solid @borders;
   min-width: 18px;
   min-height: 18px;
 }
 
 checkbutton check:checked, radiobutton radio:checked {
-  background-color: #8E44AD;
-  border-color: #9B59B6;
+  background-color: #2FAE8F;
+  border-color: #2FAE8F;
 }
 
 .view, iconview {
-  background-color: rgba(26, 10, 46, 0.5);
+  background-color: rgba(255, 255, 255, 0.76);
   color: @theme_fg_color;
   border-radius: 8px;
 }
 
 .view:selected, iconview:selected {
-  background-color: rgba(142, 68, 173, 0.4);
+  background-color: rgba(47, 174, 143, 0.20);
   color: @theme_selected_fg_color;
 }
 
 treeview header button {
-  background-color: rgba(26, 10, 46, 0.7);
+  background-color: rgba(246, 248, 246, 0.92);
   color: @theme_fg_color;
   border: none;
   border-bottom: 1px solid @borders;
@@ -865,8 +963,8 @@ placessidebar,
 .sidebar,
 paned > box,
 stacksidebar {
-  background-color: rgba(18, 8, 32, 0.72);
-  border-right: 1px solid rgba(159, 231, 215, 0.14);
+  background-color: rgba(239, 244, 241, 0.86);
+  border-right: 1px solid rgba(31, 98, 84, 0.12);
 }
 
 placessidebar row,
@@ -880,20 +978,20 @@ stacksidebar row {
 placessidebar row:selected,
 .sidebar row:selected,
 stacksidebar row:selected {
-  background-color: rgba(31, 138, 138, 0.30);
-  color: #ffffff;
+  background-color: rgba(47, 174, 143, 0.16);
+  color: #1D2421;
 }
 
 .titlebar,
 decoration {
-  border-radius: 12px 12px 0 0;
+  border-radius: 10px 10px 0 0;
 }
 
 .whiskermenu-window,
 #whiskermenu-window {
-  background-color: rgba(18, 8, 32, 0.94);
-  border: 1px solid rgba(159, 231, 215, 0.18);
-  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(31, 98, 84, 0.14);
+  border-radius: 12px;
 }
 
 spinbutton entry {
@@ -906,11 +1004,11 @@ spinbutton button {
 }
 
 .xfce4-panel {
-  background-color: rgba(26, 10, 46, 0.72);
-  border: 1px solid rgba(142, 68, 173, 0.25);
-  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(31, 98, 84, 0.12);
+  border-radius: 12px;
   margin: 6px 8px 4px 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow: 0 10px 26px rgba(30, 70, 58, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.58);
   padding: 2px 6px;
 }
 
@@ -926,44 +1024,42 @@ spinbutton button {
 }
 
 .xfce4-panel button:hover {
-  background-color: rgba(142, 68, 173, 0.35);
-  border-color: rgba(155, 89, 182, 0.5);
-  box-shadow: 0 0 12px rgba(142, 68, 173, 0.3);
+  background-color: rgba(47, 174, 143, 0.12);
+  border-color: rgba(47, 174, 143, 0.28);
 }
 
 .xfce4-panel button:checked {
-  background-color: rgba(142, 68, 173, 0.5);
-  border-color: rgba(155, 89, 182, 0.6);
-  box-shadow: 0 0 8px rgba(142, 68, 173, 0.4);
+  background-color: rgba(47, 174, 143, 0.18);
+  border-color: rgba(47, 174, 143, 0.34);
 }
-ONIONGLASSCSS
+MINGGLASSCSS
 
     if [[ -d /usr/share/themes/Arc-Darker/xfwm4 ]]; then
-        rm -rf /usr/share/themes/Onion-Glass/xfwm4
-        cp -a /usr/share/themes/Arc-Darker/xfwm4 /usr/share/themes/Onion-Glass/xfwm4
-        cat >> /usr/share/themes/Onion-Glass/xfwm4/themerc << 'XFWMONION'
+        rm -rf /usr/share/themes/Ming-Glass/xfwm4
+        cp -a /usr/share/themes/Arc-Darker/xfwm4 /usr/share/themes/Ming-Glass/xfwm4
+        cat >> /usr/share/themes/Ming-Glass/xfwm4/themerc << 'XFWMMING'
 
-# Onion OS tuned window frame
-active_text_color=#E8DAEF
-inactive_text_color=#A899B8
+# Ming OS tuned window frame
+active_text_color=#1D2421
+inactive_text_color=#66736D
 button_offset=4
 button_spacing=2
 full_width_title=true
 title_alignment=center
-XFWMONION
+XFWMMING
     fi
 
     # 创建 index.theme 文件
-    cat > /usr/share/themes/Onion-Glass/index.theme << 'THEMEINDEX'
+    cat > /usr/share/themes/Ming-Glass/index.theme << 'THEMEINDEX'
 [Desktop Entry]
 Type=X-GNOME-Metatheme
-Name=Onion Glass
-Comment=Onion OS 26.2.0 Liquid Glass Theme
+Name=Ming Glass
+Comment=Ming OS 26.3.0 Light Paper Theme
 Encoding=UTF-8
 
 [X-GNOME-Metatheme]
-GtkTheme=Onion-Glass
-MetacityTheme=Onion-Glass
+GtkTheme=Ming-Glass
+MetacityTheme=Ming-Glass
 IconTheme=Papirus
 CursorTheme=Adwaita
 THEMEINDEX
@@ -972,206 +1068,134 @@ THEMEINDEX
 # ======================== 壁纸生成 ========================
 
 setup_wallpaper() {
-    mkdir -p /usr/share/backgrounds/onion-os
+    mkdir -p /usr/share/backgrounds/ming-os
 
-    # 优先使用 assets/ 目录中的 AI 生成 PNG（26.2.5）
-    local asset_png="/tmp/onion-build/assets/wallpaper-default.png"
-    if [[ -f "${asset_png}" ]]; then
-        cp "${asset_png}" /usr/share/backgrounds/onion-os/default.png
-        # 缩放出1366x768变体（若有 ImageMagick）
+    local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
+    local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
+    local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
+    local asset_png="/tmp/ming-build/assets/wallpaper-default.png"
+
+    # 浅色壁纸
+    [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
+    # macOS 风格壁纸（绿山）
+    [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
+
+    # 默认壁纸：优先 macOS 风格（更接近用户期望的自然美观），回退深色，再回退旧 default
+    local primary=""
+    if [[ -f "${asset_macos}" ]]; then
+        primary="${asset_macos}"
+        cp "${asset_macos}" /usr/share/backgrounds/ming-os/default.png
+        [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
+    elif [[ -f "${asset_dark}" ]]; then
+        primary="${asset_dark}"
+        cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
+        cp "${asset_dark}" /usr/share/backgrounds/ming-os/default.png
+    elif [[ -f "${asset_png}" ]]; then
+        primary="${asset_png}"
+    fi
+
+    if [[ -n "${primary}" ]]; then
+        cp "${primary}" /usr/share/backgrounds/ming-os/default.png
         if command -v convert &>/dev/null; then
-            convert -resize 1366x768! /usr/share/backgrounds/onion-os/default.png \
-                /usr/share/backgrounds/onion-os/default-1366x768.png 2>/dev/null || \
-            cp /usr/share/backgrounds/onion-os/default.png \
-                /usr/share/backgrounds/onion-os/default-1366x768.png
+            convert /usr/share/backgrounds/ming-os/default.png \
+                -resize 1366x768^ \
+                -gravity center \
+                -extent 1366x768 \
+                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || \
+            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
         else
-            cp /usr/share/backgrounds/onion-os/default.png \
-                /usr/share/backgrounds/onion-os/default-1366x768.png
+            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
         fi
     fi
 
-    # 主壁纸 SVG（作为备用 / PNG 缺失时渲染）
-    cat > /usr/share/backgrounds/onion-os/default.svg << 'WALLPAPERSVG'
+    cat > /usr/share/backgrounds/ming-os/default.svg << 'WALLPAPERSVG'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#002B27"/>
-      <stop offset="100%" stop-color="#00453E"/>
+      <stop offset="0%" stop-color="#F7FAF7"/>
+      <stop offset="48%" stop-color="#EAF4EF"/>
+      <stop offset="100%" stop-color="#D8EDE6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="26%" cy="36%" r="62%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="56%" stop-color="#CFECE2" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#CFECE2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ridge" x1="0%" y1="35%" x2="100%" y2="92%">
+      <stop offset="0%" stop-color="#2FAE8F" stop-opacity="0.20"/>
+      <stop offset="48%" stop-color="#6CBBA9" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#1E7F70" stop-opacity="0.22"/>
     </linearGradient>
   </defs>
-  <!-- 背景 -->
   <rect width="1920" height="1080" fill="url(#bg)"/>
-  <!-- 六边形网格（扁平装饰） -->
-  <g stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35">
-    <path d="M0,54 l27,-27 l27,27 l0,54 l-27,27 l-27,-27Z" transform="translate(0,0)"/>
-    <use href="#hex" x="108" y="0"/>
-    <use href="#hex" x="54" y="81"/>
-    <!-- 铺满用 pattern 更高效 -->
-  </g>
-  <defs>
-    <pattern id="hexgrid" x="0" y="0" width="108" height="162" patternUnits="userSpaceOnUse">
-      <polygon points="54,2 105,27 105,81 54,106 3,81 3,27" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
-      <polygon points="0,83 27,68 27,122 0,137" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
-      <polygon points="108,83 81,68 81,122 108,137" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
-    </pattern>
-  </defs>
-  <rect width="1920" height="1080" fill="url(#hexgrid)"/>
-  <!-- 洋葱同心圆（横截面）- 中央偏左上 -->
-  <circle cx="700" cy="480" r="320" fill="#0A5A54"/>
-  <circle cx="700" cy="480" r="314" fill="#002B27"/>
-  <circle cx="700" cy="480" r="260" fill="#0F6B64"/>
-  <circle cx="700" cy="480" r="254" fill="#002B27"/>
-  <circle cx="700" cy="480" r="200" fill="#147D74"/>
-  <circle cx="700" cy="480" r="194" fill="#002B27"/>
-  <circle cx="700" cy="480" r="140" fill="#1A9088"/>
-  <circle cx="700" cy="480" r="134" fill="#002B27"/>
-  <circle cx="700" cy="480" r="80"  fill="#1FA89E"/>
-  <circle cx="700" cy="480" r="74"  fill="#002B27"/>
-  <circle cx="700" cy="480" r="32"  fill="#31C476"/>
-  <!-- 右下装饰小同心圆 -->
-  <circle cx="1700" cy="920" r="130" fill="#0A5A54" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="126" fill="#002B27" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="90"  fill="#0F6B64" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="86"  fill="#002B27" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="50"  fill="#147D74" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="46"  fill="#002B27" opacity="0.5"/>
-  <circle cx="1700" cy="920" r="20"  fill="#31C476" opacity="0.5"/>
-  <!-- 品牌文字 -->
-  <text x="1200" y="430" font-family="sans-serif" font-size="96" font-weight="300" fill="white" letter-spacing="12" opacity="0.95">Onion OS</text>
-  <text x="1200" y="490" font-family="sans-serif" font-size="28" font-weight="300" fill="#31C476" letter-spacing="4">26.2.5 Home Edition</text>
-  <text x="1200" y="535" font-family="sans-serif" font-size="18" font-weight="300" fill="#D9DBD6" letter-spacing="3" opacity="0.75">层层精简 · 层层用心</text>
-  <!-- 分割线 -->
-  <line x1="1200" y1="410" x2="1700" y2="410" stroke="#31C476" stroke-width="1.5" opacity="0.6"/>
+  <rect width="1920" height="1080" fill="url(#glow)"/>
+  <path d="M0 730 C260 628 404 768 642 662 C875 558 1052 606 1268 520 C1512 424 1680 492 1920 400 L1920 1080 L0 1080Z" fill="url(#ridge)"/>
+  <path d="M0 846 C338 720 548 856 842 744 C1088 650 1304 726 1548 590 C1708 500 1810 520 1920 466 L1920 1080 L0 1080Z" fill="#FFFFFF" opacity="0.34"/>
+  <circle cx="450" cy="320" r="210" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
+  <circle cx="450" cy="320" r="138" fill="none" stroke="#1E7F70" stroke-width="2" opacity="0.08"/>
+  <text x="124" y="172" font-family="sans-serif" font-size="54" font-weight="700" fill="#1D2421">Ming OS</text>
+  <text x="128" y="218" font-family="sans-serif" font-size="22" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG
 
-    # 1366x768 壁纸变体
-    cat > /usr/share/backgrounds/onion-os/default-1366x768.svg << 'WALLPAPERSVG1366'
+    cat > /usr/share/backgrounds/ming-os/default-1366x768.svg << 'WALLPAPERSVG1366'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1366" height="768" viewBox="0 0 1366 768">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#002B27"/>
-      <stop offset="100%" stop-color="#00453E"/>
+      <stop offset="0%" stop-color="#F7FAF7"/>
+      <stop offset="52%" stop-color="#EAF4EF"/>
+      <stop offset="100%" stop-color="#D8EDE6"/>
     </linearGradient>
-    <pattern id="hexgrid" x="0" y="0" width="108" height="162" patternUnits="userSpaceOnUse">
-      <polygon points="54,2 105,27 105,81 54,106 3,81 3,27" stroke="#0A5A54" stroke-width="0.8" fill="none" opacity="0.35"/>
-    </pattern>
   </defs>
   <rect width="1366" height="768" fill="url(#bg)"/>
-  <rect width="1366" height="768" fill="url(#hexgrid)"/>
-  <circle cx="500" cy="340" r="228" fill="#0A5A54"/>
-  <circle cx="500" cy="340" r="224" fill="#002B27"/>
-  <circle cx="500" cy="340" r="185" fill="#0F6B64"/>
-  <circle cx="500" cy="340" r="181" fill="#002B27"/>
-  <circle cx="500" cy="340" r="142" fill="#147D74"/>
-  <circle cx="500" cy="340" r="138" fill="#002B27"/>
-  <circle cx="500" cy="340" r="100" fill="#1A9088"/>
-  <circle cx="500" cy="340" r="96"  fill="#002B27"/>
-  <circle cx="500" cy="340" r="57"  fill="#1FA89E"/>
-  <circle cx="500" cy="340" r="53"  fill="#002B27"/>
-  <circle cx="500" cy="340" r="23"  fill="#31C476"/>
-  <circle cx="1210" cy="650" r="90" fill="#0A5A54" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="87" fill="#002B27" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="64" fill="#0F6B64" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="61" fill="#002B27" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="35" fill="#147D74" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="32" fill="#002B27" opacity="0.45"/>
-  <circle cx="1210" cy="650" r="14" fill="#31C476" opacity="0.45"/>
-  <line x1="840" y1="290" x2="1300" y2="290" stroke="#31C476" stroke-width="1.5" opacity="0.6"/>
-  <text x="840" y="330" font-family="sans-serif" font-size="68" font-weight="300" fill="white" letter-spacing="8" opacity="0.95">Onion OS</text>
-  <text x="840" y="370" font-family="sans-serif" font-size="20" font-weight="300" fill="#31C476" letter-spacing="3">26.2.5 Home Edition</text>
-  <text x="840" y="403" font-family="sans-serif" font-size="14" font-weight="300" fill="#D9DBD6" letter-spacing="2" opacity="0.75">层层精简 · 层层用心</text>
+  <path d="M0 520 C190 448 286 548 456 472 C626 394 750 432 906 370 C1080 302 1196 350 1366 286 L1366 768 L0 768Z" fill="#2FAE8F" opacity="0.17"/>
+  <path d="M0 612 C238 512 392 618 596 536 C784 462 936 522 1112 424 C1226 362 1286 378 1366 336 L1366 768 L0 768Z" fill="#FFFFFF" opacity="0.34"/>
+  <circle cx="320" cy="228" r="148" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
+  <text x="86" y="126" font-family="sans-serif" font-size="42" font-weight="700" fill="#1D2421">Ming OS</text>
+  <text x="88" y="164" font-family="sans-serif" font-size="18" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG1366
 
-    if command -v rsvg-convert &>/dev/null; then
-        rsvg-convert -w 1366 -h 768 /usr/share/backgrounds/onion-os/default-1366x768.svg \
-            > /usr/share/backgrounds/onion-os/default-1366x768.png 2>/dev/null || true
-    elif command -v convert &>/dev/null; then
-        convert -resize 1366x768 /usr/share/backgrounds/onion-os/default-1366x768.svg \
-            /usr/share/backgrounds/onion-os/default-1366x768.png 2>/dev/null || true
+    if [[ ! -f /usr/share/backgrounds/ming-os/default.png ]]; then
+        if command -v rsvg-convert &>/dev/null; then
+            rsvg-convert -w 1920 -h 1080 /usr/share/backgrounds/ming-os/default.svg \
+                > /usr/share/backgrounds/ming-os/default.png 2>/dev/null || true
+        elif command -v convert &>/dev/null; then
+            convert -resize 1920x1080 /usr/share/backgrounds/ming-os/default.svg \
+                /usr/share/backgrounds/ming-os/default.png 2>/dev/null || true
+        fi
     fi
 
-    if [[ ! -f /usr/share/backgrounds/onion-os/default-1366x768.png ]]; then
-        cp /usr/share/backgrounds/onion-os/default-1366x768.svg /usr/share/backgrounds/onion-os/default-1366x768.png
+    if [[ ! -f /usr/share/backgrounds/ming-os/default-1366x768.png ]]; then
+        if command -v rsvg-convert &>/dev/null; then
+            rsvg-convert -w 1366 -h 768 /usr/share/backgrounds/ming-os/default-1366x768.svg \
+                > /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || true
+        elif command -v convert &>/dev/null; then
+            convert -resize 1366x768 /usr/share/backgrounds/ming-os/default-1366x768.svg \
+                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || true
+        fi
     fi
 
-    if command -v rsvg-convert &>/dev/null; then
-        rsvg-convert -w 1920 -h 1080 /usr/share/backgrounds/onion-os/default.svg \
-            > /usr/share/backgrounds/onion-os/default.png
-    elif command -v convert &>/dev/null; then
-        convert -resize 1920x1080 /usr/share/backgrounds/onion-os/default.svg \
-            /usr/share/backgrounds/onion-os/default.png 2>/dev/null || true
-    fi
+    [[ -f /usr/share/backgrounds/ming-os/default.png ]] || cp /usr/share/backgrounds/ming-os/default.svg /usr/share/backgrounds/ming-os/default.png
+    [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
 
-    if [[ ! -f /usr/share/backgrounds/onion-os/default.png ]]; then
-        cp /usr/share/backgrounds/onion-os/default.svg /usr/share/backgrounds/onion-os/default.png
-    fi
-
-    # 额外壁纸变体
-    # 变体2：简洁版（深色）
-    cat > /usr/share/backgrounds/onion-os/dark.svg << WALLPAPERSVG2
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080">
-  <defs>
-    <linearGradient id="bg2" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#0E0620;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#1A0F2E;stop-opacity:1" />
-    </linearGradient>
-  </defs>
-  <rect width="1920" height="1080" fill="url(#bg2)"/>
-  <circle cx="960" cy="540" r="350" fill="none" stroke="#4A235A" stroke-width="0.5" opacity="0.3"/>
-  <circle cx="960" cy="540" r="280" fill="none" stroke="#6C3483" stroke-width="0.5" opacity="0.25"/>
-  <circle cx="960" cy="540" r="210" fill="none" stroke="#7D3C98" stroke-width="0.5" opacity="0.2"/>
-  <circle cx="960" cy="540" r="140" fill="none" stroke="#8E44AD" stroke-width="0.5" opacity="0.15"/>
-  <text x="960" y="530" text-anchor="middle" fill="#6C3483" font-family="sans-serif" font-size="48" font-weight="bold" opacity="0.6">ONION OS</text>
-  <text x="960" y="570" text-anchor="middle" fill="#4A235A" font-family="sans-serif" font-size="18" opacity="0.5">${ONION_OS_VERSION} Home Edition</text>
-</svg>
-WALLPAPERSVG2
-
-    if command -v rsvg-convert &>/dev/null; then
-        rsvg-convert -w 1920 -h 1080 /usr/share/backgrounds/onion-os/dark.svg \
-            > /usr/share/backgrounds/onion-os/dark.png
-    fi
-
-    # 设置默认壁纸（PNG，xfdesktop 不渲染 SVG backdrop）
-    # 实际“逐显示器”应用交给 onion-apply-appearance 登录脚本，
-    # 因为真实连接器名（如 monitorVGA-1/HDMI-1）在构建期未知。
-    runuser -u "${ONION_USER}" -- xfconf-query -c xfce4-desktop \
-        -p /backdrop/screen0/monitorscreen/workspace0/last-image \
-        -n -t string -s /usr/share/backgrounds/onion-os/default.png 2>/dev/null || true
-
-    # 同步壁纸到 Plymouth 启动动画目录
-    mkdir -p /usr/share/plymouth/themes/onion-os
-    cp /usr/share/backgrounds/onion-os/default.png /usr/share/plymouth/themes/onion-os/wallpaper.png 2>/dev/null || true
-    if [[ ! -f /usr/share/plymouth/themes/onion-os/wallpaper.png ]]; then
-        cp /usr/share/backgrounds/onion-os/default.svg /usr/share/plymouth/themes/onion-os/wallpaper.png 2>/dev/null || true
-    fi
-    if command -v rsvg-convert &>/dev/null; then
-        rsvg-convert -w 1920 -h 1080 /usr/share/backgrounds/onion-os/default.svg \
-            > /usr/share/plymouth/themes/onion-os/wallpaper.png 2>/dev/null || true
-    fi
-    # 生成 Plymouth 圆形 Logo
-    if command -v convert &>/dev/null; then
-        convert -size 128x128 xc:transparent \
-            -fill '#8E44AD' -draw "circle 64,64 64,12" \
-            /usr/share/plymouth/themes/onion-os/logo.png 2>/dev/null || true
-    fi
-    plymouth-set-default-theme onion-os 2>/dev/null || true
+    mkdir -p /usr/share/plymouth/themes/ming-os
+    cp /usr/share/backgrounds/ming-os/default.png /usr/share/plymouth/themes/ming-os/wallpaper.png 2>/dev/null || true
+    plymouth-set-default-theme ming-os 2>/dev/null || true
 }
 
 # ======================== Xfce 顶部菜单栏 (macOS 风格) ========================
-# 设计：顶部一条细面板充当 macOS 菜单栏（左 Onion 菜单 + 右托盘/时钟），
+# 设计：顶部一条细面板充当 macOS 菜单栏（左 Ming 菜单 + 右托盘/时钟），
 #       底部由 Plank 提供可放大的真·Dock（见 configure_plank_dock）。
 #       Xfce 面板本身无法做 dock 悬停放大动画，因此 Dock 交给 Plank。
 
 configure_xfce_panel() {
-    local xfconf_dir="/home/${ONION_USER}/.config/xfce4/xfconf/xfce-perchannel-xml"
+    local xfconf_dir="/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml"
     mkdir -p "${xfconf_dir}"
 
-    local old_panel_dir="/home/${ONION_USER}/.config/xfce4/panel"
+    local old_panel_dir="/home/${MING_USER}/.config/xfce4/panel"
     rm -rf "${old_panel_dir}"
     mkdir -p "${old_panel_dir}"
 
@@ -1211,10 +1235,10 @@ configure_xfce_panel() {
     </property>
   </property>
   <property name="plugins" type="empty">
-    <!-- plugin-1: Whisker Menu (Onion 品牌开始菜单) -->
+    <!-- plugin-1: Whisker Menu (Ming 品牌开始菜单) -->
     <property name="plugin-1" type="string" value="whiskermenu">
-      <property name="button-icon" type="string" value="onion-os-menu"/>
-      <property name="button-title" type="string" value="Onion OS"/>
+      <property name="button-icon" type="string" value="ming-os-menu"/>
+      <property name="button-title" type="string" value="Ming OS"/>
       <property name="show-button-title" type="bool" value="true"/>
       <property name="menu-width" type="uint" value="440"/>
       <property name="menu-height" type="uint" value="520"/>
@@ -1268,12 +1292,12 @@ PANELXML
 </channel>
 PANELXML_DOCK_ONLY
 
-    local autostart_dir="/home/${ONION_USER}/.config/autostart"
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
-    cat > "${autostart_dir}/onion-dock-only.desktop" << 'DOCKONLY'
+    cat > "${autostart_dir}/ming-dock-only.desktop" << 'DOCKONLY'
 [Desktop Entry]
 Type=Application
-Name=Onion Dock Only
+Name=Ming Dock Only
 Comment=Hide the legacy Xfce top taskbar and keep Dock as the only launcher
 Exec=sh -c "sleep 2; xfce4-panel --quit >/dev/null 2>&1 || true"
 Hidden=false
@@ -1282,38 +1306,38 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
 DOCKONLY
 
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/xfce4"
-    chown -R "${ONION_USER}:${ONION_USER}" "${autostart_dir}/onion-dock-only.desktop"
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4"
+    chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}/ming-dock-only.desktop"
 }
 
 # ======================== Plank macOS 风格 Dock ========================
 
 configure_plank_dock() {
-    local plank_dir="/home/${ONION_USER}/.config/plank/dock1"
+    local plank_dir="/home/${MING_USER}/.config/plank/dock1"
     mkdir -p "${plank_dir}/launchers"
 
-    # Dock 行为与外观：底部居中、悬停放大、半透明玻璃
+    # Dock 行为与外观：底部居中、轻放大、浅色半透明；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=onion-app-library.dockitem;;onion-files.dockitem;;firefox-esr.dockitem;;spark-store.dockitem;;wechat.dockitem;;garlic-claw.dockitem;;onion-update.dockitem;;onion-status-center.dockitem;;onion-control-center.dockitem;;onion-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;firefox-esr.dockitem;;spark-store.dockitem;;wechat.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
-#图标大小（onion-scale 会按分辨率覆盖）
-IconSize=48
+#图标大小（ming-scale 会按分辨率覆盖）
+IconSize=42
 #悬停放大开关
 ZoomEnabled=true
-#放大倍率 (1.0-2.0)；1.5 接近 macOS 手感
-ZoomPercent=150
+#放大倍率：保持轻巧，避免图标跳动和低端显卡压力
+ZoomPercent=122
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=4
 #自动隐藏延迟
 UnhideDelay=0
 HideDelay=0
-#主题（见下方 Onion.theme）
-Theme=Onion
+#主题（见下方 Ming.theme）
+Theme=Ming
 #显示在所有工作区
 Monitor=
 #锁定图标，防止误拖拽
@@ -1336,63 +1360,62 @@ Launcher=file:///usr/share/applications/${target}
 DOCKITEM
     }
 
-    _plank_launcher "onion-app-library" "onion-app-library.desktop"
+    _plank_launcher "ming-app-library" "ming-app-library.desktop"
     _plank_launcher "firefox-esr" "firefox-esr.desktop"
-    _plank_launcher "onion-files" "onion-files.desktop"
+    _plank_launcher "ming-files" "ming-files.desktop"
     _plank_launcher "spark-store" "spark-store.desktop"
-    _plank_launcher "wechat" "onion-wechat.desktop"
+    _plank_launcher "wechat" "ming-wechat.desktop"
     _plank_launcher "garlic-claw" "garlic-claw.desktop"
-    _plank_launcher "onion-update" "onion-update.desktop"
-    _plank_launcher "onion-status-center" "onion-status-center.desktop"
-    _plank_launcher "onion-control-center" "onion-control-center.desktop"
-    _plank_launcher "onion-terminal" "onion-terminal.desktop"
+    _plank_launcher "ming-update" "ming-update.desktop"
+    _plank_launcher "ming-settings" "ming-settings.desktop"
+    _plank_launcher "ming-terminal" "ming-terminal.desktop"
 
-    # Onion 玻璃风 Plank 主题
-    local theme_dir="/usr/share/plank/themes/Onion"
+    # Ming 纸感 Dock 主题
+    local theme_dir="/usr/share/plank/themes/Ming"
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=12
+TopRoundness=10
 BottomRoundness=0
 LineWidth=1
-OuterStrokeColor=155;89;182;90
-FillStartColor=26;10;46;200
-FillEndColor=26;10;46;230
-InnerStrokeColor=216;191;226;40
+OuterStrokeColor=31;98;84;46
+FillStartColor=255;255;255;196
+FillEndColor=246;250;248;220
+InnerStrokeColor=255;255;255;120
 
 [PlankDockTheme]
-HorizPadding=8
-TopPadding=-6
-BottomPadding=4
+HorizPadding=10
+TopPadding=-4
+BottomPadding=5
 ItemPadding=4
 IndicatorSize=5
-IconShadowSize=2
-UrgentBounceHeight=1.6666666666666667
-LaunchBounceHeight=0.625
+IconShadowSize=1
+UrgentBounceHeight=1.2
+LaunchBounceHeight=0.45
 FadeOpacity=1.0
 ClickTime=300
-UrgentBounceTime=600
-LaunchBounceTime=600
+UrgentBounceTime=420
+LaunchBounceTime=360
 ActiveTime=300
-SlideTime=300
-FadeTime=250
-HideTime=250
-GlowSize=30
+SlideTime=220
+FadeTime=180
+HideTime=180
+GlowSize=8
 GlowTime=10000
 GlowPulseTime=2000
-UrgentHueShift=150
-ItemMoveTime=450
+UrgentHueShift=100
+ItemMoveTime=260
 CascadeHide=true
 PLANKTHEME
 
     # Plank 自启动（picom 之后启动，确保 dock 透明模糊正常）
-    local autostart_dir="/home/${ONION_USER}/.config/autostart"
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
     cat > "${autostart_dir}/plank.desktop" << 'PLANKAUTO'
 [Desktop Entry]
 Type=Application
 Name=Plank Dock
-Comment=Onion OS macOS 风格程序坞
+Comment=Ming OS macOS 风格程序坞
 Exec=sh -c "sleep 2 && plank"
 Icon=plank
 Hidden=false
@@ -1401,34 +1424,44 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
 PLANKAUTO
 
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/plank" \
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
         "${autostart_dir}/plank.desktop"
 }
 
-# ======================== Onion Shell: 控制中心与品牌化入口 ========================
+# ======================== Ming Shell: 控制中心与品牌化入口 ========================
 
-configure_onion_shell() {
-    mkdir -p "/home/${ONION_USER}/.config/xfce4/terminal" \
-             "/home/${ONION_USER}/.local/share/applications"
+configure_ming_shell() {
+    mkdir -p "/home/${MING_USER}/.config/xfce4/terminal" \
+             "/home/${MING_USER}/.local/share/applications"
 
-    cat > /usr/local/bin/onion-files << 'ONIONFILES'
+    cat > /usr/local/bin/ming-files << 'MINGFILES'
 #!/usr/bin/env bash
 exec thunar "$@"
-ONIONFILES
-    chmod +x /usr/local/bin/onion-files
+MINGFILES
+    chmod +x /usr/local/bin/ming-files
 
-    cat > /usr/local/bin/onion-disk-hub << 'DISKHUB'
+    cat > /usr/local/bin/ming-disk-hub << 'DISKHUB'
 #!/usr/bin/env bash
 set -euo pipefail
 
 hub="${HOME}/所有磁盘"
 mkdir -p "${hub}"
+index_file="${hub}/README.txt"
+: > "${index_file}"
+cat > "${index_file}" <<'INDEXHEAD'
+Ming OS 所有磁盘
+
+这里把系统盘、用户文件、数据盘和 U 盘集中到一个入口。
+它不会合并或移动真实数据，只是用友好的入口减少“C盘/D盘”式空间焦虑。
+
+INDEXHEAD
 
 make_link() {
     local target="$1"
     local name="$2"
     [[ -e "${target}" ]] || return 0
     ln -sfn "${target}" "${hub}/${name}" 2>/dev/null || true
+    printf '%s -> %s\n' "${name}" "${target}" >> "${index_file}"
 }
 
 make_link "${HOME}" "我的文件"
@@ -1438,7 +1471,7 @@ make_link "${HOME}/Documents" "文档"
 make_link "/" "系统盘"
 
 idx=1
-while IFS='|' read -r mountpoint label size fstype; do
+while IFS='|' read -r mountpoint label size fstype avail usep; do
     [[ -n "${mountpoint}" && "${mountpoint}" != "/" ]] || continue
     case "${mountpoint}" in
         /run/user/*|/proc*|/sys*|/dev*|/boot/efi) continue ;;
@@ -1451,8 +1484,26 @@ while IFS='|' read -r mountpoint label size fstype; do
         name="${clean_label}"
     fi
     make_link "${mountpoint}" "${name}"
+    if [[ -n "${avail}" || -n "${usep}" ]]; then
+        printf '  可用空间：%s，已用：%s，格式：%s\n' "${avail:---}" "${usep:---}" "${fstype:---}" >> "${index_file}"
+    fi
     idx=$((idx + 1))
-done < <(lsblk -rpo MOUNTPOINT,LABEL,SIZE,FSTYPE 2>/dev/null | awk 'NR>1 && $1 != "" {print $1 "|" $2 "|" $3 "|" $4}')
+done < <(lsblk -rpo MOUNTPOINT,LABEL,SIZE,FSTYPE 2>/dev/null | awk 'NR>1 && $1 != "" {print $1 "|" $2 "|" $3 "|" $4}' | while IFS='|' read -r mp label size fstype; do
+    stats="$(df -hP "${mp}" 2>/dev/null | awk 'NR==2 {print $4 "|" $5}')"
+    printf '%s|%s|%s|%s|%s\n' "${mp}" "${label}" "${size}" "${fstype}" "${stats}"
+done)
+
+cat > "${hub}/释放空间.desktop" <<'FREESPACE'
+[Desktop Entry]
+Name=释放空间
+Comment=打开 Ming 设置清理缓存和临时文件
+Exec=ming-control-center
+Icon=edit-clear
+Terminal=false
+Type=Application
+Categories=Utility;System;
+FREESPACE
+chmod +x "${hub}/释放空间.desktop" 2>/dev/null || true
 
 mkdir -p "${HOME}/.config/gtk-3.0"
 bookmarks="${HOME}/.config/gtk-3.0/bookmarks"
@@ -1463,15 +1514,15 @@ if [[ "${1:-}" == "--open" ]]; then
     exec thunar "${hub}"
 fi
 DISKHUB
-    chmod +x /usr/local/bin/onion-disk-hub
+    chmod +x /usr/local/bin/ming-disk-hub
 
-    cat > /usr/local/bin/onion-terminal << 'ONIONTERM'
+    cat > /usr/local/bin/ming-terminal << 'MINGTERM'
 #!/usr/bin/env bash
-exec xfce4-terminal --hide-menubar --title="Onion Terminal" "$@"
-ONIONTERM
-    chmod +x /usr/local/bin/onion-terminal
+exec xfce4-terminal --hide-menubar --title="Ming Terminal" "$@"
+MINGTERM
+    chmod +x /usr/local/bin/ming-terminal
 
-    cat > /usr/local/bin/onion-status-center << 'STATUSCENTER'
+    cat > /usr/local/bin/ming-status-center << 'STATUSCENTER'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1482,30 +1533,30 @@ import subprocess
 import sys
 
 CSS = b'''
-window { background: #120820; }
+window { background: #F6F8F6; }
 .root {
-  background: linear-gradient(135deg, #120820, #102E32 58%, #21113A);
-  color: #F4ECF7;
+  background: linear-gradient(135deg, #F8FAF8, #EEF6F2 58%, #DDEFE8);
+  color: #1D2421;
 }
-.title { font-size: 24px; font-weight: 800; color: #FFFFFF; }
-.subtitle { font-size: 12px; color: #9FE7D7; }
-.time { font-size: 34px; font-weight: 800; color: #FFFFFF; }
-.date { font-size: 12px; color: #B9A8C7; }
+.title { font-size: 24px; font-weight: 800; color: #1D2421; }
+.subtitle { font-size: 12px; color: #4F625A; }
+.time { font-size: 34px; font-weight: 800; color: #1D2421; }
+.date { font-size: 12px; color: #66736D; }
 .tile {
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(159,231,215,0.16);
+  background: rgba(255,255,255,0.76);
+  border: 1px solid rgba(31,98,84,0.13);
   border-radius: 10px;
   padding: 12px;
-  color: #F4ECF7;
+  color: #1D2421;
 }
 .tile:hover {
-  background: rgba(31,138,138,0.24);
-  border-color: rgba(159,231,215,0.45);
+  background: rgba(255,255,255,0.94);
+  border-color: rgba(47,174,143,0.36);
 }
-.tile label { color: #F4ECF7; font-weight: 700; }
+.tile label { color: #1D2421; font-weight: 700; }
 .danger {
-  background: rgba(224,95,106,0.18);
-  border-color: rgba(224,95,106,0.35);
+  background: rgba(255,247,247,0.90);
+  border-color: rgba(178,59,72,0.28);
 }
 '''
 
@@ -1524,10 +1575,10 @@ def text(command, fallback='--'):
 
 class StatusCenter(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title='Onion 状态中心')
+        super().__init__(application=app, title='Ming 状态中心')
         self.set_default_size(520, 430)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_name('onion-control-center')
+        self.set_icon_name('ming-control-center')
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
@@ -1544,7 +1595,7 @@ class StatusCenter(Gtk.ApplicationWindow):
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         header.pack_start(title_box, True, True, 0)
 
-        title = Gtk.Label(label='Onion 状态中心')
+        title = Gtk.Label(label='Ming 状态中心')
         title.set_halign(Gtk.Align.START)
         title.get_style_context().add_class('title')
         title_box.pack_start(title, False, False, 0)
@@ -1579,8 +1630,8 @@ class StatusCenter(Gtk.ApplicationWindow):
             ('声音', 'multimedia-volume-control', 'pavucontrol'),
             ('电源', 'battery', 'xfce4-power-manager-settings'),
             ('显示', 'video-display', 'xfce4-display-settings'),
-            ('设置', 'onion-control-center', 'onion-control-center'),
-            ('应用库', 'onion-app-library', 'onion-app-library'),
+            ('设置', 'ming-control-center', 'ming-control-center'),
+            ('应用库', 'ming-app-library', 'ming-app-library'),
             ('锁屏', 'system-lock-screen', 'xflock4'),
             ('退出/关机', 'system-shutdown', 'xfce4-session-logout'),
         ]
@@ -1628,9 +1679,9 @@ if __name__ == '__main__':
     app = App()
     app.run(sys.argv)
 STATUSCENTER
-    chmod +x /usr/local/bin/onion-status-center
+    chmod +x /usr/local/bin/ming-status-center
 
-    cat > /usr/local/bin/onion-app-library << 'APPLIB'
+    cat > /usr/local/bin/ming-app-library << 'APPLIB'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1643,40 +1694,40 @@ import sys
 APP_DIRS = ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]
 
 CSS = b'''
-window { background: #120820; }
+window { background: #F6F8F6; }
 .root {
-  background: linear-gradient(135deg, #120820, #162F34 52%, #2D1B4E);
-  color: #F4ECF7;
+  background: linear-gradient(135deg, #F8FAF8, #EEF6F2 52%, #DDEFE8);
+  color: #1D2421;
 }
-.title { font-size: 26px; font-weight: 800; color: #FFFFFF; }
-.subtitle { font-size: 12px; color: #9FE7D7; }
+.title { font-size: 26px; font-weight: 800; color: #1D2421; }
+.subtitle { font-size: 12px; color: #4F625A; }
 .search {
   min-height: 42px;
   border-radius: 10px;
-  background: rgba(255,255,255,0.10);
-  color: #FFFFFF;
-  border: 1px solid rgba(159,231,215,0.24);
+  background: rgba(255,255,255,0.84);
+  color: #1D2421;
+  border: 1px solid rgba(31,98,84,0.14);
   padding: 0 12px;
 }
 .app-tile {
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(159,231,215,0.14);
+  background: rgba(255,255,255,0.74);
+  border: 1px solid rgba(31,98,84,0.13);
   border-radius: 10px;
   padding: 10px;
-  color: #F4ECF7;
+  color: #1D2421;
 }
 .app-tile:hover {
-  background: rgba(31,138,138,0.25);
-  border-color: rgba(159,231,215,0.42);
+  background: rgba(255,255,255,0.94);
+  border-color: rgba(47,174,143,0.36);
 }
-.app-name { font-size: 11px; font-weight: 700; color: #FFFFFF; }
+.app-name { font-size: 11px; font-weight: 700; color: #1D2421; }
 .quick-button {
   border-radius: 10px;
   padding: 9px 12px;
-  background: rgba(255,255,255,0.09);
-  color: #F4ECF7;
+  background: rgba(255,255,255,0.76);
+  color: #1D2421;
 }
-.quick-button:hover { background: rgba(159,231,215,0.20); }
+.quick-button:hover { background: rgba(47,174,143,0.14); }
 '''
 
 def read_desktop_file(path):
@@ -1724,10 +1775,10 @@ def load_apps():
 
 class AppLibrary(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title='Onion 应用库')
+        super().__init__(application=app, title='Ming 应用库')
         self.set_default_size(840, 560)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_name('onion-app-library')
+        self.set_icon_name('ming-app-library')
         self.apps = load_apps()
         self.filtered = self.apps
 
@@ -1742,7 +1793,7 @@ class AppLibrary(Gtk.ApplicationWindow):
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        title = Gtk.Label(label='Onion 应用库')
+        title = Gtk.Label(label='Ming 应用库')
         title.set_halign(Gtk.Align.START)
         title.get_style_context().add_class('title')
         subtitle = Gtk.Label(label='搜索、打开、整理新安装应用')
@@ -1752,7 +1803,7 @@ class AppLibrary(Gtk.ApplicationWindow):
         title_box.pack_start(subtitle, False, False, 0)
         header.pack_start(title_box, True, True, 0)
 
-        for label, cmd in [('整理桌面', 'onion-helper organize-desktop'), ('所有磁盘', 'onion-helper disks'), ('系统设置', 'onion-control-center')]:
+        for label, cmd in [('整理桌面', 'ming-helper organize-desktop'), ('所有磁盘', 'ming-helper disks'), ('系统设置', 'ming-control-center')]:
             btn = Gtk.Button(label=label)
             btn.get_style_context().add_class('quick-button')
             btn.connect('clicked', lambda _b, c=cmd: subprocess.Popen(c, shell=True))
@@ -1797,7 +1848,9 @@ class AppLibrary(Gtk.ApplicationWindow):
         btn = Gtk.Button()
         btn.get_style_context().add_class('app-tile')
         btn.set_size_request(118, 108)
+        btn.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         btn.connect('clicked', lambda _b: self.launch(app))
+        btn.connect('button-press-event', lambda widget, event: self.show_app_menu(widget, event, app))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
         box.set_valign(Gtk.Align.CENTER)
         image = Gtk.Image.new_from_icon_name(app['icon'], Gtk.IconSize.DIALOG)
@@ -1811,6 +1864,22 @@ class AppLibrary(Gtk.ApplicationWindow):
         btn.add(box)
         return btn
 
+    def show_app_menu(self, widget, event, app):
+        if getattr(event, 'button', 0) != 3:
+            return False
+        menu = Gtk.Menu()
+        open_item = Gtk.MenuItem(label='打开')
+        open_item.connect('activate', lambda _item: self.launch(app))
+        desktop_item = Gtk.MenuItem(label='添加到桌面')
+        desktop_item.connect('activate', lambda _item: subprocess.Popen(['ming-phone-desktop', '--add', app['path']]))
+        folder_item = Gtk.MenuItem(label='添加到桌面文件夹')
+        folder_item.connect('activate', lambda _item: subprocess.Popen(['ming-phone-desktop', '--add-to-folder', app['path']]))
+        for item in (open_item, desktop_item, folder_item):
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
     def launch(self, app):
         try:
             info = Gio.DesktopAppInfo.new_from_filename(app['path'])
@@ -1822,16 +1891,16 @@ class AppLibrary(Gtk.ApplicationWindow):
         command = app['exec'].replace('%U', '').replace('%u', '').replace('%F', '').replace('%f', '').strip()
         subprocess.Popen(command, shell=True)
 
-class OnionApp(Gtk.Application):
+class MingApp(Gtk.Application):
     def do_activate(self):
         AppLibrary(self).show_all()
 
 if __name__ == '__main__':
-    OnionApp().run(sys.argv)
+    MingApp().run(sys.argv)
 APPLIB
-    chmod +x /usr/local/bin/onion-app-library
+    chmod +x /usr/local/bin/ming-app-library
 
-    cat > /usr/local/bin/onion-desktop-organizer << 'DESKORG'
+    cat > /usr/local/bin/ming-desktop-organizer << 'DESKORG'
 #!/usr/bin/env bash
 set -uo pipefail
 
@@ -1842,10 +1911,12 @@ internet_dir="${desktop}/上网"
 office_dir="${desktop}/办公"
 media_dir="${desktop}/影音"
 games_dir="${desktop}/游戏"
+tools_dir="${desktop}/工具"
+common_dir="${desktop}/常用"
 disks_link="${desktop}/所有磁盘"
-state_dir="${HOME}/.config/onion-os"
+state_dir="${HOME}/.config/ming-os"
 
-mkdir -p "${apps_dir}" "${system_dir}" "${internet_dir}" "${office_dir}" "${media_dir}" "${games_dir}" "${state_dir}" "${desktop}"
+mkdir -p "${apps_dir}" "${system_dir}" "${internet_dir}" "${office_dir}" "${media_dir}" "${games_dir}" "${tools_dir}" "${common_dir}" "${state_dir}" "${desktop}"
 
 desktop_name() {
     local file="$1"
@@ -1873,6 +1944,8 @@ target_for() {
         echo "${media_dir}"
     elif [[ "${cats}" == *game* || "${name}" == *游戏* ]]; then
         echo "${games_dir}"
+    elif [[ "${name}" == *文件* || "${name}" == *磁盘* || "${name}" == *清理* || "${name}" == *安全* ]]; then
+        echo "${tools_dir}"
     elif [[ "${cats}" == *settings* || "${cats}" == *system* || "${name}" == *设置* || "${name}" == *更新* || "${name}" == *终端* ]]; then
         echo "${system_dir}"
     else
@@ -1904,24 +1977,24 @@ sync_apps() {
     done
 }
 
-    cat > "${desktop}/Onion 设置.desktop" << CONTROL
+    cat > "${desktop}/Ming 设置.desktop" << CONTROL
 [Desktop Entry]
-Name=Onion 设置
+Name=Ming 设置
 Comment=不用记命令，点按钮完成常见电脑维护
-Exec=/usr/local/bin/onion-control-center
-Icon=onion-control-center
+Exec=/usr/local/bin/ming-control-center
+Icon=ming-control-center
 Terminal=false
 Type=Application
 Categories=Settings;System;
 StartupNotify=true
 CONTROL
 
-cat > "${desktop}/Onion 应用库.desktop" << APPLIBDESKTOP
+cat > "${desktop}/Ming 应用库.desktop" << APPLIBDESKTOP
 [Desktop Entry]
-Name=Onion 应用库
+Name=Ming 应用库
 Comment=像手机应用库一样搜索、打开、整理已安装软件
-Exec=/usr/local/bin/onion-app-library
-Icon=onion-app-library
+Exec=/usr/local/bin/ming-app-library
+Icon=ming-app-library
 Terminal=false
 Type=Application
 Categories=Utility;System;
@@ -1932,27 +2005,37 @@ cat > "${desktop}/所有磁盘.desktop" << DISKDESKTOP
 [Desktop Entry]
 Name=所有磁盘
 Comment=把系统盘、数据盘、U盘集中到一个入口
-Exec=/usr/local/bin/onion-disk-hub --open
+Exec=/usr/local/bin/ming-disk-hub --open
 Icon=drive-harddisk
 Terminal=false
 Type=Application
 Categories=System;FileManager;
 StartupNotify=true
 DISKDESKTOP
-chmod +x "${desktop}/Onion 设置.desktop" "${desktop}/Onion 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
+chmod +x "${desktop}/Ming 设置.desktop" "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
 
-/usr/local/bin/onion-disk-hub >/tmp/onion-disk-hub.log 2>&1 || true
+/usr/local/bin/ming-disk-hub >/tmp/ming-disk-hub.log 2>&1 || true
 ln -sfn "${HOME}/所有磁盘" "${disks_link}" 2>/dev/null || true
 
 gio set "${apps_dir}" metadata::custom-icon-name application-x-executable 2>/dev/null || true
-gio set "${system_dir}" metadata::custom-icon-name onion-control-center 2>/dev/null || true
+gio set "${system_dir}" metadata::custom-icon-name ming-control-center 2>/dev/null || true
 gio set "${internet_dir}" metadata::custom-icon-name network-workgroup 2>/dev/null || true
 gio set "${office_dir}" metadata::custom-icon-name x-office-document 2>/dev/null || true
 gio set "${media_dir}" metadata::custom-icon-name multimedia-player 2>/dev/null || true
 gio set "${games_dir}" metadata::custom-icon-name applications-games 2>/dev/null || true
+gio set "${tools_dir}" metadata::custom-icon-name applications-utilities 2>/dev/null || true
+gio set "${common_dir}" metadata::custom-icon-name emblem-favorite 2>/dev/null || true
 gio set "${HOME}/所有磁盘" metadata::custom-icon-name drive-harddisk 2>/dev/null || true
 
-sync_apps
+if command -v ming-phone-desktop >/dev/null 2>&1; then
+    ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
+else
+    sync_apps
+fi
+for item in "${desktop}/Ming 设置.desktop" "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop"; do
+    [[ -f "${item}" ]] || continue
+    ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
+done
 
 if [[ "${1:-}" == "--watch" ]]; then
     while true; do
@@ -1961,8 +2044,12 @@ if [[ "${1:-}" == "--watch" ]]; then
         else
             sleep 20
         fi
-        sync_apps
-        /usr/local/bin/onion-disk-hub >/tmp/onion-disk-hub.log 2>&1 || true
+        if command -v ming-phone-desktop >/dev/null 2>&1; then
+            ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
+        else
+            sync_apps
+        fi
+        /usr/local/bin/ming-disk-hub >/tmp/ming-disk-hub.log 2>&1 || true
         # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
         for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
             if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
@@ -1973,13 +2060,537 @@ if [[ "${1:-}" == "--watch" ]]; then
     done
 fi
 DESKORG
-    chmod +x /usr/local/bin/onion-desktop-organizer
+    chmod +x /usr/local/bin/ming-desktop-organizer
 
-    cat > /usr/local/bin/onion-helper << 'ONIONHELPER'
+    cat > /usr/local/bin/ming-phone-desktop << 'PHONEDESKTOP'
+#!/usr/bin/env python3
+import configparser
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gdk, Gio, GLib, Gtk
+
+HOME = Path.home()
+STATE_DIR = HOME / '.config' / 'ming-os'
+LAYOUT_PATH = STATE_DIR / 'desktop-layout.json'
+DESKTOP_DIR = HOME / 'Desktop'
+APP_DIRS = [Path('/usr/share/applications'), HOME / '.local/share/applications']
+CORE_NAMES = {
+    'ming-control-center.desktop',
+    'ming-settings.desktop',
+    'ming-files.desktop',
+    'ming-app-library.desktop',
+    'ming-update.desktop',
+    'ming-terminal.desktop',
+    'firefox-esr.desktop',
+    'spark-store.desktop',
+}
+GRID_W = 112
+GRID_H = 122
+PAD_X = 36
+PAD_Y = 34
+DROP_DISTANCE = 58
+
+CSS = b'''
+window.ming-desktop {
+  background-color: rgba(18, 8, 32, 0.01);
+  color: #F4FFF9;
+}
+.tile {
+  border-radius: 16px;
+  background: rgba(10, 36, 38, 0.20);
+  border: 1px solid rgba(159, 231, 215, 0.10);
+  padding: 8px;
+  color: #F4FFF9;
+}
+.tile:hover, .tile.dragging {
+  background: rgba(31, 168, 158, 0.28);
+  border-color: rgba(159, 231, 215, 0.48);
+}
+.folder {
+  background: rgba(31, 168, 158, 0.25);
+  border-color: rgba(159, 231, 215, 0.58);
+}
+.label {
+  color: #F4FFF9;
+  font-size: 11px;
+  font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.70);
+}
+.folder-title {
+  color: #FFFFFF;
+  font-size: 20px;
+  font-weight: 800;
+}
+.folder-panel {
+  background: rgba(18, 8, 32, 0.94);
+  border: 1px solid rgba(159, 231, 215, 0.30);
+  border-radius: 14px;
+  padding: 18px;
+}
+.folder-action {
+  border-radius: 10px;
+  padding: 7px 10px;
+}
+'''
+
+def app_id(path):
+    return hashlib.sha1(str(path).encode('utf-8')).hexdigest()[:16]
+
+def read_app(path):
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        parser.read(path, encoding='utf-8')
+    except Exception:
+        return None
+    if not parser.has_section('Desktop Entry'):
+        return None
+    entry = parser['Desktop Entry']
+    if entry.get('Type', 'Application') != 'Application':
+        return None
+    if entry.get('NoDisplay', '').lower() == 'true' or entry.get('Hidden', '').lower() == 'true':
+        return None
+    if not entry.get('Exec', ''):
+        return None
+    return {
+        'id': app_id(path),
+        'type': 'app',
+        'path': str(path),
+        'name': entry.get('Name[zh_CN]') or entry.get('Name') or Path(path).stem,
+        'icon': entry.get('Icon') or 'application-x-executable',
+        'categories': entry.get('Categories', ''),
+    }
+
+def load_apps():
+    apps = []
+    seen = set()
+    for directory in APP_DIRS:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob('*.desktop')):
+            item = read_app(path)
+            if not item or item['id'] in seen:
+                continue
+            seen.add(item['id'])
+            apps.append(item)
+    apps.sort(key=lambda item: (Path(item['path']).name not in CORE_NAMES, item['name'].lower()))
+    return apps
+
+def empty_layout():
+    return {'version': 1, 'items': []}
+
+def load_layout():
+    try:
+        data = json.loads(LAYOUT_PATH.read_text(encoding='utf-8'))
+        if isinstance(data, dict) and isinstance(data.get('items'), list):
+            return data
+    except Exception:
+        pass
+    return empty_layout()
+
+def save_layout(layout):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LAYOUT_PATH.with_suffix('.tmp')
+    tmp.write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding='utf-8')
+    tmp.replace(LAYOUT_PATH)
+
+def next_position(index, width=1366):
+    cols = max(4, int((width - PAD_X * 2) / GRID_W))
+    row = index // cols
+    col = index % cols
+    return PAD_X + col * GRID_W, PAD_Y + row * GRID_H
+
+def sync_layout(width=1366):
+    apps = load_apps()
+    layout = load_layout()
+    items = layout.get('items', [])
+    known = set()
+    for item in items:
+        if item.get('type') == 'folder':
+            known.update(item.get('children', []))
+        elif item.get('path'):
+            known.add(item['path'])
+    index = len(items)
+    for app in apps:
+        if app['path'] in known:
+            continue
+        x, y = next_position(index, width)
+        app['x'] = x
+        app['y'] = y
+        items.append(app)
+        index += 1
+    layout['items'] = items
+    save_layout(layout)
+    sync_files(layout)
+    return layout
+
+def safe_name(name):
+    cleaned = ''.join('-' if ch in '/\\:*?"<>|' else ch for ch in name).strip()
+    return cleaned or '应用'
+
+def copy_desktop(path, target_dir, name=None):
+    src = Path(path)
+    if not src.is_file():
+        return
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{safe_name(name or src.stem)}.desktop"
+    try:
+        shutil.copy2(src, target)
+        target.chmod(0o755)
+    except Exception:
+        pass
+
+def sync_files(layout):
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    folders_seen = set()
+    for item in layout.get('items', []):
+        if item.get('type') == 'folder':
+            folder_dir = DESKTOP_DIR / safe_name(item.get('name', '文件夹'))
+            folders_seen.add(folder_dir)
+            folder_dir.mkdir(parents=True, exist_ok=True)
+            for child_path in item.get('children', []):
+                child = read_app(child_path)
+                if child:
+                    copy_desktop(child_path, folder_dir, child['name'])
+        elif item.get('path') and Path(item['path']).name in CORE_NAMES:
+            copy_desktop(item['path'], DESKTOP_DIR, item.get('name'))
+    for old in DESKTOP_DIR.iterdir() if DESKTOP_DIR.exists() else []:
+        if old.is_dir() and old.name not in {'应用', '系统', '上网', '办公', '影音', '游戏', '工具', '常用'} and old not in folders_seen:
+            try:
+                if not any(old.iterdir()):
+                    old.rmdir()
+            except Exception:
+                pass
+
+def command_add(path, folder=False):
+    item = read_app(path)
+    if not item:
+        return 1
+    layout = sync_layout()
+    items = layout['items']
+    if any(x.get('path') == item['path'] for x in items):
+        return 0
+    if folder:
+        folder_item = next((x for x in items if x.get('type') == 'folder'), None)
+        if not folder_item:
+            folder_item = {'id': 'folder-' + app_id(item['path']), 'type': 'folder', 'name': '新文件夹', 'children': [], 'x': PAD_X, 'y': PAD_Y}
+            items.insert(0, folder_item)
+        if item['path'] not in folder_item['children']:
+            folder_item['children'].append(item['path'])
+    else:
+        item['x'], item['y'] = next_position(len(items))
+        items.append(item)
+    save_layout(layout)
+    sync_files(layout)
+    return 0
+
+class DesktopTile(Gtk.EventBox):
+    def __init__(self, desktop, item):
+        super().__init__()
+        self.desktop = desktop
+        self.item = item
+        self.dragging = False
+        self.offset = (0, 0)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+        self.connect('button-press-event', self.on_press)
+        self.connect('motion-notify-event', self.on_motion)
+        self.connect('button-release-event', self.on_release)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_size_request(92, 102)
+        box.get_style_context().add_class('tile')
+        if item.get('type') == 'folder':
+            box.get_style_context().add_class('folder')
+            image = Gtk.Image.new_from_icon_name('folder', Gtk.IconSize.DIALOG)
+        else:
+            image = Gtk.Image.new_from_icon_name(item.get('icon') or 'application-x-executable', Gtk.IconSize.DIALOG)
+        label = Gtk.Label(label=item.get('name', '应用'))
+        label.get_style_context().add_class('label')
+        label.set_justify(Gtk.Justification.CENTER)
+        label.set_line_wrap(True)
+        label.set_max_width_chars(8)
+        box.pack_start(image, True, True, 0)
+        box.pack_start(label, False, False, 0)
+        self.box = box
+        self.add(box)
+
+    def on_press(self, _widget, event):
+        if event.button == 3:
+            self.desktop.show_context_menu(self.item, event)
+            return True
+        if event.button != 1:
+            return False
+        self.dragging = False
+        self.offset = (event.x, event.y)
+        return True
+
+    def on_motion(self, _widget, event):
+        if not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+            return False
+        self.dragging = True
+        self.box.get_style_context().add_class('dragging')
+        root_x, root_y = event.x_root, event.y_root
+        win_x, win_y = self.desktop.window_origin
+        x = int(root_x - win_x - self.offset[0])
+        y = int(root_y - win_y - self.offset[1])
+        self.desktop.fixed.move(self, max(8, x), max(8, y))
+        return True
+
+    def on_release(self, _widget, event):
+        self.box.get_style_context().remove_class('dragging')
+        root_x, root_y = event.x_root, event.y_root
+        win_x, win_y = self.desktop.window_origin
+        x = int(root_x - win_x - self.offset[0])
+        y = int(root_y - win_y - self.offset[1])
+        if self.dragging:
+            self.desktop.finish_drag(self.item, max(8, x), max(8, y))
+        else:
+            self.desktop.open_item(self.item)
+        self.dragging = False
+        return True
+
+class PhoneDesktop(Gtk.Window):
+    def __init__(self):
+        super().__init__(title='Ming Desktop')
+        self.set_name('ming-desktop-window')
+        self.get_style_context().add_class('ming-desktop')
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DESKTOP)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual and screen.is_composited():
+            self.set_visual(visual)
+            self.set_app_paintable(True)
+        self.maximize()
+        self.fullscreen()
+        self.connect('destroy', Gtk.main_quit)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
+        self.fixed = Gtk.Fixed()
+        self.add(self.fixed)
+        self.tiles = {}
+        self.layout = sync_layout(self.get_screen().get_width())
+        self.render()
+        GLib.timeout_add_seconds(8, self.refresh_from_apps)
+
+    @property
+    def window_origin(self):
+        window = self.get_window()
+        if window:
+            try:
+                ok, x, y = window.get_origin()
+                if ok:
+                    return x, y
+            except Exception:
+                pass
+        return 0, 0
+
+    def render(self):
+        for child in self.fixed.get_children():
+            self.fixed.remove(child)
+        self.tiles = {}
+        for item in self.layout.get('items', []):
+            tile = DesktopTile(self, item)
+            self.tiles[item['id']] = tile
+            self.fixed.put(tile, int(item.get('x', PAD_X)), int(item.get('y', PAD_Y)))
+        self.show_all()
+
+    def refresh_from_apps(self):
+        self.layout = sync_layout(self.get_screen().get_width())
+        self.render()
+        return True
+
+    def find_drop_target(self, source, x, y):
+        best = None
+        best_distance = DROP_DISTANCE
+        for item in self.layout.get('items', []):
+            if item.get('id') == source.get('id'):
+                continue
+            dx = int(item.get('x', 0)) - x
+            dy = int(item.get('y', 0)) - y
+            distance = (dx * dx + dy * dy) ** 0.5
+            if distance < best_distance:
+                best = item
+                best_distance = distance
+        return best
+
+    def finish_drag(self, item, x, y):
+        target = self.find_drop_target(item, x, y)
+        if target and item.get('type') == 'app':
+            self.create_or_merge_folder(item, target)
+        else:
+            item['x'] = x
+            item['y'] = y
+        save_layout(self.layout)
+        sync_files(self.layout)
+        self.render()
+
+    def create_or_merge_folder(self, source, target):
+        items = self.layout.get('items', [])
+        if target.get('type') == 'folder':
+            if source.get('path') not in target.setdefault('children', []):
+                target['children'].append(source.get('path'))
+            items[:] = [x for x in items if x.get('id') != source.get('id')]
+            return
+        if target.get('type') != 'app':
+            return
+        folder = {
+            'id': 'folder-' + app_id(source.get('path', '') + target.get('path', '')),
+            'type': 'folder',
+            'name': '新文件夹',
+            'children': [target.get('path'), source.get('path')],
+            'x': target.get('x', PAD_X),
+            'y': target.get('y', PAD_Y),
+        }
+        items[:] = [x for x in items if x.get('id') not in {source.get('id'), target.get('id')}]
+        items.append(folder)
+
+    def open_item(self, item):
+        if item.get('type') == 'folder':
+            self.show_folder(item)
+            return
+        try:
+            info = Gio.DesktopAppInfo.new_from_filename(item.get('path'))
+            if info:
+                info.launch([], None)
+                return
+        except Exception:
+            pass
+        subprocess.Popen(['gtk-launch', Path(item.get('path', '')).stem])
+
+    def show_folder(self, folder):
+        dialog = Gtk.Dialog(title=folder.get('name', '文件夹'), transient_for=self, flags=0)
+        dialog.set_default_size(520, 420)
+        area = dialog.get_content_area()
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        panel.get_style_context().add_class('folder-panel')
+        panel.set_border_width(16)
+        area.add(panel)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Entry()
+        title.set_text(folder.get('name', '文件夹'))
+        title.get_style_context().add_class('folder-title')
+        rename = Gtk.Button(label='改名')
+        rename.get_style_context().add_class('folder-action')
+        rename.connect('clicked', lambda _b: self.rename_folder(folder, title.get_text(), dialog))
+        header.pack_start(title, True, True, 0)
+        header.pack_start(rename, False, False, 0)
+        panel.pack_start(header, False, False, 0)
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_max_children_per_line(4)
+        flow.set_row_spacing(10)
+        flow.set_column_spacing(10)
+        panel.pack_start(flow, True, True, 0)
+        for child_path in list(folder.get('children', [])):
+            child = read_app(child_path)
+            if not child:
+                continue
+            button = Gtk.Button()
+            button.set_size_request(104, 94)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            box.pack_start(Gtk.Image.new_from_icon_name(child.get('icon'), Gtk.IconSize.DIALOG), True, True, 0)
+            label = Gtk.Label(label=child.get('name'))
+            label.set_line_wrap(True)
+            label.set_max_width_chars(8)
+            box.pack_start(label, False, False, 0)
+            button.add(box)
+            button.connect('clicked', lambda _b, app=child: self.open_item(app))
+            button.connect('button-press-event', lambda w, e, app=child, f=folder, d=dialog: self.child_menu(w, e, app, f, d))
+            flow.add(button)
+        close = Gtk.Button(label='关闭')
+        close.connect('clicked', lambda _b: dialog.destroy())
+        panel.pack_start(close, False, False, 0)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def child_menu(self, widget, event, app, folder, dialog):
+        if getattr(event, 'button', 0) != 3:
+            return False
+        menu = Gtk.Menu()
+        move = Gtk.MenuItem(label='移到桌面')
+        move.connect('activate', lambda _i: self.move_child_to_desktop(app, folder, dialog))
+        menu.append(move)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def rename_folder(self, folder, name, dialog):
+        folder['name'] = safe_name(name)
+        save_layout(self.layout)
+        sync_files(self.layout)
+        dialog.destroy()
+        self.render()
+
+    def move_child_to_desktop(self, app, folder, dialog):
+        folder['children'] = [x for x in folder.get('children', []) if x != app.get('path')]
+        app['x'], app['y'] = next_position(len(self.layout.get('items', [])), self.get_screen().get_width())
+        self.layout['items'].append(app)
+        if not folder['children']:
+            self.layout['items'] = [x for x in self.layout['items'] if x.get('id') != folder.get('id')]
+        save_layout(self.layout)
+        sync_files(self.layout)
+        dialog.destroy()
+        self.render()
+
+    def show_context_menu(self, item, event):
+        menu = Gtk.Menu()
+        open_item = Gtk.MenuItem(label='打开')
+        open_item.connect('activate', lambda _i: self.open_item(item))
+        menu.append(open_item)
+        if item.get('type') == 'folder':
+            rename = Gtk.MenuItem(label='重命名文件夹')
+            rename.connect('activate', lambda _i: self.show_folder(item))
+            menu.append(rename)
+            if not item.get('children'):
+                delete = Gtk.MenuItem(label='删除空文件夹')
+                delete.connect('activate', lambda _i: self.delete_item(item))
+                menu.append(delete)
+        else:
+            remove = Gtk.MenuItem(label='从桌面移除')
+            remove.connect('activate', lambda _i: self.delete_item(item))
+            menu.append(remove)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def delete_item(self, item):
+        self.layout['items'] = [x for x in self.layout.get('items', []) if x.get('id') != item.get('id')]
+        save_layout(self.layout)
+        sync_files(self.layout)
+        self.render()
+
+def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == '--add':
+        raise SystemExit(command_add(sys.argv[2], folder=False))
+    if len(sys.argv) >= 3 and sys.argv[1] == '--add-to-folder':
+        raise SystemExit(command_add(sys.argv[2], folder=True))
+    if len(sys.argv) >= 2 and sys.argv[1] == '--sync':
+        sync_layout()
+        return
+    PhoneDesktop()
+    Gtk.main()
+
+if __name__ == '__main__':
+    main()
+PHONEDESKTOP
+    chmod +x /usr/local/bin/ming-phone-desktop
+
+    cat > /usr/local/bin/ming-helper << 'MINGHELPER'
 #!/usr/bin/env bash
 set -uo pipefail
 
-title="Onion OS"
+title="Ming OS"
 
 info() {
     if command -v zenity >/dev/null 2>&1; then
@@ -2012,7 +2623,7 @@ run_progress() {
         (
             echo 15
             echo "# ${message}"
-            "$@" >/tmp/onion-helper.log 2>&1
+            "$@" >/tmp/ming-helper.log 2>&1
             echo $?
         ) | {
             read -r _pct || true
@@ -2026,11 +2637,11 @@ run_progress() {
 
 case "${1:-}" in
     update)
-        exec /usr/local/bin/onion-update-gui check
+        exec /usr/local/bin/ming-update-gui check
         ;;
     install-wechat)
         if confirm "将下载安装腾讯官方 Linux 版微信。这个过程需要联网，可能需要几分钟。" "安装微信"; then
-            if pkexec /usr/local/bin/onion-install-wechat >/tmp/onion-install-wechat.log 2>&1 || sudo /usr/local/bin/onion-install-wechat >/tmp/onion-install-wechat.log 2>&1; then
+            if pkexec /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1 || sudo /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1; then
                 info "微信已安装。现在可以从 Dock 或开始菜单打开。"
             else
                 warn "微信安装没有完成。请先确认网络可用，再点一次“安装微信”。"
@@ -2038,10 +2649,10 @@ case "${1:-}" in
         fi
         ;;
     wechat-light)
-        ONION_WECHAT_MODE=light /usr/local/bin/onion-wechat
+        MING_WECHAT_MODE=light /usr/local/bin/ming-wechat
         ;;
     wechat-web)
-        exec /usr/local/bin/onion-wechat-web
+        exec /usr/local/bin/ming-wechat-web
         ;;
     clean-wechat)
         if confirm "将清理微信的大缓存文件，不会删除聊天账号。清理后微信下次启动可能稍慢。" "清理缓存"; then
@@ -2051,14 +2662,14 @@ case "${1:-}" in
         fi
         ;;
     repair-display)
-        rm -f "${HOME}/.config/onion-os/scale-done" 2>/dev/null || true
-        /usr/local/bin/onion-scale >/tmp/onion-scale.log 2>&1 || true
-        /usr/local/bin/onion-apply-appearance >/tmp/onion-appearance.log 2>&1 || true
+        rm -f "${HOME}/.config/ming-os/scale-done" 2>/dev/null || true
+        /usr/local/bin/ming-scale >/tmp/ming-scale.log 2>&1 || true
+        /usr/local/bin/ming-apply-appearance >/tmp/ming-appearance.log 2>&1 || true
         info "界面显示已重新整理：壁纸、主题、Dock 和缩放会在几秒内刷新。"
         ;;
     repair-store)
         if confirm "将修复或重新安装星火应用商店。这个过程需要联网。" "修复商店"; then
-            if pkexec /usr/local/bin/onion-install-spark-store >/tmp/onion-spark.log 2>&1 || sudo /usr/local/bin/onion-install-spark-store >/tmp/onion-spark.log 2>&1; then
+            if pkexec /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1 || sudo /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1; then
                 info "星火应用商店已就绪。"
             else
                 warn "商店修复没有完成。请先连接网络，再点一次“修复应用商店”。"
@@ -2066,28 +2677,29 @@ case "${1:-}" in
         fi
         ;;
     organize-desktop)
-        /usr/local/bin/onion-desktop-organizer >/tmp/onion-desktop-organizer.log 2>&1 || true
-        info "桌面已经整理好。\n\n新安装的软件会自动放入“应用、上网、办公、影音、游戏、系统”等文件夹。"
+        /usr/local/bin/ming-desktop-organizer >/tmp/ming-desktop-organizer.log 2>&1 || true
+        info "桌面已经刷新。\n\n新安装的软件会自动出现在 Ming 手机式桌面；把一个图标拖到另一个图标上，就会自动生成文件夹。"
         ;;
     disks)
-        exec /usr/local/bin/onion-disk-hub --open
+        exec /usr/local/bin/ming-disk-hub --open
         ;;
     memory)
         mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-        profile="$(cat "${HOME}/.config/onion-os/memory-profile" 2>/dev/null || true)"
-        info "本机内存约 ${mem_mb}MB。\n\nOnion OS 会自动启用 zram、低内存桌面策略和微信省内存模式。\n\n${profile}"
+        profile="$(cat "${HOME}/.config/ming-os/memory-profile" 2>/dev/null || true)"
+        info "本机内存约 ${mem_mb}MB。\n\nMing OS 会自动启用 zram、低内存桌面策略和微信省内存模式。\n\n${profile}"
         ;;
     install-os)
-        exec /usr/local/bin/onion-live-installer.sh
+        exec /usr/local/bin/ming-live-installer.sh
         ;;
     *)
-        info "请选择 Onion 设置中的按钮来完成操作。"
+        info "请选择 Ming 设置中的按钮来完成操作。"
         ;;
 esac
-ONIONHELPER
-    chmod +x /usr/local/bin/onion-helper
+MINGHELPER
+    chmod +x /usr/local/bin/ming-helper
+    bash -n /usr/local/bin/ming-helper
 
-    cat > "/home/${ONION_USER}/.config/xfce4/terminal/terminalrc" << 'TERMINALRC'
+    cat > "/home/${MING_USER}/.config/xfce4/terminal/terminalrc" << 'TERMINALRC'
 [Configuration]
 FontName=DejaVu Sans Mono 11
 MiscAlwaysShowTabs=FALSE
@@ -2099,16 +2711,16 @@ MiscDefaultGeometry=92x26
 MiscMenubarDefault=FALSE
 MiscToolbarDefault=FALSE
 MiscConfirmClose=FALSE
-ColorForeground=#E8DAEF
-ColorBackground=#120820
+ColorForeground=#D4F7F1
+ColorBackground=#1D2421
 ColorCursor=#9FE7D7
-ColorSelection=#1F8A8A
+ColorSelection=#2FAE8F
 ColorSelectionUseDefault=FALSE
-ColorPalette=#171326;#E05F6A;#62D49F;#E0C56F;#7EA7F8;#B77DDA;#61D6D6;#E8DAEF;#5D5368;#FF7A85;#82E8B8;#F0D986;#9BBDFB;#C998E7;#8FE5E5;#FFFFFF
+ColorPalette=#1D2421;#D75D66;#58B88F;#D7B95A;#5A8CCF;#7B72B9;#4DB9B1;#D4F7F1;#51635C;#E9747C;#7ED6AD;#E5CB72;#78A9E5;#9C92D8;#72D3CC;#FFFFFF
 TERMINALRC
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/xfce4/terminal"
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4/terminal"
 
-    cat > /usr/local/bin/onion-control-center << 'ONIONCONTROL'
+    cat > /usr/local/bin/ming-control-center << 'MINGCONTROL'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
@@ -2117,79 +2729,79 @@ import subprocess
 import sys
 
 TASKS = [
-    ('检查系统更新', 'onion-update-icon', '下载并安装新版本 Onion OS', 'onion-helper update'),
-    ('修复界面显示', 'onion-display', '重新整理壁纸、缩放和 Dock', 'onion-helper repair-display'),
+    ('检查系统更新', 'ming-update-icon', '下载并安装新版本 Ming OS', 'ming-helper update'),
+    ('修复界面显示', 'ming-display', '重新整理壁纸、缩放和 Dock', 'ming-helper repair-display'),
     ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'nm-connection-editor'),
-    ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'onion-helper install-wechat'),
-    ('微信省内存启动', 'wechat', '适合 2GB 内存和群组较多账号', 'onion-helper wechat-light'),
-    ('清理微信缓存', 'edit-clear', '释放微信缓存占用的磁盘和内存压力', 'onion-helper clean-wechat'),
-    ('网页版微信', 'web-browser', '机器太卡时用浏览器聊天', 'onion-helper wechat-web'),
-    ('打开应用商店', 'onion-app-store', '按需安装常用软件', 'spark-store'),
-    ('修复应用商店', 'onion-app-store', '商店打不开时点这里', 'onion-helper repair-store'),
-    ('应用库', 'onion-app-library', '搜索并打开所有已安装应用', 'onion-app-library'),
-    ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'onion-helper organize-desktop'),
-    ('所有磁盘', 'drive-harddisk', '像一个盘一样查看系统盘和数据盘', 'onion-helper disks'),
-    ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'onion-helper memory'),
+    ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'ming-helper install-wechat'),
+    ('微信省内存启动', 'wechat', '适合 2GB 内存和群组较多账号', 'ming-helper wechat-light'),
+    ('清理微信缓存', 'edit-clear', '释放微信缓存占用的磁盘和内存压力', 'ming-helper clean-wechat'),
+    ('网页版微信', 'web-browser', '机器太卡时用浏览器聊天', 'ming-helper wechat-web'),
+    ('打开应用商店', 'ming-app-store', '按需安装常用软件', 'spark-store'),
+    ('修复应用商店', 'ming-app-store', '商店打不开时点这里', 'ming-helper repair-store'),
+    ('应用库', 'ming-app-library', '搜索并打开所有已安装应用', 'ming-app-library'),
+    ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'ming-helper organize-desktop'),
+    ('所有磁盘', 'drive-harddisk', '像一个盘一样查看系统盘和数据盘', 'ming-helper disks'),
+    ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'ming-helper memory'),
     ('声音和音量', 'multimedia-volume-control', '调节扬声器、麦克风和输出设备', 'pavucontrol'),
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
-    ('文件', 'files-icon', '打开文件和下载目录', 'onion-files'),
+    ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
     ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
-    ('高级设置', 'onion-settings', '给懂电脑的人使用', 'xfce4-settings-manager'),
+    ('高级设置', 'ming-settings', '给懂电脑的人使用', 'xfce4-settings-manager'),
 ]
 
 CSS = b'''
 window {
-  background: #120820;
+  background: #F6F8F6;
 }
 .root {
-  background: linear-gradient(135deg, #120820, #21113A 55%, #102E32);
-  color: #E8DAEF;
+  background: linear-gradient(135deg, #F8FAF8, #EEF6F2 55%, #DDEFE8);
+  color: #1D2421;
 }
 .title {
   font-size: 26px;
   font-weight: 800;
-  color: #FFFFFF;
+  color: #1D2421;
 }
 .subtitle {
   font-size: 12px;
-  color: #9FE7D7;
+  color: #4F625A;
 }
 .tile {
-  background: rgba(255,255,255,0.065);
-  border: 1px solid rgba(159,231,215,0.16);
+  background: rgba(255,255,255,0.76);
+  border: 1px solid rgba(31,98,84,0.13);
   border-radius: 10px;
   padding: 12px;
-  color: #E8DAEF;
+  color: #1D2421;
 }
 .tile:hover {
-  background: rgba(31,138,138,0.24);
-  border-color: rgba(159,231,215,0.45);
+  background: rgba(255,255,255,0.94);
+  border-color: rgba(47,174,143,0.36);
 }
 .tile:active {
-  background: rgba(142,68,173,0.34);
+  background: rgba(47,174,143,0.14);
 }
 .tile label {
-  color: #F4ECF7;
+  color: #1D2421;
   font-weight: 700;
 }
 .tile .desc {
-  color: #B9A8C7;
+  color: #66736D;
   font-size: 10px;
   font-weight: 400;
 }
 .footer {
-  color: #B9A8C7;
+  color: #66736D;
   font-size: 11px;
 }
 '''
 
 class ControlCenter(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title='Onion Control Center')
+        super().__init__(application=app, title='Ming Control Center')
         self.set_default_size(760, 520)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_name('onion-control-center')
+        self.set_icon_name('ming-control-center')
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
@@ -2200,7 +2812,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         root.set_border_width(24)
         self.add(root)
 
-        title = Gtk.Label(label='Onion 设置')
+        title = Gtk.Label(label='Ming 设置')
         title.set_halign(Gtk.Align.START)
         title.get_style_context().add_class('title')
         root.pack_start(title, False, False, 0)
@@ -2226,7 +2838,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Onion OS 26.2.0 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.3.0 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -2268,28 +2880,28 @@ class App(Gtk.Application):
 if __name__ == '__main__':
     app = App()
     app.run(sys.argv)
-ONIONCONTROL
-    chmod +x /usr/local/bin/onion-control-center
+MINGCONTROL
+    chmod +x /usr/local/bin/ming-control-center
 
-    cat > /usr/share/applications/onion-control-center.desktop << 'CONTROLAPP'
+    cat > /usr/share/applications/ming-control-center.desktop << 'CONTROLAPP'
 [Desktop Entry]
-Name=Onion 设置
-Name[zh_CN]=Onion 设置
-Comment=Onion OS control center
-Exec=/usr/local/bin/onion-control-center
-Icon=onion-control-center
+Name=Ming 设置
+Name[zh_CN]=Ming 设置
+Comment=Ming OS control center
+Exec=/usr/local/bin/ming-control-center
+Icon=ming-control-center
 Terminal=false
 Type=Application
 Categories=Settings;System;
 StartupNotify=true
 CONTROLAPP
 
-    cat > /usr/share/applications/onion-files.desktop << 'FILESAPP'
+    cat > /usr/share/applications/ming-files.desktop << 'FILESAPP'
 [Desktop Entry]
-Name=Onion 文件
-Name[zh_CN]=Onion 文件
-Comment=Browse files in Onion OS
-Exec=/usr/local/bin/onion-files
+Name=Ming 文件
+Name[zh_CN]=Ming 文件
+Comment=Browse files in Ming OS
+Exec=/usr/local/bin/ming-files
 Icon=files-icon
 Terminal=false
 Type=Application
@@ -2297,88 +2909,61 @@ Categories=System;FileManager;
 StartupNotify=true
 FILESAPP
 
-    cat > /usr/share/applications/onion-terminal.desktop << 'TERMAPP'
+    cat > /usr/share/applications/ming-terminal.desktop << 'TERMAPP'
 [Desktop Entry]
-Name=Onion 终端
-Name[zh_CN]=Onion 终端
-Comment=Onion OS terminal
-Exec=/usr/local/bin/onion-terminal
-Icon=onion-terminal
+Name=Ming 终端
+Name[zh_CN]=Ming 终端
+Comment=Ming OS terminal
+Exec=/usr/local/bin/ming-terminal
+Icon=ming-terminal
 Terminal=false
 Type=Application
 Categories=System;TerminalEmulator;
 StartupNotify=true
 TERMAPP
 
-    cat > /usr/share/applications/onion-status-center.desktop << 'STATUSAPP'
+    cat > /usr/share/applications/ming-status-center.desktop << 'STATUSAPP'
 [Desktop Entry]
-Name=Onion 状态中心
-Name[zh_CN]=Onion 状态中心
+Name=Ming 状态中心
+Name[zh_CN]=Ming 状态中心
 Comment=Network, sound, power, time, and session actions
 Comment[zh_CN]=网络、声音、电源、时间和退出
-Exec=/usr/local/bin/onion-status-center
-Icon=onion-control-center
+Exec=/usr/local/bin/ming-status-center
+Icon=ming-control-center
 Terminal=false
 Type=Application
 Categories=Settings;System;Utility;
 StartupNotify=true
 STATUSAPP
 
-    cat > /usr/share/applications/onion-app-library.desktop << 'APPLIBAPP'
+    cat > /usr/share/applications/ming-app-library.desktop << 'APPLIBAPP'
 [Desktop Entry]
-Name=Onion 应用库
-Name[zh_CN]=Onion 应用库
+Name=Ming 应用库
+Name[zh_CN]=Ming 应用库
 Comment=Search, open, and organize installed apps
 Comment[zh_CN]=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/onion-app-library
-Icon=onion-app-library
+Exec=/usr/local/bin/ming-app-library
+Icon=ming-app-library
 Terminal=false
 Type=Application
 Categories=Utility;System;
 StartupNotify=true
 APPLIBAPP
 
-    cp /usr/share/applications/onion-control-center.desktop "/home/${ONION_USER}/.local/share/applications/"
-    cp /usr/share/applications/onion-files.desktop "/home/${ONION_USER}/.local/share/applications/"
-    cp /usr/share/applications/onion-terminal.desktop "/home/${ONION_USER}/.local/share/applications/"
-    cp /usr/share/applications/onion-status-center.desktop "/home/${ONION_USER}/.local/share/applications/"
-    cp /usr/share/applications/onion-app-library.desktop "/home/${ONION_USER}/.local/share/applications/"
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.local/share/applications"
+    cp /usr/share/applications/ming-control-center.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-files.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-terminal.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-status-center.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-app-library.desktop "/home/${MING_USER}/.local/share/applications/"
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications"
 }
 
 # ======================== WPS 兜底安装 ========================
 
 ensure_wps_office() {
+    mkdir -p "/home/${MING_USER}/Desktop" "/usr/share/applications"
     if command -v wps >/dev/null 2>&1 || dpkg -s wps-office >/dev/null 2>&1; then
-        return 0
-    fi
-
-    local wps_page="https://linux.wps.cn/"
-    local wps_url=""
-    local wps_deb="/tmp/wps-office.deb"
-
-    wps_url=$(curl -fsSL "${wps_page}" 2>/dev/null \
-        | grep -oE "https://wps-linux-personal\.wpscdn\.cn/wps/download/ep/[^']+_amd64\.deb" \
-        | head -n1 || true)
-    if [[ -z "${wps_url}" ]]; then
-        wps_url="https://wps-linux-personal.wpscdn.cn/wps/download/ep/Linux2023/26885/wps-office_12.1.2.26885.AK.preread.sw.Personal_715971_amd64.deb"
-    fi
-
-    local wps_path timestamp token
-    wps_path="${wps_url#https://wps-linux-personal.wpscdn.cn}"
-    timestamp="$(date +%s)"
-    token="$(printf '7f8faaaa468174dc1c9cd62e5f218a5b%s%s' "${wps_path}" "${timestamp}" | md5sum | awk '{print $1}')"
-    wps_url="${wps_url}?t=${timestamp}&k=${token}"
-
-    if ! wget -q --show-progress -O "${wps_deb}" "${wps_url}" 2>/dev/null; then
-        return 0
-    fi
-
-    apt install -y "${wps_deb}" || apt install -y -f || true
-    rm -f "${wps_deb}"
-
-    mkdir -p "/home/${ONION_USER}/Desktop" "/usr/share/applications"
-    cat > /usr/share/applications/wps-office.desktop << 'WPSDESKTOP'
+        cat > /usr/share/applications/wps-office.desktop << 'WPSDESKTOP'
 [Desktop Entry]
 Name=WPS Office
 Name[zh_CN]=WPS Office
@@ -2390,17 +2975,25 @@ Type=Application
 Categories=Office;WordProcessor;Spreadsheet;Presentation;
 StartupNotify=true
 WPSDESKTOP
-    cp /usr/share/applications/wps-office.desktop "/home/${ONION_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-    chmod +x "/home/${ONION_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        cp /usr/share/applications/wps-office.desktop "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        chmod +x "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        return 0
+    fi
+
+    if [[ -x /usr/local/bin/ming-install-wps && -f /usr/share/applications/ming-install-wps.desktop ]]; then
+        cp /usr/share/applications/ming-install-wps.desktop "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+        chmod +x "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
+    fi
 }
 
 # ======================== Picom 用户级配置 ========================
 
 configure_picom() {
-    mkdir -p /home/${ONION_USER}/.config/picom
-    cat > /home/${ONION_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Onion OS 26.2.0 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
+    mkdir -p /home/${MING_USER}/.config/picom
+    cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
+# Ming OS 26.3.0 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
 # 说明：Debian 仓库的 picom 主线版不支持 jonaburg/FT-Labs
 #       分支的 animations 块；强行写入会导致配置解析失败、合成器拒绝启动，
 #       这正是历史版本“美化没生效”的元凶之一。这里只用主线支持的特性：
@@ -2551,16 +3144,16 @@ detect-client-opacity = true;
 detect-transient = true;
 PICOMLOWMEM
 
-    chown -R "${ONION_USER}:${ONION_USER}" /home/${ONION_USER}/.config/picom
+    chown -R "${MING_USER}:${MING_USER}" /home/${MING_USER}/.config/picom
 }
 
 # ======================== 通知降噪 ========================
 
 configure_notification_filter() {
-    mkdir -p /home/${ONION_USER}/.config/xfce4
-    cat > "/home/${ONION_USER}/.config/xfce4/xfce4-notifyd.xml" << 'NOTIFYCFG'
+    mkdir -p /home/${MING_USER}/.config/xfce4
+    cat > "/home/${MING_USER}/.config/xfce4/xfce4-notifyd.xml" << 'NOTIFYCFG'
 <?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-notifyd">
+<channel name="xfce4-notifyd" version="1.0">
   <property name="notify-location" type="uint" value="3"/>
   <property name="theme" type="string" value="Smoke"/>
   <property name="initial-opacity" type="double" value="0.85"/>
@@ -2583,8 +3176,8 @@ NOTIFYCFG
 # ======================== Thunar 右键菜单 ========================
 
 configure_thunar_uca() {
-    mkdir -p /home/${ONION_USER}/.config/Thunar
-    cat > "/home/${ONION_USER}/.config/Thunar/uca.xml" << 'UCACFG'
+    mkdir -p /home/${MING_USER}/.config/Thunar
+    cat > "/home/${MING_USER}/.config/Thunar/uca.xml" << 'UCACFG'
 <?xml version="1.0" encoding="UTF-8"?>
 <actions>
 <action>
@@ -2631,7 +3224,7 @@ UCACFG
 # ======================== 桌面快捷方式 (极简) ========================
 
 setup_desktop_shortcuts() {
-    local desktop_dir="/home/${ONION_USER}/Desktop"
+    local desktop_dir="/home/${MING_USER}/Desktop"
     mkdir -p "${desktop_dir}"
 
     # 仅保留 3 个核心快捷方式
@@ -2661,13 +3254,13 @@ Categories=Network;WebBrowser;
 StartupNotify=true
 FFDESKTOP
 
-    cat > "${desktop_dir}/onion-app-library.desktop" << APPLIBDESKTOP
+    cat > "${desktop_dir}/ming-app-library.desktop" << APPLIBDESKTOP
 [Desktop Entry]
 Name=应用库
-Name[zh_CN]=Onion 应用库
+Name[zh_CN]=Ming 应用库
 Comment=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/onion-app-library
-Icon=onion-app-library
+Exec=/usr/local/bin/ming-app-library
+Icon=ming-app-library
 Terminal=false
 Type=Application
 Categories=Utility;System;
@@ -2678,7 +3271,7 @@ APPLIBDESKTOP
 [Desktop Entry]
 Name=AI 助手
 Name[zh_CN]=Garlic Claw
-Comment=Onion OS AI 助手
+Comment=Ming OS AI 助手
 Exec=xfce4-terminal --title="Garlic Claw" -e "garlic-claw"
 Icon=utilities-terminal
 Terminal=false
@@ -2687,91 +3280,165 @@ Categories=System;AI;
 StartupNotify=true
 GCDESKTOP
 
-    chown -R "${ONION_USER}:${ONION_USER}" "${desktop_dir}"
+    chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
     chmod +x "${desktop_dir}"/*.desktop
 }
 
 # ======================== 发布说明与给网站 AI 的提示词 ========================
 
 deploy_release_readme() {
-    local doc_dir="/usr/share/doc/onion-os"
+    local doc_dir="/usr/share/doc/ming-os"
     mkdir -p "${doc_dir}"
 
-    cat > "${doc_dir}/ONION_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Onion OS 26.2.0 发布改动与网站素材说明
+    cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
+# Ming OS 26.3.0 Release And Website Handoff
 
-## 本次版本定位
+This document is the current website and AI handoff source for Ming OS. Use `26.3.0` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
-Onion OS 26.2.0 是面向正式用户发布前的维护与体验升级版本。重点解决 ISO 启动、低内存微信、OTA 更新、桌面辨识度、图形化操作入口和安装后易用性问题。
+## Positioning
 
-## 核心改动摘要
+Ming OS 26.3.0 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
 
-- 系统底座升级到 Debian 13 / Trixie。
-- 修复 ISO 启动可能停在 `Welcome to GRUB` 的问题，BIOS/UEFI 回退引导会加载 Onion OS 菜单。
-- 微信改为腾讯官方 Linux deb，提供 `onion-wechat` 低内存启动包装器和网页版微信入口。
-- 2GB 内存优化：zram、earlyoom、低内存 Picom 回退、Dock 动效降级、微信低缓存和低优先级启动。
-- 应用商店改为星火应用商店，避免 GNOME Software/Flatpak 在低内存设备上带来额外后台负担。
-- Xfce 页面重构为 Onion 风格：Onion Glass 主题、Dock、控制中心、品牌化图标、壁纸和首次启动引导。
-- 减少命令依赖：常见操作集中到 `Onion 设置` 按钮，包括更新、网络、微信、应用商店、桌面整理、所有磁盘、内存策略、声音、电源、外观。
-- 新增 `Onion 应用库`：像手机应用库/Launchpad 一样搜索并打开已安装软件。
-- 新增安卓式桌面文件夹：应用、系统、上网、办公、影音、游戏。新安装应用会自动同步到桌面文件夹。
-- 新增 `所有磁盘`：用一个入口聚合个人文件、桌面、下载、文档、系统盘和已挂载数据盘，缓解 C/D 盘式空间焦虑。
-- 增强 OTA 客户端：更新清单 JSON 校验、下载重试、SHA256/大小校验、未上传 ISO 时不会错误缓存更新。
-- 新增安装后免登录：LightDM 会自动选择 `onion` 或第一个普通用户进入桌面。
+This is the version to use when producing:
 
-## 用户沟通口径
+- website copy;
+- download cards;
+- release notes;
+- OTA descriptions;
+- social posts;
+- screenshots and promo art captions.
 
-2GB 内存可以运行 Onion OS，但微信好友和群组很多时，主要压力来自微信本身。Onion OS 会尽量保护系统流畅：压缩内存、降低微信优先级、限制缓存、必要时建议使用网页版微信。若用户账号群组特别多，2GB 设备仍建议优先网页版微信或升级内存。
+## Public Links
 
-## 链接素材
+- Official website: `https://scallion.uno`
+- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
+- ISO SHA256: `f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25`
+- ISO size: `2568552448`
+- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- GitHub repo: `https://github.com/bzm2008/onion-os`
+- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
 
-- 官网：`https://scallion.uno`
-- OTA API：`https://scallion.uno/api/onion-update/check?version=26.1.0&channel=stable`
-- ISO 下载链接：`https://scallion.uno/iso/onion-os-26.2.0-home-amd64.iso`
-- GitHub 仓库：`https://github.com/bzm2008/onion-os`
-- 推荐页面主标题：`Onion OS 26.2.0`
-- 推荐副标题：`给老旧电脑和中文用户的按钮化 Linux 桌面`
+## Feature Summary
 
-注意：ISO 文件上传并校验完成前，OTA 会返回 `pending_artifact`，网页上的下载按钮应支持“即将开放下载”或“复制 OTA 检查链接”的状态。
+- Debian 13 / Trixie base.
+- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2630`.
+- Fixes the 26.2.5 `invalid magic number` / `you need to load the kernel first` class of failures.
+- Live/Ventoy auto-login as `ming`.
+- Ming wallpaper applies by default.
+- Main Ming icons no longer use white-background AI PNG overrides.
+- Ming Security Manager opens through a stable wrapper and writes readable logs.
+- Installed system identity is repaired to Ming OS after installation.
+- Desktop update button uses a clear GUI flow.
+- Low-memory WeChat strategy: zram, earlyoom, cache cleanup, low-priority launcher, Web WeChat fallback.
+- Android-like desktop app folders and automatic app visibility.
+- `All Disks` entry combines common user folders and mounted disks to reduce C/D drive anxiety.
+- HDD/SSD runtime tuning for schedulers, read-ahead, and dirty writeback.
+- Dock-only desktop and Ming Settings reduce reliance on terminal commands.
 
-## 给其他 AI 制作 Scallion 网站 Onion 产品介绍页的提示词
+## Product Narrative
 
-你是一个资深产品网页设计与前端实现 AI。请为 Scallion 官网制作 `Onion OS 26.2.0` 产品介绍页，页面要面向普通中文用户和老旧电脑用户，不要做泛泛的 Linux 技术页。
+The release should be described as:
 
-页面目标：
-- 让用户理解 Onion OS 是一个基于 Debian 13/Trixie 的中文桌面系统。
-- 强调正式版重点：修复 ISO 启动、低内存微信优化、OTA 更新、按钮化设置、应用库、安卓式桌面文件夹、所有磁盘入口、免登录。
-- 提供清晰的 ISO 下载入口、GitHub 链接和 OTA 状态说明。
+- stable enough to hand to real users;
+- visually branded enough to look like a system, not a theme pack;
+- simple enough for users who do not want to remember command lines;
+- pragmatic enough to stay useful on old hardware.
 
-必须包含的链接：
-- ISO 下载：`https://scallion.uno/iso/onion-os-26.2.0-home-amd64.iso`
-- GitHub：`https://github.com/bzm2008/onion-os`
-- OTA 检查：`https://scallion.uno/api/onion-update/check?version=26.1.0&channel=stable`
+It should not be sold as a minimal Linux demo. It is a complete desktop with:
 
-页面结构建议：
-- 首屏：标题 `Onion OS 26.2.0`，副标题 `给老旧电脑和中文用户的按钮化 Linux 桌面`，按钮 `下载 ISO`、`查看 GitHub`、`检查 OTA`。
-- 第二屏：三张重点卡片，分别是 `2GB 内存也尽量顺滑`、`不用记命令`、`像手机一样整理应用`。
-- 功能区：官方微信低内存模式、星火应用商店、Onion 设置、Onion 应用库、所有磁盘、OTA 更新。
-- 说明区：明确提示 2GB 机器可以跑系统，但群组很多的微信仍可能吃内存，推荐网页版微信作为兜底。
-- 下载区：展示 ISO 文件名 `onion-os-26.2.0-home-amd64.iso`，并支持 ISO 未就绪时的 `即将开放下载` 状态。
+- boot repair;
+- auto-login;
+- low-memory WeChat support;
+- update tooling;
+- installer branding;
+- desktop organization;
+- storage simplification;
+- and a control center for common actions.
 
-设计风格：
-- 避免原版 Xfce 或 Linux Mint 视觉感。
-- 使用 Onion OS 特色的深色玻璃、青绿色和紫色点缀，但不要整页单一紫色。
-- 面向“数字难民”，文案要短、直接、像按钮说明，不要堆命令。
-- 首屏要让用户一眼看到产品名、下载入口和适用人群。
+## GitHub Download Note
 
-实现要求：
-- 页面必须响应式，手机和桌面都能读。
-- 下载按钮若 ISO 返回非 ISO 内容或未就绪，应显示友好状态，不要让用户下载错误文件。
-- 不要展示服务器密码、SSH、运维私密信息。
+The complete ISO is available on the official website. GitHub Release uses split assets:
+
+```text
+onion-os-26.2.6-r2-home-amd64.iso.part01
+onion-os-26.2.6-r2-home-amd64.iso.part02
+onion-os-26.2.6-r2-home-amd64.iso.sha256
+SHA256SUMS
+```
+
+Merge on Linux/macOS/WSL:
+
+```bash
+cat onion-os-26.2.6-r2-home-amd64.iso.part01 onion-os-26.2.6-r2-home-amd64.iso.part02 > onion-os-26.2.6-r2-home-amd64.iso
+sha256sum -c onion-os-26.2.6-r2-home-amd64.iso.sha256
+```
+
+Merge on Windows PowerShell:
+
+```powershell
+cmd /c copy /b onion-os-26.2.6-r2-home-amd64.iso.part01+onion-os-26.2.6-r2-home-amd64.iso.part02 onion-os-26.2.6-r2-home-amd64.iso
+Get-FileHash onion-os-26.2.6-r2-home-amd64.iso -Algorithm SHA256
+```
+
+## Prompt For Another AI Building The Scallion Product Page
+
+You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.0`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
+
+Required links:
+
+- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
+- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
+- GitHub repo: `https://github.com/bzm2008/onion-os`
+- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+
+Page goals:
+
+- Explain that Ming OS is a Debian 13 / Trixie based Chinese desktop system.
+- Make `Ming OS 26.3.0` the visible product name in the first viewport.
+- Highlight boot reliability, Live auto-login, low-memory WeChat support, graphical update button, Ming Settings, Android-like app folders, All Disks, and the Ming-branded installer.
+- Tell users clearly that 2GB RAM can run the OS, but a WeChat account with many friends and groups may still be heavy; recommend Web WeChat as the fallback.
+- Provide a clear ISO download button, GitHub button, and OTA status area.
+
+Suggested message hierarchy:
+
+- first show the product name and official download path;
+- then show the boot and desktop improvements;
+- then show the user-facing buttons and shortcuts;
+- then show the compatibility and low-memory guidance.
+
+Suggested structure:
+
+- Hero: title `Ming OS 26.3.0`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
+- Trust strip: SHA256, size, release date, OTA ready status.
+- Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
+- Feature section: WeChat low-memory mode, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Security Manager, Ming installer.
+- Download section: show official full ISO and GitHub split download instructions.
+- Compatibility section: Rufus ISO/DD, Ventoy/Live, BIOS/UEFI, VirtualBox.
+
+Design direction:
+
+- Avoid stock Xfce, Linux Mint, or generic distro visuals.
+- Use Ming OS identity: light paper-like surfaces, one restrained jade-green accent, clear icons, and dense but readable feature blocks.
+- Keep language short and concrete. This page is for users who want buttons and confidence, not command-heavy troubleshooting.
+- Do not show server passwords, SSH commands, internal deployment notes, or private operations details.
+
+## Feature Language To Reuse
+
+- boot more reliably;
+- auto-login in Live mode;
+- use buttons instead of commands;
+- group apps like a phone launcher;
+- keep files and disks easy to find;
+- make updates clear and checkable;
+- keep the system branded as Ming OS after installation;
+- protect low-memory machines from heavy WeChat sessions.
 RELEASEREADME
 }
 
 # ======================== Xfce 会话自启动 ========================
 
 configure_autostart() {
-    local autostart_dir="/home/${ONION_USER}/.config/autostart"
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
 
     # Picom 合成器 (GLX自动探测，老旧GPU回退xrender)
@@ -2780,7 +3447,7 @@ configure_autostart() {
 Type=Application
 Name=Picom Compositor
 Comment=窗口合成器
-Exec=/usr/local/bin/onion-picom
+Exec=/usr/local/bin/ming-picom
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
@@ -2835,12 +3502,12 @@ X-GNOME-Autostart-enabled=true
 POLKITAUTO
 
     # 首次启动配置向导
-    cat > "${autostart_dir}/onion-first-run.desktop" << FIRSTRUN
+    cat > "${autostart_dir}/ming-first-run.desktop" << FIRSTRUN
 [Desktop Entry]
 Type=Application
-Name=Onion First Setup
+Name=Ming First Setup
 Comment=首次启动配置
-Exec=/usr/local/bin/onion-first-run.sh
+Exec=/usr/local/bin/ming-first-run.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
@@ -2850,36 +3517,59 @@ FIRSTRUN
     cat > "${autostart_dir}/calamares-live.desktop" << CALAMARES
 [Desktop Entry]
 Type=Application
-Name=Install Onion OS
+Name=Install Ming OS
+Name[zh_CN]=安装 Ming OS
 Comment=系统安装程序
-Exec=/usr/local/bin/onion-live-installer.sh
+Exec=/usr/local/bin/ming-live-installer.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 CALAMARES
 
+    rm -f \
+        "/home/${MING_USER}/Desktop/calamares.desktop" \
+        "/home/${MING_USER}/Desktop/install-debian.desktop" \
+        "/home/${MING_USER}/Desktop/Install Debian.desktop" \
+        "/home/${MING_USER}/Desktop/安装 Debian.desktop" \
+        "/etc/skel/Desktop/calamares.desktop" \
+        "/etc/skel/Desktop/install-debian.desktop" \
+        "/etc/skel/Desktop/Install Debian.desktop" \
+        "/etc/skel/Desktop/安装 Debian.desktop" 2>/dev/null || true
+
     # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用
-    cat > "${autostart_dir}/onion-desktop-organizer.desktop" << DESKORGAUTO
+    cat > "${autostart_dir}/ming-desktop-organizer.desktop" << DESKORGAUTO
 [Desktop Entry]
 Type=Application
-Name=Onion Desktop Organizer
-Comment=自动把新安装应用放入桌面文件夹
-Exec=sh -c "sleep 5 && /usr/local/bin/onion-desktop-organizer --watch"
+Name=Ming Desktop Organizer
+Comment=同步新安装应用到 Ming 手机式桌面
+Exec=sh -c "sleep 5 && /usr/local/bin/ming-desktop-organizer --watch"
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=5
 DESKORGAUTO
 
-    chown -R "${ONION_USER}:${ONION_USER}" "${autostart_dir}"
+    cat > "${autostart_dir}/ming-phone-desktop.desktop" << PHONEDESKTOPAUTO
+[Desktop Entry]
+Type=Application
+Name=Ming Phone Desktop
+Comment=手机式桌面图标和拖拽文件夹
+Exec=sh -c "sleep 3 && /usr/local/bin/ming-phone-desktop"
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+PHONEDESKTOPAUTO
+
+    chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}"
 }
 
 # ======================== 首次启动欢迎引导 ========================
 
 setup_welcome_wizard() {
-    cat > /usr/local/bin/onion-welcome << 'WELCOMEPY'
+    cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'
 #!/usr/bin/env python3
-# Onion OS 26.2.0 首次启动欢迎引导
+# Ming OS 26.3.0 首次启动欢迎引导
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -2888,13 +3578,13 @@ import os
 import subprocess
 import sys
 
-WELCOME_DONE = os.path.expanduser('~/.config/onion-os/welcome-done')
+WELCOME_DONE = os.path.expanduser('~/.config/ming-os/welcome-done')
 if os.path.exists(WELCOME_DONE):
     sys.exit(0)
 
 class WelcomeWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
-        Gtk.ApplicationWindow.__init__(self, application=app, title='欢迎使用 Onion OS')
+        Gtk.ApplicationWindow.__init__(self, application=app, title='欢迎使用 Ming OS')
         self.set_default_size(600, 480)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_resizable(False)
@@ -2912,16 +3602,16 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         self.add(self.main_box)
 
         css = b'''
-        window { background-color: #1a0a2e; border-radius: 16px; }
-        .welcome-title { font-size: 28px; font-weight: bold; color: #E8DAEF; margin-top: 30px; }
-        .welcome-subtitle { font-size: 16px; color: #BB8FCE; margin-top: 10px; margin-bottom: 20px; }
+        window { background-color: #F6F8F6; border-radius: 16px; }
+        .welcome-title { font-size: 28px; font-weight: bold; color: #1D2421; margin-top: 30px; }
+        .welcome-subtitle { font-size: 16px; color: #4F625A; margin-top: 10px; margin-bottom: 20px; }
         .big-button { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                      background-color: #8E44AD; color: white; border: none; min-height: 52px; }
-        .big-button:hover { background-color: #9B59B6; }
+                      background-color: #1FA89E; color: white; border: none; min-height: 52px; }
+        .big-button:hover { background-color: #1FA89E; }
         .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                          background-color: rgba(142,68,173,0.3); color: #E8DAEF; border: 1px solid #8E44AD; min-height: 52px; }
-        .step-label { font-size: 14px; color: #D7BDE2; margin-top: 16px; }
-        .done-icon { font-size: 64px; color: #9B59B6; }
+                          background-color: rgba(255,255,255,0.84); color: #1D2421; border: 1px solid rgba(31,98,84,0.18); min-height: 52px; }
+        .step-label { font-size: 14px; color: #4F625A; margin-top: 16px; }
+        .done-icon { font-size: 64px; color: #1FA89E; }
         '''
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -2941,11 +3631,11 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         title = Gtk.Label()
-        title.set_markup('<span size="36000" weight="bold" foreground="#E8DAEF">🎉 欢迎使用 Onion OS</span>')
+        title.set_markup('<span size="36000" weight="bold" foreground="#D4F7F1">🎉 欢迎使用 Ming OS</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="16000" foreground="#BB8FCE">让电脑更简单，让人人都会用</span>')
+        subtitle.set_markup('<span size="16000" foreground="#6DCFC4">让电脑更简单，让人人都会用</span>')
         subtitle.set_margin_bottom(30)
 
         btn = Gtk.Button(label='开始设置')
@@ -2954,7 +3644,7 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         btn.connect('clicked', lambda w: self.next_step())
 
         dots = Gtk.Label()
-        dots.set_markup('<span size="12000" foreground="#9B59B6">● ○ ○</span>')
+        dots.set_markup('<span size="12000" foreground="#1FA89E">● ○ ○</span>')
         dots.set_margin_top(24)
 
         vbox.pack_start(title, False, False, 0)
@@ -2970,11 +3660,11 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         title = Gtk.Label()
-        title.set_markup('<span size="24000" weight="bold" foreground="#E8DAEF">📶 连接到网络</span>')
+        title.set_markup('<span size="24000" weight="bold" foreground="#D4F7F1">📶 连接到网络</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="14000" foreground="#BB8FCE">Wi-Fi 可以让您上网、更新系统和下载应用</span>')
+        subtitle.set_markup('<span size="14000" foreground="#6DCFC4">Wi-Fi 可以让您上网、更新系统和下载应用</span>')
         subtitle.set_margin_bottom(20)
 
         btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -2991,7 +3681,7 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         skip_btn.connect('clicked', lambda w: self.next_step())
 
         dots = Gtk.Label()
-        dots.set_markup('<span size="12000" foreground="#9B59B6">○ ● ○</span>')
+        dots.set_markup('<span size="12000" foreground="#1FA89E">○ ● ○</span>')
         dots.set_margin_top(24)
 
         btn_box.pack_start(wifi_btn, False, False, 0)
@@ -3009,24 +3699,24 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         icon = Gtk.Label()
-        icon.set_markup('<span size="48000" foreground="#9B59B6">✨</span>')
+        icon.set_markup('<span size="48000" foreground="#1FA89E">✨</span>')
         icon.set_margin_bottom(10)
 
         title = Gtk.Label()
-        title.set_markup('<span size="28000" weight="bold" foreground="#E8DAEF">一切就绪！</span>')
+        title.set_markup('<span size="28000" weight="bold" foreground="#D4F7F1">一切就绪！</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="14000" foreground="#BB8FCE">您可以随时在底部 Dock 找到常用应用</span>')
+        subtitle.set_markup('<span size="14000" foreground="#6DCFC4">您可以随时在底部 Dock 找到常用应用</span>')
         subtitle.set_margin_bottom(20)
 
-        btn = Gtk.Button(label='开始使用 Onion OS')
+        btn = Gtk.Button(label='开始使用 Ming OS')
         btn.get_style_context().add_class('big-button')
         btn.set_size_request(300, 56)
         btn.connect('clicked', lambda w: self.finish())
 
         dots = Gtk.Label()
-        dots.set_markup('<span size="12000" foreground="#9B59B6">○ ○ ●</span>')
+        dots.set_markup('<span size="12000" foreground="#1FA89E">○ ○ ●</span>')
         dots.set_margin_top(24)
 
         vbox.pack_start(icon, False, False, 0)
@@ -3069,25 +3759,157 @@ if __name__ == '__main__':
     app.run()
 WELCOMEPY
 
-    chmod +x /usr/local/bin/onion-welcome
+    chmod +x /usr/local/bin/ming-welcome
 
-    mkdir -p "/home/${ONION_USER}/.config/autostart"
-    cat > "/home/${ONION_USER}/.config/autostart/onion-welcome.desktop" << WELCOMEAUTO
+    mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > "/home/${MING_USER}/.config/autostart/ming-welcome.desktop" << WELCOMEAUTO
 [Desktop Entry]
 Type=Application
-Name=Onion OS Welcome
-Comment=Onion OS 首次启动引导
-Exec=/usr/local/bin/onion-welcome
+Name=Ming OS Welcome
+Comment=Ming OS 首次启动引导
+Exec=/usr/local/bin/ming-welcome
 X-GNOME-Autostart-enabled=true
 WELCOMEAUTO
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/autostart/onion-welcome.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-welcome.desktop"
+}
+
+# ======================== 首次开机账户向导 (OOBE) ========================
+# 极简用户名/密码设置 + 明显的"跳过"按钮。无论设置或跳过，都保持 lightdm
+# 免密自动登录开启，确保跳过后后续开机绝不出现密码框（修复历史恶性 Bug）。
+setup_account_oobe() {
+    cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'
+#!/usr/bin/env bash
+# Ming OS 首次开机账户向导 (OOBE)
+set -uo pipefail
+
+MARKER="${HOME}/.config/ming-os/oobe-account-done"
+[[ -f "${MARKER}" ]] && exit 0
+
+# 仅在已安装系统的首次开机运行；Live/安装器会话中不弹出（那里只跑 Calamares）
+if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null \
+   || [ -f /.disk/info ] || [ -d /lib/live/mount/medium ]; then
+    exit 0
+fi
+
+# 等桌面与授权代理就绪
+sleep 4
+
+CUR_USER="$(whoami)"
+
+dialog() {
+    if command -v yad >/dev/null 2>&1; then yad "$@"; else zenity "$@"; fi
+}
+
+# 始终先确保免密自动登录已就位（双保险，独立于用户选择）
+ensure_autologin() {
+    # 入 autologin / nopasswdlogin 组
+    pkexec /bin/bash -c "
+        for g in autologin nopasswdlogin; do
+            getent group \$g >/dev/null 2>&1 || groupadd -r \$g 2>/dev/null || true
+            usermod -aG \$g '${CUR_USER}' 2>/dev/null || true
+        done
+        mkdir -p /etc/lightdm/lightdm.conf.d
+        cat > /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf <<EOF
+[Seat:*]
+autologin-user=${CUR_USER}
+autologin-user-timeout=0
+autologin-session=xfce
+user-session=xfce
+greeter-session=lightdm-gtk-greeter
+allow-guest=false
+EOF
+        chmod 0644 /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf
+    " 2>/dev/null || true
+}
+
+# 欢迎 + 选择：设置账户 / 跳过
+CHOICE=$(dialog --title="欢迎使用 Ming OS" \
+    --text="<b>欢迎使用 Ming OS</b>\n\n您可以为本机设置一个登录密码（用于安装软件等需要授权的操作），\n也可以直接跳过——跳过后开机将自动进入桌面，无需输入任何密码。" \
+    --width=480 --height=200 \
+    --button="设置密码:0" \
+    --button="跳过 (Skip):2" 2>/dev/null)
+RC=$?
+
+if [[ "${RC}" != "0" ]]; then
+    # 跳过：保证免密自动登录，写标记，结束
+    ensure_autologin
+    mkdir -p "$(dirname "${MARKER}")"
+    echo "skipped" > "${MARKER}"
+    dialog --title="已跳过" --text="已为您启用免密自动登录。\n开机将直接进入桌面。" \
+        --width=380 --button="好的:0" 2>/dev/null || true
+    exit 0
+fi
+
+# 设置密码流程（显示名 + 两次密码）
+FORM=$(dialog --form --title="设置账户" \
+    --text="为本机设置一个密码（留空则保持免密）。" \
+    --field="显示名称:" \
+    --field="密码:H" \
+    --field="确认密码:H" \
+    --width=440 \
+    "Ming 用户" "" "" 2>/dev/null)
+FRC=$?
+
+if [[ "${FRC}" != "0" ]]; then
+    # 关闭表单也视为跳过，仍保证免密
+    ensure_autologin
+    mkdir -p "$(dirname "${MARKER}")"
+    echo "skipped" > "${MARKER}"
+    exit 0
+fi
+
+FULLNAME=$(echo "${FORM}" | cut -d'|' -f1)
+PW1=$(echo "${FORM}" | cut -d'|' -f2)
+PW2=$(echo "${FORM}" | cut -d'|' -f3)
+
+ensure_autologin
+
+# 设置显示名
+if [[ -n "${FULLNAME}" ]]; then
+    pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
+fi
+
+# 设置密码（用于 sudo/解锁；登录仍自动免密）
+if [[ -n "${PW1}" ]]; then
+    if [[ "${PW1}" != "${PW2}" ]]; then
+        dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
+            --width=380 --button="好的:0" 2>/dev/null || true
+    else
+        echo -e "${PW1}\n${PW1}" | pkexec passwd "${CUR_USER}" 2>/dev/null \
+            || pkexec /bin/bash -c "echo '${CUR_USER}:${PW1}' | chpasswd" 2>/dev/null || true
+    fi
+fi
+
+mkdir -p "$(dirname "${MARKER}")"
+echo "configured" > "${MARKER}"
+
+dialog --title="完成" \
+    --text="账户设置完成。\n开机仍会自动进入桌面，无需输入密码。" \
+    --width=380 --button="开始使用:0" 2>/dev/null || true
+exit 0
+OOBEACCOUNT
+    chmod +x /usr/local/bin/ming-oobe-account
+
+    # 自启动：在 Garlic Claw 欢迎之前运行（账户优先）
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
+    mkdir -p "${autostart_dir}"
+    cat > "${autostart_dir}/ming-oobe-account.desktop" << OOBEAUTO
+[Desktop Entry]
+Type=Application
+Name=Ming OS Account Setup
+Comment=首次开机账户向导
+Exec=/usr/local/bin/ming-oobe-account
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Applications
+OOBEAUTO
+    chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}/ming-oobe-account.desktop"
 }
 
 # ======================== 精简右键菜单 ========================
 
 configure_simplified_menus() {
-    mkdir -p "/home/${ONION_USER}/.config/Thunar"
-    cat > "/home/${ONION_USER}/.config/Thunar/uca.xml" << 'UCACFG'
+    mkdir -p "/home/${MING_USER}/.config/Thunar"
+    cat > "/home/${MING_USER}/.config/Thunar/uca.xml" << 'UCACFG'
 <?xml version="1.0" encoding="UTF-8"?>
 <actions>
 <action>
@@ -3127,16 +3949,320 @@ configure_simplified_menus() {
 </action>
 </actions>
 UCACFG
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/Thunar/uca.xml"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/Thunar/uca.xml"
 
     # 桌面采用安卓式文件夹分组，不再清空应用入口。
-    runuser -u "${ONION_USER}" -- /usr/local/bin/onion-desktop-organizer >/tmp/onion-desktop-organizer.log 2>&1 || true
+    runuser -u "${MING_USER}" -- /usr/local/bin/ming-desktop-organizer >/tmp/ming-desktop-organizer.log 2>&1 || true
 }
 
 # ======================== Live 安装器脚本 ========================
 
 deploy_live_installer() {
-    cat > /usr/local/bin/onion-live-installer.sh << LIVEINSTALLER
+    cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
+#!/usr/bin/env bash
+set -u
+
+LOG="/tmp/ming-installer/preflight.log"
+mkdir -p /tmp/ming-installer
+chmod 1777 /tmp/ming-installer 2>/dev/null || true
+: > "${LOG}"
+
+log() {
+    printf '%s\n' "$*" >> "${LOG}"
+}
+
+log "date=$(date --iso-8601=seconds 2>/dev/null || date)"
+log "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL >> "${LOG}" 2>&1 || true
+
+export TZ=Asia/Shanghai
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>>"${LOG}" || true
+printf 'Asia/Shanghai\n' > /etc/timezone 2>>"${LOG}" || true
+timeout 5 timedatectl set-timezone Asia/Shanghai >> "${LOG}" 2>&1 || true
+
+mkdir -p /etc/calamares/modules
+
+cat > /etc/calamares/settings.conf <<'SETTINGS'
+---
+modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
+instances:
+- id: ming-identity
+  module: shellprocess
+  config: ming-identity.conf
+branding: ming
+prompt-install: false
+oem-setup: false
+disable-cancel: false
+disable-cancel-during-exec: false
+quit-at-end: false
+dont-chroot: false
+sequence:
+- show:
+  - welcome
+  - locale
+  - keyboard
+  - partition
+  - users
+  - summary
+- exec:
+  - partition
+  - mount
+  - unpackfs
+  - machineid
+  - fstab
+  - locale
+  - keyboard
+  - localecfg
+  - users
+  - displaymanager
+  - networkcfg
+  - hwclock
+  - initramfs
+  - grubcfg
+  - bootloader
+  - shellprocess@ming-identity
+  - umount
+- show:
+  - finished
+SETTINGS
+
+cat > /etc/calamares/modules/locale.conf <<'LOCALECONF'
+---
+region: "Asia"
+zone: "Shanghai"
+locale: "zh_CN.UTF-8"
+useSystemTimezone: true
+adjustLiveTimezone: true
+LOCALECONF
+
+cat > /etc/calamares/modules/keyboard.conf <<'KEYBOARDCONF'
+---
+model: "pc105"
+layout: "us"
+variant: ""
+KEYBOARDCONF
+
+cat > /etc/calamares/modules/localecfg.conf <<'LOCALECFGCONF'
+---
+localeConf:
+  LANG: "zh_CN.UTF-8"
+  LANGUAGE: "zh_CN:zh"
+  LC_ALL: "zh_CN.UTF-8"
+  LC_TIME: "zh_CN.UTF-8"
+  LC_NUMERIC: "zh_CN.UTF-8"
+  LC_MONETARY: "zh_CN.UTF-8"
+  LC_PAPER: "zh_CN.UTF-8"
+  LC_NAME: "zh_CN.UTF-8"
+  LC_ADDRESS: "zh_CN.UTF-8"
+  LC_TELEPHONE: "zh_CN.UTF-8"
+  LC_MEASUREMENT: "zh_CN.UTF-8"
+  LC_IDENTIFICATION: "zh_CN.UTF-8"
+LOCALECFGCONF
+
+cat > /etc/calamares/modules/users.conf <<'USERSCONF'
+---
+defaultGroups:
+  - users
+  - audio
+  - video
+  - plugdev
+  - netdev
+  - bluetooth
+  - lp
+  - scanner
+sudoersGroup: sudo
+autologinGroup: autologin
+sudoersConfigureWithGroup: false
+setRootPassword: false
+doReusePassword: false
+displayAutologin: true
+doAutologin: true
+passwordRequirements:
+  minLength: -1
+  maxLength: -1
+  libpwquality:
+    - minlen=0
+    - minclass=0
+    - dictcheck=0
+    - enforcing=0
+allowWeakPasswords: true
+allowWeakPasswordsDefault: true
+user:
+  shell: /bin/bash
+  forbidden_names: [ root, nobody ]
+  home_permissions: "o700"
+hostname:
+  location: EtcFile
+  writeHostsFile: true
+  template: "ming-os"
+  forbidden_names: [ localhost ]
+USERSCONF
+
+cat > /etc/default/locale <<'DEFAULTLOCALE'
+LANG=zh_CN.UTF-8
+LANGUAGE=zh_CN:zh
+LC_ALL=zh_CN.UTF-8
+DEFAULTLOCALE
+
+cat > /etc/locale.conf <<'ETCLOCALE'
+LANG=zh_CN.UTF-8
+LANGUAGE=zh_CN:zh
+LC_ALL=zh_CN.UTF-8
+ETCLOCALE
+
+if [ -f /etc/locale.gen ]; then
+    sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/; s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen 2>>"${LOG}" || true
+fi
+update-locale LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8 >> "${LOG}" 2>&1 || true
+
+squash=""
+for candidate in \
+    /run/live/medium/live/filesystem.squashfs \
+    /lib/live/mount/medium/live/filesystem.squashfs \
+    /lib/live/mount/medium/live/filesystem.squashfs \
+    /cdrom/live/filesystem.squashfs; do
+    if [ -s "${candidate}" ]; then
+        squash="${candidate}"
+        break
+    fi
+done
+
+if [ -z "${squash}" ]; then
+    squash=$(find /run/live /lib/live /cdrom /media /run/media \
+        -path '*/live/filesystem.squashfs' \
+        -type f -size +1M -print -quit 2>/dev/null || true)
+fi
+
+squash_link="/run/ming-installer/filesystem.squashfs"
+mkdir -p /run/ming-installer
+rm -f "${squash_link}"
+
+if [ -z "${squash}" ]; then
+    log "unpackfs_source=NOT_FOUND"
+    log "ERROR: cannot find live/filesystem.squashfs"
+    exit 2
+fi
+
+if ln -s "${squash}" "${squash_link}" 2>>"${LOG}"; then
+    :
+elif command -v mount >/dev/null 2>&1; then
+    touch "${squash_link}" 2>>"${LOG}" || true
+    mount --bind "${squash}" "${squash_link}" >> "${LOG}" 2>&1 || true
+fi
+
+if [ ! -s "${squash_link}" ]; then
+    log "unpackfs_stable_source=NOT_READY"
+    log "ERROR: cannot create ${squash_link}"
+    exit 3
+fi
+
+cat > /etc/calamares/modules/unpackfs.conf <<UNPACKFSCONF
+---
+unpack:
+  - source: "${squash_link}"
+    sourcefs: "squashfs"
+    destination: ""
+UNPACKFSCONF
+
+log "unpackfs_source=${squash}"
+log "unpackfs_stable_source=${squash_link}"
+log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
+log "locale_conf=$(tr '\n' ';' </etc/calamares/modules/locale.conf 2>/dev/null || true)"
+log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/null | awk '{print $1}')"
+
+# Fresh VirtualBox disks sometimes reach Calamares without a usable label.
+# Only initialize completely blank non-removable disks; never touch a disk
+# that already has partitions or a mounted filesystem.
+for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
+    [ -b "${disk}" ] || continue
+    case "${disk}" in
+        /dev/sr*|/dev/loop*|/dev/ram*) continue ;;
+    esac
+    if lsblk -nr -o TYPE "${disk}" 2>/dev/null | grep -q '^part$'; then
+        continue
+    fi
+    if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
+        continue
+    fi
+    if command -v parted >/dev/null 2>&1; then
+        parted -s "${disk}" mklabel gpt >> "${LOG}" 2>&1 || true
+    fi
+done
+
+exit 0
+CALAMARESPREFLIGHT
+    chmod +x /usr/local/sbin/ming-calamares-preflight
+
+    cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
+#!/usr/bin/env bash
+set -e
+
+export TZ=Asia/Shanghai
+export LANG=zh_CN.UTF-8
+export LANGUAGE=zh_CN:zh
+export LC_ALL=zh_CN.UTF-8
+
+mkdir -p /tmp/ming-installer
+chmod 1777 /tmp/ming-installer 2>/dev/null || true
+
+run_preflight() {
+    if [ "$(id -u)" -eq 0 ]; then
+        /usr/local/sbin/ming-calamares-preflight
+    else
+        sudo -n /usr/local/sbin/ming-calamares-preflight
+    fi
+}
+
+is_live_or_installer() {
+    grep -qw "boot=live" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "live-config" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "install" /proc/cmdline 2>/dev/null && return 0
+    [ -d /run/live/medium ] && return 0
+    [ -d /lib/live/mount/medium ] && return 0
+    [ -f /.disk/info ] && return 0
+    return 1
+}
+
+show_preflight_error() {
+    local detail
+    detail="$(tail -n 80 /tmp/ming-installer/preflight.log 2>/dev/null || true)"
+    zenity --error --title="Ming OS installer preflight failed" --width=620 \
+        --text="Could not prepare the installer unpack source or Beijing timezone defaults.\n\n${detail}\n\nLog: /tmp/ming-installer/preflight.log" \
+        2>/dev/null || true
+}
+
+if ! is_live_or_installer; then
+    zenity --info --title="Ming OS" --text="This is not a Live installer session. The installer does not need to run here." 2>/dev/null || true
+    exit 0
+fi
+
+if ! run_preflight; then
+    show_preflight_error
+    exit 1
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+    exec env TZ=Asia/Shanghai LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8 \
+        calamares -d
+fi
+
+if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    exec sudo -n env \
+        DISPLAY="${DISPLAY:-:0}" \
+        XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" \
+        TZ=Asia/Shanghai \
+        LANG=zh_CN.UTF-8 \
+        LANGUAGE=zh_CN:zh \
+        LC_ALL=zh_CN.UTF-8 \
+        calamares -d
+fi
+
+exec pkexec calamares -d
+CALAMARESLAUNCHER
+    chmod +x /usr/local/bin/ming-calamares-launcher
+
+    cat > /usr/local/bin/ming-live-installer.sh << 'LIVEINSTALLER'
 #!/usr/bin/env bash
 set -e
 
@@ -3149,56 +4275,176 @@ is_live_environment() {
     return 1
 }
 
-sleep 3
+# Ming OS is an installer-only image. When booted with ming.installer=1 the
+# session launches Calamares immediately and full-screen; the live desktop is
+# only a thin host for the installer, never a destination of its own.
+is_installer_boot() {
+    grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null && return 0
+    grep -qw "install" /proc/cmdline 2>/dev/null && return 0
+    return 1
+}
 
-if is_live_environment; then
-    if [ -z "\${DISPLAY}" ]; then
+prepare_installer_disks() {
+    mkdir -p /tmp/ming-installer
+    chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    {
+        date
+        echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+        lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true
+    } > /tmp/ming-installer/preflight.log 2>&1
+
+    # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
+    # Only initialize completely blank non-removable disks; never touch a disk
+    # that already has partitions or a mounted filesystem.
+    for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
+        [ -b "${disk}" ] || continue
+        case "${disk}" in
+            /dev/sr*|/dev/loop*|/dev/ram*) continue ;;
+        esac
+        if lsblk -nr -o TYPE "${disk}" 2>/dev/null | grep -q '^part$'; then
+            continue
+        fi
+        if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
+            continue
+        fi
+        if command -v parted >/dev/null 2>&1; then
+            parted -s "${disk}" mklabel gpt >> /tmp/ming-installer/preflight.log 2>&1 || true
+        fi
+    done
+}
+
+prepare_calamares_runtime() {
+    export TZ=Asia/Shanghai
+    if [ "$(id -u)" -eq 0 ]; then
+        /usr/local/sbin/ming-calamares-preflight
+    else
+        sudo -n /usr/local/sbin/ming-calamares-preflight
+    fi
+}
+
+sleep 2
+
+if is_live_environment || is_installer_boot; then
+    if [ -z "${DISPLAY}" ]; then
         export DISPLAY=:0
     fi
+    mkdir -p /tmp/ming-installer
+    chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
 
     if command -v calamares &>/dev/null; then
-        pkexec calamares &
+        # -style/maximize handled by calamares window manager hint; keep retrying
+        # if the X session is not ready yet.
+        for _try in 1 2 3 4 5; do
+            if /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1; then
+                break
+            fi
+            sleep 2
+        done &
     else
         zenity --error --title="安装错误" --text="找不到 Calamares 安装程序。" 2>/dev/null || true
     fi
 fi
 LIVEINSTALLER
 
-    chmod +x /usr/local/bin/onion-live-installer.sh
+    chmod +x /usr/local/bin/ming-live-installer.sh
+
+    # Kiosk session：无 WM → Calamares 无标题栏无关闭按钮，关了自动重启
+    cat > /usr/local/bin/ming-installer-session << 'KIOSK'
+#!/usr/bin/env bash
+xsetroot -solid '#0c1f1c'
+prepare_installer_disks() {
+    mkdir -p /tmp/ming-installer
+    chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    {
+        date
+        echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+        lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true
+    } > /tmp/ming-installer/preflight.log 2>&1
+
+    for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
+        [ -b "${disk}" ] || continue
+        case "${disk}" in
+            /dev/sr*|/dev/loop*|/dev/ram*) continue ;;
+        esac
+        if lsblk -nr -o TYPE "${disk}" 2>/dev/null | grep -q '^part$'; then
+            continue
+        fi
+        if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
+            continue
+        fi
+        if command -v parted >/dev/null 2>&1; then
+            parted -s "${disk}" mklabel gpt >> /tmp/ming-installer/preflight.log 2>&1 || true
+        fi
+    done
+}
+prepare_calamares_runtime() {
+    export TZ=Asia/Shanghai
+    if [ -x /usr/local/sbin/ming-calamares-preflight ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            /usr/local/sbin/ming-calamares-preflight
+        else
+            sudo -n /usr/local/sbin/ming-calamares-preflight
+        fi
+    fi
+}
+while true; do
+    if ! prepare_calamares_runtime; then
+        zenity --error --title="安装预检失败" --text="无法找到或配置 live/filesystem.squashfs。\n\n请查看 /tmp/ming-installer/preflight.log" 2>/dev/null || true
+        sleep 3
+        continue
+    fi
+    chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
+    # 已触发关机/重启则退出循环
+    systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null && break
+    sleep 1
+done
+KIOSK
+    chmod +x /usr/local/bin/ming-installer-session
+
+    mkdir -p /usr/share/xsessions
+    cat > /usr/share/xsessions/ming-installer.desktop << 'KISOSESS'
+[Desktop Entry]
+Name=Ming OS Installer
+Exec=/usr/local/bin/ming-installer-session
+Type=Application
+KISOSESS
 
     mkdir -p /etc/systemd/system
-    cat > /etc/systemd/system/onion-live-installer.service << SYSTEMDSERVICE
+    cat > /etc/systemd/system/ming-live-installer.service << SYSTEMDSERVICE
 [Unit]
-Description=Onion OS Live Installer
+Description=Ming OS Live Installer
 After=lightdm.service display-manager.service
 Wants=lightdm.service
 ConditionKernelCommandLine=|boot=live
 ConditionKernelCommandLine=|live-config
+ConditionKernelCommandLine=|ming.installer=1
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/onion-live-installer.sh
-User=${ONION_USER}
+ExecStart=/usr/local/bin/ming-live-installer.sh
+User=${MING_USER}
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/${ONION_USER}/.Xauthority
+Environment=XAUTHORITY=/home/${MING_USER}/.Xauthority
 RemainAfterExit=yes
 
 [Install]
 WantedBy=graphical.target
 SYSTEMDSERVICE
 
-    systemctl enable onion-live-installer.service 2>/dev/null || true
+
+    systemctl enable ming-live-installer.service 2>/dev/null || true
 }
 
 # ======================== Xfce 全局设置 ========================
 
 configure_xfce_settings() {
-    mkdir -p /home/${ONION_USER}/.config/xfce4/xfconf/xfce-perchannel-xml
+    mkdir -p /home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml
 
     # Xfwm4 窗口管理器 (同步 Picom glx 设置)
-    cat > "/home/${ONION_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" << 'XFWM4CFG'
+    cat > "/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" << 'XFWM4CFG'
 <?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfwm4">
+<channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
     <property name="activate_action" type="string" value="bring"/>
     <property name="borderless_maximize" type="bool" value="true"/>
@@ -3244,7 +4490,7 @@ configure_xfce_settings() {
     <property name="snap_to_windows" type="bool" value="true"/>
     <property name="snap_width" type="int" value="10"/>
     <property name="sync_to_vblank" type="bool" value="true"/>
-	    <property name="theme" type="string" value="Onion-Glass"/>
+	    <property name="theme" type="string" value="Ming-Glass"/>
     <property name="tile_on_move" type="bool" value="true"/>
     <property name="title_alignment" type="string" value="center"/>
     <property name="title_font" type="string" value="WenQuanYi Micro Hei Bold 11"/>
@@ -3269,37 +4515,58 @@ configure_xfce_settings() {
 </channel>
 XFWM4CFG
 
-    # Xfce 桌面设置
-    cat > "/home/${ONION_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" << 'DESKTOPCFG'
+    # Xfce desktop wallpaper settings. Xfce stores one backdrop path per monitor
+    # name, so seed the common names and let ming-apply-appearance update the
+    # actual runtime monitor paths after login.
+    cat > "/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" << 'DESKTOPCFG'
 <?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-desktop">
+<channel name="xfce4-desktop" version="1.0">
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
       <property name="monitorscreen" type="empty">
         <property name="workspace0" type="empty">
           <property name="color-style" type="int" value="0"/>
           <property name="image-style" type="int" value="5"/>
-          <property name="last-image" type="string" value="/usr/share/backgrounds/onion-os/default.png"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorVirtual-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorVGA-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
         </property>
       </property>
     </property>
   </property>
   <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="0"/>
     <property name="file-icons" type="empty">
       <property name="show-home" type="bool" value="false"/>
       <property name="show-trash" type="bool" value="false"/>
       <property name="show-filesystem" type="bool" value="false"/>
+      <property name="show-removable" type="bool" value="false"/>
     </property>
   </property>
 </channel>
 DESKTOPCFG
 
     # Xsettings 全局外观
-    cat > "/home/${ONION_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" << 'XSETTINGSCFG'
+    cat > "/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" << 'XSETTINGSCFG'
 <?xml version="1.0" encoding="UTF-8"?>
-<channel name="xsettings">
+<channel name="xsettings" version="1.0">
   <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="Onion-Glass"/>
+    <property name="ThemeName" type="string" value="Ming-Glass"/>
     <property name="IconThemeName" type="string" value="Papirus"/>
     <property name="DoubleClickTime" type="int" value="400"/>
     <property name="DoubleClickDistance" type="int" value="5"/>
@@ -3337,20 +4604,20 @@ DESKTOPCFG
 </channel>
 XSETTINGSCFG
 
-    # Whisker Menu 配置（26.2.0 紫色玻璃主题版）
-    mkdir -p "/home/${ONION_USER}/.config/xfce4/panel"
-    cat > "/home/${ONION_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
-button-title=Onion OS
+    # Whisker Menu 配置（26.3.0 玻璃主题版）
+    mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
+    cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
+button-title=Ming OS
 show-button-title=true
 launcher-icon-size=2
-button-icon=onion-os-menu
+button-icon=ming-os-menu
 show-favorites=true
 show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=onion-control-center.desktop,onion-files.desktop,firefox-esr.desktop,spark-store.desktop,onion-wechat.desktop,garlic-claw.desktop,onion-update.desktop,onion-master.desktop,onion-terminal.desktop
-command-settings=onion-control-center
+favorites=ming-control-center.desktop,ming-files.desktop,firefox-esr.desktop,spark-store.desktop,ming-wechat.desktop,garlic-claw.desktop,ming-update.desktop,ming-master.desktop,ming-terminal.desktop
+command-settings=ming-control-center
 command-lockscreen=xflock4
 command-switchuser=dm-tool switch-to-greeter
 command-logoutuser=xfce4-session-logout --logout
@@ -3370,7 +4637,7 @@ view-mode=1
 sort-categories=true
 WHISKERRC
 
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/xfce4"
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4"
 }
 
 # ======================== 登录期外观强制应用 ========================
@@ -3379,11 +4646,11 @@ WHISKERRC
 # 登录时自愈式地强制套用壁纸、主题与 Dock，是“美化确实生效”的最后保障。
 
 configure_appearance_enforcer() {
-    cat > /usr/local/bin/onion-apply-appearance << 'APPLYAPPEARANCE'
+    cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
 #!/usr/bin/env bash
-# Onion OS 外观强制应用 - 每次登录运行，确保美化生效
-WALL_PNG="/usr/share/backgrounds/onion-os/default.png"
-WALL_1366="/usr/share/backgrounds/onion-os/default-1366x768.png"
+# Ming OS 外观强制应用 - 每次登录运行，确保美化生效
+WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
+WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
 
 # 等待 xfdesktop / xfconfd 就绪
 for i in $(seq 1 15); do
@@ -3420,9 +4687,9 @@ else
 fi
 
 # 强制主题/图标主题（防止首次会话回退到默认）
-xfconf-query -c xsettings -p /Net/ThemeName -s "Onion-Glass" 2>/dev/null || true
+xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/theme -s "Onion-Glass" 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
 
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
@@ -3445,50 +4712,161 @@ fi
 
 exit 0
 APPLYAPPEARANCE
-    chmod +x /usr/local/bin/onion-apply-appearance
+    chmod +x /usr/local/bin/ming-apply-appearance
 
     # 登录自启动（在 picom/plank 之后，phase=Applications）
-    local autostart_dir="/home/${ONION_USER}/.config/autostart"
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
-    cat > "${autostart_dir}/onion-apply-appearance.desktop" << 'APPLYAUTO'
+    cat > "${autostart_dir}/ming-apply-appearance.desktop" << 'APPLYAUTO'
 [Desktop Entry]
 Type=Application
-Name=Onion Appearance
-Comment=确保 Onion OS 外观正确应用
-Exec=/usr/local/bin/onion-apply-appearance
+Name=Ming Appearance
+Comment=确保 Ming OS 外观正确应用
+Exec=/usr/local/bin/ming-apply-appearance
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Phase=Applications
 X-GNOME-Autostart-Delay=3
 APPLYAUTO
-    chown -R "${ONION_USER}:${ONION_USER}" "${autostart_dir}/onion-apply-appearance.desktop"
+    chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}/ming-apply-appearance.desktop"
+}
+
+# ======================== 触屏手势 + 虚拟键盘 (Onboard) ========================
+# 设计意图：为小米平板一代/Surface 等触屏设备提供 macOS 风格触摸体验——
+#   1. Onboard 虚拟键盘：点击文本输入框时自动弹起（auto-show），无物理键盘也能输入。
+#   2. touchegg：三指上滑=显示桌面、三指下滑=最小化、四指左右=切换工作区。
+configure_touch_input() {
+    # ---- Onboard 虚拟键盘：自动弹起 ----
+    mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > "/home/${MING_USER}/.config/autostart/onboard-autostart.desktop" << 'ONBOARDAUTO'
+[Desktop Entry]
+Type=Application
+Name=Onboard 虚拟键盘
+Comment=触屏点击输入框时自动弹起
+Exec=onboard
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+ONBOARDAUTO
+
+    # 通过 gsettings schema 覆盖让 Onboard 默认 auto-show + 停靠底部 + 触屏友好
+    mkdir -p "/home/${MING_USER}/.config/onboard"
+    cat > "/home/${MING_USER}/.config/onboard/ming-defaults.dconf" << 'ONBOARDCFG'
+[org/onboard]
+layout='Compact'
+theme='Nightshade'
+xembed-onboard=false
+start-minimized=true
+
+[org/onboard/auto-show]
+enabled=true
+hide-on-key-press=true
+
+[org/onboard/window]
+docking-enabled=true
+docking-edge='bottom'
+force-to-top=true
+ONBOARDCFG
+
+    # 登录时把默认值灌入 dconf（用户可后续自行调整）
+    cat > "/home/${MING_USER}/.config/autostart/ming-onboard-defaults.desktop" << 'ONBOARDLOAD'
+[Desktop Entry]
+Type=Application
+Name=Ming Onboard Defaults
+Comment=应用虚拟键盘默认设置
+Exec=sh -c "test -f ~/.config/onboard/.applied || (dconf load /org/onboard/ < ~/.config/onboard/ming-defaults.dconf 2>/dev/null && touch ~/.config/onboard/.applied)"
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+ONBOARDLOAD
+
+    # ---- touchegg 触摸手势 ----
+    mkdir -p "/home/${MING_USER}/.config/touchegg"
+    cat > "/home/${MING_USER}/.config/touchegg/touchegg.conf" << 'TOUCHEGGCFG'
+<touchégg>
+  <settings>
+    <property name="animation_delay">150</property>
+    <property name="action_execute_threshold">20</property>
+  </settings>
+  <application name="All">
+    <gesture type="SWIPE" fingers="3" direction="UP">
+      <action type="RUN_COMMAND">
+        <repeat>false</repeat>
+        <command>wmctrl -k on</command>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <gesture type="SWIPE" fingers="3" direction="DOWN">
+      <action type="RUN_COMMAND">
+        <repeat>false</repeat>
+        <command>xdotool getactivewindow windowminimize</command>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <gesture type="SWIPE" fingers="4" direction="LEFT">
+      <action type="RUN_COMMAND">
+        <repeat>false</repeat>
+        <command>wmctrl -s $(( $(wmctrl -d | grep '\*' | cut -d' ' -f1) + 1 ))</command>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <gesture type="SWIPE" fingers="4" direction="RIGHT">
+      <action type="RUN_COMMAND">
+        <repeat>false</repeat>
+        <command>wmctrl -s $(( $(wmctrl -d | grep '\*' | cut -d' ' -f1) - 1 ))</command>
+        <on>begin</on>
+      </action>
+    </gesture>
+  </application>
+</touchégg>
+TOUCHEGGCFG
+
+    # touchegg 守护进程需常驻；提供用户级自启（客户端）
+    cat > "/home/${MING_USER}/.config/autostart/touchegg.desktop" << 'TOUCHEGGAUTO'
+[Desktop Entry]
+Type=Application
+Name=Touchégg
+Comment=触摸手势
+Exec=touchegg
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+TOUCHEGGAUTO
+    systemctl enable touchegg 2>/dev/null || true
+
+    chown -R "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/onboard" \
+        "/home/${MING_USER}/.config/touchegg" \
+        "/home/${MING_USER}/.config/autostart" 2>/dev/null || true
 }
 
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Onion OS 26.2.0 macOS Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.3.0 Dock 桌面定制 <====="
 
-    generate_onion_icons
+    generate_ming_icons
     configure_hidpi_autoscale
     install_themes
     setup_wallpaper
-    configure_onion_shell
+    configure_ming_shell
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
     configure_plank_dock         # 底部可放大 Dock
     configure_picom
+    configure_touch_input        # 触屏手势 + Onboard 虚拟键盘
     configure_notification_filter
     configure_simplified_menus   # 只动 Thunar 右键菜单，不再覆盖桌面/xfwm 配置
     deploy_release_readme
     configure_autostart
     deploy_live_installer
+    setup_account_oobe
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Onion OS 26.2.0 macOS Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.3.0 Dock 桌面定制完成 <====="
 }
 
 main

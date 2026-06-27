@@ -1,6 +1,19 @@
-# Onion OS 26.2.6-r2 Execution Guide
+# Ming OS 26.3.0-r4 Execution Guide
 
-This guide reflects the public `26.2.6-r2` release. Older 26.2.0/26.2.5 notes are historical and should not be used as the recommended download target.
+This guide now tracks the Ming OS `26.3.0-r4` development target. Older Onion OS 26.2.x notes below are historical release context only and must not be treated as the current build target.
+
+## 26.3.0-r4 Must-Pass Checks
+
+- Build artifact name: `ming-os-26.3.0-home-amd64-r4.iso`.
+- Main architecture: `amd64` only. The 32-bit/i386 system is deferred.
+- Boot menu includes the old-computer compatibility entry for first/second/third-generation i3/i5 and E3 V1/V2 class hardware.
+- Calamares defaults to `Asia/Shanghai`, `zh_CN.UTF-8`, physical keyboard `us`, and does not fail on the users page with `error loading dictionary`.
+- Ming Settings contains `硬件与诊断` with buttons for network repair, driver detection, printer/scanner access, diagnostic bundle generation, classic lightweight mode, and optional Surface support.
+- Wi-Fi defaults to NetworkManager + wpa_supplicant; iwd remains available as a switch inside Ming Settings.
+- Printer/scanner support is present through CUPS, graphical printer tools, IPP/AirPrint, USB printer support, and scan tools.
+- Locally shipped executables under `/usr/local/bin` and `/usr/local/sbin` must not require AVX/AVX2/x86-64-v3.
+
+This guide previously reflected the public `26.2.6-r2` release. Older 26.2.0/26.2.5 notes are historical and should not be used as the recommended download target for new Ming OS builds.
 
 ## Release Target
 
@@ -11,6 +24,8 @@ This guide reflects the public `26.2.6-r2` release. Older 26.2.0/26.2.5 notes ar
 - installer branding so Live installation produces Onion OS, not a Debian-looking install;
 - update button and OTA clarity;
 - HDD/SSD and low-memory runtime tuning.
+
+This release is intended to be the version you hand to testers, content writers, and other AI systems. It is the current truth for downloads and website copy.
 
 ## Final Artifact
 
@@ -71,6 +86,43 @@ Build or repack output must pass:
 - Installed system identity is Onion OS after Calamares completes.
 - Desktop update button opens a clear check/download/install flow.
 
+When testing in VirtualBox, check both a clean live session and a post-install session. A file that boots in Live but installs as Debian or loses its wallpaper/theme is still a regression.
+
+## Feature Checklist
+
+The release should visibly provide:
+
+- Onion Settings as the main control center.
+- Onion App Library for installed software.
+- Android-like desktop folders for app grouping.
+- All Disks as the single storage entry point.
+- Onion Security Manager for readable system diagnostics.
+- Graphical update flow with clear success, pending, and error states.
+- Low-memory WeChat launcher and cleanup helpers.
+- Dock-only desktop behavior without relying on a top taskbar.
+
+## User Scenarios
+
+Scenario 1:
+
+- User boots from Rufus or Ventoy.
+- The system auto-logs in without a password prompt.
+- The desktop appears with Onion wallpaper and branded launchers.
+- The user clicks a Dock icon or Onion Settings button instead of typing a command.
+
+Scenario 2:
+
+- User runs the update check.
+- The client verifies JSON, size, and SHA256.
+- If the artifact is ready, the download proceeds.
+- If not, the interface says the package is not ready yet instead of failing silently.
+
+Scenario 3:
+
+- User installs to the target disk.
+- The installed system remains identified as Onion OS.
+- The desktop does not revert to a Debian-branded identity.
+
 ## OTA Publish Flow
 
 Current OTA endpoint:
@@ -113,3 +165,11 @@ Say plainly:
 - Prefer desktop buttons: Onion Settings, update button, app folders, All Disks, and GUI repair tools.
 - Command-line usage is for advanced troubleshooting, not the normal path.
 - For Rufus/Ventoy boot issues, test both ISO mode and DD mode, and record the exact error text and machine generation.
+
+## Notes For Support And Content Teams
+
+- When writing screenshots or release posts, use `26.2.6-r2` as the visible version.
+- Do not reuse the old `26.2.0` page title for the current release.
+- Do not describe the installer as Debian; it is Onion OS.
+- The desktop is intended to look like a finished branded system, not a plain Xfce install.
+- If you mention the OTA endpoint, remember it is a compatibility query path; the current public version it returns is `26.2.6-r2`.

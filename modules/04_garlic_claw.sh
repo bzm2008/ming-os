@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 模块 04: Garlic Claw（深度定制 OpenClaw）AI 助手
+# Ming OS 模块 04: Garlic Claw（深度定制 OpenClaw）AI 助手
 # ============================================================================
 # 设计意图：
-#   将 OpenClaw 深度定制为 Garlic Claw，作为 Onion OS 的标志性 AI 助手。
+#   将 OpenClaw 深度定制为 Garlic Claw，作为 Ming OS 的标志性 AI 助手。
 #   以独立终端客户端形式运行，开机自启 Gateway 服务，并配置安全加固。
 #
 # 输入：
-#   环境变量: ONION_USER
+#   环境变量: MING_USER
 #
 # 输出：
 #   完整安装的 Garlic Claw AI 助手，含 .desktop 启动器、
@@ -119,15 +119,15 @@ OPENCLAWPLACEHOLDER
 # ======================== Garlic Claw 命令集成 ========================
 
 create_garlic_claw_command() {
-    # 设计意图：创建 garlic-claw 命令作为 Onion OS 的 AI 助手入口
+    # 设计意图：创建 garlic-claw 命令作为 Ming OS 的 AI 助手入口
     # 该命令封装 openclaw 的 TUI 模式，提供更友好的交互体验
 
     cat > /usr/local/bin/garlic-claw << GARLICCLAWCMD
 #!/usr/bin/env bash
-# Garlic Claw - Onion OS AI 助手
+# Garlic Claw - Ming OS AI 助手
 # 基于 OpenClaw TUI 模式的深度定制客户端
 
-readonly GC_VERSION="1.0.0-onion"
+readonly GC_VERSION="1.0.0-ming"
 readonly GC_CONFIG_DIR="\${HOME}/.openclaw"
 readonly GC_CONFIG_FILE="\${GC_CONFIG_DIR}/config.json"
 
@@ -136,7 +136,7 @@ show_banner() {
     echo ""
     echo "  ╔═══════════════════════════════════════╗"
     echo "  ║       🧄 Garlic Claw AI 助手 🧄       ║"
-    echo "  ║       Onion OS 标志性功能              ║"
+    echo "  ║       Ming OS 标志性功能              ║"
     echo "  ╚═══════════════════════════════════════╝"
     echo ""
 }
@@ -144,7 +144,7 @@ show_banner() {
 check_config() {
     if [[ ! -f "\${GC_CONFIG_FILE}" ]]; then
         echo "[提示] 首次使用，请先运行配置向导："
-        echo "       onion-first-run.sh"
+        echo "       ming-first-run.sh"
         echo ""
         echo "或手动创建配置文件："
         echo "       mkdir -p \${GC_CONFIG_DIR}"
@@ -170,7 +170,7 @@ main() {
             fi
             ;;
         config)
-            /usr/local/bin/onion-first-run.sh
+            /usr/local/bin/ming-first-run.sh
             ;;
         status)
             if systemctl --user is-active openclaw-gateway &>/dev/null; then
@@ -209,7 +209,7 @@ install_garlic_claw_gui() {
 
     cat > /usr/local/bin/garlic-claw-app << 'GARLICAPP'
 #!/usr/bin/env python3
-"""Garlic Claw - Onion OS AI 电脑助手（面向数码难民）"""
+"""Garlic Claw - Ming OS AI 电脑助手（面向数码难民）"""
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib, Pango
@@ -222,7 +222,7 @@ SYSTEM_CMDS = [
     ("🧹 清理磁盘缓存",  "bleachbit --clean system.cache apt.autoclean; read -p '按回车关闭'"),
     ("💾 查看内存使用",   "free -h; echo; vmstat -s | head -12; read -p '按回车关闭'"),
     ("🌐 修复网络连接",   "nmcli dev status; echo; nmcli networking off; sleep 1; nmcli networking on; read -p '按回车关闭'"),
-    ("🔄 检查系统更新",   "/usr/local/bin/onion-update-gui"),
+    ("🔄 检查系统更新",   "/usr/local/bin/ming-update-gui"),
     ("📊 进程管理",       "htop"),
     ("ℹ️  系统信息",      "neofetch 2>/dev/null || lsb_release -a; uname -r; read -p '按回车关闭'"),
 ]
@@ -235,7 +235,7 @@ OFFICE_CMDS = [
 ]
 
 def run_cmd(cmd):
-    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad","/usr/local/bin/onion-update-gui"]):
+    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad","/usr/local/bin/ming-update-gui"]):
         subprocess.Popen(cmd.split(None, 1) if ' ' not in cmd else ["sh","-c",cmd])
     else:
         subprocess.Popen(["xterm", "-fa", "Monospace", "-fs", "11", "-bg", "#0d1117", "-fg", "#c9d1d9",
@@ -298,10 +298,10 @@ class GarlicClaw(Gtk.ApplicationWindow):
         # 是否有 claude CLI
         if not shutil.which("claude") and not shutil.which("garlic-claw"):
             self._append("\n⚠️  未检测到 claude / garlic-claw 命令。\n"
-                         "请先运行 /usr/local/bin/onion-garlic-setup 完成安装。\n\n"
+                         "请先运行 /usr/local/bin/ming-garlic-setup 完成安装。\n\n"
                          "安装后重新打开此窗口即可使用 AI 对话。\n")
         else:
-            self._append("👋 你好！我是 Garlic Claw，Onion OS 的 AI 电脑助手。\n"
+            self._append("👋 你好！我是 Garlic Claw，Ming OS 的 AI 电脑助手。\n"
                          "有什么我可以帮你的？（电脑问题、文件操作、办公辅助都可以问）\n\n")
         return vbox
 
@@ -403,11 +403,11 @@ StartupWMClass=garlic-claw
 GCDESKTOP
 
     # 同时在用户桌面放置快捷方式
-    mkdir -p "/home/${ONION_USER}/Desktop"
+    mkdir -p "/home/${MING_USER}/Desktop"
     cp /usr/share/applications/garlic-claw.desktop \
-        "/home/${ONION_USER}/Desktop/garlic-claw.desktop"
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/garlic-claw.desktop"
-    chmod +x "/home/${ONION_USER}/Desktop/garlic-claw.desktop"
+        "/home/${MING_USER}/Desktop/garlic-claw.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/garlic-claw.desktop"
+    chmod +x "/home/${MING_USER}/Desktop/garlic-claw.desktop"
 }
 
 # ======================== Gateway 服务配置 ========================
@@ -417,9 +417,9 @@ configure_gateway_service() {
     # 用户登录后自动启动，AI 能力即就绪
 
     # 创建用户级 systemd 目录
-    sudo -u "${ONION_USER}" mkdir -p "/home/${ONION_USER}/.config/systemd/user"
+    sudo -u "${MING_USER}" mkdir -p "/home/${MING_USER}/.config/systemd/user"
 
-    cat > "/home/${ONION_USER}/.config/systemd/user/openclaw-gateway.service" << GATEWAYSERVICE
+    cat > "/home/${MING_USER}/.config/systemd/user/openclaw-gateway.service" << GATEWAYSERVICE
 [Unit]
 Description=OpenClaw Gateway Service (Garlic Claw)
 After=network-online.target
@@ -436,10 +436,10 @@ Environment=NODE_ENV=production
 WantedBy=default.target
 GATEWAYSERVICE
 
-    chown -R "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/.config/systemd"
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/systemd"
 
     # 启用 linger（允许用户服务在未登录时也运行）
-    loginctl enable-linger "${ONION_USER}" 2>/dev/null || true
+    loginctl enable-linger "${MING_USER}" 2>/dev/null || true
 }
 
 # ======================== 防火墙安全加固 ========================
@@ -455,14 +455,14 @@ deploy_first_run_wizard() {
     # 设计意图：系统首次启动后自动运行图形化配置向导
     # 使用 zenity 实现，引导用户选择模型并输入 API Key
 
-    cat > /usr/local/bin/onion-first-run.sh << FIRSTRUNWIZARD
+    cat > /usr/local/bin/ming-first-run.sh << FIRSTRUNWIZARD
 #!/usr/bin/env bash
-# Onion OS 首次配置向导
+# Ming OS 首次配置向导
 # 引导用户配置 Garlic Claw AI 助手
 
 readonly CONFIG_DIR="\${HOME}/.openclaw"
 readonly CONFIG_FILE="\${CONFIG_DIR}/config.json"
-readonly MARKER_FILE="\${HOME}/.config/onion-os/first-run-done"
+readonly MARKER_FILE="\${HOME}/.config/ming-os/first-run-done"
 
 # 检查是否已完成首次配置
 if [[ -f "\${MARKER_FILE}" ]]; then
@@ -474,8 +474,8 @@ sleep 5
 
 # 欢迎界面
 zenity --info \\
-    --title="欢迎使用 Onion OS" \\
-        --text="欢迎使用 Onion OS 26.2.0 Home Edition！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
+    --title="欢迎使用 Ming OS" \\
+        --text="欢迎使用 Ming OS ${MING_OS_VERSION} Home Edition！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
     --width=450 \\
     --ok-label="开始配置" \\
     --extra-button="跳过" \\
@@ -555,10 +555,10 @@ zenity --info \\
     --width=450
 FIRSTRUNWIZARD
 
-    chmod +x /usr/local/bin/onion-first-run.sh
+    chmod +x /usr/local/bin/ming-first-run.sh
 
     # 创建标记目录
-    sudo -u "${ONION_USER}" mkdir -p "/home/${ONION_USER}/.config/onion-os"
+    sudo -u "${MING_USER}" mkdir -p "/home/${MING_USER}/.config/ming-os"
 }
 
 # ======================== 主流程 ========================

@@ -6,6 +6,24 @@ This document is the current website and AI handoff source for Onion OS. Use `26
 
 Onion OS 26.2.6-r2 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Onion OS rather than Debian.
 
+It should be presented as a finished desktop product with a clear personality:
+
+- dock-first;
+- button-first;
+- Chinese-friendly;
+- low-friction for older hardware;
+- visibly branded from Live boot through installation.
+
+This is the version to use when producing:
+
+- website copy;
+- download cards;
+- release notes;
+- OTA descriptions;
+- GitHub README summaries;
+- social posts;
+- screenshots and promo art captions.
+
 ## Public Links
 
 - Official website: `https://scallion.uno`
@@ -19,20 +37,63 @@ Onion OS 26.2.6-r2 is a Debian 13 / Trixie based Chinese desktop system for olde
 ## Feature Summary
 
 - Debian 13 / Trixie base.
-- Rebuilt boot chain for BIOS and UEFI with stable label `ONION_OS_2626`.
+- Rebuilt BIOS/UEFI boot chain with stable label `ONION_OS_2626`.
 - Fixes the 26.2.5 `invalid magic number` and `you need to load the kernel first` class of failures.
 - Live/Ventoy auto-login as `onion`.
 - Onion wallpaper applies by default.
 - Main Onion icons no longer use white-background AI PNG overrides.
 - Onion Security Manager opens through a stable wrapper and writes readable logs.
-- Live installer is branded as `Install Onion OS` / `安装 Onion OS`.
-- Installed OS identity is repaired to Onion OS after installation.
+- Installed system identity is repaired to Onion OS after installation.
 - Desktop update button uses a clear GUI flow.
 - Low-memory WeChat strategy: zram, earlyoom, cache cleanup, low-priority launcher, Web WeChat fallback.
 - Android-like desktop app folders and automatic app visibility.
 - `All Disks` entry combines common user folders and mounted disks to reduce C/D drive anxiety.
 - HDD/SSD runtime tuning for schedulers, read-ahead, and dirty writeback.
 - Dock-only desktop and Onion Settings reduce reliance on terminal commands.
+- GitHub and website documentation now describe the same current public version and download path.
+
+## What Users Can Do
+
+- Boot into a branded Live desktop without needing a username and password prompt.
+- Open apps from the Dock or Onion App Library instead of hunting through menus.
+- Keep software organized with Android-like folders.
+- Use All Disks to reduce the feeling that files are scattered across too many drive letters.
+- Check for updates with a visible GUI flow.
+- Install to disk and still land in Onion OS rather than a Debian-branded system.
+
+## What The Release Fixes
+
+- The 26.2.5 boot chain regression.
+- Desktop wallpaper not applying correctly.
+- White-border icon overlays on common desktop entries.
+- Security Manager crash-on-launch behavior.
+- Installer branding that still looked like Debian.
+- Update UI that could silently fail or appear dead.
+- Older-machine ergonomics such as Dock-first usage and less command-line dependence.
+
+## Product Narrative
+
+The release should be described as:
+
+- stable enough to hand to real users;
+- visually branded enough to look like a system, not a theme pack;
+- simple enough for users who do not want to remember command lines;
+- pragmatic enough to stay useful on old hardware.
+
+It should not be sold as a minimal Linux demo. It is a complete desktop with:
+
+- boot repair;
+- auto-login;
+- low-memory WeChat support;
+- update tooling;
+- installer branding;
+- desktop organization;
+- storage simplification;
+- and a control center for common actions.
+
+The short product story is:
+
+> Onion OS takes a Debian base and turns it into a more obvious Chinese desktop for older PCs, with fewer commands, clearer buttons, and a system identity that stays consistent from boot to install.
 
 ## GitHub Download Note
 
@@ -78,9 +139,16 @@ Page goals:
 - Tell users clearly that 2GB RAM can run the OS, but a WeChat account with many friends and groups may still be heavy; recommend Web WeChat as the fallback.
 - Provide a clear ISO download button, GitHub button, and OTA status area.
 
+Suggested message hierarchy:
+
+- first show the product name and official download path;
+- then show the boot and desktop improvements;
+- then show the user-facing buttons and shortcuts;
+- then show the compatibility and low-memory guidance.
+
 Suggested structure:
 
-- Hero: title `Onion OS 26.2.6-r2`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
+- Hero: title `Onion OS 26.2.6-r2`; subtitle `给老旧电脑和中文用户的按钮式 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
 - Feature section: WeChat low-memory mode, Spark Store, Onion Settings, Onion App Library, All Disks, OTA updates, Security Manager, Onion installer.
@@ -93,3 +161,20 @@ Design direction:
 - Use Onion OS identity: dark glass surfaces, restrained green and violet accents, clear icons, and dense but readable feature blocks.
 - Keep language short and concrete. This page is for users who want buttons and confidence, not command-heavy troubleshooting.
 - Do not show server passwords, SSH commands, internal deployment notes, or private operations details.
+
+## Feature Language To Reuse
+
+- boot more reliably;
+- auto-login in Live mode;
+- use buttons instead of commands;
+- group apps like a phone launcher;
+- keep files and disks easy to find;
+- make updates clear and checkable;
+- keep the system branded as Onion OS after installation;
+- protect low-memory machines from heavy WeChat sessions.
+
+## Release Summary For GitHub
+
+Use this short summary anywhere a concise changelog is needed:
+
+Onion OS 26.2.6-r2 is the current public release. It fixes the earlier boot regression, refreshes the Live desktop, keeps Live auto-login enabled, brands the installer and installed system as Onion OS, improves update clarity, and keeps the desktop focused on button-first workflows for older Chinese PCs.

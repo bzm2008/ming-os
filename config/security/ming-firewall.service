@@ -1,0 +1,18 @@
+[Unit]
+Description=Ming OS Firewall (nftables)
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/sbin/modprobe nf_tables
+ExecStartPre=-/sbin/modprobe nf_conntrack
+ExecStartPre=-/sbin/nft flush ruleset
+ExecStart=-/usr/sbin/nft -f /etc/nftables.conf
+ExecReload=-/usr/sbin/nft -f /etc/nftables.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

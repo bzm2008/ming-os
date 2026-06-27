@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 模块 07: 收尾与配置固化
+# Ming OS 模块 07: 收尾与配置固化
 # ============================================================================
 # 设计意图：
-#   解决历史顽疾——此前所有桌面美化都写入 /home/onion（仅 Live 会话用户），
+#   解决历史顽疾——此前所有桌面美化都写入 /home/user（仅 Live 会话用户），
 #   而 Calamares 安装时会新建用户并从 /etc/skel 拉取初始配置，导致安装后的
 #   系统完全没有应用美化。本模块把已配置好的用户配置同步到 /etc/skel，
 #   保证“安装后的新用户”与“Live 用户”获得完全一致的外观与体验。
 #
 # 输入：
-#   环境变量: ONION_USER, ONION_OS_VERSION
+#   环境变量: MING_USER, MING_OS_VERSION
 #
 # 输出：
-#   /etc/skel 被填充为完整的 Onion OS 默认用户配置
+#   /etc/skel 被填充为完整的 Ming OS 默认用户配置
 #   登录时外观强制应用脚本就位
 #
 # 关键步骤：
-#   1. 将 /home/${ONION_USER} 的配置镜像到 /etc/skel
+#   1. 将 /home/${MING_USER} 的配置镜像到 /etc/skel
 #   2. 清除“一次性完成”标记，让新用户也能看到欢迎引导
 #   3. 校验关键美化文件确实存在（构建期自检）
 # ============================================================================
 
 set -uo pipefail
 
-readonly USER_HOME="/home/${ONION_USER}"
+readonly USER_HOME="/home/${MING_USER}"
 
 # ======================== 同步用户配置到 /etc/skel ========================
 
@@ -51,9 +51,10 @@ seed_skel() {
 
     # 清除 Live 会话写下的“一次性完成”标记，
     # 否则新安装用户会跳过欢迎引导与缩放检测。
-    rm -f /etc/skel/.config/onion-os/scale-done \
-          /etc/skel/.config/onion-os/welcome-done \
-          /etc/skel/.config/onion-os/app-recommend-done 2>/dev/null || true
+    rm -f /etc/skel/.config/ming-os/scale-done \
+          /etc/skel/.config/ming-os/welcome-done \
+          /etc/skel/.config/ming-os/oobe-account-done \
+          /etc/skel/.config/ming-os/app-recommend-done 2>/dev/null || true
 
     # /etc/skel 内文件应为 root 所有（useradd 复制时会重新赋予新用户）
     chown -R root:root /etc/skel 2>/dev/null || true
@@ -68,11 +69,11 @@ verify_appearance_assets() {
     local missing=0
 
     local must_exist=(
-        "/usr/share/themes/Onion-Glass/gtk-3.0/gtk.css"
-        "/usr/share/backgrounds/onion-os/default.png"
-        "/usr/share/icons/hicolor/48x48/apps/onion-os-menu.svg"
-        "/usr/local/bin/onion-picom"
-        "/usr/local/bin/onion-apply-appearance"
+        "/usr/share/themes/Ming-Glass/gtk-3.0/gtk.css"
+        "/usr/share/backgrounds/ming-os/default.png"
+        "/usr/share/icons/hicolor/48x48/apps/ming-os-menu.svg"
+        "/usr/local/bin/ming-picom"
+        "/usr/local/bin/ming-apply-appearance"
         "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
         "/etc/skel/.config/plank/dock1/settings"
     )
@@ -94,7 +95,7 @@ verify_appearance_assets() {
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [07_finalize] 开始收尾与配置固化 (${ONION_OS_VERSION}) <====="
+    echo "=====> [07_finalize] 开始收尾与配置固化 (${MING_OS_VERSION}) <====="
 
     seed_skel
     verify_appearance_assets

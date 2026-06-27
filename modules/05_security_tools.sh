@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Onion OS 模块 05: 安全工具与 QQ 安装
-# ============================================================================
-# 设计意图：
-#   安装 Onion 安全管家、安全扫描工具、防火墙配置以及 QQ Linux 版。
-#
-# 输入：
-#   环境变量: ONION_USER
-#
-# 输出：
-#   完整的安全工具集和 QQ 即时通讯软件
+# Ming OS module 05: security tools and Ming Security Manager
 # ============================================================================
 
 set -uo pipefail
 
-# ======================== 安全工具安装 ========================
-
 install_security_tools() {
-    echo "安装安全工具..."
-    
+    echo "Installing security tools..."
+
     apt install -y --no-install-recommends \
         rkhunter \
         chkrootkit \
@@ -27,87 +16,101 @@ install_security_tools() {
         yad \
         nftables
 
-    echo "nf_tables" >> /etc/modules
-    echo "nf_conntrack" >> /etc/modules
-    echo "nft_ct" >> /etc/modules
-    echo "nft_counter" >> /etc/modules
+    grep -qxF "nf_tables" /etc/modules || echo "nf_tables" >> /etc/modules
+    grep -qxF "nf_conntrack" /etc/modules || echo "nf_conntrack" >> /etc/modules
+    grep -qxF "nft_ct" /etc/modules || echo "nft_ct" >> /etc/modules
+    grep -qxF "nft_counter" /etc/modules || echo "nft_counter" >> /etc/modules
 
     mkdir -p /etc/modprobe.d
-    cat > /etc/modprobe.d/onion-nftables.conf << MODPROBE
+    cat > /etc/modprobe.d/ming-nftables.conf << 'MODPROBE'
 softdep nf_tables pre: nf_conntrack
 MODPROBE
 }
 
-# ======================== Onion 安全管家部署 ========================
+deploy_ming_master() {
+    echo "Deploying Ming Security Manager..."
 
-deploy_onion_master() {
-    echo "部署 Onion 安全管家..."
-    
-    # 复制主程序
-    cp /tmp/onion-build/config/security/onion-master.py /usr/local/bin/
-    chmod +x /usr/local/bin/onion-master.py
-    
-    # 复制防火墙配置
-    cp /tmp/onion-build/config/security/nftables.conf /etc/nftables.conf
-    chmod 600 /etc/nftables.conf
-    
-    # 复制防火墙服务文件
-    cp /tmp/onion-build/config/security/onion-firewall.service /etc/systemd/system/
-    chmod 0644 /etc/systemd/system/onion-firewall.service
-    systemctl enable onion-firewall 2>/dev/null || true
-    
-    # 创建桌面快捷方式
-    cat > /usr/share/applications/onion-master.desktop << ONIONMASTERDESKTOP
+    install -m 0755 /tmp/ming-build/config/security/ming-master.py /usr/local/bin/ming-master.py
+
+    cat > /usr/local/bin/ming-master << 'MINGMASTERWRAPPER'
+#!/usr/bin/env bash
+set -u
+
+LOG=/tmp/ming-master.log
+: > "${LOG}"
+
+show_error() {
+    local text="$1"
+    if command -v yad >/dev/null 2>&1; then
+        yad --error --title="Ming 安全管家" --width=620 --text="${text}" 2>/dev/null || true
+    elif command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="Ming 安全管家" --width=620 --text="${text}" 2>/dev/null || true
+    else
+        printf '%s\n' "${text}" >&2
+    fi
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+    show_error "未找到 python3，无法启动安全管家。"
+    exit 127
+fi
+
+python3 /usr/local/bin/ming-master.py "$@" >>"${LOG}" 2>&1
+rc=$?
+if [ "${rc}" -ne 0 ]; then
+    summary="$(tail -n 40 "${LOG}" 2>/dev/null)"
+    show_error "安全管家启动失败。\n\n${summary}\n\n完整日志：${LOG}"
+fi
+exit "${rc}"
+MINGMASTERWRAPPER
+    chmod 0755 /usr/local/bin/ming-master
+
+    install -m 0600 /tmp/ming-build/config/security/nftables.conf /etc/nftables.conf
+    install -m 0644 /tmp/ming-build/config/security/ming-firewall.service /etc/systemd/system/ming-firewall.service
+    systemctl enable ming-firewall 2>/dev/null || true
+
+    cat > /usr/share/applications/ming-master.desktop << 'MINGMASTERDESKTOP'
 [Desktop Entry]
-Name=Onion 管家
-Name[zh_CN]=Onion 安全管家
-Comment=Onion OS 安全工具集
+Name=Ming Manager
+Name[zh_CN]=Ming 安全管家
+Comment=Ming OS security toolkit
 Comment[zh_CN]=系统安全扫描、清理与防火墙管理
-Exec=pkexec python3 /usr/local/bin/onion-master.py
-Icon=onion-security
+Exec=/usr/local/bin/ming-master
+Icon=ming-security
 Terminal=false
 Type=Application
 Categories=System;Security;
 Keywords=security;firewall;clean;scan;
 StartupNotify=true
-ONIONMASTERDESKTOP
-    
-    # 在用户桌面放置快捷方式
-    mkdir -p "/home/${ONION_USER}/Desktop"
-    cp /usr/share/applications/onion-master.desktop \
-        "/home/${ONION_USER}/Desktop/onion-master.desktop"
-    chown "${ONION_USER}:${ONION_USER}" "/home/${ONION_USER}/Desktop/onion-master.desktop"
-    chmod +x "/home/${ONION_USER}/Desktop/onion-master.desktop"
-    
-    # 配置 sudo 免密运行 Onion 管家
-    echo "${ONION_USER} ALL=(ALL) NOPASSWD: /usr/local/bin/onion-master.py" > /etc/sudoers.d/onion-master
-    chmod 440 /etc/sudoers.d/onion-master
-}
+MINGMASTERDESKTOP
 
-# ======================== QQ Linux 版安装 ========================
+    mkdir -p "/home/${MING_USER}/Desktop"
+    cp /usr/share/applications/ming-master.desktop "/home/${MING_USER}/Desktop/ming-master.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/ming-master.desktop"
+    chmod +x "/home/${MING_USER}/Desktop/ming-master.desktop"
+
+    cat > /etc/sudoers.d/user-master << SUDOERS
+${MING_USER} ALL=(ALL) NOPASSWD: /usr/bin/bleachbit, /usr/sbin/rkhunter, /usr/sbin/lynis, /usr/sbin/nft
+SUDOERS
+    chmod 0440 /etc/sudoers.d/user-master
+}
 
 install_qq_linux() {
-    echo "配置 QQ Linux 版 (用户可从应用商店安装)..."
-    mkdir -p "/home/${ONION_USER}/Desktop"
+    echo "QQ Linux is available from the app store; skipping bundled install."
+    mkdir -p "/home/${MING_USER}/Desktop"
 }
-
-# ======================== Listen1 音乐播放器安装 ========================
 
 install_listen1() {
-    echo "配置 Listen1 音乐播放器 (用户可从应用商店安装)..."
+    echo "Listen1 is available from the app store; skipping bundled install."
 }
 
-# ======================== 主流程 ========================
-
 main() {
-    echo "=====> [05_security_tools] 开始安装安全工具、QQ 与 Listen1 <====="
-    
+    echo "=====> [05_security_tools] Installing security tools and Ming Security Manager <====="
     install_security_tools
-    deploy_onion_master
+    deploy_ming_master
     install_qq_linux
     install_listen1
-    
-    echo "=====> [05_security_tools] 安全工具、QQ 与 Listen1 安装完成 <====="
+    echo "=====> [05_security_tools] Security tools installed <====="
 }
 
 main
