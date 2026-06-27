@@ -107,12 +107,23 @@ check_host_environment() {
 }
 install_build_deps() {
     log_step "安装构建依赖"
-    if command -v apt &>/dev/null; then
-        apt update
-        apt install -y --no-install-recommends \
+    if command -v apt-get &>/dev/null; then
+        local apt_ok=0
+        if apt-get update; then
+            apt_ok=1
+        else
+            log_warn "apt-get update 失败，改用已有缓存继续安装"
+        fi
+        if ! apt-get install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools dosfstools
+            mtools dosfstools; then
+            if [[ "${apt_ok}" -eq 0 ]]; then
+                log_error "apt 依赖安装失败且缓存不可用"
+                exit 1
+            fi
+            log_warn "apt-get install 失败，但依赖可能已存在，继续后续检查"
+        fi
     elif command -v dnf &>/dev/null; then
         dnf install -y debootstrap squashfs-tools xorriso \
             grub2-tools grub2-tools-extra grub2-efi-x64-modules \
