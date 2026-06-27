@@ -107,9 +107,22 @@ check_host_environment() {
 }
 install_build_deps() {
     log_step "安装构建依赖"
+    local required_bins=(debootstrap mksquashfs xorriso grub-mkimage mkfs.vfat mcopy)
+    local missing_bins=()
+    local bin
+    for bin in "${required_bins[@]}"; do
+        if ! command -v "${bin}" &>/dev/null; then
+            missing_bins+=("${bin}")
+        fi
+    done
+    if [[ ${#missing_bins[@]} -eq 0 ]]; then
+        log_info "构建依赖已存在，跳过在线安装"
+        return 0
+    fi
+    log_warn "缺少构建依赖: ${missing_bins[*]}"
     if command -v apt-get &>/dev/null; then
         local apt_ok=0
-        if apt-get update; then
+        if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]] && apt-get update; then
             apt_ok=1
         else
             log_warn "apt-get update 失败，改用已有缓存继续安装"
