@@ -69,6 +69,11 @@ install_base_packages() {
         squashfs-tools \
         calamares \
         calamares-settings-debian \
+        grub2-common \
+        grub-pc-bin \
+        grub-efi-amd64-bin \
+        efibootmgr \
+        dosfstools \
         libpwquality-tools \
         cracklib-runtime \
         wamerican \
@@ -115,20 +120,18 @@ install_base_packages() {
         xserver-xorg-input-libinput \
         xserver-xorg-input-synaptics
 
-    # Core firmware for common old laptops. These are expected on Debian Trixie
-    # and should not be skipped because one optional package name changed.
-    apt install -y --no-install-recommends \
+    # Firmware and microcode packaging shifts across Debian snapshots. Install
+    # what exists without letting renamed packages break the whole base system.
+    for pkg in \
+        firmware-linux \
+        firmware-linux-free \
         firmware-linux-nonfree \
         firmware-misc-nonfree \
         firmware-iwlwifi \
         firmware-realtek \
         firmware-atheros \
+        firmware-ath9k-htc \
         firmware-brcm80211 \
-        intel-microcode \
-        amd64-microcode
-
-    # Extra firmware is best-effort: some Debian mirrors/package sets can lag.
-    for pkg in \
         firmware-sof-signed \
         firmware-intel-graphics \
         firmware-amd-graphics \
@@ -136,7 +139,9 @@ install_base_packages() {
         firmware-mediatek \
         firmware-ralink \
         firmware-ti-connectivity \
-        bluez-firmware; do
+        bluez-firmware \
+        intel-microcode \
+        amd64-microcode; do
         apt install -y --no-install-recommends "${pkg}" || true
     done
 

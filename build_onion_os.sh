@@ -424,6 +424,10 @@ libpwquality_text = "\n".join(str(item) for item in libpwquality)
 if "dictcheck=0" not in libpwquality_text or "enforcing=0" not in libpwquality_text:
     errors.append("users.conf must disable libpwquality dictionary enforcement")
 
+grub_install = root / "usr/sbin/grub-install"
+if not grub_install.is_file():
+    errors.append("live installer environment is missing /usr/sbin/grub-install; BIOS bootloader install will fail")
+
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
     "usr/local/bin/ming-calamares-launcher",

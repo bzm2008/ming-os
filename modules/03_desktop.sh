@@ -4172,7 +4172,8 @@ log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/n
 
 # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
 # Only initialize completely blank non-removable disks; never touch a disk
-# that already has partitions or a mounted filesystem.
+# that already has partitions or a mounted filesystem. Prefer msdos here so
+# BIOS installs do not depend on a BIOS boot partition just to install GRUB.
 for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
     [ -b "${disk}" ] || continue
     case "${disk}" in
@@ -4185,7 +4186,7 @@ for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
         continue
     fi
     if command -v parted >/dev/null 2>&1; then
-        parted -s "${disk}" mklabel gpt >> "${LOG}" 2>&1 || true
+        parted -s "${disk}" mklabel msdos >> "${LOG}" 2>&1 || true
     fi
 done
 
@@ -4295,7 +4296,8 @@ prepare_installer_disks() {
 
     # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
     # Only initialize completely blank non-removable disks; never touch a disk
-    # that already has partitions or a mounted filesystem.
+    # that already has partitions or a mounted filesystem. Prefer msdos here so
+    # BIOS installs do not depend on a BIOS boot partition just to install GRUB.
     for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
         [ -b "${disk}" ] || continue
         case "${disk}" in
@@ -4308,7 +4310,7 @@ prepare_installer_disks() {
             continue
         fi
         if command -v parted >/dev/null 2>&1; then
-            parted -s "${disk}" mklabel gpt >> /tmp/ming-installer/preflight.log 2>&1 || true
+            parted -s "${disk}" mklabel msdos >> /tmp/ming-installer/preflight.log 2>&1 || true
         fi
     done
 }
