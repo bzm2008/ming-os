@@ -17,10 +17,10 @@
 
 set -uo pipefail
 
-readonly MING_GREEN="#1FA89E"
-readonly MING_GREEN_DARK="#0E5C54"
-readonly MING_BG="#F6F8F6"
-readonly MING_ACCENT="#1FA89E"
+readonly MING_GREEN="#2F8A7D"
+readonly MING_GREEN_DARK="#1E5D55"
+readonly MING_BG="#F4F7F3"
+readonly MING_ACCENT="#2F8A7D"
 
 # ======================== HiDPI 自动缩放 ========================
 
@@ -179,11 +179,11 @@ generate_ming_icons() {
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="mingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#2F8A7D"/>
-      <stop offset="100%" style="stop-color:#215F57"/>
+      <stop offset="0%" style="stop-color:#285F58"/>
+      <stop offset="100%" style="stop-color:#173D39"/>
     </linearGradient>
     <radialGradient id="glow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#DFF6F1;stop-opacity:0.58"/>
+      <stop offset="0%" style="stop-color:#E8F4F0;stop-opacity:0.46"/>
       <stop offset="100%" style="stop-color:#2F8A7D;stop-opacity:0"/>
     </radialGradient>
   </defs>
@@ -205,11 +205,11 @@ MENUICON
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="mingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#2F8A7D"/>
-      <stop offset="100%" style="stop-color:#215F57"/>
+      <stop offset="0%" style="stop-color:#285F58"/>
+      <stop offset="100%" style="stop-color:#173D39"/>
     </linearGradient>
     <radialGradient id="glow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#DFF6F1;stop-opacity:0.46"/>
+      <stop offset="0%" style="stop-color:#E8F4F0;stop-opacity:0.34"/>
       <stop offset="100%" style="stop-color:#2F8A7D;stop-opacity:0"/>
     </radialGradient>
   </defs>
@@ -229,12 +229,12 @@ MENUICON48
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
     <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#37B99B"/>
-      <stop offset="100%" style="stop-color:#1E7F70"/>
+      <stop offset="0%" style="stop-color:#3AA891"/>
+      <stop offset="100%" style="stop-color:#1F6F67"/>
     </linearGradient>
     <radialGradient id="logoGlow" cx="50%" cy="40%" r="50%">
-      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.36"/>
-      <stop offset="100%" style="stop-color:#CFECE2;stop-opacity:0"/>
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.28"/>
+      <stop offset="100%" style="stop-color:#D7EAE4;stop-opacity:0"/>
     </radialGradient>
   </defs>
   <rect width="128" height="128" rx="24" fill="url(#logoGrad)"/>
@@ -257,11 +257,11 @@ LOGOICON
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="filesGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
     <radialGradient id="filesGlow" cx="50%" cy="30%" r="55%">
-      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="0%" style="stop-color:#D6EEE8;stop-opacity:0.34"/>
       <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
@@ -301,11 +301,11 @@ FILESICON48
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="browserGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
     <radialGradient id="browserGlow" cx="50%" cy="35%" r="50%">
-      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="0%" style="stop-color:#D6EEE8;stop-opacity:0.34"/>
       <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
@@ -349,11 +349,11 @@ BROWSERICON48
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="storeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
     <radialGradient id="storeGlow" cx="50%" cy="30%" r="50%">
-      <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.5"/>
+      <stop offset="0%" style="stop-color:#D6EEE8;stop-opacity:0.34"/>
       <stop offset="100%" style="stop-color:#1FA89E;stop-opacity:0"/>
     </radialGradient>
   </defs>
@@ -373,8 +373,8 @@ STOREICON32
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="storeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
     <radialGradient id="storeGlow" cx="50%" cy="30%" r="50%">
       <stop offset="0%" style="stop-color:#9FE7D7;stop-opacity:0.45"/>
@@ -421,8 +421,8 @@ STOREICON
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="secGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0E5C54"/>
-      <stop offset="100%" style="stop-color:#1E7F70"/>
+      <stop offset="0%" style="stop-color:#174C47"/>
+      <stop offset="100%" style="stop-color:#2F8A7D"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#secGrad)"/>
@@ -437,8 +437,8 @@ SECICON
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="dispGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#dispGrad)"/>
@@ -456,8 +456,8 @@ DISPICON
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="updGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1FA89E"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#updGrad)"/>
@@ -472,7 +472,7 @@ UPDICON
     cat > "${icon_base}/48x48/apps/ming-settings.svg" << SETICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <rect width="48" height="48" rx="10" fill="#0E5C54"/>
+  <rect width="48" height="48" rx="10" fill="#174C47"/>
   <circle cx="24" cy="24" r="5" fill="none" stroke="#D4F7F1" stroke-width="2" opacity="0.9"/>
   <path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="#D4F7F1" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
   <path d="M10 10 L16 16 M32 32 L38 38 M38 10 L32 16 M10 38 L16 32" stroke="#9FE7D7" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
@@ -485,9 +485,9 @@ SETICON
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
     <linearGradient id="ctrlGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#37B99B"/>
-      <stop offset="55%" style="stop-color:#1F8A8A"/>
-      <stop offset="100%" style="stop-color:#0E5C54"/>
+      <stop offset="0%" style="stop-color:#3AA891"/>
+      <stop offset="55%" style="stop-color:#2F8A7D"/>
+      <stop offset="100%" style="stop-color:#174C47"/>
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="10" fill="url(#ctrlGrad)"/>
@@ -501,8 +501,8 @@ CONTROLICON
     cat > "${icon_base}/48x48/apps/ming-terminal.svg" << TERMICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <rect width="48" height="48" rx="10" fill="#1D2421"/>
-  <rect x="7" y="9" width="34" height="30" rx="5" fill="#24332E" stroke="#2FAE8F" stroke-width="1.5"/>
+  <rect width="48" height="48" rx="10" fill="#1A2220"/>
+  <rect x="7" y="9" width="34" height="30" rx="5" fill="#232F2C" stroke="#2F8A7D" stroke-width="1.5"/>
   <path d="M15 20l5 4-5 4" fill="none" stroke="#9FE7D7" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M24 29h9" stroke="#D4F7F1" stroke-width="2.2" stroke-linecap="round"/>
 </svg>
@@ -754,7 +754,7 @@ window {
 
 window decoration {
   border-radius: 12px;
-  box-shadow: 0 18px 42px rgba(26, 67, 56, 0.12);
+  box-shadow: 0 14px 30px rgba(26, 67, 56, 0.10);
   margin: 8px;
 }
 
@@ -763,7 +763,7 @@ button {
   padding: 7px 15px;
   border: 1px solid @borders;
   background-image: none;
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: rgba(255, 255, 255, 0.92);
   color: @theme_fg_color;
   transition: all 200ms ease;
   min-height: 30px;
@@ -771,11 +771,11 @@ button {
 
 button:hover {
   background-color: #FFFFFF;
-  border-color: rgba(47, 138, 125, 0.34);
+  border-color: rgba(47, 138, 125, 0.26);
 }
 
 button:active {
-  background-color: #E8F2EE;
+  background-color: #EAF3EF;
 }
 
 button:disabled {
@@ -784,44 +784,44 @@ button:disabled {
 }
 
 button.suggested-action {
-  background-image: linear-gradient(to bottom, #38A595, #237468);
-  border-color: rgba(24, 103, 89, 0.36);
+  background-image: linear-gradient(to bottom, #329786, #23665E);
+  border-color: rgba(24, 103, 89, 0.28);
   color: #FFFFFF;
 }
 
 button.suggested-action:hover {
-  background-image: linear-gradient(to bottom, #44AE9D, #2A8074);
+  background-image: linear-gradient(to bottom, #39A08E, #2A776D);
 }
 
 button.destructive-action {
-  color: #B23B48;
-  border-color: rgba(178, 59, 72, 0.24);
-  background-color: rgba(255, 247, 247, 0.92);
+  color: #A64653;
+  border-color: rgba(166, 70, 83, 0.20);
+  background-color: rgba(255, 249, 249, 0.94);
 }
 
 entry {
   border-radius: 10px;
   padding: 7px 12px;
   border: 1px solid @borders;
-  background-color: rgba(255, 255, 255, 0.92);
+  background-color: rgba(255, 255, 255, 0.95);
   color: @theme_fg_color;
   min-height: 30px;
 }
 
 entry:focus {
   border-color: #2F8A7D;
-  box-shadow: 0 0 0 2px rgba(47, 138, 125, 0.12);
+  box-shadow: 0 0 0 2px rgba(47, 138, 125, 0.10);
 }
 
 notebook header {
-  background-color: rgba(246, 248, 246, 0.92);
+  background-color: rgba(245, 248, 244, 0.96);
   border: none;
 }
 
 notebook tab {
   border-radius: 10px 10px 0 0;
   padding: 7px 16px;
-  background-color: rgba(238, 243, 240, 0.84);
+  background-color: rgba(238, 243, 240, 0.92);
   color: @unfocused_fg_color;
   border: 1px solid transparent;
   border-bottom: none;
@@ -842,12 +842,12 @@ scrollbar slider {
 }
 
 scrollbar slider:hover {
-  background-color: rgba(47, 138, 125, 0.44);
+  background-color: rgba(47, 138, 125, 0.34);
 }
 
 tooltip {
   border-radius: 10px;
-  background-color: rgba(28, 39, 35, 0.96);
+  background-color: rgba(28, 39, 35, 0.94);
   color: #FFFFFF;
   border: 1px solid rgba(255, 255, 255, 0.12);
   padding: 7px 11px;
@@ -858,7 +858,7 @@ menu, .menu {
   border: 1px solid @borders;
   border-radius: 12px;
   padding: 4px;
-  box-shadow: 0 14px 32px rgba(30, 70, 58, 0.10);
+  box-shadow: 0 12px 28px rgba(30, 70, 58, 0.08);
 }
 
 menuitem {
@@ -869,30 +869,30 @@ menuitem {
 }
 
 menuitem:hover {
-  background-color: rgba(47, 138, 125, 0.11);
+  background-color: rgba(47, 138, 125, 0.08);
 }
 
 headerbar {
-  background-color: rgba(255, 255, 255, 0.82);
+  background-color: rgba(255, 255, 255, 0.88);
   border: none;
-  border-bottom: 1px solid rgba(31, 98, 84, 0.10);
+  border-bottom: 1px solid rgba(47, 138, 125, 0.08);
   border-radius: 12px 12px 0 0;
   padding: 5px 10px;
   min-height: 38px;
 }
 
 toolbar {
-  background-color: rgba(255, 255, 255, 0.78);
+  background-color: rgba(255, 255, 255, 0.86);
   border: none;
 }
 
 .separator {
-  color: rgba(31, 98, 84, 0.12);
+  color: rgba(47, 138, 125, 0.10);
 }
 
 switch {
   border-radius: 17px;
-  background-color: #DCE4E1;
+  background-color: #DEE7E4;
   border: 1px solid @borders;
 }
 
@@ -911,13 +911,13 @@ scale slider {
 
 scale trough {
   border-radius: 4px;
-  background-color: rgba(31, 98, 84, 0.10);
+  background-color: rgba(47, 138, 125, 0.08);
   min-height: 6px;
 }
 
 progressbar trough {
   border-radius: 6px;
-  background-color: rgba(31, 98, 84, 0.08);
+  background-color: rgba(47, 138, 125, 0.07);
   min-height: 8px;
 }
 
@@ -928,7 +928,7 @@ progressbar progress {
 
 checkbutton check, radiobutton radio {
   border-radius: 5px;
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: rgba(255, 255, 255, 0.94);
   border: 1px solid @borders;
   min-width: 18px;
   min-height: 18px;
@@ -946,12 +946,12 @@ checkbutton check:checked, radiobutton radio:checked {
 }
 
 .view:selected, iconview:selected {
-  background-color: rgba(47, 138, 125, 0.18);
+  background-color: rgba(47, 138, 125, 0.12);
   color: @theme_selected_fg_color;
 }
 
 treeview header button {
-  background-color: rgba(246, 248, 246, 0.92);
+  background-color: rgba(245, 248, 244, 0.96);
   color: @theme_fg_color;
   border: none;
   border-bottom: 1px solid @borders;
@@ -963,8 +963,8 @@ placessidebar,
 .sidebar,
 paned > box,
 stacksidebar {
-  background-color: rgba(238, 243, 240, 0.88);
-  border-right: 1px solid rgba(31, 98, 84, 0.12);
+  background-color: rgba(238, 243, 240, 0.92);
+  border-right: 1px solid rgba(47, 138, 125, 0.10);
 }
 
 placessidebar row,
@@ -978,7 +978,7 @@ stacksidebar row {
 placessidebar row:selected,
 .sidebar row:selected,
 stacksidebar row:selected {
-  background-color: rgba(47, 138, 125, 0.16);
+  background-color: rgba(47, 138, 125, 0.12);
   color: #1D2421;
 }
 

@@ -121,22 +121,22 @@ class MingSettings(Adw.ApplicationWindow):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
         css = b"""
         window.ming-settings-window {
-            background: #F6F8F5;
-            color: #1C2320;
+            background: #F4F7F3;
+            color: #1B2320;
         }
 
         .ming-settings-sidebar {
-            background: alpha(#EFF4EF, 0.96);
-            border-right: 1px solid alpha(#215E52, 0.06);
+            background: alpha(#EEF3EF, 0.98);
+            border-right: 1px solid alpha(#2F8A7D, 0.08);
         }
 
         .ming-settings-content {
-            background: linear-gradient(to bottom, #F8FAF7, #F3F6F2);
+            background: linear-gradient(to bottom, #F7FAF6, #F1F5F0);
         }
 
         .ming-settings-window headerbar {
-            background: alpha(#FFFFFF, 0.90);
-            border-bottom: 1px solid alpha(#215E52, 0.06);
+            background: alpha(#FFFFFF, 0.94);
+            border-bottom: 1px solid alpha(#2F8A7D, 0.06);
             min-height: 44px;
         }
 
@@ -146,18 +146,18 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window row.ming-nav-row {
-            border-radius: 10px;
+            border-radius: 12px;
             margin: 3px 0;
-            min-height: 44px;
+            min-height: 46px;
         }
 
         .ming-settings-window row.ming-nav-row:hover {
-            background: alpha(#2F8A7D, 0.08);
+            background: alpha(#2F8A7D, 0.06);
         }
 
         .ming-settings-window row.ming-nav-row:selected {
-            background: alpha(#2F8A7D, 0.12);
-            color: #1C2320;
+            background: alpha(#2F8A7D, 0.10);
+            color: #1B2320;
         }
 
         .ming-settings-window .ming-nav-label {
@@ -175,14 +175,14 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: alpha(#FFFFFF, 0.92);
-            border-radius: 12px;
-            border: 1px solid alpha(#215E52, 0.06);
-            padding: 2px;
+            background: alpha(#FFFFFF, 0.94);
+            border-radius: 14px;
+            border: 1px solid alpha(#2F8A7D, 0.06);
+            padding: 4px;
         }
 
         .ming-settings-window button {
-            border-radius: 9px;
+            border-radius: 10px;
             min-height: 38px;
             padding-left: 15px;
             padding-right: 15px;
@@ -194,18 +194,18 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window button.suggested-action:hover {
-            background: #24796E;
+            background: #27776C;
         }
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
-            border-radius: 9px;
+            border-radius: 10px;
         }
 
         .ming-settings-window progressbar trough {
             min-height: 8px;
             border-radius: 999px;
-            background: alpha(#1B5A4B, 0.08);
+            background: alpha(#2F8A7D, 0.08);
         }
 
         .ming-settings-window progressbar progress {
@@ -214,7 +214,7 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window label.dim-label {
-            color: alpha(#21302A, 0.68);
+            color: alpha(#21302A, 0.66);
         }
         """
         provider = Gtk.CssProvider()
