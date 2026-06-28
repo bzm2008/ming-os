@@ -3989,6 +3989,9 @@ instances:
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-bootloader
+  module: shellprocess
+  config: ming-bootloader.conf
 branding: ming
 prompt-install: false
 oem-setup: false
@@ -4019,7 +4022,7 @@ sequence:
   - hwclock
   - initramfs
   - grubcfg
-  - bootloader
+  - shellprocess@ming-bootloader
   - shellprocess@ming-identity
   - umount
 - show:
@@ -4097,6 +4100,14 @@ hostname:
   template: "ming-os"
   forbidden_names: [ localhost ]
 USERSCONF
+
+cat > /etc/calamares/modules/ming-bootloader.conf <<'BOOTLOADERCONF'
+---
+dontChroot: true
+timeout: 180
+script:
+  - "/usr/local/sbin/ming-install-bootloader"
+BOOTLOADERCONF
 
 cat > /etc/default/locale <<'DEFAULTLOCALE'
 LANG=zh_CN.UTF-8

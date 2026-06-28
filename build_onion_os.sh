@@ -367,7 +367,7 @@ for phase in settings.get("sequence", []) or []:
 expected_steps = [
     "partition", "mount", "unpackfs", "machineid", "fstab", "locale",
     "keyboard", "localecfg", "users", "displaymanager", "networkcfg",
-    "hwclock", "initramfs", "grubcfg", "bootloader", "shellprocess@ming-identity",
+    "hwclock", "initramfs", "grubcfg", "shellprocess@ming-bootloader", "shellprocess@ming-identity",
     "umount",
 ]
 for step in expected_steps:
@@ -380,10 +380,14 @@ blocked_debian_steps = {
 }
 for step in blocked_debian_steps.intersection(exec_steps):
     errors.append(f"settings.conf still contains Debian installer step {step}")
+if "bootloader" in exec_steps:
+    errors.append("settings.conf must use Ming's diagnostic bootloader shellprocess instead of Calamares bootloader")
 
 instances = settings.get("instances") or []
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
     errors.append("settings.conf missing ming-identity instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-bootloader" for item in instances):
+    errors.append("settings.conf missing ming-bootloader instance")
 
 unpack = load_yaml("etc/calamares/modules/unpackfs.conf")
 items = unpack.get("unpack") or []
@@ -430,6 +434,7 @@ if not grub_install.is_file():
 
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
+    "usr/local/sbin/ming-install-bootloader",
     "usr/local/bin/ming-calamares-launcher",
     "usr/local/bin/ming-live-installer.sh",
     "usr/local/bin/ming-installer-session",
@@ -446,6 +451,11 @@ for relative_path in [
                 errors.append(f"{relative_path} missing stable unpackfs runtime source")
             if "ln -s" not in text and "mount --bind" not in text:
                 errors.append(f"{relative_path} must create a stable unpackfs source before Calamares starts")
+        if relative_path.endswith("ming-install-bootloader"):
+            if "--boot-directory=" not in text or "--target=i386-pc" not in text:
+                errors.append(f"{relative_path} must install BIOS GRUB into the target boot directory")
+            if "bootloader.log" not in text:
+                errors.append(f"{relative_path} must write a diagnostic bootloader log")
         if relative_path.endswith("ming-calamares-launcher"):
             if "ming-calamares-preflight" not in text or "calamares -d" not in text:
                 errors.append(f"{relative_path} must run preflight before calamares")

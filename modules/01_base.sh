@@ -662,11 +662,25 @@ configure_installer_identity() {
 #!/usr/bin/env bash
 set -uo pipefail
 
-target="${1:-/target}"
+target="${1:-}"
 version="${MING_OS_VERSION:-26.3.0}"
 
-if [[ ! -d "${target}" ]]; then
-    target="/"
+find_target_root() {
+    local candidate
+    for candidate in "${target}" /target /tmp/calamares-root-* /; do
+        [[ -n "${candidate}" ]] || continue
+        [[ -d "${candidate}" ]] || continue
+        if [[ "${candidate}" == "/" || -d "${candidate}/etc" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+target="$(find_target_root)"
+if [[ "${target}" != "/" ]]; then
+    target="${target%/}"
 fi
 
 write_file() {
@@ -807,6 +821,87 @@ fi
 MINGIDENTITY
     chmod +x /usr/local/sbin/ming-fix-installed-identity
 
+    cat > /usr/local/sbin/ming-install-bootloader << 'MINGBOOTLOADER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG=/tmp/ming-installer/bootloader.log
+mkdir -p /tmp/ming-installer
+exec > >(tee -a "${LOG}") 2>&1
+
+echo "==== Ming bootloader install $(date -Is) ===="
+echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true
+
+find_root() {
+    local candidate
+    for candidate in /tmp/calamares-root-* /target; do
+        [ -d "${candidate}" ] || continue
+        [ -d "${candidate}/boot" ] || continue
+        [ -f "${candidate}/etc/fstab" ] || continue
+        printf '%s\n' "${candidate}"
+        return 0
+    done
+    return 1
+}
+
+root="$(find_root)"
+echo "target_root=${root}"
+
+root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
+echo "root_source=${root_source}"
+boot_disk=""
+if [ -n "${root_source}" ] && [ -b "${root_source}" ]; then
+    pkname="$(lsblk -no PKNAME "${root_source}" 2>/dev/null | head -n 1 || true)"
+    if [ -n "${pkname}" ] && [ -b "/dev/${pkname}" ]; then
+        boot_disk="/dev/${pkname}"
+    fi
+fi
+if [ -z "${boot_disk}" ]; then
+    boot_disk="$(lsblk -ndo NAME,TYPE,TRAN /dev/sd? /dev/vd? /dev/nvme?n? 2>/dev/null | awk '$2=="disk" && $3!="usb" {print "/dev/"$1; exit}')"
+fi
+if [ -z "${boot_disk}" ]; then
+    boot_disk="$(lsblk -ndo NAME,TYPE /dev/sd? /dev/vd? /dev/nvme?n? 2>/dev/null | awk '$2=="disk"{print "/dev/"$1; exit}')"
+fi
+if [ -z "${boot_disk}" ] || [ ! -b "${boot_disk}" ]; then
+    echo "ERROR: cannot find install disk for GRUB"
+    exit 20
+fi
+echo "boot_disk=${boot_disk}"
+
+for mountpoint in dev proc sys run; do
+    mkdir -p "${root}/${mountpoint}"
+done
+mountpoint -q "${root}/dev" || mount --bind /dev "${root}/dev"
+mountpoint -q "${root}/proc" || mount -t proc proc "${root}/proc"
+mountpoint -q "${root}/sys" || mount -t sysfs sysfs "${root}/sys"
+mountpoint -q "${root}/run" || mount --bind /run "${root}/run"
+
+mkdir -p "${root}/boot/grub"
+
+if command -v grub-install >/dev/null 2>&1; then
+    grub-install --target=i386-pc --recheck --force \
+        --boot-directory="${root}/boot" "${boot_disk}"
+elif [ -x "${root}/usr/sbin/grub-install" ]; then
+    chroot "${root}" /usr/sbin/grub-install --target=i386-pc --recheck --force "${boot_disk}"
+else
+    echo "ERROR: grub-install is missing in live and target environments"
+    exit 21
+fi
+
+if [ -x "${root}/usr/sbin/update-grub" ]; then
+    chroot "${root}" /usr/sbin/update-grub
+elif [ -x "${root}/usr/sbin/grub-mkconfig" ]; then
+    chroot "${root}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+else
+    grub-mkconfig -o "${root}/boot/grub/grub.cfg"
+fi
+
+test -s "${root}/boot/grub/grub.cfg"
+echo "Ming bootloader install completed"
+MINGBOOTLOADER
+    chmod +x /usr/local/sbin/ming-install-bootloader
+
     # Debian's calamares-settings package brands the installer as Debian. Keep
     # the module sequence from the package, but override the visible branding
     # and add a final identity repair that runs on the installed target.
@@ -857,8 +952,16 @@ SHOWQML
 dontChroot: true
 timeout: 120
 script:
-  - "/usr/local/sbin/ming-fix-installed-identity /target"
+  - "/usr/local/sbin/ming-fix-installed-identity"
 IDENTITYCONF
+
+    cat > /etc/calamares/modules/ming-bootloader.conf << BOOTLOADERCONF
+---
+dontChroot: true
+timeout: 180
+script:
+  - "/usr/local/sbin/ming-install-bootloader"
+BOOTLOADERCONF
 
     cat > /etc/calamares/modules/unpackfs.conf << 'UNPACKFSCONF'
 ---
@@ -993,6 +1096,9 @@ instances:
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-bootloader
+  module: shellprocess
+  config: ming-bootloader.conf
 branding: ming
 prompt-install: false
 oem-setup: false
@@ -1023,7 +1129,7 @@ sequence:
   - hwclock
   - initramfs
   - grubcfg
-  - bootloader
+  - shellprocess@ming-bootloader
   - shellprocess@ming-identity
   - umount
 - show:
