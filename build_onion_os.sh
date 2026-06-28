@@ -819,22 +819,34 @@ EOF
             log_warn "未找到 isohdpfx.bin，ISO 仍可通过 BIOS/UEFI 引导，但可能不支持部分 USB-HDD 混合启动模式"
         fi
 
-        xorriso -as mkisofs \
-            -iso-level 3 \
-            -V "${ISO_VOLUME_ID}" \
-            -full-iso9660-filenames \
-            -R -J -joliet-long \
-            -c boot/grub/boot.cat \
-            -b boot/grub/i386-pc/eltorito.img \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            ${efi_data} \
-            -isohybrid-gpt-basdat \
-            "${hybrid_mbr_args[@]}" \
-            -output "${OUTPUT_DIR}/${iso_name}" \
-            "${iso_workdir}" \
-            2>&1
+        local xorriso_args=(
+            -as mkisofs
+            -iso-level 3
+            -V "${ISO_VOLUME_ID}"
+            -full-iso9660-filenames
+            -R -J -joliet-long
+            -c boot/grub/boot.cat
+            -b boot/grub/i386-pc/eltorito.img
+            -no-emul-boot
+            -boot-load-size 4
+            -boot-info-table
+        )
+        if [[ -n "${efi_data}" ]]; then
+            # shellcheck disable=SC2206
+            xorriso_args+=(${efi_data})
+        fi
+        xorriso_args+=(
+            -isohybrid-gpt-basdat
+        )
+        if [[ ${#hybrid_mbr_args[@]} -gt 0 ]]; then
+            xorriso_args+=("${hybrid_mbr_args[@]}")
+        fi
+        xorriso_args+=(
+            -o "${OUTPUT_DIR}/${iso_name}"
+            "${iso_workdir}"
+        )
+
+        xorriso "${xorriso_args[@]}" 2>&1
     else
         log_error "缺少 BIOS 引导文件 boot/grub/i386-pc/eltorito.img，拒绝生成不可启动 ISO"
         return 1

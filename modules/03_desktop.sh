@@ -2100,43 +2100,43 @@ DROP_DISTANCE = 58
 
 CSS = b'''
 window.ming-desktop {
-  background-color: rgba(18, 8, 32, 0.01);
-  color: #F4FFF9;
+  background-color: rgba(247, 250, 247, 0.01);
+  color: #1D2421;
 }
 .tile {
-  border-radius: 16px;
-  background: rgba(10, 36, 38, 0.20);
-  border: 1px solid rgba(159, 231, 215, 0.10);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.24);
+  border: 1px solid rgba(31, 98, 84, 0.08);
   padding: 8px;
-  color: #F4FFF9;
+  color: #1D2421;
 }
 .tile:hover, .tile.dragging {
-  background: rgba(31, 168, 158, 0.28);
-  border-color: rgba(159, 231, 215, 0.48);
+  background: rgba(47, 138, 125, 0.12);
+  border-color: rgba(47, 138, 125, 0.26);
 }
 .folder {
-  background: rgba(31, 168, 158, 0.25);
-  border-color: rgba(159, 231, 215, 0.58);
+  background: rgba(47, 138, 125, 0.10);
+  border-color: rgba(47, 138, 125, 0.32);
 }
 .label {
-  color: #F4FFF9;
+  color: #1D2421;
   font-size: 11px;
   font-weight: 700;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.70);
+  text-shadow: 0 1px 0 rgba(255,255,255,0.7);
 }
 .folder-title {
-  color: #FFFFFF;
-  font-size: 20px;
-  font-weight: 800;
+  color: #1D2421;
+  font-size: 18px;
+  font-weight: 700;
 }
 .folder-panel {
-  background: rgba(18, 8, 32, 0.94);
-  border: 1px solid rgba(159, 231, 215, 0.30);
-  border-radius: 14px;
+  background: rgba(251, 253, 251, 0.98);
+  border: 1px solid rgba(31, 98, 84, 0.10);
+  border-radius: 12px;
   padding: 18px;
 }
 .folder-action {
-  border-radius: 10px;
+  border-radius: 9px;
   padding: 7px 10px;
 }
 '''

@@ -121,23 +121,23 @@ class MingSettings(Adw.ApplicationWindow):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
         css = b"""
         window.ming-settings-window {
-            background: #F4F6F3;
+            background: #F6F8F5;
             color: #1C2320;
         }
 
         .ming-settings-sidebar {
-            background: alpha(#EEF4EF, 0.96);
-            border-right: 1px solid alpha(#215E52, 0.08);
+            background: alpha(#EFF4EF, 0.96);
+            border-right: 1px solid alpha(#215E52, 0.06);
         }
 
         .ming-settings-content {
-            background: linear-gradient(to bottom, #F7F9F5, #F2F5F1);
+            background: linear-gradient(to bottom, #F8FAF7, #F3F6F2);
         }
 
         .ming-settings-window headerbar {
-            background: alpha(#FFFFFF, 0.86);
-            border-bottom: 1px solid alpha(#215E52, 0.07);
-            min-height: 46px;
+            background: alpha(#FFFFFF, 0.90);
+            border-bottom: 1px solid alpha(#215E52, 0.06);
+            min-height: 44px;
         }
 
         .ming-settings-window list.navigation-sidebar {
@@ -146,17 +146,17 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window row.ming-nav-row {
-            border-radius: 12px;
+            border-radius: 10px;
             margin: 3px 0;
             min-height: 44px;
         }
 
         .ming-settings-window row.ming-nav-row:hover {
-            background: alpha(#2F8A7D, 0.09);
+            background: alpha(#2F8A7D, 0.08);
         }
 
         .ming-settings-window row.ming-nav-row:selected {
-            background: alpha(#2F8A7D, 0.14);
+            background: alpha(#2F8A7D, 0.12);
             color: #1C2320;
         }
 
@@ -175,14 +175,14 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: alpha(#FFFFFF, 0.88);
-            border-radius: 14px;
-            border: 1px solid alpha(#215E52, 0.07);
-            padding: 3px;
+            background: alpha(#FFFFFF, 0.92);
+            border-radius: 12px;
+            border: 1px solid alpha(#215E52, 0.06);
+            padding: 2px;
         }
 
         .ming-settings-window button {
-            border-radius: 10px;
+            border-radius: 9px;
             min-height: 38px;
             padding-left: 15px;
             padding-right: 15px;
@@ -199,7 +199,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
-            border-radius: 10px;
+            border-radius: 9px;
         }
 
         .ming-settings-window progressbar trough {
