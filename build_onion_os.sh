@@ -729,7 +729,13 @@ build_iso() {
     fi
 
     log_info "生成 ISO 镜像文件..."
-    local iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${MING_OS_BUILD_SUFFIX}.iso"
+    local suffix="${MING_OS_BUILD_SUFFIX}"
+    local iso_name
+    if [[ -n "${suffix}" ]]; then
+        iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${suffix}.iso"
+    else
+        iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
+    fi
 
     build_iso_manual "${iso_name}"
 
