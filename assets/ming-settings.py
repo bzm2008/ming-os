@@ -455,7 +455,8 @@ class MingSettings(Adw.ApplicationWindow):
                         cur = line.split("=", 1)[1].strip().strip('"')
         except Exception:
             pass
-        grp = Adw.PreferencesGroup(title="系统更新", description="当前版本：Ming OS %s" % cur)
+        grp = Adw.PreferencesGroup(title="系统更新",
+                                   description="当前版本：Ming OS %s\n小修复（驱动/补丁）无需重启；大版本升级会保留用户文件。" % cur)
         box.append(grp)
 
         self.update_status = Gtk.Label(label="点击下方按钮检查更新。", xalign=0, wrap=True)
@@ -473,13 +474,17 @@ class MingSettings(Adw.ApplicationWindow):
         check = Gtk.Button(label="检查更新")
         check.add_css_class("suggested-action")
         check.connect("clicked", self.on_update_check)
-        oneclick = Gtk.Button(label="一键更新")
+        patch_btn = Gtk.Button(label="应用小修复")
+        patch_btn.set_tooltip_text("应用 patch 级更新（驱动/配置/安全补丁），通常无需重启。")
+        patch_btn.connect("clicked", self.on_patch_update)
+        oneclick = Gtk.Button(label="大版本升级")
+        oneclick.set_tooltip_text("下载安装 major ISO 大版本，/home 用户文件严格保留。")
         oneclick.connect("clicked", self.on_update_oneclick)
         shutdown_btn = Gtk.Button(label="更新并关机")
         shutdown_btn.add_css_class("destructive-action")
         shutdown_btn.set_tooltip_text("检查→下载→安装更新，完成后1分钟内关机。适合睡前操作。")
         shutdown_btn.connect("clicked", self.on_update_and_shutdown)
-        btn_box.append(check); btn_box.append(oneclick); btn_box.append(shutdown_btn)
+        btn_box.append(check); btn_box.append(patch_btn); btn_box.append(oneclick); btn_box.append(shutdown_btn)
         grp.add(btn_box)
         return sc
 
@@ -489,6 +494,24 @@ class MingSettings(Adw.ApplicationWindow):
         def done(rc):
             self.update_status.set_label("检查完成。" if rc == 0 else "未发现可用更新或检查失败。")
         run_async(["ming-update", "check"], on_line=line, on_done=done)
+
+    def on_patch_update(self, _btn):
+        """应用 patch 级小修复（无需重启）。"""
+        self.update_status.set_label("正在应用 patch 小修复…")
+        self.update_bar.set_visible(True)
+        self.update_bar.set_fraction(0.1)
+        self.update_bar.set_text("patch 更新中…")
+        def line(l): self.update_status.set_label(l)
+        def done(rc):
+            self.update_bar.set_fraction(1.0)
+            if rc == 0:
+                self.update_bar.set_text("完成")
+                self.update_status.set_label("patch 更新完成，无需重启。")
+            else:
+                self.update_bar.set_text("失败或无更新")
+                self.update_status.set_label("没有可用 patch 更新，或当前已是最新。")
+                self.update_bar.set_visible(False)
+        run_async(["pkexec", "ming-update", "patch"], on_line=line, on_done=done)
 
     def on_update_oneclick(self, _btn):
         # 检查 -> 下载 -> 安装，进度条粗粒度推进

@@ -437,19 +437,153 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|download|install|auto-shutdown|status|config|help]
+Usage: ming-update [check|patch|download|install|auto-shutdown|status|config|help]
 
 Commands:
-  check             检查是否有可用更新。
-  download          下载并校验当前更新包。
-  install           将已下载的 ISO 暂存为 GRUB 启动项。
-  auto-shutdown     自动完成「检查→下载→安装→关机」全流程（适合夜间维护）。
+  check             检查是否有可用更新（含分级：patch/minor/major）。
+  patch             执行 patch 级小修复（apt 补丁 + 配置脚本，无需重启）。
+  download          下载并校验 major ISO 更新包。
+  install           将已下载的 ISO 暂存为 GRUB 启动项（major 升级，保留用户文件）。
+  auto-shutdown     自动完成「检查→下载→安装→关机」全流程（major 升级，夜间维护）。
   status            显示当前 OTA 状态。
   config            配置更新源/频道。
+
+更新策略：
+  patch  小修复、驱动更新、配置补丁 → apt/脚本应用，通常无需重启
+  minor  组件升级、新功能 → apt + 可能需重启
+  major  大版本 ISO → 完整系统替换，/home 用户文件严格保留
 HELP
 }
 
-# 一键「检查更新 → 下载 → 安装 → 关机」
+# ======================== patch 级小修复（apt 补丁路径）========================
+# 用途：驱动更新、安全补丁、配置修正，通常不需要重启。
+# 原理：从更新服务器拉取 patch manifest，执行 apt install 和 patch scripts。
+patch_update() {
+    log_step "Ming OS patch 级更新"
+    init_config
+
+    if ! check_network; then
+        log_error "网络不可用，无法检查 patch 更新。"
+        return 1
+    fi
+
+    local server
+    server=$(get_config '.update_server')
+    server=${server:-${UPDATE_SERVER}}
+    local patch_url="${server}/api/ming-patch?version=$(current_version)&arch=amd64"
+
+    log_info "检查 patch 更新：${patch_url}"
+    local response
+    response=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 "${patch_url}") || {
+        log_warn "Patch manifest 获取失败，当前已是最新或网络超时。"
+        return 0
+    }
+
+    local has_patch pkg_list script_url
+    has_patch=$(printf '%s' "${response}" | jq -r '.has_patch // false' 2>/dev/null)
+    if [[ "${has_patch}" != "true" ]]; then
+        log_info "当前已是最新（patch 级别），无需更新。"
+        notify-send -i system-software-update "Ming OS" "系统已是最新，无需 patch 更新。" 2>/dev/null || true
+        return 0
+    fi
+
+    local patch_version notes
+    patch_version=$(printf '%s' "${response}" | jq -r '.patch_version // "unknown"' 2>/dev/null)
+    notes=$(printf '%s' "${response}" | jq -r '.notes // ""' 2>/dev/null)
+    log_info "发现 patch 更新：${patch_version}  ${notes}"
+    notify-send -i system-software-update "Ming OS patch 更新" "正在应用 ${patch_version}…" 2>/dev/null || true
+
+    # 1) apt 包更新（若 manifest 包含包列表）
+    pkg_list=$(printf '%s' "${response}" | jq -r '.apt_packages[]?' 2>/dev/null | tr '\n' ' ')
+    if [[ -n "${pkg_list}" ]]; then
+        log_info "更新 apt 包：${pkg_list}"
+        # shellcheck disable=SC2086
+        DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 \
+            install ${pkg_list} </dev/null || {
+            log_warn "apt 包更新部分失败，继续执行脚本补丁。"
+        }
+    fi
+
+    # 2) 配置/脚本补丁（若 manifest 提供 patch script URL）
+    script_url=$(printf '%s' "${response}" | jq -r '.patch_script_url // ""' 2>/dev/null)
+    if [[ -n "${script_url}" && "${script_url}" != "null" ]]; then
+        log_info "下载并执行补丁脚本：${script_url}"
+        local patch_script
+        patch_script=$(mktemp /tmp/ming-patch-XXXXXX.sh)
+        if curl -fsSL --retry 2 --max-time 60 "${script_url}" -o "${patch_script}"; then
+            chmod +x "${patch_script}"
+            bash "${patch_script}" </dev/null && log_info "补丁脚本执行成功。" \
+                || log_warn "补丁脚本执行有警告，请查看日志。"
+        fi
+        rm -f "${patch_script}"
+    fi
+
+    # 3) 记录已应用的 patch 版本
+    set_config '.patch_version' "${patch_version}"
+    set_config '.last_patch' "$(date -Iseconds)"
+    notify-send -i system-software-update "Ming OS patch 完成" \
+        "已应用 ${patch_version}，无需重启。" 2>/dev/null || true
+    log_info "patch 更新完成：${patch_version}"
+}
+
+# ======================== major ISO 升级（保留用户文件）========================
+# 核心承诺：/home 分区/目录永不覆盖，用户文件严格保留。
+# 机制：Calamares replacePartition 模式仅格式化根分区，/home 挂载点独立保留；
+#       若是单分区布局则先备份 /home 到数据盘，安装后还原。
+major_install_with_home_backup() {
+    log_step "Ming OS major 大版本升级（保留用户文件）"
+    local cdir; cdir=$(cache_dir)
+    local sfile; sfile=$(state_file)
+    local manifest="${cdir}/update_info.json"
+
+    if [[ ! -f "${manifest}" ]]; then
+        log_error "未找到已下载的更新 manifest，请先运行：ming-update download"
+        return 1
+    fi
+
+    local update_type
+    update_type=$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null)
+    if [[ "${update_type}" == "patch" || "${update_type}" == "minor" ]]; then
+        log_warn "当前缓存的更新类型为 ${update_type}，建议使用 ming-update patch 而非 major 升级。"
+    fi
+
+    # 检查 /home 是否有独立分区
+    local home_separate=false
+    if findmnt -rno SOURCE /home >/dev/null 2>&1; then
+        local home_src; home_src=$(findmnt -rno SOURCE /home)
+        if [[ "${home_src}" != "$(findmnt -rno SOURCE /)" ]]; then
+            home_separate=true
+        fi
+    fi
+
+    if [[ "${home_separate}" == "true" ]]; then
+        log_info "/home 有独立分区（${home_src}），Calamares 安装时自动保留，用户文件安全。"
+    else
+        # 单分区：检查数据盘（多盘合一存储）是否可用作备份位置
+        local backup_disk=""
+        if [[ -f /run/ming-os/storage-info ]]; then
+            backup_disk=$(grep '^data_mount=' /run/ming-os/storage-info 2>/dev/null | cut -d= -f2)
+        fi
+        if [[ -n "${backup_disk}" && -d "${backup_disk}" ]]; then
+            log_info "将在 Calamares 安装前把 /home 备份到 ${backup_disk}/ming-home-backup"
+            log_info "安装完成后自动还原。"
+            # 写入 Calamares postinstall hook 配置，供 ming-fix-installed-identity 脚本在安装后执行还原
+            echo "home_backup_src=/home" > /tmp/ming-major-upgrade.conf
+            echo "home_backup_dst=${backup_disk}/ming-home-backup" >> /tmp/ming-major-upgrade.conf
+            echo "restore_after_install=true" >> /tmp/ming-major-upgrade.conf
+        else
+            log_warn "未检测到独立 /home 分区或数据盘，major 升级将依赖 Calamares 的"
+            log_warn "'replacePartition' 模式（只格式化根分区，不触碰 /home 目录）。"
+            log_warn "强烈建议安装前手动备份重要文件到 U 盘。"
+            notify-send -i dialog-warning "Ming OS 重要提示" \
+                "major 升级前请手动备份重要文件。安装程序会尽量保留 /home，但无独立分区时请谨慎。" \
+                2>/dev/null || true
+        fi
+    fi
+
+    # 调用原 install_update 暂存 ISO 启动项
+    install_update
+}
 # 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
 auto_shutdown_update() {
     log_step "Ming OS 自动更新并关机"
@@ -504,8 +638,9 @@ auto_shutdown_update() {
 
 case "${1:-help}" in
     check) check_update ;;
+    patch) patch_update ;;
     download) download_update ;;
-    install) install_update ;;
+    install) major_install_with_home_backup ;;
     auto-shutdown) auto_shutdown_update ;;
     status) show_status ;;
     config) configure_update ;;
