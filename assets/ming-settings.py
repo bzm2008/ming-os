@@ -475,7 +475,11 @@ class MingSettings(Adw.ApplicationWindow):
         check.connect("clicked", self.on_update_check)
         oneclick = Gtk.Button(label="一键更新")
         oneclick.connect("clicked", self.on_update_oneclick)
-        btn_box.append(check); btn_box.append(oneclick)
+        shutdown_btn = Gtk.Button(label="更新并关机")
+        shutdown_btn.add_css_class("destructive-action")
+        shutdown_btn.set_tooltip_text("检查→下载→安装更新，完成后1分钟内关机。适合睡前操作。")
+        shutdown_btn.connect("clicked", self.on_update_and_shutdown)
+        btn_box.append(check); btn_box.append(oneclick); btn_box.append(shutdown_btn)
         grp.add(btn_box)
         return sc
 
@@ -516,6 +520,45 @@ class MingSettings(Adw.ApplicationWindow):
             run_async(["ming-update", "download"], on_line=dl_line, on_done=after_dl)
         run_async(["ming-update", "check"], on_line=lambda l: self.update_status.set_label(l),
                   on_done=after_check)
+
+    def on_update_and_shutdown(self, _btn):
+        """更新并关机：先弹确认对话框，再后台运行 ming-update auto-shutdown。"""
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading="确认更新并关机？",
+            body="系统将自动完成「检查→下载→安装」全过程，完成后 1 分钟内关机。\n\n"
+                 "如果当前没有更新，系统不会关机。\n\n"
+                 "适合睡前操作，明天开机即可用上新版本。")
+        dlg.add_response("cancel", "取消")
+        dlg.add_response("ok", "确认，开始更新并关机")
+        dlg.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+
+        def on_resp(d, resp):
+            if resp != "ok":
+                return
+            self.update_status.set_label("正在执行更新并关机流程…")
+            self.update_bar.set_visible(True)
+            self.update_bar.set_fraction(0.1)
+            self.update_bar.set_text("自动更新中…")
+
+            def line(l):
+                self.update_status.set_label(l)
+
+            def done(rc):
+                self.update_bar.set_fraction(1.0)
+                if rc == 0:
+                    self.update_bar.set_text("完成，即将关机")
+                    self.update_status.set_label("更新流程完成，系统将在 1 分钟内关机。")
+                else:
+                    self.update_bar.set_text("失败")
+                    self.update_status.set_label("更新或关机流程失败，请查看日志。")
+                    self.update_bar.set_visible(False)
+
+            run_async(["pkexec", "ming-update", "auto-shutdown"], on_line=line, on_done=done)
+
+        dlg.connect("response", on_resp)
+        dlg.present()
 
     # ---- 5. 显示与无障碍（字体 + 图标等比缩放） ----
     def build_display(self):

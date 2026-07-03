@@ -437,21 +437,76 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|download|install|status|config|help]
+Usage: ming-update [check|download|install|auto-shutdown|status|config|help]
 
 Commands:
-  check      Check for available updates.
-  download   Download and verify the current update.
-  install    Stage the downloaded ISO as a GRUB boot entry.
-  status     Show current OTA state.
-  config     Configure update source/channel.
+  check             检查是否有可用更新。
+  download          下载并校验当前更新包。
+  install           将已下载的 ISO 暂存为 GRUB 启动项。
+  auto-shutdown     自动完成「检查→下载→安装→关机」全流程（适合夜间维护）。
+  status            显示当前 OTA 状态。
+  config            配置更新源/频道。
 HELP
+}
+
+# 一键「检查更新 → 下载 → 安装 → 关机」
+# 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
+auto_shutdown_update() {
+    log_step "Ming OS 自动更新并关机"
+    local notify_title="Ming OS 自动更新"
+
+    _notify() {
+        local msg="$1"
+        log_info "${msg}"
+        notify-send -i system-software-update "${notify_title}" "${msg}" 2>/dev/null || true
+    }
+
+    _notify "开始检查更新…"
+    if ! check_update; then
+        _notify "检查更新失败，已取消自动关机。"
+        return 1
+    fi
+
+    local manifest; manifest="$(cache_dir)/update_info.json"
+    if [[ ! -f "${manifest}" ]]; then
+        _notify "当前已是最新版本，无需更新。不执行关机。"
+        return 0
+    fi
+
+    local has_update
+    has_update=$(jq -r '.has_update // false' "${manifest}" 2>/dev/null)
+    if [[ "${has_update}" != "true" ]]; then
+        _notify "当前已是最新版本，无需更新。不执行关机。"
+        return 0
+    fi
+
+    local new_version
+    new_version=$(jq -r '.version // "unknown"' "${manifest}" 2>/dev/null)
+    _notify "发现新版本 ${new_version}，开始下载…"
+
+    if ! download_update; then
+        _notify "下载失败，已取消自动关机。"
+        return 1
+    fi
+
+    _notify "下载完成，正在暂存启动项…"
+    if ! install_update; then
+        _notify "安装暂存失败，已取消自动关机。"
+        return 1
+    fi
+
+    _notify "更新准备完毕！系统将在 60 秒后关机，重启后自动应用新版本。"
+    log_info "Scheduling shutdown in 60 seconds..."
+    # 60 秒倒计时让用户有机会中断（运行 sudo shutdown -c 可取消）
+    sudo shutdown -h +1 "Ming OS 更新完成，系统将在 1 分钟内关机。" 2>/dev/null \
+        || systemctl poweroff --no-wall 2>/dev/null || poweroff 2>/dev/null || true
 }
 
 case "${1:-help}" in
     check) check_update ;;
     download) download_update ;;
     install) install_update ;;
+    auto-shutdown) auto_shutdown_update ;;
     status) show_status ;;
     config) configure_update ;;
     help|--help|-h) show_help ;;
@@ -464,9 +519,10 @@ OTACLI
 }
 
 deploy_systemd_services() {
-    echo "Creating ming-update systemd timer..."
+    echo "Creating ming-update systemd services and timers..."
 
-    cat > /etc/systemd/system/ming-update-check.service << SYSTEMDSERVICE
+    # 每周一凌晨3点定期检查（原有）
+    cat > /etc/systemd/system/ming-update-check.service << 'SYSTEMDSERVICE'
 [Unit]
 Description=Ming OS OTA Update Check
 After=network-online.target
@@ -479,7 +535,7 @@ StandardOutput=journal
 StandardError=journal
 SYSTEMDSERVICE
 
-    cat > /etc/systemd/system/ming-update-check.timer << SYSTEMDTIMER
+    cat > /etc/systemd/system/ming-update-check.timer << 'SYSTEMDTIMER'
 [Unit]
 Description=Ming OS OTA Update Check Timer
 
@@ -492,8 +548,80 @@ Persistent=true
 WantedBy=timers.target
 SYSTEMDTIMER
 
+    # 开机联网后自动检查（新增）：静默检查，有更新则桌面通知
+    cat > /etc/systemd/system/ming-update-boot-check.service << 'BOOTCHECK'
+[Unit]
+Description=Ming OS Boot-time Update Check
+After=network-online.target graphical.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/ming-update
+
+[Service]
+Type=oneshot
+# 延迟90秒，等桌面完全就绪后弹通知
+ExecStartPre=/bin/sleep 90
+ExecStart=/usr/local/bin/ming-boot-update-check
+StandardOutput=journal
+StandardError=journal
+# 检查失败不影响登录体验
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=graphical.target
+BOOTCHECK
+
+    # 自动检查通知脚本（用户级，有更新弹 zenity/notify-send）
+    cat > /usr/local/bin/ming-boot-update-check << 'BOOTCHECKSCRIPT'
+#!/usr/bin/env bash
+# Ming OS 开机自动检查更新（静默，有更新才弹通知）
+set -uo pipefail
+
+LOG="/tmp/ming-boot-check.log"
+exec >> "${LOG}" 2>&1
+
+echo "[$(date '+%F %T')] Boot update check started"
+
+# 网络不通就退出，不阻塞
+/usr/local/bin/ming-update check >/tmp/ming-update-check.log 2>&1
+rc=$?
+echo "[$(date '+%F %T')] ming-update check rc=${rc}"
+
+# 没有 manifest 说明没有更新，静默退出
+manifest="/var/cache/ming-update/$(id -un 2>/dev/null || echo root)/update_info.json"
+[ -f "${manifest}" ] || manifest="/var/cache/ming-update/root/update_info.json"
+[ -f "${manifest}" ] || exit 0
+
+has_update=$(jq -r '.has_update // false' "${manifest}" 2>/dev/null)
+[ "${has_update}" = "true" ] || exit 0
+
+new_version=$(jq -r '.version // "新版本"' "${manifest}" 2>/dev/null)
+
+# 找到当前登录用户的 DISPLAY
+for user_home in /home/*; do
+    uname=$(basename "${user_home}")
+    display=$(cat /proc/*/environ 2>/dev/null | tr '\0' '\n' | grep "^DISPLAY=" | head -1 | cut -d= -f2)
+    if [ -n "${display}" ]; then
+        export DISPLAY="${display}"
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "${uname}" 2>/dev/null)/bus"
+        break
+    fi
+done
+
+# 桌面通知
+notify-send \
+    -i system-software-update \
+    -a "Ming OS 更新" \
+    "发现新版本 ${new_version}" \
+    "点击「铭设置」→「系统更新」可一键更新，或运行 sudo ming-update auto-shutdown 更新后关机。" \
+    2>/dev/null || true
+
+echo "[$(date '+%F %T')] Notification sent for version ${new_version}"
+BOOTCHECKSCRIPT
+    chmod +x /usr/local/bin/ming-boot-update-check
+
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable ming-update-check.timer 2>/dev/null || true
+    systemctl enable ming-update-boot-check.service 2>/dev/null || true
     systemctl start ming-update-check.timer 2>/dev/null || true
 }
 
