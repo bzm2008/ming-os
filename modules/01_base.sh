@@ -1622,6 +1622,23 @@ Section "InputClass"
 EndSection
 TOUCHSCREENCONF
 
+    # ======================== 英特尔显卡优化配置 ========================
+    # 覆盖 Sandy Bridge (HD 2000/3000) 到 Broadwell (HD 5xxx) 的老核显：
+    #   TearFree=true     消除画面撕裂（modesetting 驱动无此选项，xf86-video-intel 专有）
+    #   AccelMethod=sna   Sandy/Ivy Bridge 的最快加速方式（比 UXA 省电且快）
+    # Haswell 及更新（HD 4xxx+）由 modesetting 驱动管理，不需要此文件；
+    # 但写了也无害——xf86-video-intel 在更新卡上会被 modesetting 覆盖。
+    cat > /etc/X11/xorg.conf.d/20-intel.conf << 'INTELCONF'
+Section "Device"
+    Identifier  "Intel Graphics"
+    Driver      "intel"
+    Option      "TearFree"    "true"
+    Option      "AccelMethod" "sna"
+    Option      "DRI"         "3"
+    Option      "TripleBuffer" "true"
+EndSection
+INTELCONF
+
     # ACPI 守护进程（处理笔记本热键/电源按钮）
     systemctl enable acpid 2>/dev/null || true
 }

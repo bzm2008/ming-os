@@ -167,6 +167,28 @@ if [ "${MEM_MB}" -le 4200 ]; then
 fi
 
 HAS_GPU=0
+IS_OLD_INTEL=0
+
+# 检测是否是老旧英特尔核显（Sandy/Ivy/Haswell Bridge，GMA 系列）
+# 这些显卡有 DRI 设备但 GLX 不稳定，picom 应降级到 xrender
+if [ -e /dev/dri/card0 ]; then
+    vendor_id=$(cat /sys/class/drm/card0/device/vendor 2>/dev/null || true)
+    device_id=$(cat /sys/class/drm/card0/device/device 2>/dev/null || true)
+    if [ "${vendor_id}" = "0x8086" ]; then
+        # Intel GPU: 0x0100-0x017F = Sandy Bridge, 0x0150-0x017F = Ivy Bridge,
+        # 0x0400-0x0417 = Haswell, 0x2e*/0x2a*/0x29* = GMA 4500/X3100/G45
+        case "${device_id}" in
+            0x0102|0x0106|0x010a|0x0112|0x0116|0x0122|0x0126)
+                IS_OLD_INTEL=1 ;;  # Sandy Bridge HD 2000/3000
+            0x0152|0x0156|0x015a|0x0162|0x0166|0x016a)
+                IS_OLD_INTEL=1 ;;  # Ivy Bridge HD 2500/4000
+            0x29*|0x2a*|0x2e*)
+                IS_OLD_INTEL=1 ;;  # GMA X3100/G45/4500
+            *) IS_OLD_INTEL=0 ;;
+        esac
+    fi
+fi
+
 if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/card1 ]; then
     HAS_GPU=1
 fi
@@ -176,7 +198,10 @@ if [ "$HAS_GPU" -eq 0 ] && command -v glxinfo &>/dev/null; then
     fi
 fi
 
-if [ "$HAS_GPU" -eq 1 ]; then
+if [ "$IS_OLD_INTEL" -eq 1 ]; then
+    # 老英特尔核显：GLX 不稳定，强制使用 xrender（无模糊但稳定）
+    exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
+elif [ "$HAS_GPU" -eq 1 ]; then
     exec ${PICOM_BIN} --config "${CONF}" -b "$@"
 else
     exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
