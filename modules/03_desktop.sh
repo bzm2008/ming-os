@@ -4764,6 +4764,7 @@ X-GNOME-Autostart-enabled=true
 ONBOARDAUTO
 
     # 通过 gsettings schema 覆盖让 Onboard 默认 auto-show + 停靠底部 + 触屏友好
+    # 平板专项：大键盘布局，按键放大1.4倍，适合手指点击
     mkdir -p "/home/${MING_USER}/.config/onboard"
     cat > "/home/${MING_USER}/.config/onboard/ming-defaults.dconf" << 'ONBOARDCFG'
 [org/onboard]
@@ -4771,10 +4772,12 @@ layout='Compact'
 theme='Nightshade'
 xembed-onboard=false
 start-minimized=true
+key-size=1.4
 
 [org/onboard/auto-show]
 enabled=true
-hide-on-key-press=true
+hide-on-key-press=false
+tablet-mode-detection-enabled=true
 
 [org/onboard/window]
 docking-enabled=true
@@ -4794,15 +4797,49 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 ONBOARDLOAD
 
-    # ---- touchegg 触摸手势 ----
+    # ---- touchegg 触摸手势（增强版：单指/双指/三指/四指全覆盖）----
     mkdir -p "/home/${MING_USER}/.config/touchegg"
     cat > "/home/${MING_USER}/.config/touchegg/touchegg.conf" << 'TOUCHEGGCFG'
 <touchégg>
   <settings>
-    <property name="animation_delay">150</property>
-    <property name="action_execute_threshold">20</property>
+    <property name="animation_delay">100</property>
+    <property name="action_execute_threshold">10</property>
   </settings>
   <application name="All">
+    <!-- 双指：两指上下滚动（模拟鼠标滚轮，触屏最常用操作）-->
+    <gesture type="SWIPE" fingers="2" direction="UP">
+      <action type="SCROLL">
+        <direction>UP</direction>
+        <speed>2</speed>
+      </action>
+    </gesture>
+    <gesture type="SWIPE" fingers="2" direction="DOWN">
+      <action type="SCROLL">
+        <direction>DOWN</direction>
+        <speed>2</speed>
+      </action>
+    </gesture>
+    <!-- 双指：捏合缩放（浏览器/图片查看必备）-->
+    <gesture type="PINCH" fingers="2" direction="IN">
+      <action type="SEND_KEYS">
+        <keys>Control_L+minus</keys>
+        <repeat>true</repeat>
+      </action>
+    </gesture>
+    <gesture type="PINCH" fingers="2" direction="OUT">
+      <action type="SEND_KEYS">
+        <keys>Control_L+plus</keys>
+        <repeat>true</repeat>
+      </action>
+    </gesture>
+    <!-- 双指：长按 = 右键（平板操作习惯）-->
+    <gesture type="TAP" fingers="2" direction="UNKNOWN">
+      <action type="MOUSE_CLICK">
+        <button>3</button>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <!-- 三指：上划 = 显示桌面；下划 = 最小化当前窗口 -->
     <gesture type="SWIPE" fingers="3" direction="UP">
       <action type="RUN_COMMAND">
         <repeat>false</repeat>
@@ -4817,6 +4854,20 @@ ONBOARDLOAD
         <on>begin</on>
       </action>
     </gesture>
+    <!-- 三指：左右划 = 前进/后退（浏览器）-->
+    <gesture type="SWIPE" fingers="3" direction="LEFT">
+      <action type="SEND_KEYS">
+        <keys>Alt_L+Left</keys>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <gesture type="SWIPE" fingers="3" direction="RIGHT">
+      <action type="SEND_KEYS">
+        <keys>Alt_L+Right</keys>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <!-- 四指：左右划 = 切换工作区 -->
     <gesture type="SWIPE" fingers="4" direction="LEFT">
       <action type="RUN_COMMAND">
         <repeat>false</repeat>
@@ -4828,6 +4879,13 @@ ONBOARDLOAD
       <action type="RUN_COMMAND">
         <repeat>false</repeat>
         <command>wmctrl -s $(( $(wmctrl -d | grep '\*' | cut -d' ' -f1) - 1 ))</command>
+        <on>begin</on>
+      </action>
+    </gesture>
+    <!-- 四指：上划 = 应用切换器 -->
+    <gesture type="SWIPE" fingers="4" direction="UP">
+      <action type="SEND_KEYS">
+        <keys>Alt_L+Tab</keys>
         <on>begin</on>
       </action>
     </gesture>
