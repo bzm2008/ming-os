@@ -19,7 +19,6 @@ build-logs/
 repackage_*.sh
 repack_*.sh
 resume-build.log
-resume_build.sh
 qemu_verify_*.sh
 make_bootable_iso.sh
 make-bootable.log
