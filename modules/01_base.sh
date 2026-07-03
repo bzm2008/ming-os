@@ -1025,7 +1025,13 @@ BOOTLOADERCONF
     cat > /etc/calamares/modules/unpackfs.conf << 'UNPACKFSCONF'
 ---
 unpack:
-  - source: "/run/ming-installer/filesystem.squashfs"
+  # live-boot 3.x 把 squashfs 挂载在 /run/live/medium/live/filesystem.squashfs
+  # 旧版（2.x）路径为 /lib/live/mount/medium/live/filesystem.squashfs
+  # 两路同时兜底：先找新路径，若不存在则 Calamares 会报错后中止
+  - source: "/run/live/medium/live/filesystem.squashfs"
+    sourcefs: "squashfs"
+    destination: ""
+  - source: "/lib/live/mount/medium/live/filesystem.squashfs"
     sourcefs: "squashfs"
     destination: ""
 UNPACKFSCONF
@@ -1623,12 +1629,18 @@ EndSection
 TOUCHSCREENCONF
 
     # ======================== 英特尔显卡优化配置 ========================
-    # 覆盖 Sandy Bridge (HD 2000/3000) 到 Broadwell (HD 5xxx) 的老核显：
-    #   TearFree=true     消除画面撕裂（modesetting 驱动无此选项，xf86-video-intel 专有）
-    #   AccelMethod=sna   Sandy/Ivy Bridge 的最快加速方式（比 UXA 省电且快）
-    # Haswell 及更新（HD 4xxx+）由 modesetting 驱动管理，不需要此文件；
-    # 但写了也无害——xf86-video-intel 在更新卡上会被 modesetting 覆盖。
-    cat > /etc/X11/xorg.conf.d/20-intel.conf << 'INTELCONF'
+    # 关键：20-intel.conf 只能在确认有 Intel GPU 时才写入。
+    # 若无条件写入 Driver "intel"，在 VirtualBox/QEMU/AMD 机器上 X 服务器会
+    # 因找不到 intel DDX 驱动而加载失败，导致黑屏。
+    # 通过 systemd tmpfiles + 开机脚本动态检测，只在 Intel GPU 机器上生效。
+    cat > /usr/local/sbin/ming-intel-xorg-setup << 'INTELXORGSETUP'
+#!/bin/sh
+# 开机时检查是否有 Intel GPU，仅有 Intel 时写入 xorg.conf
+XCONF="/etc/X11/xorg.conf.d/20-intel.conf"
+vendor=$(cat /sys/class/drm/card0/device/vendor 2>/dev/null || echo "")
+if [ "${vendor}" = "0x8086" ]; then
+    mkdir -p /etc/X11/xorg.conf.d
+    cat > "${XCONF}" << 'EOF'
 Section "Device"
     Identifier  "Intel Graphics"
     Driver      "intel"
@@ -1637,7 +1649,29 @@ Section "Device"
     Option      "DRI"         "3"
     Option      "TripleBuffer" "true"
 EndSection
-INTELCONF
+EOF
+else
+    rm -f "${XCONF}"
+fi
+INTELXORGSETUP
+    chmod 0755 /usr/local/sbin/ming-intel-xorg-setup
+    rm -f /etc/X11/xorg.conf.d/20-intel.conf
+
+    cat > /etc/systemd/system/ming-intel-xorg.service << 'INTELXORGSVC'
+[Unit]
+Description=Ming OS Intel Xorg config (only on Intel GPU)
+DefaultDependencies=no
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-intel-xorg-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+INTELXORGSVC
+    systemctl enable ming-intel-xorg.service 2>/dev/null || true
 
     # ACPI 守护进程（处理笔记本热键/电源按钮）
     systemctl enable acpid 2>/dev/null || true
