@@ -707,8 +707,8 @@ Categories=Office;
 StartupNotify=true
 WPSINSTALLDESKTOP
 
-    if [[ "${MING_PREINSTALL_WPS:-0}" != "1" ]]; then
-        echo "[02_apps] Skip WPS preinstall in image build; keep on-demand installer for faster and more reliable builds."
+    if [[ "${MING_PREINSTALL_WPS:-1}" != "1" ]]; then
+        echo "[02_apps] MING_PREINSTALL_WPS=0，跳过 WPS 预装，保留按需安装脚本。"
         return 0
     fi
 

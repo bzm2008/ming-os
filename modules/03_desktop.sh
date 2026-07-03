@@ -1054,7 +1054,7 @@ XFWMMING
 [Desktop Entry]
 Type=X-GNOME-Metatheme
 Name=Ming Glass
-Comment=Ming OS 26.3.0 Light Paper Theme
+Comment=Ming OS 26.3.1 Light Paper Theme
 Encoding=UTF-8
 
 [X-GNOME-Metatheme]
@@ -2838,7 +2838,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Ming OS 26.3.0 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.3.1 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -2993,7 +2993,7 @@ WPSDESKTOP
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.0 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
+# Ming OS 26.3.1 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
 # 说明：Debian 仓库的 picom 主线版不支持 jonaburg/FT-Labs
 #       分支的 animations 块；强行写入会导致配置解析失败、合成器拒绝启动，
 #       这正是历史版本“美化没生效”的元凶之一。这里只用主线支持的特性：
@@ -3291,13 +3291,13 @@ deploy_release_readme() {
     mkdir -p "${doc_dir}"
 
     cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Ming OS 26.3.0 Release And Website Handoff
+# Ming OS 26.3.1 Release And Website Handoff
 
 This document is the current website and AI handoff source for Ming OS. Use `26.3.0` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
 ## Positioning
 
-Ming OS 26.3.0 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
+Ming OS 26.3.1 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
 
 This is the version to use when producing:
 
@@ -3321,7 +3321,7 @@ This is the version to use when producing:
 ## Feature Summary
 
 - Debian 13 / Trixie base.
-- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2630`.
+- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2631`.
 - Fixes the 26.2.5 `invalid magic number` / `you need to load the kernel first` class of failures.
 - Live/Ventoy auto-login as `ming`.
 - Ming wallpaper applies by default.
@@ -3382,7 +3382,7 @@ Get-FileHash onion-os-26.2.6-r2-home-amd64.iso -Algorithm SHA256
 
 ## Prompt For Another AI Building The Scallion Product Page
 
-You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.0`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
+You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.1`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
 
 Required links:
 
@@ -3394,7 +3394,7 @@ Required links:
 Page goals:
 
 - Explain that Ming OS is a Debian 13 / Trixie based Chinese desktop system.
-- Make `Ming OS 26.3.0` the visible product name in the first viewport.
+- Make `Ming OS 26.3.1` the visible product name in the first viewport.
 - Highlight boot reliability, Live auto-login, low-memory WeChat support, graphical update button, Ming Settings, Android-like app folders, All Disks, and the Ming-branded installer.
 - Tell users clearly that 2GB RAM can run the OS, but a WeChat account with many friends and groups may still be heavy; recommend Web WeChat as the fallback.
 - Provide a clear ISO download button, GitHub button, and OTA status area.
@@ -3408,7 +3408,7 @@ Suggested message hierarchy:
 
 Suggested structure:
 
-- Hero: title `Ming OS 26.3.0`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
+- Hero: title `Ming OS 26.3.1`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
 - Feature section: WeChat low-memory mode, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Security Manager, Ming installer.
@@ -3569,7 +3569,7 @@ PHONEDESKTOPAUTO
 setup_welcome_wizard() {
     cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'
 #!/usr/bin/env python3
-# Ming OS 26.3.0 首次启动欢迎引导
+# Ming OS 26.3.1 首次启动欢迎引导
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -4857,7 +4857,7 @@ TOUCHEGGAUTO
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Ming OS 26.3.0 Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.3.1 Dock 桌面定制 <====="
 
     generate_ming_icons
     configure_hidpi_autoscale
@@ -4879,7 +4879,7 @@ main() {
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.3.0 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.3.1 Dock 桌面定制完成 <====="
 }
 
 main

@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
-readonly MING_OS_VERSION="26.3.0"
-readonly MING_OS_BUILD_SUFFIX="r4"
+readonly MING_OS_VERSION="26.3.1"
+readonly MING_OS_BUILD_SUFFIX=""
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
-readonly ISO_VOLUME_ID="MING_OS_2630"
+readonly ISO_VOLUME_ID="MING_OS_2631"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
@@ -478,6 +478,8 @@ for relative_path in [
         if relative_path.endswith("ming-install-bootloader"):
             if "--boot-directory=" not in text or "--target=i386-pc" not in text:
                 errors.append(f"{relative_path} must install BIOS GRUB into the target boot directory")
+            if "--target=x86_64-efi" not in text or "BOOTX64.EFI" not in text or "--removable" not in text:
+                errors.append(f"{relative_path} must install a removable UEFI fallback bootloader")
             if "bootloader.log" not in text:
                 errors.append(f"{relative_path} must write a diagnostic bootloader log")
         if relative_path.endswith("ming-calamares-launcher"):
@@ -647,6 +649,16 @@ menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphic
 
 menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
     linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 install nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+    initrd /live/initrd
+}
+
+menuentry "Ming OS ${MING_OS_VERSION} 老 AMD 显卡 / Radeon 兼容模式" {
+    linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 install nomodeset radeon.modeset=0 amdgpu.modeset=0 pcie_aspm=off iommu=off
+    initrd /live/initrd
+}
+
+menuentry "Ming OS ${MING_OS_VERSION} Surface Pro / Mac EFI 兼容模式" {
+    linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 install acpi_osi=Darwin noapic nolapic efi=noruntime
     initrd /live/initrd
 }
 

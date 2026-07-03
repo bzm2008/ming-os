@@ -663,7 +663,7 @@ configure_installer_identity() {
 set -uo pipefail
 
 target="${1:-}"
-version="${MING_OS_VERSION:-26.3.0}"
+version="${MING_OS_VERSION:-26.3.1}"
 
 find_target_root() {
     local candidate
@@ -879,14 +879,65 @@ mountpoint -q "${root}/run" || mount --bind /run "${root}/run"
 
 mkdir -p "${root}/boot/grub"
 
-if command -v grub-install >/dev/null 2>&1; then
-    grub-install --target=i386-pc --recheck --force \
-        --boot-directory="${root}/boot" "${boot_disk}"
-elif [ -x "${root}/usr/sbin/grub-install" ]; then
-    chroot "${root}" /usr/sbin/grub-install --target=i386-pc --recheck --force "${boot_disk}"
+install_uefi_grub() {
+    [ -d /sys/firmware/efi ] || return 1
+    if ! findmnt --target "${root}/boot/efi" >/dev/null 2>&1; then
+        echo "UEFI firmware detected but target /boot/efi is not mounted; falling back to BIOS GRUB"
+        return 1
+    fi
+    mkdir -p "${root}/boot/efi/EFI/Ming" "${root}/boot/efi/EFI/BOOT"
+    if [ -x "${root}/usr/sbin/grub-install" ]; then
+        chroot "${root}" /usr/sbin/grub-install \
+            --target=x86_64-efi \
+            --efi-directory=/boot/efi \
+            --bootloader-id="Ming OS" \
+            --recheck \
+            --removable
+    elif command -v grub-install >/dev/null 2>&1; then
+        grub-install \
+            --target=x86_64-efi \
+            --efi-directory="${root}/boot/efi" \
+            --boot-directory="${root}/boot" \
+            --bootloader-id="Ming OS" \
+            --recheck \
+            --removable \
+            --no-nvram
+    else
+        return 1
+    fi
+    if [ -f "${root}/boot/efi/EFI/BOOT/BOOTX64.EFI" ]; then
+        echo "UEFI fallback bootloader installed at /boot/efi/EFI/BOOT/BOOTX64.EFI"
+        return 0
+    fi
+    echo "ERROR: UEFI grub-install finished without BOOTX64.EFI"
+    return 2
+}
+
+install_bios_grub() {
+    if command -v grub-install >/dev/null 2>&1; then
+        grub-install --target=i386-pc --recheck --force \
+            --boot-directory="${root}/boot" "${boot_disk}"
+    elif [ -x "${root}/usr/sbin/grub-install" ]; then
+        chroot "${root}" /usr/sbin/grub-install --target=i386-pc --recheck --force "${boot_disk}"
+    else
+        echo "ERROR: grub-install is missing in live and target environments"
+        exit 21
+    fi
+}
+
+if [ -d /sys/firmware/efi ]; then
+    if install_uefi_grub; then
+        echo "Ming UEFI bootloader path completed"
+    elif findmnt --target "${root}/boot/efi" >/dev/null 2>&1; then
+        echo "ERROR: UEFI bootloader install failed even though the target ESP is mounted"
+        exit 22
+    else
+        install_bios_grub
+        echo "Ming BIOS bootloader path completed"
+    fi
 else
-    echo "ERROR: grub-install is missing in live and target environments"
-    exit 21
+    install_bios_grub
+    echo "Ming BIOS bootloader path completed"
 fi
 
 if [ -x "${root}/usr/sbin/update-grub" ]; then
