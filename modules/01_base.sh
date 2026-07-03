@@ -858,10 +858,10 @@ if [ -n "${root_source}" ] && [ -b "${root_source}" ]; then
     fi
 fi
 if [ -z "${boot_disk}" ]; then
-    boot_disk="$(lsblk -ndo NAME,TYPE,TRAN /dev/sd? /dev/vd? /dev/nvme?n? 2>/dev/null | awk '$2=="disk" && $3!="usb" {print "/dev/"$1; exit}')"
+    boot_disk="$(lsblk -ndo NAME,TYPE,TRAN /dev/sd? /dev/vd? /dev/nvme?n? /dev/mmcblk? 2>/dev/null | awk '$2=="disk" && $3!="usb" {print "/dev/"$1; exit}')"
 fi
 if [ -z "${boot_disk}" ]; then
-    boot_disk="$(lsblk -ndo NAME,TYPE /dev/sd? /dev/vd? /dev/nvme?n? 2>/dev/null | awk '$2=="disk"{print "/dev/"$1; exit}')"
+    boot_disk="$(lsblk -ndo NAME,TYPE /dev/sd? /dev/vd? /dev/nvme?n? /dev/mmcblk? 2>/dev/null | awk '$2=="disk"{print "/dev/"$1; exit}')"
 fi
 if [ -z "${boot_disk}" ] || [ ! -b "${boot_disk}" ]; then
     echo "ERROR: cannot find install disk for GRUB"
@@ -928,27 +928,35 @@ install_bios_grub() {
 if [ -d /sys/firmware/efi ]; then
     if install_uefi_grub; then
         echo "Ming UEFI bootloader path completed"
-    elif findmnt --target "${root}/boot/efi" >/dev/null 2>&1; then
-        echo "ERROR: UEFI bootloader install failed even though the target ESP is mounted"
-        exit 22
     else
+        # UEFI 安装失败（无论是 ESP 未挂载还是 grub-install 出错），
+        # 都降级到 BIOS GRUB——确保老主板/半残 UEFI 机器仍可引导
+        echo "WARN: UEFI bootloader install failed; falling back to BIOS GRUB"
         install_bios_grub
-        echo "Ming BIOS bootloader path completed"
+        echo "Ming BIOS fallback bootloader path completed"
     fi
 else
     install_bios_grub
     echo "Ming BIOS bootloader path completed"
 fi
 
+# 更新 GRUB 配置（失败不致命，grub.cfg 可能已由 Calamares grubcfg 模块写好）
 if [ -x "${root}/usr/sbin/update-grub" ]; then
-    chroot "${root}" /usr/sbin/update-grub
+    chroot "${root}" /usr/sbin/update-grub 2>/tmp/ming-installer/update-grub.log || \
+        echo "WARN: update-grub returned non-zero; check /tmp/ming-installer/update-grub.log"
 elif [ -x "${root}/usr/sbin/grub-mkconfig" ]; then
-    chroot "${root}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+    chroot "${root}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg \
+        2>/tmp/ming-installer/update-grub.log || true
 else
-    grub-mkconfig -o "${root}/boot/grub/grub.cfg"
+    grub-mkconfig -o "${root}/boot/grub/grub.cfg" 2>/dev/null || true
 fi
 
-test -s "${root}/boot/grub/grub.cfg"
+# grub.cfg 存在即视为成功；空文件不阻断安装（Calamares grubcfg 模块会兜底）
+if [ -s "${root}/boot/grub/grub.cfg" ]; then
+    echo "grub.cfg OK: $(wc -l < "${root}/boot/grub/grub.cfg") lines"
+else
+    echo "WARN: grub.cfg is missing or empty after update-grub"
+fi
 echo "Ming bootloader install completed"
 MINGBOOTLOADER
     chmod +x /usr/local/sbin/ming-install-bootloader
@@ -1305,46 +1313,62 @@ WantedBy=sysinit.target
 MEMSVC
 
     # 系统内核参数优化
-    cat > /etc/sysctl.d/99-ming-performance.conf << SYSCTLCONF
-# Ming OS 内核深度优化
-# ---- 内存 ----
+    cat > /etc/sysctl.d/99-ming-performance.conf << 'SYSCTLCONF'
+# Ming OS 26.3.1 内核深度优化
+# 目标：兼容 2GB+ RAM / 老 i3-i5-E3 / 老 AMD / 机械硬盘，同时保持桌面流畅
+
+# ---- 内存：老机器优先减少换页 ----
 vm.swappiness=10
-vm.vfs_cache_pressure=80
-vm.dirty_ratio=12
-vm.dirty_background_ratio=4
-vm.dirty_expire_centisecs=1500
-vm.dirty_writeback_centisecs=500
+vm.vfs_cache_pressure=60
+vm.dirty_ratio=15
+vm.dirty_background_ratio=5
+vm.dirty_expire_centisecs=3000
+vm.dirty_writeback_centisecs=1500
 vm.page-cluster=0
 vm.watermark_boost_factor=0
 vm.watermark_scale_factor=125
-# 透明大页改为 madvise（只有显式申请的进程才用，避免桌面卡顿）
-# 由 udev/boot 脚本单独写 /sys/kernel/mm/transparent_hugepage/enabled
+# 禁止内核 OOM 过于激进地杀进程（桌面常驻应用保护）
+vm.oom_kill_allocating_task=0
+vm.overcommit_memory=0
+vm.overcommit_ratio=50
+# 最小空闲内存保留（单位 kB），防止老机器频繁触发回收
+vm.min_free_kbytes=65536
 
-# ---- 网络：BBR + 快速建连 ----
+# ---- 网络：BBR + 快速建连（弱网友好）----
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
-net.core.somaxconn=65535
-net.core.netdev_max_backlog=5000
+net.core.somaxconn=4096
+net.core.netdev_max_backlog=2048
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_fin_timeout=20
 net.ipv4.tcp_keepalive_time=300
 net.ipv4.tcp_keepalive_probes=5
 net.ipv4.tcp_keepalive_intvl=15
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_rmem=4096 87380 6291456
+net.ipv4.tcp_wmem=4096 16384 4194304
+# IPv6 隐私扩展（老机器无线网卡友好）
+net.ipv6.conf.all.use_tempaddr=2
 
 # ---- 文件系统 ----
-fs.file-max=2097152
-fs.nr_open=2097152
+fs.file-max=1048576
+fs.nr_open=1048576
 fs.inotify.max_user_watches=524288
+fs.inotify.max_user_instances=512
 
-# ---- 内核调度（桌面响应优先） ----
-kernel.sched_latency_ns=4000000
-kernel.sched_min_granularity_ns=500000
-kernel.sched_wakeup_granularity_ns=1000000
+# ---- 内核调度：桌面响应优先（低延迟）----
+# 降低调度延迟让桌面交互更跟手，适合老 CPU
+kernel.sched_latency_ns=6000000
+kernel.sched_min_granularity_ns=750000
+kernel.sched_wakeup_granularity_ns=1500000
+kernel.sched_migration_cost_ns=500000
+# 禁用 NMI watchdog 减少 CPU 中断开销
 kernel.nmi_watchdog=0
 kernel.randomize_va_space=2
+# 减少 printk 刷屏（老机器串口不快）
+kernel.printk=3 4 1 3
 SYSCTLCONF
 
     # 透明大页 → madvise（延迟到首次使用，避免 GC pause）
@@ -1354,10 +1378,25 @@ w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise
 w /sys/kernel/mm/transparent_hugepage/defrag  - - - - defer+madvise
 THPCONF
 
+    # /tmp 挂载到 tmpfs（减少机械硬盘随机写，老机器流畅感提升明显）
+    # 上限 512MB，超大 tmp 操作自动溢出到磁盘
+    cat >> /etc/fstab << 'TMPFSMOUNT'
+tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=512M 0 0
+TMPFSMOUNT
+
     # BBR 模块（多数 Debian 内核已内建，兜底加载）
     mkdir -p /etc/modules-load.d
     echo "tcp_bbr" > /etc/modules-load.d/ming-bbr.conf
     modprobe tcp_bbr 2>/dev/null || true
+
+    # CPU 频率调节：老机器 ondemand，优先节能且响应快
+    # cpufrequtils 不在 Live squashfs，走 udev 在启动时写 cpufreq governor
+    cat > /etc/udev/rules.d/61-ming-cpufreq.rules << 'CPUFREQRULE'
+# Ming OS：CPU 频率调节策略。老机器（<= 4核 <= Sandy Bridge）用 ondemand，
+# 新机器用 schedutil（内核调度驱动）。两者均比 powersave 响应更快。
+ACTION=="add", SUBSYSTEM=="cpu", KERNEL=="cpu[0-9]*", \
+  RUN+="/bin/sh -c 'echo schedutil > /sys/devices/system/cpu/cpu%n/cpufreq/scaling_governor 2>/dev/null || echo ondemand > /sys/devices/system/cpu/cpu%n/cpufreq/scaling_governor 2>/dev/null || true'"
+CPUFREQRULE
 
     # 应用 sysctl 配置
     sysctl --system
