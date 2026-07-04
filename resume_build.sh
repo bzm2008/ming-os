@@ -48,13 +48,8 @@ resume_main() {
         log_info "模块 ${mod} 完成"
     done
 
-    cat > "${CHROOT_DIR}/etc/calamares/modules/unpackfs.conf" << 'UNPACKFSCONF'
----
-unpack:
-  - source: "/run/ming-installer/filesystem.squashfs"
-    sourcefs: "squashfs"
-    destination: ""
-UNPACKFSCONF
+    # unpackfs 配置已由 modules/01_base.sh 正确写入 chroot，
+    # resume_build 不需要也不应该在这里单独覆盖它（否则会把旧路径写回去）
 
     clean_chroot
     umount_chroot

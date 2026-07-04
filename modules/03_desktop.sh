@@ -4000,12 +4000,10 @@ disable-cancel-during-exec: false
 quit-at-end: false
 dont-chroot: false
 sequence:
+# 一键安装：用户只需点"开始安装"，无需配置语言/键盘/用户/时区
 - show:
   - welcome
-  - locale
-  - keyboard
   - partition
-  - users
   - summary
 - exec:
   - partition
@@ -4080,6 +4078,13 @@ setRootPassword: false
 doReusePassword: false
 displayAutologin: true
 doAutologin: true
+presets:
+  fullName:
+    value: "Ming OS User"
+    editable: false
+  loginName:
+    value: "user"
+    editable: false
 passwordRequirements:
   minLength: -1
   maxLength: -1

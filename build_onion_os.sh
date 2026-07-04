@@ -493,8 +493,9 @@ for relative_path in [
         if relative_path.endswith("ming-calamares-preflight") and "Asia/Shanghai" not in text:
             errors.append(f"{relative_path} missing Asia/Shanghai runtime enforcement")
         if relative_path.endswith("ming-calamares-preflight"):
-            if "/run/ming-installer/filesystem.squashfs" not in text:
-                errors.append(f"{relative_path} missing stable unpackfs runtime source")
+            # 运行时会动态找到 squashfs 并创建 /run/ming-installer 软链接
+            if "run/live/medium" not in text and "lib/live/mount" not in text and "find /run/live" not in text:
+                errors.append(f"{relative_path} must search for live squashfs in standard live-boot paths")
             if "ln -s" not in text and "mount --bind" not in text:
                 errors.append(f"{relative_path} must create a stable unpackfs source before Calamares starts")
         if relative_path.endswith("ming-install-bootloader"):
