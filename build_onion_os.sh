@@ -560,6 +560,11 @@ def require_file(relative_path, marker=None):
         errors.append(f"{relative_path} missing marker {marker!r}")
     return text
 
+def require_path(relative_path):
+    path = root / relative_path
+    if not path.exists() or (path.is_file() and path.stat().st_size == 0):
+        errors.append(f"missing or empty {relative_path}")
+
 settings = require_file("usr/local/bin/ming-settings", "硬件与诊断")
 for marker in [
     "ming-network-repair",
@@ -578,8 +583,16 @@ for helper in [
     "usr/local/bin/ming-diagnostic-bundle",
     "usr/local/bin/ming-surface-support",
     "usr/local/bin/ming-classic-mode",
+    "usr/local/bin/ming-lock",
 ]:
     require_file(helper)
+
+for binary in [
+    "usr/bin/wmctrl",
+    "usr/bin/xfce4-screensaver",
+    "usr/bin/xfce4-screensaver-command",
+]:
+    require_path(binary)
 
 require_file("usr/sbin/cupsd")
 if not any((root / candidate).is_file() for candidate in [

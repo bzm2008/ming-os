@@ -22,6 +22,19 @@ echo "[INFO] ISO_VOLUME_ID=${ISO_VOLUME_ID}"
 echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
+ensure_resume_runtime_packages() {
+    log_step "补齐 resume 构建新增运行时依赖"
+    chroot_exec apt-get update
+    chroot_exec /usr/local/sbin/apt-build install xfce4-screensaver wmctrl
+    settle_chroot_dpkg "resume runtime packages"
+
+    for bin in xfce4-screensaver xfce4-screensaver-command wmctrl; do
+        if ! chroot_exec command -v "${bin}" >/dev/null 2>&1; then
+            log_error "resume 构建缺少必要命令: ${bin}"
+        fi
+    done
+}
+
 resume_main() {
     [[ "${EUID}" -ne 0 ]] && { echo "[ERROR] 需要 root 权限"; exit 1; }
 
@@ -31,6 +44,7 @@ resume_main() {
 
     # 同步最新的 assets（含壁纸、图标、settings.py）
     prepare_chroot_scripts
+    ensure_resume_runtime_packages
 
     # 执行剩余模块（03 及之后）
     local modules=(
