@@ -4683,19 +4683,32 @@ fi
 # 这样无论连接器叫 monitorVGA-1 / monitorHDMI-1 / monitorscreen 都能命中。
 mapfile -t PROPS < <(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/last-image$')
 if [[ ${#PROPS[@]} -eq 0 ]]; then
-    # 没有现成属性时，手动建一个通用的
-    xfconf-query -c xfce4-desktop \
-        -p /backdrop/screen0/monitorscreen/workspace0/last-image \
-        -n -t string -s "${WALL}" 2>/dev/null || true
-    xfconf-query -c xfce4-desktop \
-        -p /backdrop/screen0/monitorscreen/workspace0/image-style \
-        -n -t int -s 5 2>/dev/null || true
+    # 首次登录 xfconf 数据库为空，无法枚举属性。
+    # 解决方案：把所有常见连接器名称全部写一遍，确保至少一个命中。
+    # 真实机器连接器名（xrandr --listmonitors）各不相同：
+    # VGA-1 / HDMI-1 / DP-1 / eDP-1 / LVDS-1 / Virtual-1 / screen 等。
+    for mon in screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1; do
+        for ws in workspace0 workspace1; do
+            xfconf-query -c xfce4-desktop \
+                -p "/backdrop/screen0/monitor${mon}/${ws}/last-image" \
+                -n -t string -s "${WALL}" 2>/dev/null || true
+            xfconf-query -c xfce4-desktop \
+                -p "/backdrop/screen0/monitor${mon}/${ws}/image-style" \
+                -n -t int -s 5 2>/dev/null || true
+            xfconf-query -c xfce4-desktop \
+                -p "/backdrop/screen0/monitor${mon}/${ws}/image-path" \
+                -n -t string -s "${WALL}" 2>/dev/null || true
+        done
+    done
 else
     for p in "${PROPS[@]}"; do
         xfconf-query -c xfce4-desktop -p "${p}" -s "${WALL}" 2>/dev/null || true
         # 同步设置缩放方式为 5 (zoomed/拉伸填充)
         style_prop="${p%/last-image}/image-style"
         xfconf-query -c xfce4-desktop -p "${style_prop}" -n -t int -s 5 2>/dev/null || true
+        # 同时写 image-path（部分 XFCE 版本优先读这个）
+        path_prop="${p%/last-image}/image-path"
+        xfconf-query -c xfce4-desktop -p "${path_prop}" -n -t string -s "${WALL}" 2>/dev/null || true
     done
 fi
 

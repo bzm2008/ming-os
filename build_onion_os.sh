@@ -800,6 +800,7 @@ build_iso_manual() {
     local early_cfg="${iso_workdir}/boot/grub/early-grub.cfg"
 
     mkdir -p "${iso_workdir}/EFI/BOOT"
+    mkdir -p "${iso_workdir}/isolinux"
 
     mkdir -p "${iso_workdir}/boot/grub/x86_64-efi"
     if [[ -d /usr/lib/grub/x86_64-efi ]]; then
@@ -812,6 +813,39 @@ build_iso_manual() {
     if [[ -d /usr/lib/grub/i386-pc ]]; then
         cp /usr/lib/grub/i386-pc/*.mod "${iso_workdir}/boot/grub/i386-pc/" 2>/dev/null || true
         cp /usr/lib/grub/i386-pc/*.lst "${iso_workdir}/boot/grub/i386-pc/" 2>/dev/null || true
+    fi
+
+    # isolinux 存根：Rufus ISO 模式写盘时会在 MBR 注入寻找 isolinux.bin 的代码。
+    # 若 ISO 里没有 isolinux.bin，老 BIOS 机器（如 i5-2430M/Dell Inspiron）会报
+    # "isolinux.bin missing or corrupt" 并尝试 PXE 引导。
+    # 解决方案：复制 isolinux.bin + ldlinux.c32，加一个 chain 到 GRUB 的 isolinux.cfg。
+    local isolinux_bin=""
+    for f in /usr/lib/ISOLINUX/isolinux.bin /usr/lib/syslinux/isolinux.bin; do
+        [[ -f "${f}" ]] && { isolinux_bin="${f}"; break; }
+    done
+    local ldlinux_c32=""
+    for f in /usr/lib/syslinux/modules/bios/ldlinux.c32 /usr/lib/syslinux/ldlinux.c32; do
+        [[ -f "${f}" ]] && { ldlinux_c32="${f}"; break; }
+    done
+    if [[ -n "${isolinux_bin}" && -n "${ldlinux_c32}" ]]; then
+        cp "${isolinux_bin}" "${iso_workdir}/isolinux/isolinux.bin"
+        cp "${ldlinux_c32}"  "${iso_workdir}/isolinux/ldlinux.c32"
+        # chain.c32 让 isolinux 直接转交控制权给 GRUB MBR
+        for f in /usr/lib/syslinux/modules/bios/chain.c32 /usr/lib/syslinux/chain.c32; do
+            [[ -f "${f}" ]] && { cp "${f}" "${iso_workdir}/isolinux/chain.c32"; break; }
+        done
+        cat > "${iso_workdir}/isolinux/isolinux.cfg" << 'ISOLINUXCFG'
+# Ming OS isolinux stub — chain-load GRUB for Rufus ISO-mode compatibility
+DEFAULT grub
+PROMPT 0
+TIMEOUT 0
+LABEL grub
+  COM32 chain.c32
+  APPEND boot/grub/i386-pc/eltorito.img
+ISOLINUXCFG
+        log_info "isolinux 存根已写入（Rufus ISO 模式兼容）"
+    else
+        log_warn "未找到 isolinux.bin/ldlinux.c32，Rufus ISO 模式可能失败"
     fi
 
     # Both BIOS and UEFI boot images embed this tiny config. Without it GRUB can

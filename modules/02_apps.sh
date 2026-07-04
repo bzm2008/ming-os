@@ -296,6 +296,9 @@ autologin-session=xfce
 user-session=xfce
 greeter-session=lightdm-gtk-greeter
 allow-guest=false
+# session-wrapper 确保 dbus-launch 在 autologin 时正确启动 session bus，
+# 修复 GDBus.Error:ServiceUnknown: org.xfce.Panel（session bus 未就绪）
+session-wrapper=/etc/X11/Xsession
 AUTOLOGIN
 
     cat > /etc/lightdm/lightdm-gtk-greeter.conf << GREETERCFG

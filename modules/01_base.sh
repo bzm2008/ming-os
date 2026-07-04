@@ -818,6 +818,31 @@ if [[ -x "${target}/usr/sbin/update-grub" ]]; then
 elif [[ -x "${target}/usr/sbin/grub-mkconfig" ]]; then
     chroot "${target}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/tmp/ming-update-grub.log 2>&1 || true
 fi
+
+# 确保 NetworkManager 已启用，并强制加载常见老网卡驱动模块（Bug2: 安装后无网卡）
+# i5-2430M 等 Sandy Bridge 机器常用 iwlwifi / Realtek r8169 / r8168
+for svc in NetworkManager networking systemd-networkd; do
+    if [ -f "${target}/usr/lib/systemd/system/${svc}.service" ] || \
+       [ -f "${target}/lib/systemd/system/${svc}.service" ]; then
+        chroot "${target}" systemctl enable "${svc}" 2>/dev/null || true
+    fi
+done
+# 写 /etc/modules-load.d 确保常见网卡模块在下次开机自动加载
+mkdir -p "${target}/etc/modules-load.d"
+cat > "${target}/etc/modules-load.d/ming-network.conf" << 'NETMOD'
+# Ming OS：确保常见老网卡驱动在开机时加载
+r8169
+r8168
+iwlwifi
+ath9k
+ath10k_pci
+rtl8192ee
+rtl8188ee
+brcmfmac
+e1000e
+NETMOD
+# 确保固件被 initramfs 包含（update-initramfs 已在前面运行）
+chroot "${target}" depmod -a 2>/dev/null || true
 MINGIDENTITY
     chmod +x /usr/local/sbin/ming-fix-installed-identity
 
@@ -1050,6 +1075,9 @@ availableFileSystemTypes:
   - "ext4"
   - "btrfs"
   - "xfs"
+# 兼容老 BIOS 机器（i5-2430M 等 Sandy Bridge 时代）：
+# erase 模式在 Legacy BIOS 下自动用 MBR，UEFI 下用 GPT。
+# 不强制 GPT，避免老 BIOS 固件不认 GPT 磁盘。
 initialPartitioningChoice: erase
 initialSwapChoice: file
 requiredStorage: 12
