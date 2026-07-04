@@ -660,22 +660,22 @@ set gfxmode=auto
 # entry plus a safe-graphics fallback for old hardware. The ming.installer=1 flag
 # tells the booted session to launch Calamares directly instead of a live desktop.
 menuentry "安装 Ming OS ${MING_OS_VERSION}  (Install Ming OS)" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
     initrd /live/initrd
 }
 
 menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphics)" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} 老 AMD 显卡 / Radeon 兼容模式" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset radeon.modeset=0 amdgpu.modeset=0 pcie_aspm=off iommu=off
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset radeon.modeset=0 amdgpu.modeset=0 pcie_aspm=off iommu=off
     initrd /live/initrd
 }
 
@@ -684,7 +684,7 @@ menuentry "Ming OS ${MING_OS_VERSION} 老 AMD 显卡 / Radeon 兼容模式" {
 # intel_idle.max_cstate=1 防止老Atom/IvyBridge挂起后不醒；
 # acpi_mask_gpe=0x6e 处理 Surface 特定 ACPI GPE 事件风暴
 menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
     initrd /live/initrd
 }
 
@@ -692,7 +692,7 @@ menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
 # acpi_osi=Darwin 让 BIOS 暴露 Mac 专用 ACPI 表；
 # reboot=pci 解决 Mac 重启后停在黑屏问题
 menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
- linux /live/vmlinuz boot=live components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
     initrd /live/initrd
 }
 
