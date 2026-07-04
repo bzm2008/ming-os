@@ -223,10 +223,19 @@ configure_locale() {
 }
 
 configure_timezone() {
-    # 设置时区为东八区（中国标准时间）
+    # 默认设置东八区，联网后 systemd-timesyncd 会自动同步精确时间
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
     echo "Asia/Shanghai" > /etc/timezone
     dpkg-reconfigure -f noninteractive tzdata
+
+    # 启用 NTP 时间自动同步（联网后自动更新，用户无需手动设置时间）
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    cat > /etc/systemd/timesyncd.conf.d/ming-ntp.conf << 'NTPCFG'
+[Time]
+NTP=ntp.aliyun.com ntp1.aliyun.com ntp2.aliyun.com cn.pool.ntp.org
+FallbackNTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org
+NTPCFG
+    systemctl enable systemd-timesyncd 2>/dev/null || true
 }
 
 configure_keyboard() {
@@ -1070,22 +1079,20 @@ efiSystemPartition: "/boot/efi"
 userSwapChoices:
   - none
   - small
-  - suspend
   - file
-drawNestedPartitions: true
+drawNestedPartitions: false
 alwaysShowPartitionLabels: true
 defaultFileSystemType: "ext4"
+# 只保留 ext4，移除 btrfs：
+# btrfs 在已有 Fedora/旧 btrfs 卷的磁盘上创建分区会失败（图二错误）
+# ext4 稳定可靠，是绝大多数老机器的最佳选择
 availableFileSystemTypes:
   - "ext4"
-  - "btrfs"
-  - "xfs"
-# 兼容老 BIOS 机器（i5-2430M 等 Sandy Bridge 时代）：
-# erase 模式在 Legacy BIOS 下自动用 MBR，UEFI 下用 GPT。
-# 不强制 GPT，避免老 BIOS 固件不认 GPT 磁盘。
 initialPartitioningChoice: erase
-initialSwapChoice: file
+initialSwapChoice: none
 requiredStorage: 12
-allowManualPartitioning: true
+# 关闭手动分区入口——普通用户不需要也不会用，只显示"清空整个磁盘"
+allowManualPartitioning: false
 PARTITIONCONF
 
     cat > /etc/calamares/modules/mount.conf << 'MOUNTCONF'
@@ -1161,6 +1168,15 @@ setRootPassword: false
 doReusePassword: false
 displayAutologin: true
 doAutologin: true
+# 一键安装：跳过用户名/密码页面，使用以下预设值。
+# 用户可在安装完成后通过「铭设置」修改账户信息和密码。
+presets:
+  fullName:
+    value: "Ming OS User"
+    editable: false
+  loginName:
+    value: "user"
+    editable: false
 passwordRequirements:
   minLength: -1
   maxLength: -1
@@ -1200,12 +1216,13 @@ disable-cancel-during-exec: false
 quit-at-end: false
 dont-chroot: false
 sequence:
+# 一键安装：用户只需点击"开始安装"，无需配置任何选项。
+# 语言/时区/键盘全部预设为中文/北京/US（装完后联网自动更新时间）。
+# 用户账户由 users.conf 默认配置，无需手动填写。
+# 分区默认"清空整个磁盘"，不显示手动分区界面。
 - show:
   - welcome
-  - locale
-  - keyboard
   - partition
-  - users
   - summary
 - exec:
   - partition
