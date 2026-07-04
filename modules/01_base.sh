@@ -1025,13 +1025,9 @@ BOOTLOADERCONF
     cat > /etc/calamares/modules/unpackfs.conf << 'UNPACKFSCONF'
 ---
 unpack:
-  # live-boot 3.x 把 squashfs 挂载在 /run/live/medium/live/filesystem.squashfs
-  # 旧版（2.x）路径为 /lib/live/mount/medium/live/filesystem.squashfs
-  # 两路同时兜底：先找新路径，若不存在则 Calamares 会报错后中止
-  - source: "/run/live/medium/live/filesystem.squashfs"
-    sourcefs: "squashfs"
-    destination: ""
-  - source: "/lib/live/mount/medium/live/filesystem.squashfs"
+  # ming-calamares-preflight resolves the real live-boot path and exposes this
+  # stable source before Calamares starts.
+  - source: "/run/ming-installer/filesystem.squashfs"
     sourcefs: "squashfs"
     destination: ""
 UNPACKFSCONF

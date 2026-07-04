@@ -1,180 +1,36 @@
-# Onion OS 26.2.6-r2 Release And Website Handoff
+# Historical Onion OS 26.2 Release Note
 
-This document is the current website and AI handoff source for Onion OS. Use `26.2.6-r2` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
+This file is kept only as historical context for the old Onion OS 26.2 release line.
 
-## Positioning
-
-Onion OS 26.2.6-r2 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Onion OS rather than Debian.
-
-It should be presented as a finished desktop product with a clear personality:
-
-- dock-first;
-- button-first;
-- Chinese-friendly;
-- low-friction for older hardware;
-- visibly branded from Live boot through installation.
-
-This is the version to use when producing:
-
-- website copy;
-- download cards;
-- release notes;
-- OTA descriptions;
-- GitHub README summaries;
-- social posts;
-- screenshots and promo art captions.
-
-## Public Links
-
-- Official website: `https://scallion.uno`
-- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
-- ISO SHA256: `f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25`
-- ISO size: `2568552448`
-- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
-- GitHub repo: `https://github.com/bzm2008/onion-os`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
-
-## Feature Summary
-
-- Debian 13 / Trixie base.
-- Rebuilt BIOS/UEFI boot chain with stable label `ONION_OS_2626`.
-- Fixes the 26.2.5 `invalid magic number` and `you need to load the kernel first` class of failures.
-- Live/Ventoy auto-login as `onion`.
-- Onion wallpaper applies by default.
-- Main Onion icons no longer use white-background AI PNG overrides.
-- Onion Security Manager opens through a stable wrapper and writes readable logs.
-- Installed system identity is repaired to Onion OS after installation.
-- Desktop update button uses a clear GUI flow.
-- Low-memory WeChat strategy: zram, earlyoom, cache cleanup, low-priority launcher, Web WeChat fallback.
-- Android-like desktop app folders and automatic app visibility.
-- `All Disks` entry combines common user folders and mounted disks to reduce C/D drive anxiety.
-- HDD/SSD runtime tuning for schedulers, read-ahead, and dirty writeback.
-- Dock-only desktop and Onion Settings reduce reliance on terminal commands.
-- GitHub and website documentation now describe the same current public version and download path.
-
-## What Users Can Do
-
-- Boot into a branded Live desktop without needing a username and password prompt.
-- Open apps from the Dock or Onion App Library instead of hunting through menus.
-- Keep software organized with Android-like folders.
-- Use All Disks to reduce the feeling that files are scattered across too many drive letters.
-- Check for updates with a visible GUI flow.
-- Install to disk and still land in Onion OS rather than a Debian-branded system.
-
-## What The Release Fixes
-
-- The 26.2.5 boot chain regression.
-- Desktop wallpaper not applying correctly.
-- White-border icon overlays on common desktop entries.
-- Security Manager crash-on-launch behavior.
-- Installer branding that still looked like Debian.
-- Update UI that could silently fail or appear dead.
-- Older-machine ergonomics such as Dock-first usage and less command-line dependence.
-
-## Product Narrative
-
-The release should be described as:
-
-- stable enough to hand to real users;
-- visually branded enough to look like a system, not a theme pack;
-- simple enough for users who do not want to remember command lines;
-- pragmatic enough to stay useful on old hardware.
-
-It should not be sold as a minimal Linux demo. It is a complete desktop with:
-
-- boot repair;
-- auto-login;
-- low-memory WeChat support;
-- update tooling;
-- installer branding;
-- desktop organization;
-- storage simplification;
-- and a control center for common actions.
-
-The short product story is:
-
-> Onion OS takes a Debian base and turns it into a more obvious Chinese desktop for older PCs, with fewer commands, clearer buttons, and a system identity that stays consistent from boot to install.
-
-## GitHub Download Note
-
-The complete ISO is available on the official website. GitHub Release uses split assets:
+The current recommended public release is:
 
 ```text
-onion-os-26.2.6-r2-home-amd64.iso.part01
-onion-os-26.2.6-r2-home-amd64.iso.part02
-onion-os-26.2.6-r2-home-amd64.iso.sha256
-SHA256SUMS
+Ming OS 26.3.1 Home Edition
 ```
 
-Merge on Linux/macOS/WSL:
+Current download:
 
-```bash
-cat onion-os-26.2.6-r2-home-amd64.iso.part01 onion-os-26.2.6-r2-home-amd64.iso.part02 > onion-os-26.2.6-r2-home-amd64.iso
-sha256sum -c onion-os-26.2.6-r2-home-amd64.iso.sha256
+```text
+https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso
 ```
 
-Merge on Windows PowerShell:
+Current OTA endpoint:
 
-```powershell
-cmd /c copy /b onion-os-26.2.6-r2-home-amd64.iso.part01+onion-os-26.2.6-r2-home-amd64.iso.part02 onion-os-26.2.6-r2-home-amd64.iso
-Get-FileHash onion-os-26.2.6-r2-home-amd64.iso -Algorithm SHA256
+```text
+https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable
 ```
 
-## Prompt For Another AI Building The Scallion Product Page
+Current GitHub release:
 
-You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Onion OS 26.2.6-r2`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
+```text
+https://github.com/bzm2008/onion-os/releases/tag/v26.3.1
+```
 
-Required links:
+Current ISO metadata:
 
-- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
-- GitHub repo: `https://github.com/bzm2008/onion-os`
-- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+```text
+Size:   2698493952
+SHA256: 0a23e1ce739ced8daede1b2deb6e7d5879c9b0b44e1ecb43fda0422c2a164df1
+```
 
-Page goals:
-
-- Explain that Onion OS is a Debian 13 / Trixie based Chinese desktop system.
-- Make `Onion OS 26.2.6-r2` the visible product name in the first viewport.
-- Highlight boot reliability, Live auto-login, low-memory WeChat support, graphical update button, Onion Settings, Android-like app folders, All Disks, and the Onion-branded installer.
-- Tell users clearly that 2GB RAM can run the OS, but a WeChat account with many friends and groups may still be heavy; recommend Web WeChat as the fallback.
-- Provide a clear ISO download button, GitHub button, and OTA status area.
-
-Suggested message hierarchy:
-
-- first show the product name and official download path;
-- then show the boot and desktop improvements;
-- then show the user-facing buttons and shortcuts;
-- then show the compatibility and low-memory guidance.
-
-Suggested structure:
-
-- Hero: title `Onion OS 26.2.6-r2`; subtitle `给老旧电脑和中文用户的按钮式 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
-- Trust strip: SHA256, size, release date, OTA ready status.
-- Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
-- Feature section: WeChat low-memory mode, Spark Store, Onion Settings, Onion App Library, All Disks, OTA updates, Security Manager, Onion installer.
-- Download section: show official full ISO and GitHub split download instructions.
-- Compatibility section: Rufus ISO/DD, Ventoy/Live, BIOS/UEFI, VirtualBox.
-
-Design direction:
-
-- Avoid stock Xfce, Linux Mint, or generic distro visuals.
-- Use Onion OS identity: dark glass surfaces, restrained green and violet accents, clear icons, and dense but readable feature blocks.
-- Keep language short and concrete. This page is for users who want buttons and confidence, not command-heavy troubleshooting.
-- Do not show server passwords, SSH commands, internal deployment notes, or private operations details.
-
-## Feature Language To Reuse
-
-- boot more reliably;
-- auto-login in Live mode;
-- use buttons instead of commands;
-- group apps like a phone launcher;
-- keep files and disks easy to find;
-- make updates clear and checkable;
-- keep the system branded as Onion OS after installation;
-- protect low-memory machines from heavy WeChat sessions.
-
-## Release Summary For GitHub
-
-Use this short summary anywhere a concise changelog is needed:
-
-Onion OS 26.2.6-r2 is the current public release. It fixes the earlier boot regression, refreshes the Live desktop, keeps Live auto-login enabled, brands the installer and installed system as Onion OS, improves update clarity, and keeps the desktop focused on button-first workflows for older Chinese PCs.
+Do not use this historical file to recommend 26.2.x images to new users.

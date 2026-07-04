@@ -3293,7 +3293,7 @@ deploy_release_readme() {
     cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
 # Ming OS 26.3.1 Release And Website Handoff
 
-This document is the current website and AI handoff source for Ming OS. Use `26.3.0` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
+This document is the current website and AI handoff source for Ming OS. Use `26.3.1` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
 ## Positioning
 
@@ -3311,12 +3311,12 @@ This is the version to use when producing:
 ## Public Links
 
 - Official website: `https://scallion.uno`
-- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
-- ISO SHA256: `f2823efa5545502fb6ec93ad8b476b5821c915ccede8366283f4c560fc26ce25`
-- ISO size: `2568552448`
-- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso`
+- ISO SHA256: `0a23e1ce739ced8daede1b2deb6e7d5879c9b0b44e1ecb43fda0422c2a164df1`
+- ISO size: `2698493952`
+- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
 - GitHub repo: `https://github.com/bzm2008/onion-os`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
+- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.3.1`
 
 ## Feature Summary
 
@@ -3360,24 +3360,24 @@ It should not be sold as a minimal Linux demo. It is a complete desktop with:
 The complete ISO is available on the official website. GitHub Release uses split assets:
 
 ```text
-onion-os-26.2.6-r2-home-amd64.iso.part01
-onion-os-26.2.6-r2-home-amd64.iso.part02
-onion-os-26.2.6-r2-home-amd64.iso.sha256
+ming-os-26.3.1-home-amd64.iso.part01
+ming-os-26.3.1-home-amd64.iso.part02
+ming-os-26.3.1-home-amd64.iso.sha256
 SHA256SUMS
 ```
 
 Merge on Linux/macOS/WSL:
 
 ```bash
-cat onion-os-26.2.6-r2-home-amd64.iso.part01 onion-os-26.2.6-r2-home-amd64.iso.part02 > onion-os-26.2.6-r2-home-amd64.iso
-sha256sum -c onion-os-26.2.6-r2-home-amd64.iso.sha256
+cat ming-os-26.3.1-home-amd64.iso.part01 ming-os-26.3.1-home-amd64.iso.part02 > ming-os-26.3.1-home-amd64.iso
+sha256sum -c ming-os-26.3.1-home-amd64.iso.sha256
 ```
 
 Merge on Windows PowerShell:
 
 ```powershell
-cmd /c copy /b onion-os-26.2.6-r2-home-amd64.iso.part01+onion-os-26.2.6-r2-home-amd64.iso.part02 onion-os-26.2.6-r2-home-amd64.iso
-Get-FileHash onion-os-26.2.6-r2-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.3.1-home-amd64.iso.part01+ming-os-26.3.1-home-amd64.iso.part02 ming-os-26.3.1-home-amd64.iso
+Get-FileHash ming-os-26.3.1-home-amd64.iso -Algorithm SHA256
 ```
 
 ## Prompt For Another AI Building The Scallion Product Page
@@ -3386,10 +3386,10 @@ You are a senior product web designer and frontend implementer. Build a Scallion
 
 Required links:
 
-- ISO download: `https://scallion.uno/iso/onion-os-26.2.6-r2-home-amd64-f2823efa.iso`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.2.6-r2`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso`
+- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.3.1`
 - GitHub repo: `https://github.com/bzm2008/onion-os`
-- OTA check: `https://scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
 
 Page goals:
 
@@ -4941,3 +4941,5 @@ main() {
 }
 
 main
+
+

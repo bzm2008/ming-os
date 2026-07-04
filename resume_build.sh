@@ -48,6 +48,14 @@ resume_main() {
         log_info "模块 ${mod} 完成"
     done
 
+    cat > "${CHROOT_DIR}/etc/calamares/modules/unpackfs.conf" << 'UNPACKFSCONF'
+---
+unpack:
+  - source: "/run/ming-installer/filesystem.squashfs"
+    sourcefs: "squashfs"
+    destination: ""
+UNPACKFSCONF
+
     clean_chroot
     umount_chroot
     trap - EXIT
