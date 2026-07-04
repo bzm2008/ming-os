@@ -596,15 +596,21 @@ for marker in [
     "APP_DIRS = [DESKTOP_DIR",
     "render desktop items=",
     "self.set_size_request(76, 88)",
+    "self.fullscreen()",
+    "self.fixed.connect('draw', self.draw_background)",
+    "def draw_background(self, widget, cr):",
+    "def draw_icon_fallback(self, cr):",
+    "def on_fixed_button_release(self, _widget, event):",
+    "PangoCairo.show_layout",
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing desktop-layer/core-app marker {marker}")
 if "window.lower()" in phone_desktop:
     errors.append("ming-phone-desktop must not call window.lower(); it can hide behind xfdesktop")
-if ".fullscreen()" in phone_desktop:
-    errors.append("ming-phone-desktop must not fullscreen; it can cover Plank and other dock windows")
 if "Gdk.WindowTypeHint.DESKTOP" in phone_desktop:
     errors.append("ming-phone-desktop must not use DESKTOP type; xfdesktop can intercept its clicks")
+if "Gtk.Overlay()" in phone_desktop:
+    errors.append("ming-phone-desktop must not use Gtk.Overlay for desktop icons; direct Fixed drawing is more reliable")
 for marker in ["CORE_FALLBACKS", "CORE_GENERATED", "write_generated_core_launcher"]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing empty-layout recovery marker {marker}")

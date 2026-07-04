@@ -2436,7 +2436,7 @@ from pathlib import Path
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('GdkPixbuf', '2.0')
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, PangoCairo
 
 HOME = Path.home()
 STATE_DIR = HOME / '.config' / 'ming-os'
@@ -2491,6 +2491,8 @@ PAD_X = 34
 PAD_Y = 92
 DROP_DISTANCE = 50
 ICON_SIZE = 34
+TILE_W = 76
+TILE_H = 88
 CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
 WALLPAPER_PATHS = [
@@ -3010,22 +3012,19 @@ class PhoneDesktop(Gtk.Window):
         self.set_default_size(screen_w, screen_h)
         self.resize(screen_w, screen_h)
         self.move(0, 0)
+        self.fullscreen()
         self.connect('destroy', Gtk.main_quit)
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
-        self.overlay = Gtk.Overlay()
         self.wallpaper = WallpaperCanvas()
         self.fixed = Gtk.Fixed()
-        self.overlay.set_hexpand(True)
-        self.overlay.set_vexpand(True)
-        self.wallpaper.set_hexpand(True)
-        self.wallpaper.set_vexpand(True)
         self.fixed.set_hexpand(True)
         self.fixed.set_vexpand(True)
-        self.overlay.add(self.wallpaper)
-        self.overlay.add_overlay(self.fixed)
-        self.add(self.overlay)
+        self.fixed.add_events(Gdk.EventMask.BUTTON_RELEASE_MASK)
+        self.fixed.connect('draw', self.draw_background)
+        self.fixed.connect('button-release-event', self.on_fixed_button_release)
+        self.add(self.fixed)
         self.tiles = {}
         self.clock = ClockWidget()
         self.connect('map-event', lambda *_args: self.enforce_desktop_layer())
@@ -3064,11 +3063,78 @@ class PhoneDesktop(Gtk.Window):
             pass
         return True
 
+    def draw_background(self, widget, cr):
+        self.wallpaper.on_draw(widget, cr)
+        self.draw_icon_fallback(cr)
+        return False
+
+    def rounded_rect(self, cr, x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -1.5708, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+        cr.arc(x + r, y + h - r, r, 1.5708, 3.1416)
+        cr.arc(x + r, y + r, r, 3.1416, 4.7124)
+        cr.close_path()
+
+    def draw_icon_fallback(self, cr):
+        icon_theme = Gtk.IconTheme.get_default()
+        for item in self.layout.get('items', []):
+            if item.get('type') != 'app':
+                continue
+            x = int(item.get('x', PAD_X))
+            y = int(item.get('y', PAD_Y))
+            self.rounded_rect(cr, x, y, 70, 82, 12)
+            cr.set_source_rgba(1, 1, 1, 0.48)
+            cr.fill_preserve()
+            cr.set_source_rgba(0.18, 0.54, 0.49, 0.18)
+            cr.set_line_width(1)
+            cr.stroke()
+            icon_name = item.get('icon') or 'application-x-executable'
+            try:
+                pixbuf = icon_theme.load_icon(icon_name, ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+            except Exception:
+                try:
+                    pixbuf = icon_theme.load_icon('application-x-executable', ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+                except Exception:
+                    pixbuf = None
+            if pixbuf:
+                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + 18, y + 7)
+                cr.paint()
+            layout = PangoCairo.create_layout(cr)
+            layout.set_text(item.get('name', '应用'), -1)
+            layout.set_width(70 * Pango.SCALE)
+            layout.set_height(30 * Pango.SCALE)
+            layout.set_alignment(Pango.Alignment.CENTER)
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+            desc = Pango.FontDescription('Sans Bold 10')
+            layout.set_font_description(desc)
+            cr.set_source_rgba(0.11, 0.15, 0.13, 0.96)
+            cr.move_to(x, y + 48)
+            PangoCairo.show_layout(cr, layout)
+
+    def item_at(self, x, y):
+        for item in reversed(self.layout.get('items', [])):
+            ix = int(item.get('x', PAD_X))
+            iy = int(item.get('y', PAD_Y))
+            if ix <= x <= ix + TILE_W and iy <= y <= iy + TILE_H:
+                return item
+        return None
+
+    def on_fixed_button_release(self, _widget, event):
+        item = self.item_at(event.x, event.y)
+        if not item:
+            return False
+        if getattr(event, 'button', 0) == 3:
+            self.show_context_menu(item, event)
+            return True
+        if getattr(event, 'button', 0) == 1:
+            self.open_item(item)
+            return True
+        return False
+
     def render(self):
         screen_w = max(320, self.get_screen().get_width())
         screen_h = max(240, self.get_screen().get_height())
-        self.overlay.set_size_request(screen_w, screen_h)
-        self.wallpaper.set_size_request(screen_w, screen_h)
         self.fixed.set_size_request(screen_w, screen_h)
         for child in self.fixed.get_children():
             self.fixed.remove(child)
