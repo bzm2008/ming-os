@@ -30,7 +30,6 @@ remove_retired_security_manager() {
           "/home/${MING_USER}/Desktop/ming-master.desktop" \
           /etc/sudoers.d/user-master
     apt purge -y rkhunter chkrootkit lynis bleachbit yad 2>/dev/null || true
-    apt autoremove -y 2>/dev/null || true
 }
 
 configure_ming_firewall() {

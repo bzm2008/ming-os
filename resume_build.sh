@@ -25,7 +25,13 @@ echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
     chroot_exec apt-get update
-    chroot_exec /usr/local/sbin/apt-build install xfce4-screensaver wmctrl
+    chroot_exec /usr/local/sbin/apt-build install \
+        xfce4-screensaver \
+        wmctrl \
+        network-manager \
+        wpasupplicant \
+        iw \
+        rfkill
     settle_chroot_dpkg "resume runtime packages"
 
     for bin in xfce4-screensaver xfce4-screensaver-command wmctrl; do
