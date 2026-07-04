@@ -1083,9 +1083,14 @@ setup_wallpaper() {
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 默认壁纸：优先 macOS 风格（更接近用户期望的自然美观），回退深色，再回退旧 default
+    # 默认壁纸：优先 Ming 浅色纸感壁纸，风景壁纸保留为可选资产。
     local primary=""
-    if [[ -f "${asset_macos}" ]]; then
+    if [[ -f "${asset_light}" ]]; then
+        primary="${asset_light}"
+        cp "${asset_light}" /usr/share/backgrounds/ming-os/default.png
+        [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
+        [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
+    elif [[ -f "${asset_macos}" ]]; then
         primary="${asset_macos}"
         cp "${asset_macos}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
@@ -1302,7 +1307,7 @@ PANELXML_DOCK_ONLY
 Type=Application
 Name=Ming Dock Only
 Comment=Hide the legacy Xfce top taskbar and keep Dock as the only launcher
-Exec=sh -c "sleep 2; xfce4-panel --quit >/dev/null 2>&1 || true"
+Exec=sh -c "mkdir -p ~/.cache/sessions; rm -f ~/.cache/sessions/xfce4-session-* 2>/dev/null || true"
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -1329,11 +1334,11 @@ Position=3
 #对齐: 3=居中
 Alignment=3
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=40
+IconSize=42
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：保持轻巧，避免图标跳动和低端显卡压力
-ZoomPercent=116
+ZoomPercent=132
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=4
 #自动隐藏延迟
@@ -1381,33 +1386,33 @@ DOCKITEM
 TopRoundness=10
 BottomRoundness=0
 LineWidth=1
-OuterStrokeColor=31;98;84;46
-FillStartColor=255;255;255;184
-FillEndColor=247;250;248;210
-InnerStrokeColor=255;255;255;120
+OuterStrokeColor=31;98;84;62
+FillStartColor=255;255;255;214
+FillEndColor=244;250;247;230
+InnerStrokeColor=255;255;255;150
 
 [PlankDockTheme]
-HorizPadding=9
-TopPadding=-4
-BottomPadding=5
-ItemPadding=3
-IndicatorSize=5
-IconShadowSize=1
-UrgentBounceHeight=1.2
-LaunchBounceHeight=0.45
+HorizPadding=12
+TopPadding=-6
+BottomPadding=7
+ItemPadding=5
+IndicatorSize=6
+IconShadowSize=2
+UrgentBounceHeight=1.35
+LaunchBounceHeight=0.75
 FadeOpacity=1.0
-ClickTime=300
-UrgentBounceTime=420
-LaunchBounceTime=360
-ActiveTime=300
-SlideTime=220
-FadeTime=180
-HideTime=180
-GlowSize=8
+ClickTime=260
+UrgentBounceTime=520
+LaunchBounceTime=460
+ActiveTime=260
+SlideTime=260
+FadeTime=170
+HideTime=170
+GlowSize=12
 GlowTime=10000
-GlowPulseTime=2000
+GlowPulseTime=1800
 UrgentHueShift=100
-ItemMoveTime=260
+ItemMoveTime=300
 CascadeHide=true
 PLANKTHEME
 
@@ -2120,7 +2125,8 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gdk, Gio, GLib, Gtk
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
 HOME = Path.home()
 STATE_DIR = HOME / '.config' / 'ming-os'
@@ -2153,41 +2159,49 @@ DESKTOP_ORDER = {name: index for index, name in enumerate([
     'garlic-claw.desktop',
     'ming-terminal.desktop',
 ])}
-LAYOUT_VERSION = 3
-GRID_W = 92
-GRID_H = 104
-PAD_X = 28
-PAD_Y = 102
+LAYOUT_VERSION = 4
+GRID_W = 86
+GRID_H = 98
+PAD_X = 34
+PAD_Y = 92
 DROP_DISTANCE = 50
-ICON_SIZE = 38
-CLOCK_MARGIN_X = 28
-CLOCK_MARGIN_Y = 22
+ICON_SIZE = 34
+CLOCK_MARGIN_X = 26
+CLOCK_MARGIN_Y = 20
+WALLPAPER_PATHS = [
+    Path('/usr/share/backgrounds/ming-os/default.png'),
+    Path('/usr/share/backgrounds/ming-os/default-1366x768.png'),
+    Path('/usr/share/backgrounds/ming-os/default.svg'),
+]
 
 CSS = b'''
 window.ming-desktop {
-  background-color: rgba(247, 250, 247, 0.001);
+  background-color: #EFF7F2;
   color: #1D2421;
 }
 .tile {
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(31, 98, 84, 0.06);
-  padding: 6px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  box-shadow: 0 8px 22px rgba(21, 68, 56, 0.08), inset 0 1px 0 rgba(255,255,255,0.58);
+  padding: 7px 6px 6px;
   color: #1D2421;
+  transition: 180ms ease-out;
 }
 .tile:hover, .tile.dragging {
-  background: rgba(47, 138, 125, 0.10);
-  border-color: rgba(47, 138, 125, 0.20);
+  background: rgba(255, 255, 255, 0.60);
+  border-color: rgba(47, 138, 125, 0.24);
+  box-shadow: 0 12px 28px rgba(21, 68, 56, 0.13), inset 0 1px 0 rgba(255,255,255,0.70);
 }
 .folder {
-  background: rgba(47, 138, 125, 0.08);
+  background: rgba(232, 248, 242, 0.64);
   border-color: rgba(47, 138, 125, 0.24);
 }
 .label {
   color: #1D2421;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  text-shadow: 0 1px 0 rgba(255,255,255,0.7);
+  text-shadow: 0 1px 0 rgba(255,255,255,0.82);
 }
 .folder-title {
   color: #1D2421;
@@ -2205,26 +2219,32 @@ window.ming-desktop {
   padding: 7px 10px;
 }
 .clock-widget {
-  border-radius: 12px;
-  padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.30);
-  border: 1px solid rgba(31, 98, 84, 0.08);
-  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.08);
+  border-radius: 14px;
+  padding: 9px 13px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.70);
+  box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.75);
   color: #1D2421;
 }
 .clock-time {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 800;
   letter-spacing: 0;
-  color: #1D2421;
+  color: #17231F;
   text-shadow: 0 1px 0 rgba(255,255,255,0.72);
 }
 .clock-date {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0;
-  color: #5C6963;
+  color: #2D695C;
   text-shadow: 0 1px 0 rgba(255,255,255,0.62);
+}
+.clock-subdate {
+  font-size: 10px;
+  font-weight: 700;
+  color: #6A7670;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.58);
 }
 '''
 
@@ -2297,7 +2317,7 @@ def save_layout(layout):
     tmp.replace(LAYOUT_PATH)
 
 def next_position(index, width=1366):
-    cols = max(4, int((width - PAD_X * 2) / GRID_W))
+    cols = min(6, max(3, int((width - PAD_X * 2) / GRID_W)))
     row = index // cols
     col = index % cols
     return PAD_X + col * GRID_W, PAD_Y + row * GRID_H
@@ -2425,8 +2445,8 @@ class DesktopTile(Gtk.EventBox):
         self.connect('button-press-event', self.on_press)
         self.connect('motion-notify-event', self.on_motion)
         self.connect('button-release-event', self.on_release)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_size_request(74, 88)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        box.set_size_request(70, 82)
         box.get_style_context().add_class('tile')
         if item.get('type') == 'folder':
             box.get_style_context().add_class('folder')
@@ -2438,7 +2458,8 @@ class DesktopTile(Gtk.EventBox):
         label.get_style_context().add_class('label')
         label.set_justify(Gtk.Justification.CENTER)
         label.set_line_wrap(True)
-        label.set_max_width_chars(7)
+        label.set_lines(2)
+        label.set_max_width_chars(6)
         box.pack_start(image, True, True, 0)
         box.pack_start(label, False, False, 0)
         self.box = box
@@ -2483,7 +2504,7 @@ class ClockWidget(Gtk.EventBox):
     def __init__(self):
         super().__init__()
         self.set_visible_window(False)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         box.get_style_context().add_class('clock-widget')
         box.set_halign(Gtk.Align.END)
 
@@ -2495,18 +2516,68 @@ class ClockWidget(Gtk.EventBox):
         self.date_label.get_style_context().add_class('clock-date')
         self.date_label.set_halign(Gtk.Align.END)
 
+        self.subdate_label = Gtk.Label()
+        self.subdate_label.get_style_context().add_class('clock-subdate')
+        self.subdate_label.set_halign(Gtk.Align.END)
+
         box.pack_start(self.time_label, False, False, 0)
         box.pack_start(self.date_label, False, False, 0)
+        box.pack_start(self.subdate_label, False, False, 0)
         self.add(box)
         self.refresh()
         GLib.timeout_add_seconds(30, self.refresh)
 
     def refresh(self):
         now = datetime.datetime.now()
-        weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        weekdays = ['\u5468\u4e00', '\u5468\u4e8c', '\u5468\u4e09', '\u5468\u56db', '\u5468\u4e94', '\u5468\u516d', '\u5468\u65e5']
         self.time_label.set_text(now.strftime('%H:%M'))
-        self.date_label.set_text(now.strftime(f'%m月%d日  {weekdays[now.weekday()]}'))
+        self.date_label.set_text(weekdays[now.weekday()])
+        self.subdate_label.set_text(now.strftime('%m/%d'))
         return True
+
+class WallpaperCanvas(Gtk.DrawingArea):
+    def __init__(self):
+        super().__init__()
+        self.pixbuf = self.load_wallpaper()
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+        self.connect('draw', self.on_draw)
+
+    def load_wallpaper(self):
+        for path in WALLPAPER_PATHS:
+            if not path.exists():
+                continue
+            try:
+                return GdkPixbuf.Pixbuf.new_from_file(str(path))
+            except Exception:
+                continue
+        return None
+
+    def on_draw(self, widget, cr):
+        width = max(1, widget.get_allocated_width())
+        height = max(1, widget.get_allocated_height())
+        if not self.pixbuf:
+            cr.set_source_rgb(0.937, 0.969, 0.949)
+            cr.rectangle(0, 0, width, height)
+            cr.fill()
+            cr.set_source_rgba(0.18, 0.54, 0.49, 0.16)
+            cr.arc(width * 0.78, height * 0.78, min(width, height) * 0.38, 0, 6.28318)
+            cr.fill()
+            return False
+        src_w = self.pixbuf.get_width()
+        src_h = self.pixbuf.get_height()
+        scale = max(width / src_w, height / src_h)
+        draw_w = int(src_w * scale)
+        draw_h = int(src_h * scale)
+        scaled = self.pixbuf.scale_simple(draw_w, draw_h, GdkPixbuf.InterpType.BILINEAR)
+        x = int((width - draw_w) / 2)
+        y = int((height - draw_h) / 2)
+        Gdk.cairo_set_source_pixbuf(cr, scaled, x, y)
+        cr.paint()
+        cr.set_source_rgba(1, 1, 1, 0.10)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+        return False
 
 class PhoneDesktop(Gtk.Window):
     def __init__(self):
@@ -2522,19 +2593,18 @@ class PhoneDesktop(Gtk.Window):
             self.stick()
         except Exception:
             pass
-        screen = self.get_screen()
-        visual = screen.get_rgba_visual()
-        if visual and screen.is_composited():
-            self.set_visual(visual)
-            self.set_app_paintable(True)
         self.maximize()
         self.fullscreen()
         self.connect('destroy', Gtk.main_quit)
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
+        self.overlay = Gtk.Overlay()
+        self.wallpaper = WallpaperCanvas()
         self.fixed = Gtk.Fixed()
-        self.add(self.fixed)
+        self.overlay.add(self.wallpaper)
+        self.overlay.add_overlay(self.fixed)
+        self.add(self.overlay)
         self.tiles = {}
         self.clock = ClockWidget()
         self.connect('size-allocate', lambda *_args: self.place_clock())
@@ -2591,8 +2661,8 @@ class PhoneDesktop(Gtk.Window):
         if not hasattr(self, 'clock') or not hasattr(self, 'fixed'):
             return
         screen_w = max(320, self.get_screen().get_width())
-        widget_w = 210 if screen_w >= 900 else 168
-        self.clock.set_size_request(widget_w, 62)
+        widget_w = 158 if screen_w >= 900 else 132
+        self.clock.set_size_request(widget_w, 72)
         x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
         y = CLOCK_MARGIN_Y
         if self.clock.get_parent() is None:
@@ -5173,7 +5243,8 @@ fi
 xfdesktop --reload 2>/dev/null || true
 
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
-xfce4-panel --quit >/dev/null 2>&1 || true
+mkdir -p "${HOME}/.cache/sessions"
+rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
 
 # 确保 Plank Dock 在运行（picom 启动后）
 if command -v plank &>/dev/null && ! pgrep -x plank &>/dev/null; then
