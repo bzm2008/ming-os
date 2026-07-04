@@ -2442,7 +2442,7 @@ HOME = Path.home()
 STATE_DIR = HOME / '.config' / 'ming-os'
 LAYOUT_PATH = STATE_DIR / 'desktop-layout.json'
 DESKTOP_DIR = HOME / 'Desktop'
-APP_DIRS = [Path('/usr/share/applications'), HOME / '.local/share/applications']
+APP_DIRS = [DESKTOP_DIR, Path('/usr/share/applications'), HOME / '.local/share/applications']
 CORE_NAMES = {
     'ming-settings.desktop',
     'ming-files.desktop',
@@ -2850,6 +2850,7 @@ class DesktopTile(Gtk.EventBox):
         self.item = item
         self.dragging = False
         self.offset = (0, 0)
+        self.set_size_request(76, 88)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
         self.connect('button-press-event', self.on_press)
         self.connect('motion-notify-event', self.on_motion)
@@ -2873,6 +2874,7 @@ class DesktopTile(Gtk.EventBox):
         box.pack_start(label, False, False, 0)
         self.box = box
         self.add(box)
+        self.show_all()
 
     def on_press(self, _widget, event):
         if event.button == 3:
@@ -3071,10 +3073,12 @@ class PhoneDesktop(Gtk.Window):
         for child in self.fixed.get_children():
             self.fixed.remove(child)
         self.tiles = {}
+        log(f"render desktop items={len(self.layout.get('items', []))} screen={screen_w}x{screen_h}")
         for item in self.layout.get('items', []):
             tile = DesktopTile(self, item)
             self.tiles[item['id']] = tile
             self.fixed.put(tile, int(item.get('x', PAD_X)), int(item.get('y', PAD_Y)))
+            tile.show_all()
         self.place_clock()
         self.show_all()
         self.enforce_desktop_layer()

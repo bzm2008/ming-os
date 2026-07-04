@@ -593,6 +593,9 @@ for marker in [
     "skip_taskbar,skip_pager",
     "CORE_NAMES",
     "launch_item(item)",
+    "APP_DIRS = [DESKTOP_DIR",
+    "render desktop items=",
+    "self.set_size_request(76, 88)",
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing desktop-layer/core-app marker {marker}")
