@@ -4167,15 +4167,17 @@ elif command -v mount >/dev/null 2>&1; then
 fi
 
 if [ ! -s "${squash_link}" ]; then
-    log "unpackfs_stable_source=NOT_READY"
-    log "ERROR: cannot create ${squash_link}"
-    exit 3
+    # squashfs 软链接创建失败，直接用真实路径写 unpackfs.conf，不中断安装
+    log "WARN: cannot create ${squash_link}, using direct path ${squash}"
+    final_source="${squash}"
+else
+    final_source="${squash_link}"
 fi
 
 cat > /etc/calamares/modules/unpackfs.conf <<UNPACKFSCONF
 ---
 unpack:
-  - source: "${squash_link}"
+  - source: "${final_source}"
     sourcefs: "squashfs"
     destination: ""
 UNPACKFSCONF
@@ -4209,6 +4211,118 @@ done
 exit 0
 CALAMARESPREFLIGHT
     chmod +x /usr/local/sbin/ming-calamares-preflight
+
+    # 静态兜底：确保无论 preflight 是否成功执行，
+    # settings.conf/users.conf/partition.conf 都是一键安装版本。
+    # 这一步由 03_desktop.sh 负责写入，resume_build 也会执行到这里。
+    mkdir -p /etc/calamares/modules
+    cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'
+---
+modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
+instances:
+- id: ming-identity
+  module: shellprocess
+  config: ming-identity.conf
+- id: ming-bootloader
+  module: shellprocess
+  config: ming-bootloader.conf
+branding: ming
+prompt-install: false
+oem-setup: false
+disable-cancel: false
+disable-cancel-during-exec: false
+quit-at-end: false
+dont-chroot: false
+sequence:
+- show:
+  - welcome
+  - partition
+  - summary
+- exec:
+  - partition
+  - mount
+  - unpackfs
+  - machineid
+  - fstab
+  - locale
+  - keyboard
+  - localecfg
+  - users
+  - displaymanager
+  - networkcfg
+  - hwclock
+  - initramfs
+  - grubcfg
+  - shellprocess@ming-bootloader
+  - shellprocess@ming-identity
+  - umount
+- show:
+  - finished
+STATICCALASETTINGS
+
+    cat > /etc/calamares/modules/partition.conf << 'STATICPARTCONF'
+---
+efiSystemPartition: "/boot/efi"
+userSwapChoices:
+  - none
+  - small
+  - file
+drawNestedPartitions: false
+alwaysShowPartitionLabels: true
+defaultFileSystemType: "ext4"
+availableFileSystemTypes:
+  - "ext4"
+initialPartitioningChoice: erase
+initialSwapChoice: none
+requiredStorage: 12
+allowManualPartitioning: false
+STATICPARTCONF
+
+    cat > /etc/calamares/modules/users.conf << 'STATICUSERSCONF'
+---
+defaultGroups:
+  - users
+  - audio
+  - video
+  - plugdev
+  - netdev
+  - bluetooth
+  - lp
+  - scanner
+sudoersGroup: sudo
+autologinGroup: autologin
+sudoersConfigureWithGroup: false
+setRootPassword: false
+doReusePassword: false
+displayAutologin: true
+doAutologin: true
+presets:
+  fullName:
+    value: "Ming OS User"
+    editable: false
+  loginName:
+    value: "user"
+    editable: false
+passwordRequirements:
+  minLength: -1
+  maxLength: -1
+  libpwquality:
+    - minlen=0
+    - minclass=0
+    - dictcheck=0
+    - enforcing=0
+allowWeakPasswords: true
+allowWeakPasswordsDefault: true
+user:
+  shell: /bin/bash
+  forbidden_names: [ root, nobody ]
+  home_permissions: "o700"
+hostname:
+  location: EtcFile
+  writeHostsFile: true
+  template: "ming-os"
+  forbidden_names: [ localhost ]
+STATICUSERSCONF
 
     cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
 #!/usr/bin/env bash
