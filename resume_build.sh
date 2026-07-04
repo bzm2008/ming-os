@@ -29,8 +29,9 @@ ensure_resume_runtime_packages() {
     settle_chroot_dpkg "resume runtime packages"
 
     for bin in xfce4-screensaver xfce4-screensaver-command wmctrl; do
-        if ! chroot_exec command -v "${bin}" >/dev/null 2>&1; then
+        if ! chroot_exec /bin/sh -c "command -v '${bin}'" >/dev/null 2>&1; then
             log_error "resume 构建缺少必要命令: ${bin}"
+            exit 1
         fi
     done
 }
