@@ -4536,6 +4536,8 @@ XFWM4CFG
 <channel name="xfce4-desktop" version="1.0">
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
+      <!-- 覆盖所有常见显示器连接器名称，确保任何机器都能应用壁纸 -->
+      <!-- screen / Virtual（VirtualBox/QEMU）-->
       <property name="monitorscreen" type="empty">
         <property name="workspace0" type="empty">
           <property name="color-style" type="int" value="0"/>
@@ -4552,7 +4554,101 @@ XFWM4CFG
           <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
         </property>
       </property>
+      <!-- VGA（老台式机/部分笔记本）-->
       <property name="monitorVGA-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorVGA1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <!-- HDMI（大多数现代台式机/笔记本）-->
+      <property name="monitorHDMI-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorHDMI1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorHDMI-A-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <!-- DP（DisplayPort，台式机/工作站）-->
+      <property name="monitorDP-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <!-- eDP（内置屏幕，大多数现代笔记本）-->
+      <property name="monitoreDP-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitoreDP1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <!-- LVDS（老笔记本内置屏，如 i5-2430M 时代）-->
+      <property name="monitorLVDS-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorLVDS1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <!-- DVI（老台式机）-->
+      <property name="monitorDVI-D-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitorDVI-I-1" type="empty">
         <property name="workspace0" type="empty">
           <property name="color-style" type="int" value="0"/>
           <property name="image-style" type="int" value="5"/>

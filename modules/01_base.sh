@@ -1050,9 +1050,13 @@ BOOTLOADERCONF
     cat > /etc/calamares/modules/unpackfs.conf << 'UNPACKFSCONF'
 ---
 unpack:
-  # ming-calamares-preflight resolves the real live-boot path and exposes this
-  # stable source before Calamares starts.
-  - source: "/run/ming-installer/filesystem.squashfs"
+  # live-boot 3.x 标准挂载路径（Debian Trixie 默认）
+  # 旧路径 /run/ming-installer/filesystem.squashfs 已废弃，会导致 Calamares 安装失败
+  - source: "/run/live/medium/live/filesystem.squashfs"
+    sourcefs: "squashfs"
+    destination: ""
+  # live-boot 2.x / 老版本回退路径
+  - source: "/lib/live/mount/medium/live/filesystem.squashfs"
     sourcefs: "squashfs"
     destination: ""
 UNPACKFSCONF
