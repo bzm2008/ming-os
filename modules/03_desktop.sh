@@ -1416,6 +1416,178 @@ ItemMoveTime=260
 CascadeHide=false
 PLANKTHEME
 
+    cat > /usr/local/bin/ming-dock << 'MINGDOCK'
+#!/usr/bin/env python3
+import configparser
+from pathlib import Path
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gio, GLib, Gtk
+
+APPS = [
+    ('ming-settings.desktop', 'ming-control-center', 'Ming 设置'),
+    ('ming-app-library.desktop', 'ming-app-library', '应用库'),
+    ('ming-files.desktop', 'files-icon', '文件'),
+    ('firefox-esr.desktop', 'firefox', 'Firefox'),
+    ('ming-wechat.desktop', 'wechat', '微信'),
+    ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
+    ('ming-update.desktop', 'ming-update-icon', '系统更新'),
+    ('ming-terminal.desktop', 'ming-terminal', '终端'),
+]
+
+CSS = b'''
+window#ming-dock-window {
+  background: transparent;
+}
+.dock {
+  border-radius: 16px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 42px rgba(21, 68, 56, 0.18), inset 0 1px 0 rgba(255,255,255,0.82);
+}
+.dock-button {
+  border-radius: 12px;
+  padding: 5px;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid transparent;
+  transition: 160ms ease-out;
+}
+.dock-button:hover {
+  background: rgba(47, 138, 125, 0.14);
+  border-color: rgba(47, 138, 125, 0.22);
+}
+'''
+
+def desktop_path(basename):
+    for base in (Path('/usr/share/applications'), Path.home() / '.local/share/applications', Path.home() / 'Desktop'):
+        path = base / basename
+        if path.exists():
+            return path
+    return None
+
+def app_name(path, fallback):
+    if not path:
+        return fallback
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        parser.read(path, encoding='utf-8')
+        entry = parser['Desktop Entry']
+        return entry.get('Name[zh_CN]') or entry.get('Name') or fallback
+    except Exception:
+        return fallback
+
+class DockButton(Gtk.Button):
+    def __init__(self, basename, icon, fallback):
+        super().__init__()
+        self.basename = basename
+        self.path = desktop_path(basename)
+        self.icon = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
+        self.icon.set_pixel_size(36)
+        self.set_image(self.icon)
+        self.set_always_show_image(True)
+        self.set_relief(Gtk.ReliefStyle.NONE)
+        self.set_tooltip_text(app_name(self.path, fallback))
+        self.get_style_context().add_class('dock-button')
+        self.connect('clicked', self.launch)
+        self.connect('enter-notify-event', self.hover_in)
+        self.connect('leave-notify-event', self.hover_out)
+
+    def hover_in(self, *_args):
+        self.icon.set_pixel_size(46)
+        return False
+
+    def hover_out(self, *_args):
+        self.icon.set_pixel_size(36)
+        return False
+
+    def launch(self, *_args):
+        try:
+            info = Gio.DesktopAppInfo.new_from_filename(str(self.path)) if self.path else None
+            if info:
+                info.launch([], None)
+                return
+        except Exception:
+            pass
+        try:
+            Gio.AppInfo.launch_default_for_uri(f'appstream://{self.basename}', None)
+        except Exception:
+            pass
+
+class MingDock(Gtk.Window):
+    def __init__(self):
+        super().__init__(title='Ming Dock')
+        self.set_name('ming-dock-window')
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.stick()
+        self.set_keep_above(True)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 710)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.get_style_context().add_class('dock')
+        for basename, icon, fallback in APPS:
+            box.pack_start(DockButton(basename, icon, fallback), False, False, 0)
+        self.add(box)
+        self.connect('size-allocate', lambda *_args: self.place())
+        GLib.timeout_add_seconds(2, self.place)
+        self.show_all()
+        self.place()
+
+    def place(self):
+        screen = self.get_screen()
+        width = self.get_allocated_width() or 560
+        height = self.get_allocated_height() or 70
+        x = max(12, int((screen.get_width() - width) / 2))
+        y = max(12, screen.get_height() - height - 18)
+        self.move(x, y)
+        self.present()
+        return True
+
+if __name__ == '__main__':
+    MingDock()
+    Gtk.main()
+MINGDOCK
+    chmod 0755 /usr/local/bin/ming-dock
+
+    cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
+#!/usr/bin/env bash
+set -u
+
+start_ming_dock() {
+    command -v ming-dock >/dev/null 2>&1 || return 0
+    pgrep -u "$(id -u)" -f "python3 .*ming-dock|/usr/local/bin/ming-dock" >/dev/null 2>&1 && return 0
+    mkdir -p "${HOME}/.cache/ming-os"
+    export DISPLAY="${DISPLAY:-:0}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+    echo "[$(date '+%F %T')] starting ming-dock DISPLAY=${DISPLAY}" >>"${HOME}/.cache/ming-os/ming-dock.log"
+    (nohup ming-dock >>"${HOME}/.cache/ming-os/ming-dock.log" 2>&1 &) || true
+}
+
+case "${1:-start}" in
+    --session)
+        sleep 3
+        for _ in $(seq 1 24); do
+            start_ming_dock
+            sleep 5
+        done
+        ;;
+    *)
+        start_ming_dock
+        ;;
+esac
+MINGDOCKWATCH
+    chmod 0755 /usr/local/bin/ming-dock-watchdog
+
     cat > /usr/local/bin/ming-plank-watchdog << 'PLANKWATCH'
 #!/usr/bin/env bash
 set -u
@@ -1446,24 +1618,25 @@ esac
 PLANKWATCH
     chmod 0755 /usr/local/bin/ming-plank-watchdog
 
-    # Plank 自启动（picom 之后启动，确保 dock 透明模糊正常）
+    # Ming Dock 自启动（替代 Plank，避免会话恢复时空 Dock 或位置漂移）
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
-    cat > "${autostart_dir}/plank.desktop" << 'PLANKAUTO'
+    rm -f "${autostart_dir}/plank.desktop"
+    cat > "${autostart_dir}/ming-dock.desktop" << 'MINGDOCKAUTO'
 [Desktop Entry]
 Type=Application
-Name=Plank Dock
-Exec=/usr/local/bin/ming-plank-watchdog --session
+Name=Ming Dock
+Exec=/usr/local/bin/ming-dock-watchdog --session
 Comment=Ming OS Dock
-Icon=plank
+Icon=ming-os-menu
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
-PLANKAUTO
+MINGDOCKAUTO
 
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
-        "${autostart_dir}/plank.desktop"
+        "${autostart_dir}/ming-dock.desktop"
 }
 
 # ======================== Ming Shell: 控制中心与品牌化入口 ========================
@@ -2679,7 +2852,7 @@ class PhoneDesktop(Gtk.Window):
         self.set_decorated(False)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
-        self.set_type_hint(Gdk.WindowTypeHint.DESKTOP)
+        self.set_type_hint(Gdk.WindowTypeHint.NORMAL)
         try:
             self.set_keep_below(True)
             self.stick()
@@ -5350,12 +5523,11 @@ xfdesktop --reload 2>/dev/null || true
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
 mkdir -p "${HOME}/.cache/sessions"
 rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
+xfce4-panel --quit >/dev/null 2>&1 || true
 
-# 确保 Plank Dock 在运行（picom 启动后）
-if command -v ming-plank-watchdog &>/dev/null; then
-    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
-elif command -v plank &>/dev/null && ! pgrep -x plank &>/dev/null; then
-    (sleep 1 && nohup plank >/dev/null 2>&1 &) 2>/dev/null || true
+# 确保 Ming Dock 在运行（picom 启动后）
+if command -v ming-dock-watchdog &>/dev/null; then
+    /usr/local/bin/ming-dock-watchdog >/dev/null 2>&1 || true
 fi
 
 if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then

@@ -586,7 +586,7 @@ settings_desktop = require_file("usr/share/applications/ming-settings.desktop", 
 if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
     errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
 
-phone_desktop = require_file("usr/local/bin/ming-phone-desktop", "Gdk.WindowTypeHint.DESKTOP")
+phone_desktop = require_file("usr/local/bin/ming-phone-desktop", "Gdk.WindowTypeHint.NORMAL")
 for marker in [
     "DESKTOP_DIR / basename",
     "set_keep_below(True)",
@@ -599,9 +599,18 @@ if "window.lower()" in phone_desktop:
     errors.append("ming-phone-desktop must not call window.lower(); it can hide behind xfdesktop")
 if ".fullscreen()" in phone_desktop:
     errors.append("ming-phone-desktop must not fullscreen; it can cover Plank and other dock windows")
+if "Gdk.WindowTypeHint.DESKTOP" in phone_desktop:
+    errors.append("ming-phone-desktop must not use DESKTOP type; xfdesktop can intercept its clicks")
 for marker in ["CORE_FALLBACKS", "CORE_GENERATED", "write_generated_core_launcher"]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing empty-layout recovery marker {marker}")
+
+ming_dock = require_file("usr/local/bin/ming-dock", "Gdk.WindowTypeHint.DOCK")
+for marker in ["set_keep_above(True)", "DockButton", "ming-update.desktop"]:
+    if marker not in ming_dock:
+        errors.append(f"ming-dock missing marker {marker}")
+require_file("usr/local/bin/ming-dock-watchdog", "starting ming-dock")
+require_file("home/user/.config/autostart/ming-dock.desktop", "ming-dock-watchdog --session")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
 for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
