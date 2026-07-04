@@ -98,6 +98,20 @@ constrain_default_desktop() {
     reset_desktop_dir "/etc/skel/Desktop" "root:root"
 }
 
+repair_default_user_ownership() {
+    echo "[07_finalize] repairing default user ownership ..."
+
+    mkdir -p "${USER_HOME}/.cache/ming-os" \
+             "${USER_HOME}/.cache/sessions" \
+             "${USER_HOME}/.config/ming-os" 2>/dev/null || true
+
+    # Calamares no longer runs the users module; /home/user comes from squashfs.
+    # Keep it user-owned so autostart watchdogs can write logs and state files.
+    chown -R "${MING_USER}:${MING_USER}" "${USER_HOME}" 2>/dev/null || true
+    chmod 0700 "${USER_HOME}" 2>/dev/null || true
+    chmod 0755 "${USER_HOME}/.cache" "${USER_HOME}/.cache/ming-os" 2>/dev/null || true
+}
+
 # ======================== 同步用户配置到 /etc/skel ========================
 
 seed_skel() {
@@ -174,6 +188,7 @@ main() {
 
     seed_skel
     constrain_default_desktop
+    repair_default_user_ownership
     verify_appearance_assets
 
     echo "=====> [07_finalize] 收尾完成 <====="

@@ -615,7 +615,16 @@ if "python3 .*ming-dock|/usr/local/bin/ming-dock" in ming_dock_watchdog:
     errors.append("ming-dock-watchdog pgrep pattern must not match ming-dock-watchdog itself")
 if "ming-dock([[:space:]]|$)" not in ming_dock_watchdog:
     errors.append("ming-dock-watchdog must use a bounded ming-dock process match")
-require_file("usr/local/bin/ming-phone-desktop-watchdog", "starting ming-phone-desktop")
+for marker in ["ming_log_dir()", "XDG_RUNTIME_DIR:-/tmp", "nohup ming-dock >/dev/null"]:
+    if marker not in ming_dock_watchdog:
+        errors.append(f"ming-dock-watchdog missing logging fallback marker {marker}")
+phone_watchdog = require_file("usr/local/bin/ming-phone-desktop-watchdog", "starting ming-phone-desktop")
+for marker in ["ming_log_dir()", "start_xfdesktop_fallback()", "ming-phone-desktop did not stay running", "stop_xfdesktop"]:
+    if marker not in phone_watchdog:
+        errors.append(f"ming-phone-desktop-watchdog missing black-screen guard marker {marker}")
+for marker in ["if phone_desktop_running; then\n        stop_xfdesktop", "if phone_desktop_running; then\n        stop_xfdesktop\n    else"]:
+    if marker not in phone_watchdog:
+        errors.append("ming-phone-desktop-watchdog must stop xfdesktop only after Ming desktop is running")
 require_file("home/user/.config/autostart/ming-dock.desktop", "ming-dock-watchdog --session")
 require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")
 
@@ -630,9 +639,20 @@ if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "S
 
 require_path("usr/share/backgrounds/ming-os/default.png")
 appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
-for marker in ["xfdesktop --quit", "pkill -u \"$(id -u)\" -x xfdesktop", "ming-phone-desktop-watchdog", "ming-dock-watchdog"]:
+for marker in ["ming-phone-desktop-watchdog", "ming-dock-watchdog"]:
     if marker not in appearance:
         errors.append(f"ming-apply-appearance missing desktop ownership marker {marker}")
+for forbidden in ["xfdesktop --quit", "pkill -u \"$(id -u)\" -x xfdesktop"]:
+    if forbidden in appearance:
+        errors.append(f"ming-apply-appearance must not directly run {forbidden}; watchdog handles it after Ming desktop starts")
+
+cache_dir = root / "home/user/.cache/ming-os"
+if not cache_dir.exists():
+    errors.append("home/user/.cache/ming-os must exist so watchdog logs are writable")
+else:
+    st = cache_dir.stat()
+    if st.st_uid != 1000 or st.st_gid != 1000:
+        errors.append(f"home/user/.cache/ming-os must be owned by uid/gid 1000, got {st.st_uid}/{st.st_gid}")
 
 for helper in [
     "usr/local/bin/ming-network-repair",

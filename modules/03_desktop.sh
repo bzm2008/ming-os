@@ -1562,19 +1562,37 @@ if __name__ == '__main__':
 MINGDOCK
     chmod 0755 /usr/local/bin/ming-dock
 
-    cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
+cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
 #!/usr/bin/env bash
 set -u
+
+ming_log_dir() {
+    local primary="${HOME}/.cache/ming-os"
+    if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
+        printf '%s\n' "${primary}"
+        return 0
+    fi
+    local fallback="${XDG_RUNTIME_DIR:-/tmp}/ming-os-$(id -u)"
+    mkdir -p "${fallback}" 2>/dev/null || fallback="/tmp"
+    printf '%s\n' "${fallback}"
+}
+
+ming_log() {
+    local file="$1"
+    shift
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
+}
 
 start_ming_dock() {
     command -v ming-dock >/dev/null 2>&1 || return 0
     pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 && return 0
-    mkdir -p "${HOME}/.cache/ming-os"
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
-    echo "[$(date '+%F %T')] starting ming-dock DISPLAY=${DISPLAY}" >>"${HOME}/.cache/ming-os/ming-dock.log"
-    (nohup ming-dock >>"${HOME}/.cache/ming-os/ming-dock.log" 2>&1 &) || true
+    local log_file
+    log_file="$(ming_log_dir)/ming-dock.log"
+    ming_log "${log_file}" "starting ming-dock DISPLAY=${DISPLAY}"
+    (nohup ming-dock >>"${log_file}" 2>&1 &) || (nohup ming-dock >/dev/null 2>&1 &)
 }
 
 case "${1:-start}" in
@@ -1592,15 +1610,39 @@ esac
 MINGDOCKWATCH
     chmod 0755 /usr/local/bin/ming-dock-watchdog
 
-    cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'
+cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'
 #!/usr/bin/env bash
 set -u
 
+ming_log_dir() {
+    local primary="${HOME}/.cache/ming-os"
+    if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
+        printf '%s\n' "${primary}"
+        return 0
+    fi
+    local fallback="${XDG_RUNTIME_DIR:-/tmp}/ming-os-$(id -u)"
+    mkdir -p "${fallback}" 2>/dev/null || fallback="/tmp"
+    printf '%s\n' "${fallback}"
+}
+
+ming_log() {
+    local file="$1"
+    shift
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
+}
+
 stop_xfdesktop() {
     # Ming Phone Desktop owns wallpaper, icons and click handling.
-    # xfdesktop draws a separate desktop window that can sit above it and steal clicks.
+    # Stop xfdesktop only after Ming Phone Desktop is confirmed alive; otherwise
+    # the user would be left with a black root window.
     xfdesktop --quit >/dev/null 2>&1 || true
     pkill -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || true
+}
+
+start_xfdesktop_fallback() {
+    pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 && return 0
+    command -v xfdesktop >/dev/null 2>&1 || return 0
+    (nohup xfdesktop >/dev/null 2>&1 &) || true
 }
 
 phone_desktop_running() {
@@ -1609,14 +1651,25 @@ phone_desktop_running() {
 
 start_phone_desktop() {
     command -v ming-phone-desktop >/dev/null 2>&1 || return 0
-    mkdir -p "${HOME}/.cache/ming-os"
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
-    stop_xfdesktop
-    phone_desktop_running && return 0
-    echo "[$(date '+%F %T')] starting ming-phone-desktop DISPLAY=${DISPLAY}" >>"${HOME}/.cache/ming-os/ming-phone-desktop.log"
-    (nohup ming-phone-desktop >>"${HOME}/.cache/ming-os/ming-phone-desktop.log" 2>&1 &) || true
+    local log_file
+    log_file="$(ming_log_dir)/ming-phone-desktop.log"
+    if phone_desktop_running; then
+        stop_xfdesktop
+        return 0
+    fi
+    ming_log "${log_file}" "starting ming-phone-desktop DISPLAY=${DISPLAY}"
+    (nohup ming-phone-desktop >>"${log_file}" 2>&1 &) || (nohup ming-phone-desktop >/dev/null 2>&1 &)
+    sleep 1
+    if phone_desktop_running; then
+        stop_xfdesktop
+    else
+        ming_log "${log_file}" "ming-phone-desktop did not stay running; keeping xfdesktop fallback"
+        start_xfdesktop_fallback
+        return 1
+    fi
 }
 
 lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-phone-desktop-watchdog.lock"
@@ -5602,10 +5655,9 @@ if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
     sed -i "s/^ZoomPercent=.*/ZoomPercent=110/" "${PLANK_SETTINGS}" 2>/dev/null || true
 fi
 
-# Ming 手机桌面接管壁纸、图标和点击；关闭 xfdesktop 避免它的桌面窗口盖住 Ming 图标。
+# Ming 手机桌面接管壁纸、图标和点击。不要在这里直接关闭 xfdesktop；
+# phone watchdog 会在确认 Ming 桌面存活后再关闭它，避免失败时黑屏。
 xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
-xfdesktop --quit >/dev/null 2>&1 || true
-pkill -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || true
 
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
 mkdir -p "${HOME}/.cache/sessions"
