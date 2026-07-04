@@ -274,7 +274,6 @@ run_modules() {
         "02_apps.sh"
         "03_desktop.sh"
         "04_garlic_claw.sh"
-        "05_security_tools.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"
         "07_finalize.sh"
@@ -406,19 +405,27 @@ if settings.get("dont-chroot") is not False:
     errors.append(f"settings.conf dont-chroot must be boolean false, got {settings.get('dont-chroot')!r}")
 
 exec_steps = []
+show_steps = []
 for phase in settings.get("sequence", []) or []:
+    if isinstance(phase, dict) and "show" in phase:
+        show_steps.extend(phase.get("show") or [])
     if isinstance(phase, dict) and "exec" in phase:
         exec_steps = phase.get("exec") or []
-        break
 expected_steps = [
     "partition", "mount", "unpackfs", "machineid", "fstab", "locale",
-    "keyboard", "localecfg", "users", "displaymanager", "networkcfg",
+    "keyboard", "localecfg", "networkcfg",
     "hwclock", "initramfs", "grubcfg", "shellprocess@ming-bootloader", "shellprocess@ming-identity",
     "umount",
 ]
 for step in expected_steps:
     if step not in exec_steps:
         errors.append(f"settings.conf exec sequence missing {step}")
+blocked_show_steps = {"locale", "keyboard", "users"}
+for step in blocked_show_steps.intersection(show_steps):
+    errors.append(f"settings.conf visible sequence must not show {step}")
+blocked_ming_steps = {"users", "displaymanager"}
+for step in blocked_ming_steps.intersection(exec_steps):
+    errors.append(f"settings.conf exec sequence must not run Calamares {step}; ming-identity handles it")
 blocked_debian_steps = {
     "luksbootkeyfile", "dpkg-unsafe-io", "sources-media", "services-systemd",
     "bootloader-config", "packages", "plymouthcfg", "initramfscfg",

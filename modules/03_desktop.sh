@@ -415,7 +415,7 @@ STOREICON48
 </svg>
 STOREICON
 
-    # 安全管家图标
+    # Generic security icon kept for Settings status surfaces.
     cat > "${icon_base}/48x48/apps/ming-security.svg" << SECICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
@@ -730,17 +730,17 @@ GTK2SETTINGS
     # 但避免高成本模糊和重发光，优先照顾老电脑。
     mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0
     cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'
-@define-color theme_bg_color #F6F8F6;
+@define-color theme_bg_color #F7F9F6;
 @define-color theme_fg_color #1D2421;
 @define-color theme_selected_bg_color #2FAE8F;
 @define-color theme_selected_fg_color #ffffff;
-@define-color borders rgba(31, 98, 84, 0.14);
+@define-color borders rgba(31, 98, 84, 0.12);
 @define-color theme_base_color #FFFFFF;
 @define-color theme_text_color #1D2421;
-@define-color insensitive_bg_color #EEF2EF;
-@define-color insensitive_fg_color #9AA6A0;
-@define-color unfocused_bg_color #F1F4F2;
-@define-color unfocused_fg_color #66736D;
+@define-color insensitive_bg_color #EEF3F0;
+@define-color insensitive_fg_color #9AA8A2;
+@define-color unfocused_bg_color #F2F5F2;
+@define-color unfocused_fg_color #5C6963;
 
 * {
   -GtkWidget-cursor-aspect-ratio: 0.05;
@@ -754,7 +754,7 @@ window {
 
 window decoration {
   border-radius: 12px;
-  box-shadow: 0 14px 30px rgba(26, 67, 56, 0.10);
+  box-shadow: 0 12px 28px rgba(26, 67, 56, 0.09);
   margin: 8px;
 }
 
@@ -763,15 +763,16 @@ button {
   padding: 7px 15px;
   border: 1px solid @borders;
   background-image: none;
-  background-color: rgba(255, 255, 255, 0.92);
+  background-color: rgba(255, 255, 255, 0.90);
   color: @theme_fg_color;
-  transition: all 200ms ease;
+  transition: background-color 160ms ease-out, border-color 160ms ease-out, box-shadow 180ms ease-out;
   min-height: 30px;
 }
 
 button:hover {
   background-color: #FFFFFF;
-  border-color: rgba(47, 138, 125, 0.26);
+  border-color: rgba(47, 138, 125, 0.24);
+  box-shadow: 0 4px 12px rgba(30, 70, 58, 0.06);
 }
 
 button:active {
@@ -784,13 +785,15 @@ button:disabled {
 }
 
 button.suggested-action {
-  background-image: linear-gradient(to bottom, #329786, #23665E);
-  border-color: rgba(24, 103, 89, 0.28);
+  background-image: none;
+  background-color: #2F8A7D;
+  border-color: rgba(24, 103, 89, 0.24);
   color: #FFFFFF;
 }
 
 button.suggested-action:hover {
-  background-image: linear-gradient(to bottom, #39A08E, #2A776D);
+  background-image: none;
+  background-color: #28786E;
 }
 
 button.destructive-action {
@@ -858,7 +861,7 @@ menu, .menu {
   border: 1px solid @borders;
   border-radius: 12px;
   padding: 4px;
-  box-shadow: 0 12px 28px rgba(30, 70, 58, 0.08);
+  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.07);
 }
 
 menuitem {
@@ -873,7 +876,7 @@ menuitem:hover {
 }
 
 headerbar {
-  background-color: rgba(255, 255, 255, 0.88);
+  background-color: rgba(255, 255, 255, 0.86);
   border: none;
   border-bottom: 1px solid rgba(47, 138, 125, 0.08);
   border-radius: 12px 12px 0 0;
@@ -1004,11 +1007,11 @@ spinbutton button {
 }
 
 .xfce4-panel {
-  background-color: rgba(255, 255, 255, 0.80);
-  border: 1px solid rgba(31, 98, 84, 0.12);
+  background-color: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(31, 98, 84, 0.10);
   border-radius: 14px;
   margin: 6px 8px 4px 8px;
-  box-shadow: 0 10px 28px rgba(30, 70, 58, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  box-shadow: 0 8px 22px rgba(30, 70, 58, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.60);
   padding: 2px 6px;
 }
 
@@ -1326,11 +1329,11 @@ Position=3
 #对齐: 3=居中
 Alignment=3
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=42
+IconSize=40
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：保持轻巧，避免图标跳动和低端显卡压力
-ZoomPercent=122
+ZoomPercent=116
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=4
 #自动隐藏延迟
@@ -1379,15 +1382,15 @@ TopRoundness=10
 BottomRoundness=0
 LineWidth=1
 OuterStrokeColor=31;98;84;46
-FillStartColor=255;255;255;196
-FillEndColor=246;250;248;220
+FillStartColor=255;255;255;184
+FillEndColor=247;250;248;210
 InnerStrokeColor=255;255;255;120
 
 [PlankDockTheme]
-HorizPadding=10
+HorizPadding=9
 TopPadding=-4
 BottomPadding=5
-ItemPadding=4
+ItemPadding=3
 IndicatorSize=5
 IconShadowSize=1
 UrgentBounceHeight=1.2
@@ -1516,11 +1519,50 @@ fi
 DISKHUB
     chmod +x /usr/local/bin/ming-disk-hub
 
+    cat > /usr/share/applications/ming-disk-hub.desktop << 'DISKHUBAPP'
+[Desktop Entry]
+Name=All Disks
+Name[zh_CN]=所有磁盘
+Comment=Open local files, system disk, and mounted data disks
+Comment[zh_CN]=集中查看系统盘、个人文件和已挂载的数据盘
+Exec=/usr/local/bin/ming-disk-hub --open
+Icon=drive-harddisk
+Terminal=false
+Type=Application
+Categories=System;FileManager;
+StartupNotify=true
+DISKHUBAPP
+
     cat > /usr/local/bin/ming-terminal << 'MINGTERM'
 #!/usr/bin/env bash
 exec xfce4-terminal --hide-menubar --title="Ming Terminal" "$@"
 MINGTERM
     chmod +x /usr/local/bin/ming-terminal
+
+    cat > /usr/local/bin/ming-lock << 'MINGLOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+
+if command -v xfce4-screensaver-command >/dev/null 2>&1; then
+    xfce4-screensaver-command --lock >/tmp/ming-lock.log 2>&1 && exit 0
+fi
+
+if command -v xflock4 >/dev/null 2>&1; then
+    xflock4 >/tmp/ming-lock.log 2>&1 && exit 0
+fi
+
+if command -v dm-tool >/dev/null 2>&1; then
+    dm-tool lock >/tmp/ming-lock.log 2>&1 && exit 0
+fi
+
+if command -v loginctl >/dev/null 2>&1; then
+    loginctl lock-session >/tmp/ming-lock.log 2>&1 && exit 0
+fi
+
+notify-send "Ming OS" "暂时无法锁定屏幕，请稍后重试。" 2>/dev/null || true
+exit 1
+MINGLOCK
+    chmod +x /usr/local/bin/ming-lock
 
     cat > /usr/local/bin/ming-status-center << 'STATUSCENTER'
 #!/usr/bin/env python3
@@ -1533,25 +1575,26 @@ import subprocess
 import sys
 
 CSS = b'''
-window { background: #F4F6F3; }
+window { background: #F7F9F6; }
 .root {
-  background: linear-gradient(135deg, #F7F9F5, #EEF4EF 58%, #E4EDE8);
+  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 58%, #E5EFE9);
   color: #1C2320;
 }
 .title { font-size: 24px; font-weight: 800; color: #1C2320; }
-.subtitle { font-size: 12px; color: #51605A; }
+.subtitle { font-size: 12px; color: #5C6963; }
 .time { font-size: 34px; font-weight: 800; color: #1C2320; }
-.date { font-size: 12px; color: #66726C; }
+.date { font-size: 12px; color: #5C6963; }
 .tile {
-  background: rgba(255,255,255,0.84);
-  border: 1px solid rgba(31,98,84,0.10);
+  background: rgba(255,255,255,0.78);
+  border: 1px solid rgba(31,98,84,0.09);
   border-radius: 12px;
   padding: 12px;
   color: #1C2320;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.96);
-  border-color: rgba(47,138,125,0.26);
+  background: rgba(255,255,255,0.94);
+  border-color: rgba(47,138,125,0.22);
+  box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .tile label { color: #1C2320; font-weight: 700; }
 .danger {
@@ -1632,7 +1675,7 @@ class StatusCenter(Gtk.ApplicationWindow):
             ('显示', 'video-display', 'xfce4-display-settings'),
             ('设置', 'ming-control-center', 'ming-control-center'),
             ('应用库', 'ming-app-library', 'ming-app-library'),
-            ('锁屏', 'system-lock-screen', 'xflock4'),
+            ('锁屏', 'system-lock-screen', 'ming-lock'),
             ('退出/关机', 'system-shutdown', 'xfce4-session-logout'),
         ]
         for index, (label, icon, command) in enumerate(actions):
@@ -1694,40 +1737,41 @@ import sys
 APP_DIRS = ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]
 
 CSS = b'''
-window { background: #F4F6F3; }
+window { background: #F7F9F6; }
 .root {
-  background: linear-gradient(135deg, #F7F9F5, #EEF4EF 52%, #E4EDE8);
+  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 52%, #E5EFE9);
   color: #1C2320;
 }
 .title { font-size: 26px; font-weight: 800; color: #1C2320; }
-.subtitle { font-size: 12px; color: #51605A; }
+.subtitle { font-size: 12px; color: #5C6963; }
 .search {
   min-height: 42px;
   border-radius: 12px;
-  background: rgba(255,255,255,0.86);
+  background: rgba(255,255,255,0.82);
   color: #1C2320;
-  border: 1px solid rgba(31,98,84,0.10);
+  border: 1px solid rgba(31,98,84,0.09);
   padding: 0 12px;
 }
 .app-tile {
-  background: rgba(255,255,255,0.84);
-  border: 1px solid rgba(31,98,84,0.10);
+  background: rgba(255,255,255,0.78);
+  border: 1px solid rgba(31,98,84,0.09);
   border-radius: 12px;
   padding: 10px;
   color: #1C2320;
 }
 .app-tile:hover {
-  background: rgba(255,255,255,0.96);
-  border-color: rgba(47,138,125,0.26);
+  background: rgba(255,255,255,0.94);
+  border-color: rgba(47,138,125,0.22);
+  box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .app-name { font-size: 11px; font-weight: 700; color: #1C2320; }
 .quick-button {
   border-radius: 12px;
   padding: 9px 12px;
-  background: rgba(255,255,255,0.84);
+  background: rgba(255,255,255,0.78);
   color: #1C2320;
 }
-.quick-button:hover { background: rgba(47,138,125,0.12); }
+.quick-button:hover { background: rgba(47,138,125,0.10); }
 '''
 
 def read_desktop_file(path):
@@ -2065,6 +2109,7 @@ DESKORG
     cat > /usr/local/bin/ming-phone-desktop << 'PHONEDESKTOP'
 #!/usr/bin/env python3
 import configparser
+import datetime
 import hashlib
 import json
 import os
@@ -2083,7 +2128,6 @@ LAYOUT_PATH = STATE_DIR / 'desktop-layout.json'
 DESKTOP_DIR = HOME / 'Desktop'
 APP_DIRS = [Path('/usr/share/applications'), HOME / '.local/share/applications']
 CORE_NAMES = {
-    'ming-control-center.desktop',
     'ming-settings.desktop',
     'ming-files.desktop',
     'ming-app-library.desktop',
@@ -2091,36 +2135,57 @@ CORE_NAMES = {
     'ming-terminal.desktop',
     'firefox-esr.desktop',
     'spark-store.desktop',
+    'ming-disk-hub.desktop',
+    'ming-wechat.desktop',
+    'wps-office.desktop',
+    'garlic-claw.desktop',
 }
-GRID_W = 112
-GRID_H = 122
-PAD_X = 36
-PAD_Y = 34
-DROP_DISTANCE = 58
+DESKTOP_ORDER = {name: index for index, name in enumerate([
+    'ming-settings.desktop',
+    'ming-app-library.desktop',
+    'ming-files.desktop',
+    'firefox-esr.desktop',
+    'ming-wechat.desktop',
+    'wps-office.desktop',
+    'spark-store.desktop',
+    'ming-update.desktop',
+    'ming-disk-hub.desktop',
+    'garlic-claw.desktop',
+    'ming-terminal.desktop',
+])}
+LAYOUT_VERSION = 3
+GRID_W = 92
+GRID_H = 104
+PAD_X = 28
+PAD_Y = 102
+DROP_DISTANCE = 50
+ICON_SIZE = 38
+CLOCK_MARGIN_X = 28
+CLOCK_MARGIN_Y = 22
 
 CSS = b'''
 window.ming-desktop {
-  background-color: rgba(247, 250, 247, 0.01);
+  background-color: rgba(247, 250, 247, 0.001);
   color: #1D2421;
 }
 .tile {
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.24);
-  border: 1px solid rgba(31, 98, 84, 0.08);
-  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(31, 98, 84, 0.06);
+  padding: 6px;
   color: #1D2421;
 }
 .tile:hover, .tile.dragging {
-  background: rgba(47, 138, 125, 0.12);
-  border-color: rgba(47, 138, 125, 0.26);
+  background: rgba(47, 138, 125, 0.10);
+  border-color: rgba(47, 138, 125, 0.20);
 }
 .folder {
-  background: rgba(47, 138, 125, 0.10);
-  border-color: rgba(47, 138, 125, 0.32);
+  background: rgba(47, 138, 125, 0.08);
+  border-color: rgba(47, 138, 125, 0.24);
 }
 .label {
   color: #1D2421;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   text-shadow: 0 1px 0 rgba(255,255,255,0.7);
 }
@@ -2138,6 +2203,28 @@ window.ming-desktop {
 .folder-action {
   border-radius: 9px;
   padding: 7px 10px;
+}
+.clock-widget {
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.30);
+  border: 1px solid rgba(31, 98, 84, 0.08);
+  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.08);
+  color: #1D2421;
+}
+.clock-time {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0;
+  color: #1D2421;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.72);
+}
+.clock-date {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #5C6963;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.62);
 }
 '''
 
@@ -2164,13 +2251,14 @@ def read_app(path):
         'id': app_id(path),
         'type': 'app',
         'path': str(path),
+        'basename': Path(path).name,
         'name': entry.get('Name[zh_CN]') or entry.get('Name') or Path(path).stem,
         'icon': entry.get('Icon') or 'application-x-executable',
         'categories': entry.get('Categories', ''),
     }
 
-def load_apps():
-    apps = []
+def load_apps(default_only=False):
+    apps_by_basename = {}
     seen = set()
     for directory in APP_DIRS:
         if not directory.is_dir():
@@ -2179,13 +2267,19 @@ def load_apps():
             item = read_app(path)
             if not item or item['id'] in seen:
                 continue
+            basename = item['basename']
+            if default_only and basename not in CORE_NAMES:
+                continue
+            if basename in apps_by_basename:
+                continue
             seen.add(item['id'])
-            apps.append(item)
-    apps.sort(key=lambda item: (Path(item['path']).name not in CORE_NAMES, item['name'].lower()))
+            apps_by_basename[basename] = item
+    apps = list(apps_by_basename.values())
+    apps.sort(key=lambda item: (DESKTOP_ORDER.get(item['basename'], 999), item['name'].lower()))
     return apps
 
 def empty_layout():
-    return {'version': 1, 'items': []}
+    return {'version': LAYOUT_VERSION, 'items': []}
 
 def load_layout():
     try:
@@ -2209,15 +2303,22 @@ def next_position(index, width=1366):
     return PAD_X + col * GRID_W, PAD_Y + row * GRID_H
 
 def sync_layout(width=1366):
-    apps = load_apps()
+    apps = load_apps(default_only=True)
     layout = load_layout()
-    items = layout.get('items', [])
+    if layout.get('version') != LAYOUT_VERSION:
+        layout = empty_layout()
+    items = []
     known = set()
-    for item in items:
+    for item in layout.get('items', []):
         if item.get('type') == 'folder':
-            known.update(item.get('children', []))
+            if item.get('pinned'):
+                items.append(item)
+                known.update(item.get('children', []))
         elif item.get('path'):
-            known.add(item['path'])
+            basename = Path(item['path']).name
+            if basename in CORE_NAMES or item.get('pinned'):
+                items.append(item)
+                known.add(item['path'])
     index = len(items)
     for app in apps:
         if app['path'] in known:
@@ -2225,8 +2326,10 @@ def sync_layout(width=1366):
         x, y = next_position(index, width)
         app['x'] = x
         app['y'] = y
+        app['pinned'] = False
         items.append(app)
         index += 1
+    layout['version'] = LAYOUT_VERSION
     layout['items'] = items
     save_layout(layout)
     sync_files(layout)
@@ -2239,18 +2342,20 @@ def safe_name(name):
 def copy_desktop(path, target_dir, name=None):
     src = Path(path)
     if not src.is_file():
-        return
+        return None
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{safe_name(name or src.stem)}.desktop"
     try:
         shutil.copy2(src, target)
         target.chmod(0o755)
+        return target
     except Exception:
-        pass
+        return None
 
 def sync_files(layout):
     DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
     folders_seen = set()
+    launchers_seen = set()
     for item in layout.get('items', []):
         if item.get('type') == 'folder':
             folder_dir = DESKTOP_DIR / safe_name(item.get('name', '文件夹'))
@@ -2260,13 +2365,28 @@ def sync_files(layout):
                 child = read_app(child_path)
                 if child:
                     copy_desktop(child_path, folder_dir, child['name'])
-        elif item.get('path') and Path(item['path']).name in CORE_NAMES:
-            copy_desktop(item['path'], DESKTOP_DIR, item.get('name'))
+        elif item.get('path') and (Path(item['path']).name in CORE_NAMES or item.get('pinned')):
+            copied = copy_desktop(item['path'], DESKTOP_DIR, item.get('name'))
+            if copied:
+                launchers_seen.add(copied)
+    for old in DESKTOP_DIR.glob('*.desktop'):
+        if old not in launchers_seen:
+            try:
+                old.unlink()
+            except Exception:
+                pass
     for old in DESKTOP_DIR.iterdir() if DESKTOP_DIR.exists() else []:
         if old.is_dir() and old.name not in {'应用', '系统', '上网', '办公', '影音', '游戏', '工具', '常用'} and old not in folders_seen:
             try:
                 if not any(old.iterdir()):
                     old.rmdir()
+            except Exception:
+                pass
+        elif old.is_dir() and old not in folders_seen:
+            try:
+                children = list(old.iterdir())
+                if not children or all(child.is_file() and child.suffix == '.desktop' for child in children):
+                    shutil.rmtree(old)
             except Exception:
                 pass
 
@@ -2281,12 +2401,14 @@ def command_add(path, folder=False):
     if folder:
         folder_item = next((x for x in items if x.get('type') == 'folder'), None)
         if not folder_item:
-            folder_item = {'id': 'folder-' + app_id(item['path']), 'type': 'folder', 'name': '新文件夹', 'children': [], 'x': PAD_X, 'y': PAD_Y}
+            folder_item = {'id': 'folder-' + app_id(item['path']), 'type': 'folder', 'name': '新文件夹', 'children': [], 'x': PAD_X, 'y': PAD_Y, 'pinned': True}
             items.insert(0, folder_item)
+        folder_item['pinned'] = True
         if item['path'] not in folder_item['children']:
             folder_item['children'].append(item['path'])
     else:
         item['x'], item['y'] = next_position(len(items))
+        item['pinned'] = True
         items.append(item)
     save_layout(layout)
     sync_files(layout)
@@ -2304,18 +2426,19 @@ class DesktopTile(Gtk.EventBox):
         self.connect('motion-notify-event', self.on_motion)
         self.connect('button-release-event', self.on_release)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_size_request(92, 102)
+        box.set_size_request(74, 88)
         box.get_style_context().add_class('tile')
         if item.get('type') == 'folder':
             box.get_style_context().add_class('folder')
             image = Gtk.Image.new_from_icon_name('folder', Gtk.IconSize.DIALOG)
         else:
             image = Gtk.Image.new_from_icon_name(item.get('icon') or 'application-x-executable', Gtk.IconSize.DIALOG)
+        image.set_pixel_size(ICON_SIZE)
         label = Gtk.Label(label=item.get('name', '应用'))
         label.get_style_context().add_class('label')
         label.set_justify(Gtk.Justification.CENTER)
         label.set_line_wrap(True)
-        label.set_max_width_chars(8)
+        label.set_max_width_chars(7)
         box.pack_start(image, True, True, 0)
         box.pack_start(label, False, False, 0)
         self.box = box
@@ -2356,6 +2479,35 @@ class DesktopTile(Gtk.EventBox):
         self.dragging = False
         return True
 
+class ClockWidget(Gtk.EventBox):
+    def __init__(self):
+        super().__init__()
+        self.set_visible_window(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        box.get_style_context().add_class('clock-widget')
+        box.set_halign(Gtk.Align.END)
+
+        self.time_label = Gtk.Label()
+        self.time_label.get_style_context().add_class('clock-time')
+        self.time_label.set_halign(Gtk.Align.END)
+
+        self.date_label = Gtk.Label()
+        self.date_label.get_style_context().add_class('clock-date')
+        self.date_label.set_halign(Gtk.Align.END)
+
+        box.pack_start(self.time_label, False, False, 0)
+        box.pack_start(self.date_label, False, False, 0)
+        self.add(box)
+        self.refresh()
+        GLib.timeout_add_seconds(30, self.refresh)
+
+    def refresh(self):
+        now = datetime.datetime.now()
+        weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        self.time_label.set_text(now.strftime('%H:%M'))
+        self.date_label.set_text(now.strftime(f'%m月%d日  {weekdays[now.weekday()]}'))
+        return True
+
 class PhoneDesktop(Gtk.Window):
     def __init__(self):
         super().__init__(title='Ming Desktop')
@@ -2365,6 +2517,11 @@ class PhoneDesktop(Gtk.Window):
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_type_hint(Gdk.WindowTypeHint.DESKTOP)
+        try:
+            self.set_keep_below(True)
+            self.stick()
+        except Exception:
+            pass
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual and screen.is_composited():
@@ -2379,9 +2536,12 @@ class PhoneDesktop(Gtk.Window):
         self.fixed = Gtk.Fixed()
         self.add(self.fixed)
         self.tiles = {}
+        self.clock = ClockWidget()
+        self.connect('size-allocate', lambda *_args: self.place_clock())
         self.layout = sync_layout(self.get_screen().get_width())
         self.render()
         GLib.timeout_add_seconds(8, self.refresh_from_apps)
+        GLib.timeout_add_seconds(2, self.enforce_desktop_layer)
 
     @property
     def window_origin(self):
@@ -2395,6 +2555,26 @@ class PhoneDesktop(Gtk.Window):
                 pass
         return 0, 0
 
+    def enforce_desktop_layer(self):
+        window = self.get_window()
+        try:
+            self.set_keep_below(True)
+            self.stick()
+            if window:
+                window.lower()
+        except Exception:
+            pass
+        try:
+            subprocess.run(
+                ['wmctrl', '-r', 'Ming Desktop', '-b', 'add,below,sticky,skip_taskbar,skip_pager'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+        except Exception:
+            pass
+        return True
+
     def render(self):
         for child in self.fixed.get_children():
             self.fixed.remove(child)
@@ -2403,7 +2583,22 @@ class PhoneDesktop(Gtk.Window):
             tile = DesktopTile(self, item)
             self.tiles[item['id']] = tile
             self.fixed.put(tile, int(item.get('x', PAD_X)), int(item.get('y', PAD_Y)))
+        self.place_clock()
         self.show_all()
+        self.enforce_desktop_layer()
+
+    def place_clock(self):
+        if not hasattr(self, 'clock') or not hasattr(self, 'fixed'):
+            return
+        screen_w = max(320, self.get_screen().get_width())
+        widget_w = 210 if screen_w >= 900 else 168
+        self.clock.set_size_request(widget_w, 62)
+        x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
+        y = CLOCK_MARGIN_Y
+        if self.clock.get_parent() is None:
+            self.fixed.put(self.clock, x, y)
+        else:
+            self.fixed.move(self.clock, x, y)
 
     def refresh_from_apps(self):
         self.layout = sync_layout(self.get_screen().get_width())
@@ -2499,7 +2694,9 @@ class PhoneDesktop(Gtk.Window):
             button = Gtk.Button()
             button.set_size_request(104, 94)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            box.pack_start(Gtk.Image.new_from_icon_name(child.get('icon'), Gtk.IconSize.DIALOG), True, True, 0)
+            child_image = Gtk.Image.new_from_icon_name(child.get('icon'), Gtk.IconSize.DIALOG)
+            child_image.set_pixel_size(ICON_SIZE)
+            box.pack_start(child_image, True, True, 0)
             label = Gtk.Label(label=child.get('name'))
             label.set_line_wrap(True)
             label.set_max_width_chars(8)
@@ -2982,6 +3179,7 @@ WPSDESKTOP
     fi
 
     if [[ -x /usr/local/bin/ming-install-wps && -f /usr/share/applications/ming-install-wps.desktop ]]; then
+        cp /usr/share/applications/ming-install-wps.desktop /usr/share/applications/wps-office.desktop 2>/dev/null || true
         cp /usr/share/applications/ming-install-wps.desktop "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
         chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
         chmod +x "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
@@ -3326,7 +3524,7 @@ This is the version to use when producing:
 - Live/Ventoy auto-login as `ming`.
 - Ming wallpaper applies by default.
 - Main Ming icons no longer use white-background AI PNG overrides.
-- Ming Security Manager opens through a stable wrapper and writes readable logs.
+- Ming Settings opens through a stable wrapper and writes readable logs.
 - Installed system identity is repaired to Ming OS after installation.
 - Desktop update button uses a clear GUI flow.
 - Low-memory WeChat strategy: zram, earlyoom, cache cleanup, low-priority launcher, Web WeChat fallback.
@@ -3411,7 +3609,7 @@ Suggested structure:
 - Hero: title `Ming OS 26.3.1`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
-- Feature section: WeChat low-memory mode, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Security Manager, Ming installer.
+- Feature section: WeChat low-memory mode, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
 - Download section: show official full ISO and GitHub split download instructions.
 - Compatibility section: Rufus ISO/DD, Ventoy/Live, BIOS/UEFI, VirtualBox.
 
@@ -3489,6 +3687,17 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 POWERAUTOSTART
 
+    cat > "${autostart_dir}/xfce4-screensaver.desktop" << SCREENSAVERAUTO
+[Desktop Entry]
+Type=Application
+Name=Xfce Screensaver
+Comment=Ming OS lock screen and idle screensaver
+Exec=xfce4-screensaver
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+SCREENSAVERAUTO
+
     # Polkit 图形授权代理（让安装微信/修复商店/系统安装器等按钮能弹出授权窗口）
     cat > "${autostart_dir}/lxpolkit.desktop" << POLKITAUTO
 [Desktop Entry]
@@ -3554,11 +3763,11 @@ DESKORGAUTO
 Type=Application
 Name=Ming Phone Desktop
 Comment=手机式桌面图标和拖拽文件夹
-Exec=sh -c "sleep 3 && /usr/local/bin/ming-phone-desktop"
+Exec=sh -c "sleep 8; wmctrl -k on 2>/dev/null || true; exec /usr/local/bin/ming-phone-desktop"
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Delay=8
 PHONEDESKTOPAUTO
 
     chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}"
@@ -3602,16 +3811,16 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         self.add(self.main_box)
 
         css = b'''
-        window { background-color: #F6F8F6; border-radius: 16px; }
+        window { background-color: #F7F9F6; border-radius: 16px; }
         .welcome-title { font-size: 28px; font-weight: bold; color: #1D2421; margin-top: 30px; }
-        .welcome-subtitle { font-size: 16px; color: #4F625A; margin-top: 10px; margin-bottom: 20px; }
+        .welcome-subtitle { font-size: 16px; color: #5C6963; margin-top: 10px; margin-bottom: 20px; }
         .big-button { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                      background-color: #1FA89E; color: white; border: none; min-height: 52px; }
-        .big-button:hover { background-color: #1FA89E; }
+                      background-color: #2F8A7D; color: white; border: none; min-height: 52px; }
+        .big-button:hover { background-color: #28786E; }
         .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                          background-color: rgba(255,255,255,0.84); color: #1D2421; border: 1px solid rgba(31,98,84,0.18); min-height: 52px; }
-        .step-label { font-size: 14px; color: #4F625A; margin-top: 16px; }
-        .done-icon { font-size: 64px; color: #1FA89E; }
+                          background-color: rgba(255,255,255,0.78); color: #1D2421; border: 1px solid rgba(31,98,84,0.14); min-height: 52px; }
+        .step-label { font-size: 14px; color: #5C6963; margin-top: 16px; }
+        .done-icon { font-size: 64px; color: #2F8A7D; }
         '''
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -3631,11 +3840,11 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         title = Gtk.Label()
-        title.set_markup('<span size="36000" weight="bold" foreground="#D4F7F1">🎉 欢迎使用 Ming OS</span>')
+        title.set_markup('<span size="36000" weight="bold" foreground="#1D2421">欢迎使用 Ming OS</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="16000" foreground="#6DCFC4">让电脑更简单，让人人都会用</span>')
+        subtitle.set_markup('<span size="16000" foreground="#5C6963">让电脑更简单，让人人都会用</span>')
         subtitle.set_margin_bottom(30)
 
         btn = Gtk.Button(label='开始设置')
@@ -3644,7 +3853,7 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         btn.connect('clicked', lambda w: self.next_step())
 
         dots = Gtk.Label()
-        dots.set_markup('<span size="12000" foreground="#1FA89E">● ○ ○</span>')
+        dots.set_markup('<span size="12000" foreground="#2F8A7D">● ○ ○</span>')
         dots.set_margin_top(24)
 
         vbox.pack_start(title, False, False, 0)
@@ -3660,11 +3869,11 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         title = Gtk.Label()
-        title.set_markup('<span size="24000" weight="bold" foreground="#D4F7F1">📶 连接到网络</span>')
+        title.set_markup('<span size="24000" weight="bold" foreground="#1D2421">连接到网络</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="14000" foreground="#6DCFC4">Wi-Fi 可以让您上网、更新系统和下载应用</span>')
+        subtitle.set_markup('<span size="14000" foreground="#5C6963">Wi-Fi 可以让您上网、更新系统和下载应用</span>')
         subtitle.set_margin_bottom(20)
 
         btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -3681,7 +3890,7 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         skip_btn.connect('clicked', lambda w: self.next_step())
 
         dots = Gtk.Label()
-        dots.set_markup('<span size="12000" foreground="#1FA89E">○ ● ○</span>')
+        dots.set_markup('<span size="12000" foreground="#2F8A7D">○ ● ○</span>')
         dots.set_margin_top(24)
 
         btn_box.pack_start(wifi_btn, False, False, 0)
@@ -3699,15 +3908,15 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         vbox.set_halign(Gtk.Align.CENTER)
 
         icon = Gtk.Label()
-        icon.set_markup('<span size="48000" foreground="#1FA89E">✨</span>')
+        icon.set_markup('<span size="48000" foreground="#2F8A7D">•</span>')
         icon.set_margin_bottom(10)
 
         title = Gtk.Label()
-        title.set_markup('<span size="28000" weight="bold" foreground="#D4F7F1">一切就绪！</span>')
+        title.set_markup('<span size="28000" weight="bold" foreground="#1D2421">一切就绪</span>')
         title.set_margin_bottom(10)
 
         subtitle = Gtk.Label()
-        subtitle.set_markup('<span size="14000" foreground="#6DCFC4">您可以随时在底部 Dock 找到常用应用</span>')
+        subtitle.set_markup('<span size="14000" foreground="#5C6963">您可以随时在底部 Dock 找到常用应用</span>')
         subtitle.set_margin_bottom(20)
 
         btn = Gtk.Button(label='开始使用 Ming OS')
@@ -4014,8 +4223,6 @@ sequence:
   - locale
   - keyboard
   - localecfg
-  - users
-  - displaymanager
   - networkcfg
   - hwclock
   - initramfs
@@ -4247,8 +4454,6 @@ sequence:
   - locale
   - keyboard
   - localecfg
-  - users
-  - displaymanager
   - networkcfg
   - hwclock
   - initramfs
@@ -4832,6 +5037,24 @@ DESKTOPCFG
 </channel>
 XSETTINGSCFG
 
+    cat > "/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml" << 'SCREENSAVERCFG'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty">
+    <property name="enabled" type="bool" value="true"/>
+    <property name="fullscreen-inhibit" type="bool" value="true"/>
+    <property name="mode" type="int" value="0"/>
+  </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="true"/>
+    <property name="saver-activation" type="empty">
+      <property name="enabled" type="bool" value="true"/>
+      <property name="delay" type="int" value="5"/>
+    </property>
+  </property>
+</channel>
+SCREENSAVERCFG
+
     # Whisker Menu 配置（26.3.0 玻璃主题版）
     mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
     cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
@@ -4844,9 +5067,9 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,firefox-esr.desktop,spark-store.desktop,ming-wechat.desktop,garlic-claw.desktop,ming-update.desktop,ming-master.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,firefox-esr.desktop,spark-store.desktop,ming-wechat.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
 command-settings=ming-control-center
-command-lockscreen=xflock4
+command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter
 command-logoutuser=xfce4-session-logout --logout
 command-restart=xfce4-session-logout --reboot
@@ -4931,6 +5154,12 @@ fi
 xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
+xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
+xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
+xfconf-query -c xfce4-screensaver -p /saver/fullscreen-inhibit -n -t bool -s true 2>/dev/null || true
+xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
+xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
+xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
 
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
@@ -4949,6 +5178,10 @@ xfce4-panel --quit >/dev/null 2>&1 || true
 # 确保 Plank Dock 在运行（picom 启动后）
 if command -v plank &>/dev/null && ! pgrep -x plank &>/dev/null; then
     (sleep 1 && nohup plank >/dev/null 2>&1 &) 2>/dev/null || true
+fi
+
+if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then
+    (sleep 1 && nohup xfce4-screensaver >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 
 exit 0
@@ -5169,5 +5402,3 @@ main() {
 }
 
 main
-
-

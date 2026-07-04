@@ -699,6 +699,39 @@ write_file() {
     cat > "${target}${path}"
 }
 
+ensure_ming_user() {
+    local user_name="user"
+    local user_home="/home/${user_name}"
+    local groups=(
+        users sudo adm cdrom dip plugdev lp lpadmin netdev audio video input
+        scanner bluetooth nopasswdlogin autologin
+    )
+    local grp
+
+    mkdir -p "${target}/etc/sudoers.d" "${target}/etc/lightdm/lightdm.conf.d" "${target}${user_home}"
+
+    for grp in "${groups[@]}"; do
+        chroot "${target}" getent group "${grp}" >/dev/null 2>&1 \
+            || chroot "${target}" groupadd -r "${grp}" >/dev/null 2>&1 \
+            || true
+    done
+
+    if chroot "${target}" getent passwd "${user_name}" >/dev/null 2>&1; then
+        chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
+    else
+        chroot "${target}" useradd -m -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
+        printf '%s:%s\n' "${user_name}" "${user_name}" | chroot "${target}" chpasswd >/dev/null 2>&1 || true
+    fi
+
+    for grp in "${groups[@]}"; do
+        chroot "${target}" getent group "${grp}" >/dev/null 2>&1 \
+            && chroot "${target}" usermod -aG "${grp}" "${user_name}" >/dev/null 2>&1 \
+            || true
+    done
+
+    chroot "${target}" chown "${user_name}:${user_name}" "${user_home}" >/dev/null 2>&1 || true
+}
+
 write_file /etc/os-release <<OSRELEASE
 NAME="Ming OS"
 VERSION="${version} Home Edition"
@@ -758,6 +791,8 @@ XKBOPTIONS=""
 BACKSPACE="guess"
 TARGETKEYBOARD
 
+ensure_ming_user
+
 mkdir -p "${target}/etc/security"
 cat > "${target}/etc/security/pwquality.conf" <<'TARGETPWQUALITY'
 # Ming OS installer-friendly password policy.
@@ -793,10 +828,8 @@ autologin-user-timeout=0
 user-session=xfce
 LIGHTDM
 
-if [[ -d "${target}/etc/sudoers.d" ]]; then
-    echo "user ALL=(ALL) NOPASSWD: ALL" > "${target}/etc/sudoers.d/user" 2>/dev/null || true
-    chmod 440 "${target}/etc/sudoers.d/user" 2>/dev/null || true
-fi
+echo "user ALL=(ALL) NOPASSWD: ALL" > "${target}/etc/sudoers.d/user" 2>/dev/null || true
+chmod 440 "${target}/etc/sudoers.d/user" 2>/dev/null || true
 
 # The installed system is produced by unpacking the Live filesystem, so remove
 # Live-only installer launchers and sessions from the target before first boot.
@@ -1218,8 +1251,8 @@ dont-chroot: false
 sequence:
 # 一键安装：用户只需点击"开始安装"，无需配置任何选项。
 # 语言/时区/键盘全部预设为中文/北京/US（装完后联网自动更新时间）。
-# 用户账户由 users.conf 默认配置，无需手动填写。
-# 分区默认"清空整个磁盘"，不显示手动分区界面。
+# 用户账户由 ming-fix-installed-identity 幂等修复，避免 users 模块重复 useradd。
+# 分区保留确认页，避免误清空硬盘。
 - show:
   - welcome
   - partition
@@ -1233,8 +1266,6 @@ sequence:
   - locale
   - keyboard
   - localecfg
-  - users
-  - displaymanager
   - networkcfg
   - hwclock
   - initramfs

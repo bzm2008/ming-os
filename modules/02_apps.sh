@@ -148,64 +148,97 @@ PICOMFALLBACK
     # Picom 启动包装器（自动探测 GLX 可用性，低内存/老显卡回退）
     cat > /usr/local/bin/ming-picom << 'PICOMWRAP'
 #!/usr/bin/env bash
+set -u
+
 CONF="${HOME}/.config/picom/picom.conf"
 LOWMEM="/etc/xdg/picom/picom-lowmem.conf"
 FALLBACK="/etc/xdg/picom/picom-fallback.conf"
 PICOM_BIN=$(command -v picom 2>/dev/null || echo "picom")
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
+LOG="/tmp/ming-picom.log"
+CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
+RENDERER=""
+DIRECT_RENDERING=""
 
-# <=2600MB: 无 blur, 无重阴影, 仅 fade (最省 GPU/内存)
-if [ "${MEM_MB}" -le 2600 ]; then
-    exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
-fi
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${LOG}" 2>/dev/null || true
+}
 
-# 2601-4200MB: 低内存轻动画配置（无 blur, 轻阴影）
-if [ "${MEM_MB}" -le 4200 ]; then
-    if [ -f "${LOWMEM}" ]; then
-        exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
+choose_config() {
+    local config="$1"
+    if [ -f "${config}" ]; then
+        printf '%s' "${config}"
+    elif [ -f "${FALLBACK}" ]; then
+        printf '%s' "${FALLBACK}"
+    else
+        printf '%s' "${CONF}"
     fi
+}
+
+run_picom() {
+    local config
+    local reason="$2"
+    config="$(choose_config "$1")"
+    shift 2
+    local backend
+    backend="$(awk -F'"' '/^[[:space:]]*backend[[:space:]]*=/{print $2; exit}' "${config}" 2>/dev/null || true)"
+    log "selected config=${config} backend=${backend:-unknown} reason=${reason} mem_mb=${MEM_MB} renderer=${RENDERER:-unknown} direct=${DIRECT_RENDERING:-unknown}"
+    exec "${PICOM_BIN}" --config "${config}" -b "$@"
+}
+
+if command -v glxinfo >/dev/null 2>&1; then
+    GLXINFO="$(glxinfo -B 2>/dev/null || glxinfo 2>/dev/null || true)"
+    RENDERER="$(printf '%s\n' "${GLXINFO}" | awk -F: '/OpenGL renderer string/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
+    DIRECT_RENDERING="$(printf '%s\n' "${GLXINFO}" | awk -F: '/direct rendering/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
 fi
 
-HAS_GPU=0
-IS_OLD_INTEL=0
+if printf '%s\n' "${CMDLINE}" | grep -qwE 'nomodeset|i915.modeset=0|radeon.modeset=0|amdgpu.modeset=0|nouveau.modeset=0'; then
+    run_picom "${FALLBACK}" "kernel-modeset-disabled" "$@"
+fi
 
-# 检测是否是老旧英特尔核显（Sandy/Ivy/Haswell Bridge，GMA 系列）
-# 这些显卡有 DRI 设备但 GLX 不稳定，picom 应降级到 xrender
-if [ -e /dev/dri/card0 ]; then
-    vendor_id=$(cat /sys/class/drm/card0/device/vendor 2>/dev/null || true)
-    device_id=$(cat /sys/class/drm/card0/device/device 2>/dev/null || true)
+case "$(printf '%s' "${RENDERER}" | tr '[:upper:]' '[:lower:]')" in
+    *llvmpipe*|*softpipe*|*software*rasterizer*|*swrast*)
+        run_picom "${FALLBACK}" "software-renderer" "$@"
+        ;;
+esac
+
+HAS_DRI=0
+IS_OLD_INTEL=0
+for dri in /dev/dri/renderD* /dev/dri/card*; do
+    if [ -e "${dri}" ]; then
+        HAS_DRI=1
+        break
+    fi
+done
+
+# These Intel generations often expose DRI but remain unstable with GLX blur.
+for dev in /sys/class/drm/card*/device; do
+    [ -e "${dev}" ] || continue
+    vendor_id=$(cat "${dev}/vendor" 2>/dev/null || true)
+    device_id=$(cat "${dev}/device" 2>/dev/null || true)
     if [ "${vendor_id}" = "0x8086" ]; then
-        # Intel GPU: 0x0100-0x017F = Sandy Bridge, 0x0150-0x017F = Ivy Bridge,
-        # 0x0400-0x0417 = Haswell, 0x2e*/0x2a*/0x29* = GMA 4500/X3100/G45
         case "${device_id}" in
-            0x0102|0x0106|0x010a|0x0112|0x0116|0x0122|0x0126)
-                IS_OLD_INTEL=1 ;;  # Sandy Bridge HD 2000/3000
-            0x0152|0x0156|0x015a|0x0162|0x0166|0x016a)
-                IS_OLD_INTEL=1 ;;  # Ivy Bridge HD 2500/4000
-            0x29*|0x2a*|0x2e*)
-                IS_OLD_INTEL=1 ;;  # GMA X3100/G45/4500
-            *) IS_OLD_INTEL=0 ;;
+            0x0042|0x0046|0x0102|0x0106|0x010a|0x0112|0x0116|0x0122|0x0126|0x0152|0x0156|0x015a|0x0162|0x0166|0x016a|0x0402|0x0412|0x0416|0x0a16|0x0a26|0x0a2e|0x0d16|0x0d22|0x0d26|0x29*|0x2a*|0x2e*)
+                IS_OLD_INTEL=1
+                ;;
         esac
     fi
+done
+
+if [ "${HAS_DRI}" -eq 0 ]; then
+    run_picom "${FALLBACK}" "no-dri-device" "$@"
+fi
+if [ "${MEM_MB}" -le 2600 ]; then
+    run_picom "${FALLBACK}" "very-low-memory" "$@"
+fi
+if [ "${IS_OLD_INTEL}" -eq 1 ]; then
+    run_picom "${FALLBACK}" "old-intel-glx-risk" "$@"
+fi
+if [ "${MEM_MB}" -le 4200 ]; then
+    run_picom "${LOWMEM}" "low-memory" "$@"
 fi
 
-if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/card1 ]; then
-    HAS_GPU=1
-fi
-if [ "$HAS_GPU" -eq 0 ] && command -v glxinfo &>/dev/null; then
-    if glxinfo 2>/dev/null | grep -q "direct rendering: Yes"; then
-        HAS_GPU=1
-    fi
-fi
-
-if [ "$IS_OLD_INTEL" -eq 1 ]; then
-    # 老英特尔核显：GLX 不稳定，强制使用 xrender（无模糊但稳定）
-    exec ${PICOM_BIN} --config "${FALLBACK}" -b "$@"
-elif [ "$HAS_GPU" -eq 1 ]; then
-    exec ${PICOM_BIN} --config "${CONF}" -b "$@"
-else
-    exec ${PICOM_BIN} --config "${LOWMEM}" -b "$@"
-fi
+run_picom "${CONF}" "modern-gpu" "$@"
 PICOMWRAP
     chmod +x /usr/local/bin/ming-picom
 
@@ -213,6 +246,7 @@ PICOMWRAP
     apt install -y --no-install-recommends \
         lightdm \
         lightdm-gtk-greeter \
+        xfce4-screensaver \
         plymouth \
         plymouth-themes
 
@@ -308,6 +342,8 @@ icon-theme-name = Papirus
 font-name = WenQuanYi Micro Hei 11
 background = /usr/share/backgrounds/ming-os/default.png
 user-background = false
+clock-format = %H:%M
+indicators = ~host;~spacer;~clock;~spacer;~power
 GREETERCFG
 
     cat > /usr/local/bin/ming-autologin-setup << 'AUTOLOGINSETUP'
@@ -1215,6 +1251,7 @@ install_utilities() {
         onboard \
         touchegg \
         xdotool \
+        wmctrl \
         python3-gi \
         gir1.2-gtk-4.0 \
         gir1.2-adw-1 \

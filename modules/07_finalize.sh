@@ -24,6 +24,78 @@
 set -uo pipefail
 
 readonly USER_HOME="/home/${MING_USER}"
+readonly DEFAULT_DESKTOP_LAYOUT="${USER_HOME}/.config/ming-os/desktop-layout.json"
+
+readonly DESKTOP_LAUNCHERS=(
+    "ming-settings.desktop"
+    "ming-app-library.desktop"
+    "ming-files.desktop"
+    "firefox-esr.desktop"
+    "ming-wechat.desktop"
+    "wps-office.desktop"
+    "spark-store.desktop"
+    "ming-update.desktop"
+    "ming-disk-hub.desktop"
+    "garlic-claw.desktop"
+    "ming-terminal.desktop"
+)
+
+# Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
+copy_default_launcher() {
+    local launcher="$1"
+    local target_dir="$2"
+    local source="/usr/share/applications/${launcher}"
+
+    case "${launcher}" in
+        firefox-esr.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/firefox.desktop"
+            ;;
+        wps-office.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-wps.desktop"
+            ;;
+        spark-store.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-spark-store.desktop"
+            ;;
+    esac
+
+    if [[ ! -f "${source}" ]]; then
+        echo "[07_finalize][WARN] default desktop launcher missing: ${launcher}"
+        return 0
+    fi
+
+    cp -f "${source}" "${target_dir}/${launcher}" 2>/dev/null || true
+    chmod 0755 "${target_dir}/${launcher}" 2>/dev/null || true
+}
+
+reset_desktop_dir() {
+    local target_dir="$1"
+    local owner="$2"
+
+    mkdir -p "${target_dir}"
+    find "${target_dir}" -maxdepth 1 -type f -name '*.desktop' -delete 2>/dev/null || true
+    while IFS= read -r -d '' dir; do
+        if ! find "${dir}" -mindepth 1 ! -name '*.desktop' -print -quit 2>/dev/null | grep -q .; then
+            rm -rf "${dir}"
+        fi
+    done < <(find "${target_dir}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+    local launcher
+    for launcher in "${DESKTOP_LAUNCHERS[@]}"; do
+        copy_default_launcher "${launcher}" "${target_dir}"
+    done
+
+    chown -R "${owner}" "${target_dir}" 2>/dev/null || true
+}
+
+constrain_default_desktop() {
+    echo "[07_finalize] constraining default desktop launchers ..."
+
+    rm -f "${DEFAULT_DESKTOP_LAYOUT}" \
+          "/etc/skel/.config/ming-os/desktop-layout.json" 2>/dev/null || true
+
+    reset_desktop_dir "${USER_HOME}/Desktop" "${MING_USER}:${MING_USER}"
+    reset_desktop_dir "/etc/skel/Desktop" "root:root"
+}
 
 # ======================== 同步用户配置到 /etc/skel ========================
 
@@ -73,7 +145,9 @@ verify_appearance_assets() {
         "/usr/share/backgrounds/ming-os/default.png"
         "/usr/share/icons/hicolor/48x48/apps/ming-os-menu.svg"
         "/usr/local/bin/ming-picom"
+        "/usr/local/bin/ming-lock"
         "/usr/local/bin/ming-apply-appearance"
+        "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml"
         "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
         "/etc/skel/.config/plank/dock1/settings"
     )
@@ -98,6 +172,7 @@ main() {
     echo "=====> [07_finalize] 开始收尾与配置固化 (${MING_OS_VERSION}) <====="
 
     seed_skel
+    constrain_default_desktop
     verify_appearance_assets
 
     echo "=====> [07_finalize] 收尾完成 <====="

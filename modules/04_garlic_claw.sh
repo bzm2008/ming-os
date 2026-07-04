@@ -445,7 +445,7 @@ GATEWAYSERVICE
 # ======================== 防火墙安全加固 ========================
 
 configure_firewall() {
-    echo "配置 Garlic Claw 防火墙规则（将在 05_security_tools 中统一部署）..."
+    echo "配置 Garlic Claw 本地访问限制..."
     apt install -y --no-install-recommends nftables
 }
 
