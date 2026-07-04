@@ -643,6 +643,11 @@ insmod font
 insmod search
 insmod search_label
 insmod search_fs_file
+# 老 BIOS 机器（i3-370M 等 Westmere/Arrandale）必须显式加载 linux/initrd 模块
+# 否则 GRUB 报 "can't find command 'linux'" 并无法引导
+insmod linux
+insmod loopback
+insmod probe
 
 search --no-floppy --label ${ISO_VOLUME_ID} --set=root
 search --no-floppy --file --set=root /live/vmlinuz
