@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ming OS module 05: security tools and Ming Security Manager
+# Ming OS module 05: lightweight firewall baseline
 # ============================================================================
 
 set -uo pipefail
 
 install_security_tools() {
-    echo "Installing security tools..."
+    echo "Installing lightweight security baseline..."
 
     apt install -y --no-install-recommends \
-        rkhunter \
-        chkrootkit \
-        lynis \
-        bleachbit \
-        yad \
         nftables
 
     grep -qxF "nf_tables" /etc/modules || echo "nf_tables" >> /etc/modules
@@ -27,72 +22,22 @@ softdep nf_tables pre: nf_conntrack
 MODPROBE
 }
 
-deploy_ming_master() {
-    echo "Deploying Ming Security Manager..."
-
-    install -m 0755 /tmp/ming-build/config/security/ming-master.py /usr/local/bin/ming-master.py
-
-    cat > /usr/local/bin/ming-master << 'MINGMASTERWRAPPER'
-#!/usr/bin/env bash
-set -u
-
-LOG=/tmp/ming-master.log
-: > "${LOG}"
-
-show_error() {
-    local text="$1"
-    if command -v yad >/dev/null 2>&1; then
-        yad --error --title="Ming 安全管家" --width=620 --text="${text}" 2>/dev/null || true
-    elif command -v zenity >/dev/null 2>&1; then
-        zenity --error --title="Ming 安全管家" --width=620 --text="${text}" 2>/dev/null || true
-    else
-        printf '%s\n' "${text}" >&2
-    fi
+remove_retired_security_manager() {
+    echo "Removing retired Ming Security Manager preload..."
+    rm -f /usr/local/bin/ming-master \
+          /usr/local/bin/ming-master.py \
+          /usr/share/applications/ming-master.desktop \
+          "/home/${MING_USER}/Desktop/ming-master.desktop" \
+          /etc/sudoers.d/user-master
+    apt purge -y rkhunter chkrootkit lynis bleachbit yad 2>/dev/null || true
+    apt autoremove -y 2>/dev/null || true
 }
 
-if ! command -v python3 >/dev/null 2>&1; then
-    show_error "未找到 python3，无法启动安全管家。"
-    exit 127
-fi
-
-python3 /usr/local/bin/ming-master.py "$@" >>"${LOG}" 2>&1
-rc=$?
-if [ "${rc}" -ne 0 ]; then
-    summary="$(tail -n 40 "${LOG}" 2>/dev/null)"
-    show_error "安全管家启动失败。\n\n${summary}\n\n完整日志：${LOG}"
-fi
-exit "${rc}"
-MINGMASTERWRAPPER
-    chmod 0755 /usr/local/bin/ming-master
-
+configure_ming_firewall() {
+    echo "Deploying Ming firewall baseline..."
     install -m 0600 /tmp/ming-build/config/security/nftables.conf /etc/nftables.conf
     install -m 0644 /tmp/ming-build/config/security/ming-firewall.service /etc/systemd/system/ming-firewall.service
     systemctl enable ming-firewall 2>/dev/null || true
-
-    cat > /usr/share/applications/ming-master.desktop << 'MINGMASTERDESKTOP'
-[Desktop Entry]
-Name=Ming Manager
-Name[zh_CN]=Ming 安全管家
-Comment=Ming OS security toolkit
-Comment[zh_CN]=系统安全扫描、清理与防火墙管理
-Exec=/usr/local/bin/ming-master
-Icon=ming-security
-Terminal=false
-Type=Application
-Categories=System;Security;
-Keywords=security;firewall;clean;scan;
-StartupNotify=true
-MINGMASTERDESKTOP
-
-    mkdir -p "/home/${MING_USER}/Desktop"
-    cp /usr/share/applications/ming-master.desktop "/home/${MING_USER}/Desktop/ming-master.desktop"
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/ming-master.desktop"
-    chmod +x "/home/${MING_USER}/Desktop/ming-master.desktop"
-
-    cat > /etc/sudoers.d/user-master << SUDOERS
-${MING_USER} ALL=(ALL) NOPASSWD: /usr/bin/bleachbit, /usr/sbin/rkhunter, /usr/sbin/lynis, /usr/sbin/nft
-SUDOERS
-    chmod 0440 /etc/sudoers.d/user-master
 }
 
 install_qq_linux() {
@@ -105,12 +50,13 @@ install_listen1() {
 }
 
 main() {
-    echo "=====> [05_security_tools] Installing security tools and Ming Security Manager <====="
+    echo "=====> [05_security_tools] Installing lightweight security baseline <====="
     install_security_tools
-    deploy_ming_master
+    remove_retired_security_manager
+    configure_ming_firewall
     install_qq_linux
     install_listen1
-    echo "=====> [05_security_tools] Security tools installed <====="
+    echo "=====> [05_security_tools] Security baseline installed <====="
 }
 
 main

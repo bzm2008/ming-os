@@ -565,6 +565,11 @@ def require_path(relative_path):
     if not path.exists() or (path.is_file() and path.stat().st_size == 0):
         errors.append(f"missing or empty {relative_path}")
 
+def require_absent(relative_path, reason):
+    path = root / relative_path
+    if path.exists():
+        errors.append(f"{relative_path} must not be preinstalled: {reason}")
+
 settings = require_file("usr/local/bin/ming-settings", "硬件与诊断")
 for marker in [
     "ming-network-repair",
@@ -577,6 +582,36 @@ for marker in [
     if marker not in settings:
         errors.append(f"ming-settings does not expose {marker}")
 
+settings_desktop = require_file("usr/share/applications/ming-settings.desktop", "Exec=/usr/local/bin/ming-control-center")
+if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
+    errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
+
+phone_desktop = require_file("usr/local/bin/ming-phone-desktop", "Gdk.WindowTypeHint.DESKTOP")
+for marker in [
+    "DESKTOP_DIR / basename",
+    "set_keep_below(True)",
+    "skip_taskbar,skip_pager",
+    "CORE_NAMES",
+]:
+    if marker not in phone_desktop:
+        errors.append(f"ming-phone-desktop missing desktop-layer/core-app marker {marker}")
+if "window.lower()" in phone_desktop:
+    errors.append("ming-phone-desktop must not call window.lower(); it can hide behind xfdesktop")
+
+plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
+for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
+    if marker not in plank_settings:
+        errors.append(f"Plank settings missing {marker}")
+
+update_gui = require_file("usr/local/bin/ming-update-gui", "Ming OS 更新管理器")
+if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "System Update" in update_gui:
+    errors.append("ming-update-gui must keep user-facing update UI in Chinese")
+
+require_path("usr/share/backgrounds/ming-os/default.png")
+appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
+if "xfdesktop --reload" not in appearance:
+    errors.append("ming-apply-appearance must reload xfdesktop after setting wallpaper")
+
 for helper in [
     "usr/local/bin/ming-network-repair",
     "usr/local/bin/ming-driver-diagnose",
@@ -584,6 +619,7 @@ for helper in [
     "usr/local/bin/ming-surface-support",
     "usr/local/bin/ming-classic-mode",
     "usr/local/bin/ming-lock",
+    "usr/local/bin/ming-plank-watchdog",
 ]:
     require_file(helper)
 
@@ -591,8 +627,26 @@ for binary in [
     "usr/bin/wmctrl",
     "usr/bin/xfce4-screensaver",
     "usr/bin/xfce4-screensaver-command",
+    "usr/sbin/NetworkManager",
+    "usr/sbin/wpa_supplicant",
+    "usr/sbin/rfkill",
+    "usr/sbin/iw",
 ]:
     require_path(binary)
+
+ota_client = require_file("usr/local/bin/ming-update", "https://ming.scallion.uno")
+if "/api/onion-update" not in ota_client:
+    errors.append("ming-update must use the deployed /api/onion-update endpoint")
+if 'readonly API_ENDPOINT="/api/ming-update"' in ota_client:
+    errors.append("ming-update must not default to the undeployed /api/ming-update endpoint")
+
+for retired_path in [
+    "usr/local/bin/ming-master",
+    "usr/local/bin/ming-master.py",
+    "usr/share/applications/ming-master.desktop",
+    "home/user/Desktop/ming-master.desktop",
+]:
+    require_absent(retired_path, "Ming Security Manager was removed from the default install")
 
 require_file("usr/sbin/cupsd")
 if not any((root / candidate).is_file() for candidate in [
@@ -606,6 +660,10 @@ if nm_backend.exists():
     text = nm_backend.read_text(encoding="utf-8", errors="replace")
     if "wifi.backend=iwd" in text:
         errors.append("NetworkManager defaults to iwd; r4 must default to wpa_supplicant for old Wi-Fi")
+    if "wifi.backend=wpa_supplicant" not in text:
+        errors.append("NetworkManager must explicitly use wpa_supplicant by default")
+else:
+    errors.append("missing NetworkManager Wi-Fi backend config")
 
 pwquality = require_file("etc/security/pwquality.conf", "dictcheck = 0")
 if "minlen = 1" not in pwquality and "minlen=1" not in pwquality:

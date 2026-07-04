@@ -1334,13 +1334,13 @@ Position=3
 #对齐: 3=居中
 Alignment=3
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=42
+IconSize=40
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：保持轻巧，避免图标跳动和低端显卡压力
-ZoomPercent=132
+ZoomPercent=148
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
-HideMode=4
+HideMode=0
 #自动隐藏延迟
 UnhideDelay=0
 HideDelay=0
@@ -1383,38 +1383,64 @@ DOCKITEM
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=10
+TopRoundness=14
 BottomRoundness=0
 LineWidth=1
-OuterStrokeColor=31;98;84;62
-FillStartColor=255;255;255;214
-FillEndColor=244;250;247;230
-InnerStrokeColor=255;255;255;150
+OuterStrokeColor=31;98;84;54
+FillStartColor=255;255;255;226
+FillEndColor=242;250;247;238
+InnerStrokeColor=255;255;255;176
 
 [PlankDockTheme]
-HorizPadding=12
-TopPadding=-6
-BottomPadding=7
-ItemPadding=5
-IndicatorSize=6
-IconShadowSize=2
-UrgentBounceHeight=1.35
-LaunchBounceHeight=0.75
+HorizPadding=16
+TopPadding=-8
+BottomPadding=8
+ItemPadding=6
+IndicatorSize=5
+IconShadowSize=3
+UrgentBounceHeight=1.50
+LaunchBounceHeight=1.05
 FadeOpacity=1.0
-ClickTime=260
-UrgentBounceTime=520
-LaunchBounceTime=460
-ActiveTime=260
-SlideTime=260
-FadeTime=170
-HideTime=170
-GlowSize=12
+ClickTime=220
+UrgentBounceTime=620
+LaunchBounceTime=520
+ActiveTime=220
+SlideTime=240
+FadeTime=150
+HideTime=150
+GlowSize=14
 GlowTime=10000
-GlowPulseTime=1800
-UrgentHueShift=100
-ItemMoveTime=300
-CascadeHide=true
+GlowPulseTime=1600
+UrgentHueShift=86
+ItemMoveTime=260
+CascadeHide=false
 PLANKTHEME
+
+    cat > /usr/local/bin/ming-plank-watchdog << 'PLANKWATCH'
+#!/usr/bin/env bash
+set -u
+
+start_plank() {
+    command -v plank >/dev/null 2>&1 || return 0
+    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
+    mkdir -p "${HOME}/.cache/ming-os"
+    (nohup plank >>"${HOME}/.cache/ming-os/plank.log" 2>&1 &) || true
+}
+
+case "${1:-start}" in
+    --session)
+        sleep 3
+        for _ in $(seq 1 24); do
+            start_plank
+            sleep 5
+        done
+        ;;
+    *)
+        start_plank
+        ;;
+esac
+PLANKWATCH
+    chmod 0755 /usr/local/bin/ming-plank-watchdog
 
     # Plank 自启动（picom 之后启动，确保 dock 透明模糊正常）
     local autostart_dir="/home/${MING_USER}/.config/autostart"
@@ -1423,8 +1449,8 @@ PLANKTHEME
 [Desktop Entry]
 Type=Application
 Name=Plank Dock
-Comment=Ming OS macOS 风格程序坞
-Exec=sh -c "sleep 2 && plank"
+Exec=/usr/local/bin/ming-plank-watchdog --session
+Comment=Ming OS Dock
 Icon=plank
 Hidden=false
 NoDisplay=false
@@ -2277,23 +2303,28 @@ def read_app(path):
         'categories': entry.get('Categories', ''),
     }
 
+def add_app_from_path(apps_by_basename, path, default_only=False):
+    item = read_app(path)
+    if not item:
+        return False
+    basename = item['basename']
+    if default_only and basename not in CORE_NAMES:
+        return False
+    if basename in apps_by_basename:
+        return False
+    apps_by_basename[basename] = item
+    return True
+
 def load_apps(default_only=False):
     apps_by_basename = {}
-    seen = set()
+    if default_only:
+        for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
+            add_app_from_path(apps_by_basename, DESKTOP_DIR / basename, default_only=True)
     for directory in APP_DIRS:
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob('*.desktop')):
-            item = read_app(path)
-            if not item or item['id'] in seen:
-                continue
-            basename = item['basename']
-            if default_only and basename not in CORE_NAMES:
-                continue
-            if basename in apps_by_basename:
-                continue
-            seen.add(item['id'])
-            apps_by_basename[basename] = item
+            add_app_from_path(apps_by_basename, path, default_only=default_only)
     apps = list(apps_by_basename.values())
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item['basename'], 999), item['name'].lower()))
     return apps
@@ -2359,13 +2390,17 @@ def safe_name(name):
     cleaned = ''.join('-' if ch in '/\\:*?"<>|' else ch for ch in name).strip()
     return cleaned or '应用'
 
-def copy_desktop(path, target_dir, name=None):
+def copy_desktop(path, target_dir, name=None, preserve_basename=False):
     src = Path(path)
     if not src.is_file():
         return None
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{safe_name(name or src.stem)}.desktop"
+    target_name = src.name if preserve_basename else f"{safe_name(name or src.stem)}.desktop"
+    target = target_dir / target_name
     try:
+        if src.resolve() == target.resolve():
+            target.chmod(0o755)
+            return target
         shutil.copy2(src, target)
         target.chmod(0o755)
         return target
@@ -2386,7 +2421,8 @@ def sync_files(layout):
                 if child:
                     copy_desktop(child_path, folder_dir, child['name'])
         elif item.get('path') and (Path(item['path']).name in CORE_NAMES or item.get('pinned')):
-            copied = copy_desktop(item['path'], DESKTOP_DIR, item.get('name'))
+            is_core = Path(item['path']).name in CORE_NAMES
+            copied = copy_desktop(item['path'], DESKTOP_DIR, item.get('name'), preserve_basename=is_core)
             if copied:
                 launchers_seen.add(copied)
     for old in DESKTOP_DIR.glob('*.desktop'):
@@ -2602,16 +2638,23 @@ class PhoneDesktop(Gtk.Window):
         self.overlay = Gtk.Overlay()
         self.wallpaper = WallpaperCanvas()
         self.fixed = Gtk.Fixed()
+        self.overlay.set_hexpand(True)
+        self.overlay.set_vexpand(True)
+        self.wallpaper.set_hexpand(True)
+        self.wallpaper.set_vexpand(True)
+        self.fixed.set_hexpand(True)
+        self.fixed.set_vexpand(True)
         self.overlay.add(self.wallpaper)
         self.overlay.add_overlay(self.fixed)
         self.add(self.overlay)
         self.tiles = {}
         self.clock = ClockWidget()
+        self.connect('map-event', lambda *_args: self.enforce_desktop_layer())
         self.connect('size-allocate', lambda *_args: self.place_clock())
         self.layout = sync_layout(self.get_screen().get_width())
         self.render()
         GLib.timeout_add_seconds(8, self.refresh_from_apps)
-        GLib.timeout_add_seconds(2, self.enforce_desktop_layer)
+        GLib.timeout_add_seconds(4, self.enforce_desktop_layer)
 
     @property
     def window_origin(self):
@@ -2626,12 +2669,9 @@ class PhoneDesktop(Gtk.Window):
         return 0, 0
 
     def enforce_desktop_layer(self):
-        window = self.get_window()
         try:
             self.set_keep_below(True)
             self.stick()
-            if window:
-                window.lower()
         except Exception:
             pass
         try:
@@ -2646,6 +2686,11 @@ class PhoneDesktop(Gtk.Window):
         return True
 
     def render(self):
+        screen_w = max(320, self.get_screen().get_width())
+        screen_h = max(240, self.get_screen().get_height())
+        self.overlay.set_size_request(screen_w, screen_h)
+        self.wallpaper.set_size_request(screen_w, screen_h)
+        self.fixed.set_size_request(screen_w, screen_h)
         for child in self.fixed.get_children():
             self.fixed.remove(child)
         self.tiles = {}
@@ -5247,7 +5292,9 @@ mkdir -p "${HOME}/.cache/sessions"
 rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
 
 # 确保 Plank Dock 在运行（picom 启动后）
-if command -v plank &>/dev/null && ! pgrep -x plank &>/dev/null; then
+if command -v ming-plank-watchdog &>/dev/null; then
+    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
+elif command -v plank &>/dev/null && ! pgrep -x plank &>/dev/null; then
     (sleep 1 && nohup plank >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 

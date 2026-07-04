@@ -219,7 +219,7 @@ APP_COLOR  = "#00453E"
 MINT       = "#31C476"
 
 SYSTEM_CMDS = [
-    ("🧹 清理磁盘缓存",  "bleachbit --clean system.cache apt.autoclean; read -p '按回车关闭'"),
+    ("🧹 清理磁盘缓存",  "sudo apt clean; journalctl --vacuum-time=7d; read -p '按回车关闭'"),
     ("💾 查看内存使用",   "free -h; echo; vmstat -s | head -12; read -p '按回车关闭'"),
     ("🌐 修复网络连接",   "nmcli dev status; echo; nmcli networking off; sleep 1; nmcli networking on; read -p '按回车关闭'"),
     ("🔄 检查系统更新",   "/usr/local/bin/ming-update-gui"),

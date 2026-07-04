@@ -7,8 +7,8 @@ set -uo pipefail
 
 readonly OTA_CONFIG_DIR="/etc/ming-update"
 readonly OTA_CACHE_DIR="/var/cache/ming-update"
-readonly OTA_UPDATE_SERVER="https://scallion.uno"
-readonly OTA_API_ENDPOINT="/api/ming-update"
+readonly OTA_UPDATE_SERVER="https://ming.scallion.uno"
+readonly OTA_API_ENDPOINT="/api/onion-update"
 
 install_ota_dependencies() {
     echo "Installing OTA update dependencies..."
@@ -33,8 +33,8 @@ readonly USER_CONFIG_DIR="${HOME}/.config/ming-update"
 readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
 readonly USER_STATE_FILE="${USER_CONFIG_DIR}/state.json"
 readonly USER_CONFIG_FILE="${USER_CONFIG_DIR}/config.json"
-readonly UPDATE_SERVER="https://scallion.uno"
-readonly API_ENDPOINT="/api/ming-update"
+readonly UPDATE_SERVER="https://ming.scallion.uno"
+readonly API_ENDPOINT="/api/onion-update"
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -128,8 +128,30 @@ api_url() {
     version=$(current_version)
     server=${server:-${UPDATE_SERVER}}
     endpoint=${endpoint:-${API_ENDPOINT}}
+    if [[ "${server}" == "https://scallion.uno" || "${endpoint}" == "/api/ming-update" ]]; then
+        server="${UPDATE_SERVER}"
+        endpoint="${API_ENDPOINT}"
+        set_config '.update_server' "${UPDATE_SERVER}" >/dev/null 2>&1 || true
+        set_config '.api_endpoint' "${API_ENDPOINT}" >/dev/null 2>&1 || true
+    fi
     channel=${channel:-stable}
     printf '%s%s/check?version=%s&channel=%s\n' "${server}" "${endpoint}" "${version}" "${channel}"
+}
+
+legacy_api_url() {
+    local server endpoint channel version
+    server=$(get_config '.update_server')
+    endpoint=$(get_config '.api_endpoint')
+    channel=$(get_config '.channel')
+    version=$(current_version)
+    server=${server:-${UPDATE_SERVER}}
+    endpoint=${endpoint:-${API_ENDPOINT}}
+    channel=${channel:-stable}
+    printf '%s%s/check.php?version=%s&channel=%s\n' "${server}" "${endpoint}" "${version}" "${channel}"
+}
+
+is_json_response() {
+    printf '%s' "$1" | jq -e . >/dev/null 2>&1
 }
 
 check_network() {
@@ -140,48 +162,66 @@ check_network() {
 }
 
 check_update() {
-    log_step "Check for updates"
+    log_step "检查更新"
     init_config
 
     local version response url cdir manifest
     cdir=$(cache_dir)
     manifest="${cdir}/update_info.json"
     version=$(current_version)
-    log_info "Current version: ${version}"
+    log_info "当前版本：${version}"
 
     if ! check_network; then
-        log_error "Cannot connect to update server."
+        log_error "无法连接到更新服务器。"
         return 1
     fi
 
     url=$(api_url)
-    log_info "API: ${url}"
+    log_info "接口：${url}"
     response=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 45 "${url}") || {
-        log_error "Failed to fetch update manifest."
-        return 1
+        local fallback_url
+        fallback_url=$(legacy_api_url)
+        log_warn "获取更新信息失败，尝试旧版兼容入口：${fallback_url}"
+        response=$(curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 "${fallback_url}") || {
+            log_error "获取更新信息失败。"
+            return 1
+        }
     }
 
-    if ! printf '%s' "${response}" | jq -e . >/dev/null; then
-        log_error "Update server returned invalid JSON."
-        return 1
+    if ! is_json_response "${response}"; then
+        local fallback_url fallback_response
+        fallback_url=$(legacy_api_url)
+        if [[ "${fallback_url}" != "${url}" ]]; then
+            log_warn "更新服务器返回了非 JSON 内容，尝试旧版兼容入口：${fallback_url}"
+            fallback_response=$(curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 "${fallback_url}" 2>/dev/null || true)
+            if is_json_response "${fallback_response}"; then
+                response="${fallback_response}"
+            else
+                log_error "更新服务器返回了非 JSON 内容，OTA 接口可能暂时不可用。"
+                return 1
+            fi
+        else
+            log_error "更新服务器返回了非 JSON 内容，OTA 接口可能暂时不可用。"
+            return 1
+        fi
     fi
 
     local server_error ready has_update new_version notes
     server_error=$(printf '%s' "${response}" | jq -r '.error // ""')
     if [[ -n "${server_error}" ]]; then
-        log_error "Update server error: ${server_error}"
+        log_error "更新服务器错误：${server_error}"
         return 1
     fi
 
     ready=$(printf '%s' "${response}" | jq -r '.ready // true')
     has_update=$(printf '%s' "${response}" | jq -r '.has_update // .update_available // false')
     new_version=$(printf '%s' "${response}" | jq -r '.version // .latest_version // "unknown"')
-    notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "No release notes."')
+    notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "暂无更新说明。"')
 
     if [[ "${has_update}" == "true" && "${ready}" != "true" ]]; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
-        log_warn "Version ${new_version} is listed but not ready for download yet."
+        log_warn "版本 ${new_version} 已登记，但下载包尚未就绪。"
         log_warn "${notes}"
         return 0
     fi
@@ -189,7 +229,7 @@ check_update() {
     if [[ "${has_update}" != "true" ]]; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
-        log_info "No update available."
+        log_info "当前已是最新版本。"
         return 0
     fi
 
@@ -197,16 +237,16 @@ check_update() {
     chmod 644 "${manifest}"
     set_config '.last_check' "$(date -Iseconds)"
 
-    log_info "Update available: ${new_version}"
-    printf '\nVersion: %s\nCurrent: %s\n\nRelease notes:\n%s\n\n' "${new_version}" "${version}" "${notes}"
+    log_info "发现新版本：${new_version}"
+    printf '\n新版本：%s\n当前版本：%s\n\n更新说明：\n%s\n\n' "${new_version}" "${version}" "${notes}"
 
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -i ming-update-icon "Ming OS update available" "Version ${new_version} is ready." 2>/dev/null || true
+        notify-send -i ming-update-icon "Ming OS 有可用更新" "版本 ${new_version} 已就绪。" 2>/dev/null || true
     fi
 }
 
 download_update() {
-    log_step "Download update"
+    log_step "下载更新"
     init_config
 
     local cdir manifest sfile
@@ -215,7 +255,7 @@ download_update() {
     sfile=$(state_file)
 
     if [[ ! -f "${manifest}" ]]; then
-        log_error "No update manifest cached. Run: ming-update check"
+        log_error "没有缓存的更新信息。请先运行：ming-update check"
         return 1
     fi
 
@@ -231,7 +271,7 @@ download_update() {
     tmp_file="${iso_file}.tmp"
 
     if [[ -z "${url}" || "${url}" == "null" ]]; then
-        log_error "Manifest does not contain a download URL."
+        log_error "更新信息里没有下载地址。"
         return 1
     fi
 
@@ -240,7 +280,7 @@ download_update() {
         free_bytes=$(df --output=avail -B1 "${cdir}" | tail -n 1 | tr -d ' ')
         need_bytes=$(( expected_size + 536870912 ))
         if [[ "${free_bytes:-0}" -lt "${need_bytes}" ]]; then
-            log_error "Not enough disk space. Need $((need_bytes / 1048576))MB, have $(( ${free_bytes:-0} / 1048576 ))MB."
+            log_error "磁盘空间不足。需要 $((need_bytes / 1048576))MB，当前可用 $(( ${free_bytes:-0} / 1048576 ))MB。"
             return 1
         fi
     fi
@@ -248,7 +288,7 @@ download_update() {
     retries=$(get_config '.download_retries')
     [[ "${retries}" =~ ^[0-9]+$ ]] || retries=3
 
-    log_info "Downloading ${version}: ${url}"
+    log_info "正在下载 ${version}：${url}"
     wget -c --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress -O "${tmp_file}" "${url}"
     mv "${tmp_file}" "${iso_file}"
 
@@ -257,7 +297,7 @@ download_update() {
         actual_size=$(stat -c '%s' "${iso_file}")
         if [[ "${actual_size}" -ne "${expected_size}" ]]; then
             rm -f "${iso_file}"
-            log_error "Downloaded size mismatch. Expected ${expected_size}, got ${actual_size}."
+            log_error "下载大小不一致。期望 ${expected_size}，实际 ${actual_size}。"
             return 1
         fi
     fi
@@ -267,12 +307,12 @@ download_update() {
         actual_checksum=$(sha256sum "${iso_file}" | awk '{print $1}')
         if [[ "${actual_checksum}" != "${checksum}" ]]; then
             rm -f "${iso_file}"
-            log_error "SHA256 mismatch. Expected ${checksum}, got ${actual_checksum}."
+            log_error "SHA256 校验失败。期望 ${checksum}，实际 ${actual_checksum}。"
             return 1
         fi
-        log_info "SHA256 verified."
+        log_info "SHA256 校验通过。"
     else
-        log_warn "Manifest has no valid SHA256; download kept but not fully verified."
+        log_warn "更新信息里没有有效 SHA256，已保留下载文件但未完成强校验。"
     fi
 
     cat > "${sfile}" << STATEJSON
@@ -286,15 +326,15 @@ download_update() {
 }
 STATEJSON
     chmod 644 "${sfile}"
-    log_info "Update downloaded: ${iso_file}"
+    log_info "更新已下载：${iso_file}"
 }
 
 install_update() {
-    log_step "Install update"
+    log_step "安装更新"
     init_config
 
     if [[ $EUID -ne 0 ]]; then
-        log_error "Installing/staging an OTA boot entry requires root. Use: sudo ming-update install"
+        log_error "写入 OTA 启动项需要管理员权限。请使用：sudo ming-update install"
         return 1
     fi
     local sfile="${STATE_FILE}"
@@ -312,7 +352,7 @@ install_update() {
     fi
 
     if [[ ! -f "${sfile}" ]]; then
-        log_error "No downloaded update state found. Run: ming-update download"
+        log_error "没有找到已下载的更新状态。请先运行：ming-update download"
         return 1
     fi
 
@@ -323,21 +363,21 @@ install_update() {
     version=$(printf '%s' "${state}" | jq -r '.version // "unknown"')
 
     if [[ "${status}" != "downloaded" || ! -f "${iso_path}" ]]; then
-        log_error "Downloaded update is missing or invalid."
+        log_error "已下载的更新缺失或无效。"
         return 1
     fi
 
     mount_point="$(mktemp -d)"
     if ! mount -o loop,ro "${iso_path}" "${mount_point}"; then
         rmdir "${mount_point}" || true
-        log_error "Cannot mount ISO: ${iso_path}"
+        log_error "无法挂载 ISO：${iso_path}"
         return 1
     fi
 
     if [[ ! -f "${mount_point}/live/vmlinuz" || ! -f "${mount_point}/live/initrd" || ! -f "${mount_point}/live/filesystem.squashfs" ]]; then
         umount "${mount_point}" || true
         rmdir "${mount_point}" || true
-        log_error "ISO is incomplete: missing live/vmlinuz, live/initrd, or live/filesystem.squashfs."
+        log_error "ISO 不完整：缺少 live/vmlinuz、live/initrd 或 live/filesystem.squashfs。"
         return 1
     fi
     umount "${mount_point}" || true
@@ -377,8 +417,8 @@ GRUBMENU
 STATEJSON
     chmod 644 "${sfile}"
     command -v update-grub >/dev/null 2>&1 && update-grub || true
-    log_info "OTA boot entry staged in ${custom_cfg}."
-    log_info "Reboot and choose: Ming OS ${version} OTA Installer"
+    log_info "OTA 启动项已写入 ${custom_cfg}。"
+    log_info "重启后请选择：Ming OS ${version} OTA Installer"
 }
 
 show_status() {
@@ -387,18 +427,18 @@ show_status() {
     cdir=$(cache_dir)
     manifest="${cdir}/update_info.json"
     sfile=$(state_file)
-    log_step "Update status"
-    echo "Current version: $(current_version)"
-    echo "Update server: $(get_config '.update_server')"
-    echo "Channel: $(get_config '.channel')"
-    echo "Last check: $(get_config '.last_check')"
+    log_step "更新状态"
+    echo "当前版本：$(current_version)"
+    echo "更新服务器：$(get_config '.update_server')"
+    echo "频道：$(get_config '.channel')"
+    echo "上次检查：$(get_config '.last_check')"
     if [[ -f "${sfile}" ]]; then
         jq . "${sfile}" || cat "${sfile}"
     elif [[ -f "${manifest}" ]]; then
-        echo "Cached update:"
+        echo "已缓存更新："
         jq '{version, has_update, ready, download_url, checksum, size}' "${manifest}"
     else
-        echo "No cached update."
+        echo "没有缓存的更新。"
     fi
 }
 
@@ -470,7 +510,7 @@ patch_update() {
     local server
     server=$(get_config '.update_server')
     server=${server:-${UPDATE_SERVER}}
-    local patch_url="${server}/api/ming-patch?version=$(current_version)&arch=amd64"
+    local patch_url="${server}/api/onion-patch?version=$(current_version)&arch=amd64"
 
     log_info "检查 patch 更新：${patch_url}"
     local response
@@ -479,8 +519,13 @@ patch_update() {
         return 0
     }
 
+    if ! is_json_response "${response}"; then
+        log_warn "Patch API 暂未返回有效 JSON，按暂无 patch 更新处理。"
+        return 0
+    fi
+
     local has_patch pkg_list script_url
-    has_patch=$(printf '%s' "${response}" | jq -r '.has_patch // false' 2>/dev/null)
+    has_patch=$(printf '%s' "${response}" | jq -r '.has_patch // false')
     if [[ "${has_patch}" != "true" ]]; then
         log_info "当前已是最新（patch 级别），无需更新。"
         notify-send -i system-software-update "Ming OS" "系统已是最新，无需 patch 更新。" 2>/dev/null || true
@@ -761,43 +806,56 @@ BOOTCHECKSCRIPT
 }
 
 deploy_gui_tool() {
-    echo "Deploying ming-update GUI..."
+    echo "Deploying ming-update GUI (Chinese final)..."
 
     cat > /usr/local/bin/ming-update-gui << 'OTAGUI'
 #!/usr/bin/env bash
 set -uo pipefail
 
 readonly CACHE_DIR="/var/cache/ming-update"
+readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
 readonly CHECK_LOG="/tmp/ming-update-check.log"
 readonly DOWNLOAD_LOG="/tmp/ming-update-download.log"
 readonly INSTALL_LOG="/tmp/ming-update-install.log"
 
 have_zenity() { command -v zenity >/dev/null 2>&1; }
+
+manifest_file() {
+    if [[ -f "${CACHE_DIR}/update_info.json" ]]; then
+        printf '%s\n' "${CACHE_DIR}/update_info.json"
+    else
+        printf '%s\n' "${USER_CACHE_DIR}/update_info.json"
+    fi
+}
+
 log_tail() {
     local file="$1"
     if [[ -f "${file}" ]]; then
         tail -n 80 "${file}"
     else
-        echo "No log file: ${file}"
+        echo "没有日志文件：${file}"
     fi
 }
+
 show_info() {
     if have_zenity; then
-        zenity --info --title="$1" --text="$2" --width=520 2>/dev/null || true
+        zenity --info --title="$1" --text="$2" --width=560 2>/dev/null || true
     else
         printf '%s\n%s\n' "$1" "$2"
     fi
 }
+
 show_error() {
     if have_zenity; then
-        zenity --error --title="$1" --text="$2" --width=620 2>/dev/null || true
+        zenity --error --title="$1" --text="$2" --width=660 2>/dev/null || true
     else
-        printf 'ERROR: %s\n%s\n' "$1" "$2" >&2
+        printf '错误：%s\n%s\n' "$1" "$2" >&2
     fi
 }
+
 ask_yes_no() {
     if have_zenity; then
-        zenity --question --title="$1" --text="$2" --ok-label="${3:-Yes}" --cancel-label="${4:-No}" --width=560 2>/dev/null
+        zenity --question --title="$1" --text="$2" --ok-label="${3:-确定}" --cancel-label="${4:-取消}" --width=580 2>/dev/null
     else
         printf '%s\n%s\n' "$1" "$2"
         return 1
@@ -819,8 +877,8 @@ run_with_progress() {
             rc=$?
             echo "${rc}" > "${log_file}.rc"
             echo "100"
-            echo "# Done"
-        ) | zenity --progress --title="${title}" --text="${text}" --percentage=0 --auto-close --no-cancel --width=460 2>/dev/null || true
+            echo "# 完成"
+        ) | zenity --progress --title="${title}" --text="${text}" --percentage=0 --auto-close --no-cancel --width=480 2>/dev/null || true
         return "$(cat "${log_file}.rc" 2>/dev/null || echo 1)"
     fi
 
@@ -829,19 +887,21 @@ run_with_progress() {
 
 check_update_gui() {
     if ! run_with_progress "检查更新" "正在检查 Ming OS 更新..." "${CHECK_LOG}" /usr/local/bin/ming-update check; then
-        show_error "检查更新失败" "无法完成更新检查。\n\n日志:\n$(log_tail "${CHECK_LOG}")"
+        show_error "检查更新失败" "无法完成更新检查。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
         return 1
     fi
 
-    if [[ ! -f "${CACHE_DIR}/update_info.json" ]]; then
-        show_info "已是最新版本" "当前没有可安装更新。\n\n日志:\n$(log_tail "${CHECK_LOG}")"
+    local manifest
+    manifest=$(manifest_file)
+    if [[ ! -f "${manifest}" ]]; then
+        show_info "已是最新版本" "当前没有可安装更新。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
         return 0
     fi
 
     local version notes ready
-    version=$(jq -r '.version // .latest_version // "unknown"' "${CACHE_DIR}/update_info.json" 2>/dev/null || echo "unknown")
-    notes=$(jq -r '.release_notes // .message // "无更新说明。"' "${CACHE_DIR}/update_info.json" 2>/dev/null || echo "无更新说明。")
-    ready=$(jq -r '.ready // true' "${CACHE_DIR}/update_info.json" 2>/dev/null || echo "true")
+    version=$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || echo "unknown")
+    notes=$(jq -r '.release_notes // .message // "暂无更新说明。"' "${manifest}" 2>/dev/null || echo "暂无更新说明。")
+    ready=$(jq -r '.ready // true' "${manifest}" 2>/dev/null || echo "true")
     if [[ "${ready}" != "true" ]]; then
         show_info "更新尚未就绪" "服务器已登记版本 ${version}，但下载包仍在准备或校验中。\n\n${notes}"
         return 0
@@ -854,7 +914,7 @@ check_update_gui() {
 
 download_update_gui() {
     if ! run_with_progress "下载更新" "正在下载并校验更新包..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-update download; then
-        show_error "下载失败" "更新没有下载完成。\n\n日志:\n$(log_tail "${DOWNLOAD_LOG}")"
+        show_error "下载失败" "更新没有下载完成。\n\n日志：\n$(log_tail "${DOWNLOAD_LOG}")"
         return 1
     fi
     if ask_yes_no "下载完成" "更新已下载并校验完成。\n\n是否写入 OTA 启动项？" "安装" "稍后"; then
@@ -865,7 +925,7 @@ download_update_gui() {
 }
 
 install_update_gui() {
-    if ! ask_yes_no "安装更新" "安装会写入 GRUB OTA 启动项，之后需要重启并选择新版本安装器。\n\n是否继续？" "继续" "取消"; then
+    if ! ask_yes_no "安装更新" "安装会写入 GRUB OTA 启动项，之后需要重启并选择 Ming OS OTA Installer。\n\n是否继续？" "继续" "取消"; then
         return 0
     fi
 
@@ -885,7 +945,7 @@ install_update_gui() {
     if [[ ${rc} -eq 0 ]]; then
         show_info "安装准备完成" "OTA 启动项已写入。\n\n重启后在 GRUB 中选择 Ming OS OTA Installer。"
     else
-        show_error "安装失败" "无法写入 OTA 启动项。\n\n日志:\n$(log_tail "${INSTALL_LOG}")"
+        show_error "安装失败" "无法写入 OTA 启动项。\n\n日志：\n$(log_tail "${INSTALL_LOG}")"
     fi
     return "${rc}"
 }
@@ -927,7 +987,7 @@ case "${1:-menu}" in
     check) check_update_gui ;;
     download) download_update_gui ;;
     install) install_update_gui ;;
-    *) echo "Usage: ming-update-gui [menu|check|download|install]"; exit 1 ;;
+    *) echo "用法：ming-update-gui [menu|check|download|install]"; exit 1 ;;
 esac
 OTAGUI
 
@@ -939,216 +999,6 @@ OTAGUI
 Name=系统更新
 Name[zh_CN]=系统更新
 Comment=检查并安装 Ming OS 更新
-Comment[zh_CN]=检查并安装 Ming OS 系统更新
-Exec=/usr/local/bin/ming-update-gui
-Icon=ming-update-icon
-Terminal=false
-Type=Application
-Categories=System;Settings;
-Keywords=update;upgrade;system;
-StartupNotify=true
-DESKTOPFILE
-
-    mkdir -p "/home/${MING_USER}/Desktop"
-    cp /usr/share/applications/ming-update.desktop "/home/${MING_USER}/Desktop/"
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/ming-update.desktop"
-    chmod +x "/home/${MING_USER}/Desktop/ming-update.desktop"
-}
-
-deploy_gui_tool() {
-    echo "Deploying ming-update GUI..."
-
-    cat > /usr/local/bin/ming-update-gui << 'OTAGUI'
-#!/usr/bin/env bash
-set -uo pipefail
-
-readonly CACHE_DIR="/var/cache/ming-update"
-readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
-readonly CHECK_LOG="/tmp/ming-update-check.log"
-readonly DOWNLOAD_LOG="/tmp/ming-update-download.log"
-readonly INSTALL_LOG="/tmp/ming-update-install.log"
-
-have_zenity() { command -v zenity >/dev/null 2>&1; }
-
-manifest_file() {
-    if [[ -f "${CACHE_DIR}/update_info.json" ]]; then
-        printf '%s\n' "${CACHE_DIR}/update_info.json"
-    else
-        printf '%s\n' "${USER_CACHE_DIR}/update_info.json"
-    fi
-}
-
-log_tail() {
-    local file="$1"
-    if [[ -f "${file}" ]]; then
-        tail -n 80 "${file}"
-    else
-        echo "No log file: ${file}"
-    fi
-}
-
-show_info() {
-    if have_zenity; then
-        zenity --info --title="$1" --text="$2" --width=560 2>/dev/null || true
-    else
-        printf '%s\n%s\n' "$1" "$2"
-    fi
-}
-
-show_error() {
-    if have_zenity; then
-        zenity --error --title="$1" --text="$2" --width=660 2>/dev/null || true
-    else
-        printf 'ERROR: %s\n%s\n' "$1" "$2" >&2
-    fi
-}
-
-ask_yes_no() {
-    if have_zenity; then
-        zenity --question --title="$1" --text="$2" --ok-label="${3:-Yes}" --cancel-label="${4:-No}" --width=580 2>/dev/null
-    else
-        printf '%s\n%s\n' "$1" "$2"
-        return 1
-    fi
-}
-
-run_with_progress() {
-    local title="$1"
-    local text="$2"
-    local log_file="$3"
-    shift 3
-
-    : > "${log_file}"
-    if have_zenity; then
-        (
-            echo "10"
-            echo "# ${text}"
-            "$@" > "${log_file}" 2>&1
-            rc=$?
-            echo "${rc}" > "${log_file}.rc"
-            echo "100"
-            echo "# Done"
-        ) | zenity --progress --title="${title}" --text="${text}" --percentage=0 --auto-close --no-cancel --width=480 2>/dev/null || true
-        return "$(cat "${log_file}.rc" 2>/dev/null || echo 1)"
-    fi
-
-    "$@" > "${log_file}" 2>&1
-}
-
-check_update_gui() {
-    if ! run_with_progress "Check updates" "Checking Ming OS updates..." "${CHECK_LOG}" /usr/local/bin/ming-update check; then
-        show_error "Update check failed" "Could not complete the update check.\n\nLog:\n$(log_tail "${CHECK_LOG}")"
-        return 1
-    fi
-
-    local manifest
-    manifest=$(manifest_file)
-    if [[ ! -f "${manifest}" ]]; then
-        show_info "No update available" "This system is already up to date.\n\nLog:\n$(log_tail "${CHECK_LOG}")"
-        return 0
-    fi
-
-    local version notes ready
-    version=$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || echo "unknown")
-    notes=$(jq -r '.release_notes // .message // "No release notes."' "${manifest}" 2>/dev/null || echo "No release notes.")
-    ready=$(jq -r '.ready // true' "${manifest}" 2>/dev/null || echo "true")
-    if [[ "${ready}" != "true" ]]; then
-        show_info "Update not ready" "Version ${version} is listed, but the download is still being prepared or verified.\n\n${notes}"
-        return 0
-    fi
-
-    if ask_yes_no "Update available" "Ming OS ${version} is available.\n\n${notes}\n\nDownload it now?" "Download" "Later"; then
-        download_update_gui
-    fi
-}
-
-download_update_gui() {
-    if ! run_with_progress "Download update" "Downloading and verifying the update..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-update download; then
-        show_error "Download failed" "The update was not downloaded.\n\nLog:\n$(log_tail "${DOWNLOAD_LOG}")"
-        return 1
-    fi
-    if ask_yes_no "Download complete" "The update was downloaded and verified.\n\nWrite the OTA boot entry now?" "Install" "Later"; then
-        install_update_gui
-    else
-        show_info "Download complete" "You can open System Update later and choose Install."
-    fi
-}
-
-install_update_gui() {
-    if ! ask_yes_no "Install update" "This writes a GRUB OTA boot entry. After reboot, choose the Ming OS OTA Installer entry.\n\nContinue?" "Continue" "Cancel"; then
-        return 0
-    fi
-
-    : > "${INSTALL_LOG}"
-    local rc=1
-    if command -v pkexec >/dev/null 2>&1; then
-        pkexec /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    else
-        /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    fi
-
-    if [[ ${rc} -eq 0 ]]; then
-        show_info "Install staged" "The OTA boot entry was written.\n\nReboot and choose Ming OS OTA Installer in GRUB."
-    else
-        show_error "Install failed" "Could not write the OTA boot entry.\n\nLog:\n$(log_tail "${INSTALL_LOG}")"
-    fi
-    return "${rc}"
-}
-
-main_menu() {
-    if ! have_zenity; then
-        /usr/local/bin/ming-update "${1:-check}"
-        return $?
-    fi
-
-    while true; do
-        local choice
-        choice=$(zenity --list \
-            --title="Ming OS Update Manager" \
-            --text="Choose an action" \
-            --column="Action" --column="Description" \
-            "Check updates" "Check for a new Ming OS version" \
-            "Download update" "Download and verify the discovered update" \
-            "Install update" "Write the OTA boot entry" \
-            "Show status" "Show current update status" \
-            --width=560 --height=360 \
-            --ok-label="Run" --cancel-label="Exit" 2>/dev/null)
-        [[ $? -eq 0 ]] || break
-        case "${choice}" in
-            "Check updates") check_update_gui ;;
-            "Download update") download_update_gui ;;
-            "Install update") install_update_gui ;;
-            "Show status")
-                local status_text
-                status_text=$(/usr/local/bin/ming-update status 2>&1)
-                show_info "Update status" "${status_text}"
-                ;;
-        esac
-    done
-}
-
-case "${1:-menu}" in
-    menu) main_menu ;;
-    check) check_update_gui ;;
-    download) download_update_gui ;;
-    install) install_update_gui ;;
-    *) echo "Usage: ming-update-gui [menu|check|download|install]"; exit 1 ;;
-esac
-OTAGUI
-
-    chmod +x /usr/local/bin/ming-update-gui
-    bash -n /usr/local/bin/ming-update-gui
-
-    cat > /usr/share/applications/ming-update.desktop << DESKTOPFILE
-[Desktop Entry]
-Name=System Update
-Name[zh_CN]=系统更新
-Comment=Check and install Ming OS updates
 Comment[zh_CN]=检查并安装 Ming OS 系统更新
 Exec=/usr/local/bin/ming-update-gui
 Icon=ming-update-icon
