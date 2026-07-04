@@ -1424,6 +1424,10 @@ start_plank() {
     command -v plank >/dev/null 2>&1 || return 0
     pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
     mkdir -p "${HOME}/.cache/ming-os"
+    export DISPLAY="${DISPLAY:-:0}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+    echo "[$(date '+%F %T')] starting plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" >>"${HOME}/.cache/ming-os/plank.log"
     (nohup plank >>"${HOME}/.cache/ming-os/plank.log" 2>&1 &) || true
 }
 
@@ -2185,6 +2189,20 @@ DESKTOP_ORDER = {name: index for index, name in enumerate([
     'garlic-claw.desktop',
     'ming-terminal.desktop',
 ])}
+CORE_FALLBACKS = {
+    'firefox-esr.desktop': ['firefox.desktop'],
+    'wps-office.desktop': ['ming-install-wps.desktop'],
+    'spark-store.desktop': ['ming-install-spark-store.desktop'],
+}
+CORE_GENERATED = {
+    'ming-settings.desktop': ('Ming 设置', 'ming-control-center', 'ming-control-center', 'Settings;System;'),
+    'ming-app-library.desktop': ('Ming 应用库', 'ming-app-library', 'ming-app-library', 'Utility;System;'),
+    'ming-files.desktop': ('文件', 'ming-files', 'files-icon', 'System;FileManager;'),
+    'ming-update.desktop': ('系统更新', 'ming-update-gui', 'ming-update-icon', 'System;Settings;'),
+    'ming-terminal.desktop': ('Ming 终端', 'ming-terminal', 'ming-terminal', 'System;TerminalEmulator;'),
+    'ming-disk-hub.desktop': ('所有磁盘', 'ming-disk-hub --open', 'drive-harddisk', 'System;FileManager;'),
+    'garlic-claw.desktop': ('Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw', 'utilities-terminal', 'Utility;'),
+}
 LAYOUT_VERSION = 4
 GRID_W = 86
 GRID_H = 98
@@ -2315,11 +2333,45 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
     apps_by_basename[basename] = item
     return True
 
+def write_generated_core_launcher(basename):
+    data = CORE_GENERATED.get(basename)
+    if not data:
+        return None
+    name, exec_cmd, icon, categories = data
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    path = DESKTOP_DIR / basename
+    if not path.exists():
+        path.write_text(
+            '[Desktop Entry]\n'
+            'Type=Application\n'
+            f'Name={name}\n'
+            f'Name[zh_CN]={name}\n'
+            f'Exec={exec_cmd}\n'
+            f'Icon={icon}\n'
+            'Terminal=false\n'
+            f'Categories={categories}\n'
+            'StartupNotify=true\n',
+            encoding='utf-8',
+        )
+        path.chmod(0o755)
+    return path
+
+def add_core_app(apps_by_basename, basename):
+    candidates = [DESKTOP_DIR / basename, Path('/usr/share/applications') / basename]
+    candidates.extend(Path('/usr/share/applications') / alt for alt in CORE_FALLBACKS.get(basename, []))
+    for candidate in candidates:
+        if add_app_from_path(apps_by_basename, candidate, default_only=False):
+            return True
+    generated = write_generated_core_launcher(basename)
+    if generated:
+        return add_app_from_path(apps_by_basename, generated, default_only=False)
+    return False
+
 def load_apps(default_only=False):
     apps_by_basename = {}
     if default_only:
         for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
-            add_app_from_path(apps_by_basename, DESKTOP_DIR / basename, default_only=True)
+            add_core_app(apps_by_basename, basename)
     for directory in APP_DIRS:
         if not directory.is_dir():
             continue
@@ -2358,6 +2410,8 @@ def sync_layout(width=1366):
     layout = load_layout()
     if layout.get('version') != LAYOUT_VERSION:
         layout = empty_layout()
+    if not apps and not layout.get('items'):
+        return layout
     items = []
     known = set()
     for item in layout.get('items', []):
@@ -2382,6 +2436,8 @@ def sync_layout(width=1366):
         index += 1
     layout['version'] = LAYOUT_VERSION
     layout['items'] = items
+    if not items:
+        return layout
     save_layout(layout)
     sync_files(layout)
     return layout
@@ -2629,8 +2685,12 @@ class PhoneDesktop(Gtk.Window):
             self.stick()
         except Exception:
             pass
-        self.maximize()
-        self.fullscreen()
+        screen = self.get_screen()
+        screen_w = max(320, screen.get_width())
+        screen_h = max(240, screen.get_height())
+        self.set_default_size(screen_w, screen_h)
+        self.resize(screen_w, screen_h)
+        self.move(0, 0)
         self.connect('destroy', Gtk.main_quit)
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)

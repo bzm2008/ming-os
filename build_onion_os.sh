@@ -597,6 +597,11 @@ for marker in [
         errors.append(f"ming-phone-desktop missing desktop-layer/core-app marker {marker}")
 if "window.lower()" in phone_desktop:
     errors.append("ming-phone-desktop must not call window.lower(); it can hide behind xfdesktop")
+if ".fullscreen()" in phone_desktop:
+    errors.append("ming-phone-desktop must not fullscreen; it can cover Plank and other dock windows")
+for marker in ["CORE_FALLBACKS", "CORE_GENERATED", "write_generated_core_launcher"]:
+    if marker not in phone_desktop:
+        errors.append(f"ming-phone-desktop missing empty-layout recovery marker {marker}")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
 for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
