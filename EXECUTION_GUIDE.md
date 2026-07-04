@@ -24,7 +24,7 @@ https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso
 GitHub release:
 
 ```text
-https://github.com/bzm2008/onion-os/releases/tag/v26.3.1
+https://github.com/bzm2008/ming-os/releases/tag/v26.3.1
 ```
 
 ## Must-Pass Checks

@@ -3315,8 +3315,8 @@ This is the version to use when producing:
 - ISO SHA256: `0a23e1ce739ced8daede1b2deb6e7d5879c9b0b44e1ecb43fda0422c2a164df1`
 - ISO size: `2698493952`
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
-- GitHub repo: `https://github.com/bzm2008/onion-os`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.3.1`
+- GitHub repo: `https://github.com/bzm2008/ming-os`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.1`
 
 ## Feature Summary
 
@@ -3387,8 +3387,8 @@ You are a senior product web designer and frontend implementer. Build a Scallion
 Required links:
 
 - ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso`
-- GitHub release: `https://github.com/bzm2008/onion-os/releases/tag/v26.3.1`
-- GitHub repo: `https://github.com/bzm2008/onion-os`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.1`
+- GitHub repo: `https://github.com/bzm2008/ming-os`
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
 
 Page goals:
