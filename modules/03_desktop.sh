@@ -2476,6 +2476,11 @@ window_id() {
             local xprop_available=false
             command -v xprop >/dev/null 2>&1 && xprop_available=true
             ${xprop_available} || screen="$(screen_geometry)"
+            local dock_candidates=""
+            # Avoid bash process substitution here: the rootfs validation
+            # runs without /dev/fd mounted, while the equivalent here-string
+            # remains safe in both the build chroot and a live X session.
+            dock_candidates="$(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }' || true)"
             while read -r candidate_id; do
                 [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
                 [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
@@ -2491,7 +2496,7 @@ window_id() {
                         return 0
                     fi
                 fi
-            done < <(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }')
+            done <<< "${dock_candidates}"
             [[ -n "${fallback_id}" ]] && printf '%s\n' "${fallback_id}"
             ;;
     esac
@@ -2922,6 +2927,8 @@ plank_window_id() {
     local xprop_available=false
     command -v xprop >/dev/null 2>&1 && xprop_available=true
     ${xprop_available} || screen="$(screen_geometry)"
+    local dock_candidates=""
+    dock_candidates="$(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }' || true)"
     while read -r candidate_id; do
         [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
         [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
@@ -2937,7 +2944,7 @@ plank_window_id() {
                 return 0
             fi
         fi
-    done < <(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }')
+    done <<< "${dock_candidates}"
     [[ -n "${fallback_id}" ]] && printf '%s\n' "${fallback_id}"
 }
 
