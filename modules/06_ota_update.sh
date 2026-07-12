@@ -13,8 +13,18 @@ readonly OTA_API_ENDPOINT="/api/onion-update"
 install_ota_dependencies() {
     echo "Installing OTA update dependencies..."
     apt install -y --no-install-recommends \
-        curl wget jq rsync squashfs-tools zenity yad libnotify-bin \
+        curl wget jq rsync python3 squashfs-tools zenity yad libnotify-bin \
         pkexec polkitd lxpolkit
+}
+
+deploy_ota_backup_engine() {
+    local source="/tmp/ming-build/assets/ming-ota-backup.sh"
+    if [[ ! -s "${source}" ]]; then
+        echo "[06_ota_update][ERROR] Missing OTA backup engine: ${source}" >&2
+        return 1
+    fi
+    install -m 0755 "${source}" /usr/local/sbin/ming-ota-backup
+    bash -n /usr/local/sbin/ming-ota-backup
 }
 
 deploy_ota_cli() {
@@ -24,11 +34,29 @@ deploy_ota_cli() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+resolve_home() {
+    local uid home
+    uid="${EUID:-$(id -u)}"
+    home="$(getent passwd "${uid}" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "${home}" ]]; then
+        printf '%s\n' "${home}"
+    elif [[ "${uid}" -eq 0 ]]; then
+        printf '%s\n' /root
+    else
+        printf '%s\n' "/tmp/ming-update-${uid}"
+    fi
+}
+
+HOME="${HOME:-$(resolve_home)}"
+export HOME
+
 readonly SCRIPT_VERSION="1.2.0"
 readonly CONFIG_DIR="/etc/ming-update"
 readonly CACHE_DIR="/var/cache/ming-update"
 readonly STATE_FILE="${CONFIG_DIR}/state.json"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
+readonly STAGING_DIR="/var/lib/ming-update"
+readonly STAGING_RECORD="/var/lib/ming-update/staging.json"
 readonly USER_CONFIG_DIR="${HOME}/.config/ming-update"
 readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
 readonly USER_STATE_FILE="${USER_CONFIG_DIR}/state.json"
@@ -73,6 +101,256 @@ state_file() {
     else
         printf '%s\n' "${USER_STATE_FILE}"
     fi
+}
+
+find_cached_manifest() {
+    local candidate
+    candidate="$(cache_dir)/update_info.json"
+    if [[ -f "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        for candidate in /home/*/.cache/ming-update/update_info.json; do
+            if [[ -f "${candidate}" ]]; then
+                printf '%s\n' "${candidate}"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+state_candidate_is_downloaded() {
+    local candidate="$1" status iso_path
+    [[ -f "${candidate}" ]] || return 1
+    status="$(jq -r '.status // ""' "${candidate}" 2>/dev/null || true)"
+    iso_path="$(jq -r '.iso_path // ""' "${candidate}" 2>/dev/null || true)"
+    [[ "${status}" == "downloaded" && -n "${iso_path}" && -f "${iso_path}" ]]
+}
+
+find_download_state_file() {
+    local candidate
+    candidate="$(state_file)"
+    if state_candidate_is_downloaded "${candidate}"; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        for candidate in /home/*/.config/ming-update/state.json; do
+            if state_candidate_is_downloaded "${candidate}"; then
+                printf '%s\n' "${candidate}"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+update_state_fields() {
+    local state_path="$1" filter="$2"
+    shift 2
+    local tmp owner mode
+    owner="$(stat -c '%u:%g' "${state_path}")"
+    mode="$(stat -c '%a' "${state_path}")"
+    tmp="$(mktemp "${state_path}.tmp.XXXXXX")"
+    if ! jq "$@" "${filter}" "${state_path}" > "${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    chmod "${mode}" "${tmp}"
+    chown "${owner}" "${tmp}"
+    mv -f "${tmp}" "${state_path}"
+}
+
+physical_disks_for_path() {
+    local path="$1" device
+    device="$(findmnt -nro SOURCE -T "${path}" 2>/dev/null || true)"
+    [[ "${device}" == /dev/* ]] || return 1
+    lsblk -s -nrpo NAME,TYPE "${device}" 2>/dev/null \
+        | awk '$2 == "disk" {print $1}' \
+        | sort -u
+}
+
+paths_share_physical_disk() {
+    local left="$1" right="$2" left_disks right_disks disk
+    left_disks="$(physical_disks_for_path "${left}" || true)"
+    right_disks="$(physical_disks_for_path "${right}" || true)"
+    [[ -n "${left_disks}" && -n "${right_disks}" ]] || return 2
+    while IFS= read -r disk; do
+        [[ -n "${disk}" ]] || continue
+        grep -Fxq -- "${disk}" <<< "${right_disks}" && return 0
+    done <<< "${left_disks}"
+    return 1
+}
+
+home_is_independent_device() {
+    local root_majmin home_majmin root_uuid home_uuid shared_status
+    root_majmin="$(findmnt -nro MAJ:MIN -T / 2>/dev/null || true)"
+    home_majmin="$(findmnt -nro MAJ:MIN -T /home 2>/dev/null || true)"
+    root_uuid="$(findmnt -nro UUID -T / 2>/dev/null || true)"
+    home_uuid="$(findmnt -nro UUID -T /home 2>/dev/null || true)"
+    [[ -n "${root_majmin}" && -n "${home_majmin}" ]] || return 1
+    # Btrfs subvolumes may have different SOURCE strings but share MAJ:MIN/UUID.
+    [[ "${root_majmin}" != "${home_majmin}" ]] || return 1
+    if [[ -n "${root_uuid}" && -n "${home_uuid}" && "${root_uuid}" == "${home_uuid}" ]]; then
+        return 1
+    fi
+    if paths_share_physical_disk / /home; then
+        return 1
+    else
+        shared_status=$?
+        [[ "${shared_status}" -eq 1 ]] || return 1
+    fi
+}
+
+fetch_authoritative_major_manifest() {
+    local url response
+    url="$(api_url)"
+    response="$(curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 45 "${url}")" || {
+        log_error "unable to refetch authoritative major update manifest"
+        return 1
+    }
+    is_json_response "${response}" || {
+        log_error "authoritative major update manifest is not valid JSON"
+        return 1
+    }
+    printf '%s\n' "${response}"
+}
+
+validate_staging_inputs() {
+    local state_path="$1" state status version iso_path checksum actual_checksum
+    local backup_uuid backup_manifest backup_manifest_relative strategy iso_name
+    local iso_uuid iso_mount_target iso_boot_path shared_status
+    local manifest_uuid manifest_complete manifest_strategy mount_target expected_relative
+    local authoritative authoritative_version authoritative_checksum authoritative_filename
+    local authoritative_ready authoritative_available authoritative_type
+    state="$(cat "${state_path}")"
+    status="$(printf '%s' "${state}" | jq -r '.status // ""')"
+    version="$(printf '%s' "${state}" | jq -r '.version // ""')"
+    iso_path="$(printf '%s' "${state}" | jq -r '.iso_path // ""')"
+    checksum="$(printf '%s' "${state}" | jq -r '.checksum // ""')"
+    backup_uuid="$(printf '%s' "${state}" | jq -r '.backup_uuid // ""')"
+    backup_manifest="$(printf '%s' "${state}" | jq -r '.backup_manifest // ""')"
+    backup_manifest_relative="$(printf '%s' "${state}" | jq -r '.backup_manifest_relative // ""')"
+    strategy="$(printf '%s' "${state}" | jq -r '.home_preservation.strategy // ""')"
+
+    [[ "${status}" == "downloaded" ]] || { log_error "OTA state is not downloaded"; return 1; }
+    [[ "${version}" =~ ^[0-9]+(\.[0-9]+){1,3}([A-Za-z0-9._-]*)?$ ]] || {
+        log_error "OTA version has an unsafe format"; return 1;
+    }
+    [[ "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "major update state requires a valid SHA256"; return 1;
+    }
+    [[ "${backup_uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]] || {
+        log_error "backup UUID has an unsafe format"; return 1;
+    }
+    [[ "${backup_manifest_relative}" =~ ^/[A-Za-z0-9._/+:-]+$ ]] || {
+        log_error "backup manifest relative path has an unsafe format"; return 1;
+    }
+    [[ -f "${iso_path}" && ! -L "${iso_path}" ]] || { log_error "OTA ISO is missing or a symlink"; return 1; }
+    iso_path="$(readlink -f -- "${iso_path}")" || return 1
+    iso_uuid="$(findmnt -nro UUID -T "${iso_path}" 2>/dev/null || true)"
+    [[ -n "${iso_uuid}" && "${iso_uuid}" == "${backup_uuid}" ]] || {
+        log_error "OTA ISO is not staged on the verified preservation filesystem"; return 1;
+    }
+    iso_mount_target="$(findmnt -nro TARGET -T "${iso_path}" 2>/dev/null || true)"
+    [[ -n "${iso_mount_target}" ]] || { log_error "OTA ISO mount target is unavailable"; return 1; }
+    if [[ "${iso_mount_target}" == "/" ]]; then
+        iso_boot_path="/${iso_path#/}"
+    elif [[ "${iso_path}" == "${iso_mount_target}/"* ]]; then
+        iso_boot_path="/${iso_path#${iso_mount_target}/}"
+    else
+        log_error "OTA ISO path is outside its mounted filesystem"
+        return 1
+    fi
+    [[ "${iso_boot_path}" =~ ^/[A-Za-z0-9._/+:-]+\.iso$ ]] || {
+        log_error "OTA ISO boot path has an unsafe format"; return 1;
+    }
+    if paths_share_physical_disk / "${iso_path}"; then
+        log_error "OTA ISO preservation media shares the system target physical disk"
+        return 1
+    else
+        shared_status=$?
+        [[ "${shared_status}" -eq 1 ]] || {
+            log_error "unable to verify OTA ISO physical disk ancestry"; return 1;
+        }
+    fi
+    iso_name="$(basename -- "${iso_path}")"
+    [[ "${iso_name}" == ming-os-"${version}"*.iso ]] || {
+        log_error "OTA ISO filename does not match the validated version"; return 1;
+    }
+    actual_checksum="$(sha256sum -- "${iso_path}" | awk '{print $1}')"
+    [[ "${actual_checksum}" == "${checksum,,}" ]] || { log_error "OTA ISO SHA256 mismatch"; return 1; }
+
+    authoritative="$(fetch_authoritative_major_manifest)" || return 1
+    authoritative_available="$(printf '%s' "${authoritative}" | jq -r '.has_update // .update_available // false')"
+    authoritative_ready="$(printf '%s' "${authoritative}" | jq -r '.ready // true')"
+    authoritative_type="$(printf '%s' "${authoritative}" | jq -r '.update_type // "major"')"
+    authoritative_version="$(printf '%s' "${authoritative}" | jq -r '.version // .latest_version // ""')"
+    authoritative_checksum="$(printf '%s' "${authoritative}" | jq -r '.checksum // .sha256 // ""')"
+    authoritative_filename="$(printf '%s' "${authoritative}" | jq -r '.filename // .iso_name // empty')"
+    authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
+    if [[ "${authoritative_available}" != "true" || "${authoritative_ready}" != "true" ||
+          "${authoritative_type}" != "major" || "${authoritative_version}" != "${version}" ||
+          "${authoritative_checksum,,}" != "${checksum,,}" ||
+          "$(basename -- "${authoritative_filename}")" != "${iso_name}" ]]; then
+        log_error "authoritative ISO metadata mismatch"
+        return 1
+    fi
+
+    [[ -f "${backup_manifest}" && ! -L "${backup_manifest}" ]] || {
+        log_error "backup manifest is missing or a symlink"; return 1;
+    }
+    backup_manifest="$(readlink -f -- "${backup_manifest}")" || return 1
+    manifest_uuid="$(jq -r '.backup_uuid // .disk_uuid // ""' "${backup_manifest}" 2>/dev/null || true)"
+    manifest_complete="$(jq -r '.complete // .completed // false' "${backup_manifest}" 2>/dev/null || true)"
+    [[ "${manifest_uuid}" == "${backup_uuid}" && "${manifest_complete}" == "true" ]] || {
+        log_error "backup manifest fields do not match staged state"; return 1;
+    }
+
+    case "${strategy}" in
+        completed_backup)
+            /usr/local/sbin/ming-ota-backup verify --manifest "${backup_manifest}" >/dev/null || return 1
+            mount_target="$(findmnt -nro TARGET -T "${backup_manifest}" 2>/dev/null || true)"
+            [[ -n "${mount_target}" ]] || { log_error "backup manifest mount is unavailable"; return 1; }
+            if [[ "${mount_target}" == "/" ]]; then
+                expected_relative="/${backup_manifest#/}"
+            else
+                expected_relative="/${backup_manifest#${mount_target}/}"
+            fi
+            [[ "${backup_manifest_relative}" == "${expected_relative}" ]] || {
+                log_error "backup manifest relative path mismatch"; return 1;
+            }
+            ;;
+        separate_home)
+            manifest_strategy="$(jq -r '.strategy // ""' "${backup_manifest}" 2>/dev/null || true)"
+            [[ "${manifest_strategy}" == "separate_home" ]] || {
+                log_error "independent /home preservation plan is invalid"; return 1;
+            }
+            [[ "${backup_manifest}" == "/home/.ming-ota/home-preservation.json" &&
+               "${backup_manifest_relative}" == "/.ming-ota/home-preservation.json" ]] || {
+                log_error "independent /home preservation path mismatch"; return 1;
+            }
+            home_is_independent_device || { log_error "/home is not on an independent block device"; return 1; }
+            [[ "$(findmnt -nro UUID -T /home 2>/dev/null || true)" == "${backup_uuid}" ]] || {
+                log_error "independent /home UUID changed"; return 1;
+            }
+            ;;
+        *) log_error "unknown home preservation strategy"; return 1 ;;
+    esac
+
+    jq -n \
+        --arg version "${version}" --arg iso_path "${iso_path}" --arg iso_boot_path "${iso_boot_path}" \
+        --arg checksum "${checksum,,}" \
+        --arg backup_uuid "${backup_uuid}" --arg backup_manifest "${backup_manifest}" \
+        --arg relative "${backup_manifest_relative}" --arg strategy "${strategy}" \
+        --arg source_state "$(readlink -f -- "${state_path}")" \
+        '{status: "validated", version: $version, iso_path: $iso_path,
+          iso_boot_path: $iso_boot_path, checksum: $checksum,
+          backup_uuid: $backup_uuid, backup_manifest: $backup_manifest,
+          backup_manifest_relative: $relative, home_preservation: {strategy: $strategy},
+          source_state: $source_state}'
 }
 
 current_version() {
@@ -259,7 +537,7 @@ download_update() {
         return 1
     fi
 
-    local info url version checksum expected_size iso_name iso_file tmp_file retries
+    local info url version checksum expected_size iso_name safe_iso_name iso_file tmp_file retries
     info=$(cat "${manifest}")
     url=$(printf '%s' "${info}" | jq -r '.download_url // .url // ""')
     version=$(printf '%s' "${info}" | jq -r '.version // "unknown"')
@@ -267,11 +545,21 @@ download_update() {
     expected_size=$(printf '%s' "${info}" | jq -r '.size // 0')
     iso_name=$(printf '%s' "${info}" | jq -r '.filename // .iso_name // empty')
     iso_name=${iso_name:-ming-os-${version}.iso}
+    safe_iso_name="$(basename -- "${iso_name}")"
+    if [[ "${iso_name}" != "${safe_iso_name}" || "${safe_iso_name}" == "." || "${safe_iso_name}" == ".." ]]; then
+        log_error "ISO filename must be a basename"
+        return 1
+    fi
+    iso_name="${safe_iso_name}"
     iso_file="${cdir}/${iso_name}"
     tmp_file="${iso_file}.tmp"
 
     if [[ -z "${url}" || "${url}" == "null" ]]; then
         log_error "更新信息里没有下载地址。"
+        return 1
+    fi
+    if [[ ! "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+        log_error "major update manifest requires a valid SHA256"
         return 1
     fi
 
@@ -302,18 +590,14 @@ download_update() {
         fi
     fi
 
-    if [[ "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
-        local actual_checksum
-        actual_checksum=$(sha256sum "${iso_file}" | awk '{print $1}')
-        if [[ "${actual_checksum}" != "${checksum}" ]]; then
-            rm -f "${iso_file}"
-            log_error "SHA256 校验失败。期望 ${checksum}，实际 ${actual_checksum}。"
-            return 1
-        fi
-        log_info "SHA256 校验通过。"
-    else
-        log_warn "更新信息里没有有效 SHA256，已保留下载文件但未完成强校验。"
+    local actual_checksum
+    actual_checksum=$(sha256sum "${iso_file}" | awk '{print $1}')
+    if [[ "${actual_checksum}" != "${checksum,,}" ]]; then
+        rm -f "${iso_file}"
+        log_error "SHA256 校验失败。期望 ${checksum}，实际 ${actual_checksum}。"
+        return 1
     fi
+    log_info "SHA256 校验通过。"
 
     cat > "${sfile}" << STATEJSON
 {
@@ -333,42 +617,42 @@ install_update() {
     log_step "安装更新"
     init_config
 
-    if [[ $EUID -ne 0 ]]; then
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
         log_error "写入 OTA 启动项需要管理员权限。请使用：sudo ming-update install"
         return 1
     fi
-    local sfile="${STATE_FILE}"
-    if [[ ! -f "${sfile}" && -f "${USER_STATE_FILE}" ]]; then
-        sfile="${USER_STATE_FILE}"
-    fi
-    if [[ ! -f "${sfile}" && ${EUID} -eq 0 ]]; then
-        local candidate
-        for candidate in /home/*/.config/ming-update/state.json; do
-            if [[ -f "${candidate}" ]]; then
-                sfile="${candidate}"
-                break
-            fi
-        done
-    fi
-
-    if [[ ! -f "${sfile}" ]]; then
+    local sfile
+    if ! sfile="$(find_download_state_file)"; then
         log_error "没有找到已下载的更新状态。请先运行：ming-update download"
         return 1
     fi
 
-    local state status iso_path version mount_point custom_cfg tmp_cfg
-    state=$(cat "${sfile}")
+    local state status iso_path iso_boot_path version mount_point custom_cfg tmp_cfg previous_cfg candidate_record record_tmp
+    local backup_uuid backup_manifest backup_manifest_rel
+    candidate_record="$(mktemp)"
+    if ! validate_staging_inputs "${sfile}" > "${candidate_record}"; then
+        rm -f "${candidate_record}"
+        log_error "untrusted OTA state failed root staging validation"
+        return 1
+    fi
+    state=$(cat "${candidate_record}")
     status=$(printf '%s' "${state}" | jq -r '.status // ""')
     iso_path=$(printf '%s' "${state}" | jq -r '.iso_path // ""')
+    iso_boot_path=$(printf '%s' "${state}" | jq -r '.iso_boot_path // ""')
     version=$(printf '%s' "${state}" | jq -r '.version // "unknown"')
+    backup_uuid=$(printf '%s' "${state}" | jq -r '.backup_uuid // ""')
+    backup_manifest=$(printf '%s' "${state}" | jq -r '.backup_manifest // ""')
+    backup_manifest_rel=$(printf '%s' "${state}" | jq -r '.backup_manifest_relative // ""')
 
-    if [[ "${status}" != "downloaded" || ! -f "${iso_path}" ]]; then
-        log_error "已下载的更新缺失或无效。"
+    if [[ "${status}" != "validated" ]]; then
+        rm -f "${candidate_record}"
+        log_error "root staging validation did not produce a validated record"
         return 1
     fi
 
     mount_point="$(mktemp -d)"
     if ! mount -o loop,ro "${iso_path}" "${mount_point}"; then
+        rm -f "${candidate_record}"
         rmdir "${mount_point}" || true
         log_error "无法挂载 ISO：${iso_path}"
         return 1
@@ -377,28 +661,45 @@ install_update() {
     if [[ ! -f "${mount_point}/live/vmlinuz" || ! -f "${mount_point}/live/initrd" || ! -f "${mount_point}/live/filesystem.squashfs" ]]; then
         umount "${mount_point}" || true
         rmdir "${mount_point}" || true
+        rm -f "${candidate_record}"
         log_error "ISO 不完整：缺少 live/vmlinuz、live/initrd 或 live/filesystem.squashfs。"
         return 1
     fi
     umount "${mount_point}" || true
     rmdir "${mount_point}" || true
 
+    install -d -o root -g root -m 0700 "${STAGING_DIR}"
+    record_tmp="$(mktemp "${STAGING_DIR}/.staging.XXXXXX")"
+    install -o root -g root -m 0600 "${candidate_record}" "${record_tmp}"
+    mv -f "${record_tmp}" "${STAGING_RECORD}"
+    rm -f "${candidate_record}"
+
+    # Only the root-owned, sanitized record is used to compose privileged boot state.
+    state="$(cat "${STAGING_RECORD}")"
+    iso_path="$(printf '%s' "${state}" | jq -r '.iso_path')"
+    version="$(printf '%s' "${state}" | jq -r '.version')"
+    backup_uuid="$(printf '%s' "${state}" | jq -r '.backup_uuid')"
+    backup_manifest_rel="$(printf '%s' "${state}" | jq -r '.backup_manifest_relative')"
+
     custom_cfg="/boot/grub/custom.cfg"
     tmp_cfg="$(mktemp)"
+    previous_cfg="$(mktemp)"
     mkdir -p /boot/grub
     if [[ -f "${custom_cfg}" ]]; then
+        cp -f -- "${custom_cfg}" "${previous_cfg}"
         sed '/^### BEGIN MING OTA ###$/,/^### END MING OTA ###$/d' "${custom_cfg}" > "${tmp_cfg}"
     else
+        : > "${previous_cfg}"
         : > "${tmp_cfg}"
     fi
 
     cat >> "${tmp_cfg}" << GRUBMENU
 ### BEGIN MING OTA ###
 menuentry "Ming OS ${version} OTA Installer" {
-    set iso_path="${iso_path}"
-    search --no-floppy --file --set=root \${iso_path}
+    set iso_path="${iso_boot_path}"
+    search --no-floppy --fs-uuid --set=root ${backup_uuid}
     loopback loop (\$root)\${iso_path}
-    linux (loop)/live/vmlinuz boot=live components live-config username=user user-fullname=Ming_OS_User hostname=ming-os findiso=\${iso_path} locales=zh_CN.UTF-8 quiet splash
+    linux (loop)/live/vmlinuz boot=live components live-config username=user user-fullname=Ming_OS_User hostname=ming-os findiso=\${iso_path} ming.ota=1 ming.ota_backup_uuid=${backup_uuid} ming.ota_manifest=${backup_manifest_rel} locales=zh_CN.UTF-8 quiet splash
     initrd (loop)/live/initrd
 }
 ### END MING OTA ###
@@ -406,17 +707,21 @@ GRUBMENU
     install -m 0644 "${tmp_cfg}" "${custom_cfg}"
     rm -f "${tmp_cfg}"
 
-    cat > "${sfile}" << STATEJSON
-{
-  "status": "staged",
-  "version": "${version}",
-  "iso_path": "${iso_path}",
-  "grub_entry": "Ming OS ${version} OTA Installer",
-  "staged_time": "$(date -Iseconds)"
-}
-STATEJSON
+    if ! command -v update-grub >/dev/null 2>&1 || ! update-grub; then
+        install -m 0644 "${previous_cfg}" "${custom_cfg}"
+        command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 || true
+        rm -f "${previous_cfg}" "${STAGING_RECORD}"
+        log_error "failed to regenerate GRUB after OTA staging"
+        return 1
+    fi
+    rm -f "${previous_cfg}"
+
+    update_state_fields "${sfile}" \
+        '. + {status: "staged", grub_entry: $entry, staged_time: $time, staging_record: $record}' \
+        --arg entry "Ming OS ${version} OTA Installer" \
+        --arg time "$(date -Iseconds)" \
+        --arg record "${STAGING_RECORD}"
     chmod 644 "${sfile}"
-    command -v update-grub >/dev/null 2>&1 && update-grub || true
     log_info "OTA 启动项已写入 ${custom_cfg}。"
     log_info "重启后请选择：Ming OS ${version} OTA Installer"
 }
@@ -477,7 +782,7 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|patch|download|install|auto-shutdown|status|config|help]
+Usage: ming-update [check|patch|download|install|auto-shutdown|status|doctor|config|help]
 
 Commands:
   check             检查是否有可用更新（含分级：patch/minor/major）。
@@ -486,6 +791,7 @@ Commands:
   install           将已下载的 ISO 暂存为 GRUB 启动项（major 升级，保留用户文件）。
   auto-shutdown     自动完成「检查→下载→安装→关机」全流程（major 升级，夜间维护）。
   status            显示当前 OTA 状态。
+  doctor            检查 APT、缓存、备份引擎和 major OTA 保留状态。
   config            配置更新源/频道。
 
 更新策略：
@@ -495,9 +801,81 @@ Commands:
 HELP
 }
 
+validate_staging_record_local() {
+    [[ -e "${STAGING_RECORD}" ]] || return 0
+    [[ -f "${STAGING_RECORD}" && ! -L "${STAGING_RECORD}" && -r "${STAGING_RECORD}" ]] || return 1
+    local status iso_path checksum backup_uuid manifest iso_uuid actual_checksum
+    status="$(jq -r '.status // ""' "${STAGING_RECORD}" 2>/dev/null || true)"
+    iso_path="$(jq -r '.iso_path // ""' "${STAGING_RECORD}" 2>/dev/null || true)"
+    checksum="$(jq -r '.checksum // ""' "${STAGING_RECORD}" 2>/dev/null || true)"
+    backup_uuid="$(jq -r '.backup_uuid // ""' "${STAGING_RECORD}" 2>/dev/null || true)"
+    manifest="$(jq -r '.backup_manifest // ""' "${STAGING_RECORD}" 2>/dev/null || true)"
+    [[ "${status}" == "validated" && "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+    [[ -f "${iso_path}" && ! -L "${iso_path}" && -f "${manifest}" && ! -L "${manifest}" ]] || return 1
+    iso_uuid="$(findmnt -nro UUID -T "${iso_path}" 2>/dev/null || true)"
+    [[ -n "${iso_uuid}" && "${iso_uuid}" == "${backup_uuid}" ]] || return 1
+    actual_checksum="$(sha256sum -- "${iso_path}" | awk '{print $1}')"
+    [[ "${actual_checksum}" == "${checksum,,}" ]]
+}
+
+ota_doctor() {
+    init_config
+    local apt_ok=true backup_engine=false staging_ok=true staging_present=false
+    local state_path="" state_status="none"
+    local cached_manifest="" dpkg_audit=""
+    command -v /usr/local/sbin/ming-ota-backup >/dev/null 2>&1 && backup_engine=true
+    dpkg_audit="$(dpkg --audit 2>/dev/null || true)"
+    [[ -z "${dpkg_audit}" ]] || apt_ok=false
+    state_path="$(find_download_state_file 2>/dev/null || true)"
+    if [[ -n "${state_path}" ]]; then
+        state_status="$(jq -r '.status // "unknown"' "${state_path}" 2>/dev/null || echo invalid)"
+    fi
+    cached_manifest="$(find_cached_manifest 2>/dev/null || true)"
+    if [[ -e "${STAGING_RECORD}" ]]; then
+        staging_present=true
+        validate_staging_record_local || staging_ok=false
+    fi
+    jq -n \
+        --argjson apt_ok "${apt_ok}" \
+        --argjson backup_engine "${backup_engine}" \
+        --argjson staging_ok "${staging_ok}" \
+        --argjson staging_present "${staging_present}" \
+        --arg state_path "${state_path}" \
+        --arg state_status "${state_status}" \
+        --arg cached_manifest "${cached_manifest}" \
+        --arg dpkg_audit "${dpkg_audit}" \
+        '{apt_ok: $apt_ok, backup_engine: $backup_engine,
+          staging_ok: $staging_ok, staging_present: $staging_present, state_path: $state_path,
+          state_status: $state_status, cached_manifest: $cached_manifest,
+          dpkg_audit: $dpkg_audit}'
+    [[ "${apt_ok}" == "true" && "${backup_engine}" == "true" && "${staging_ok}" == "true" ]]
+}
+
 # ======================== patch 级小修复（apt 补丁路径）========================
 # 用途：驱动更新、安全补丁、配置修正，通常不需要重启。
 # 原理：从更新服务器拉取 patch manifest，执行 apt install 和 patch scripts。
+is_safe_apt_package() {
+    local package_spec="$1" package_name
+    package_name="${package_spec%%=*}"
+    [[ "${package_spec}" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?(=[0-9A-Za-z.+:~_-]+)?$ ]] || return 1
+    [[ "${package_spec}" != *[-+] && "${package_name}" != *[-+] ]]
+}
+
+recover_dpkg() {
+    if ! timeout 300 bash -c '
+        while fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend \
+                    /var/lib/apt/lists/lock /var/cache/apt/archives/lock \
+                    >/dev/null 2>&1; do
+            sleep 2
+        done
+    '; then
+        log_error "等待 APT/dpkg 锁超时（300 秒）。"
+        return 1
+    fi
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a </dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 -f install </dev/null
+}
+
 patch_update() {
     log_step "Ming OS patch 级更新"
     init_config
@@ -524,7 +902,7 @@ patch_update() {
         return 0
     fi
 
-    local has_patch pkg_list script_url
+    local has_patch script_url
     has_patch=$(printf '%s' "${response}" | jq -r '.has_patch // false')
     if [[ "${has_patch}" != "true" ]]; then
         log_info "当前已是最新（patch 级别），无需更新。"
@@ -538,32 +916,38 @@ patch_update() {
     log_info "发现 patch 更新：${patch_version}  ${notes}"
     notify-send -i system-software-update "Ming OS patch 更新" "正在应用 ${patch_version}…" 2>/dev/null || true
 
-    # 1) apt 包更新（若 manifest 包含包列表）
-    pkg_list=$(printf '%s' "${response}" | jq -r '.apt_packages[]?' 2>/dev/null | tr '\n' ' ')
-    if [[ -n "${pkg_list}" ]]; then
-        log_info "更新 apt 包：${pkg_list}"
-        # shellcheck disable=SC2086
-        DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 \
-            install ${pkg_list} </dev/null || {
-            log_warn "apt 包更新部分失败，继续执行脚本补丁。"
-        }
-    fi
-
-    # 2) 配置/脚本补丁（若 manifest 提供 patch script URL）
+    # Remote code is never executed without a signed update format and trust root.
     script_url=$(printf '%s' "${response}" | jq -r '.patch_script_url // ""' 2>/dev/null)
     if [[ -n "${script_url}" && "${script_url}" != "null" ]]; then
-        log_info "下载并执行补丁脚本：${script_url}"
-        local patch_script
-        patch_script=$(mktemp /tmp/ming-patch-XXXXXX.sh)
-        if curl -fsSL --retry 2 --max-time 60 "${script_url}" -o "${patch_script}"; then
-            chmod +x "${patch_script}"
-            bash "${patch_script}" </dev/null && log_info "补丁脚本执行成功。" \
-                || log_warn "补丁脚本执行有警告，请查看日志。"
-        fi
-        rm -f "${patch_script}"
+        log_error "unsigned patch_script_url is not supported; refusing the patch manifest"
+        return 1
     fi
 
-    # 3) 记录已应用的 patch 版本
+    # 1) apt 包更新（若 manifest 包含包列表）
+    local -a packages=()
+    mapfile -t packages < <(printf '%s' "${response}" | jq -r '.apt_packages[]?' 2>/dev/null)
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        local package
+        for package in "${packages[@]}"; do
+            if ! is_safe_apt_package "${package}"; then
+                log_error "Patch manifest 包含非法 APT 包名：${package}"
+                return 1
+            fi
+        done
+        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+            log_error "APT patch 需要管理员权限，请使用 pkexec ming-update patch。"
+            return 1
+        fi
+        recover_dpkg || return 1
+        log_info "更新 apt 包：${packages[*]}"
+        if ! DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 \
+            install -- "${packages[@]}" </dev/null; then
+            log_error "APT patch 安装失败，已保留 dpkg 日志供 ming-update doctor 检查。"
+            return 1
+        fi
+    fi
+
+    # 2) 记录已应用的 patch 版本
     set_config '.patch_version' "${patch_version}"
     set_config '.last_patch' "$(date -Iseconds)"
     notify-send -i system-software-update "Ming OS patch 完成" \
@@ -572,19 +956,25 @@ patch_update() {
 }
 
 # ======================== major ISO 升级（保留用户文件）========================
-# 核心承诺：/home 分区/目录永不覆盖，用户文件严格保留。
-# 机制：Calamares replacePartition 模式仅格式化根分区，/home 挂载点独立保留；
-#       若是单分区布局则先备份 /home 到数据盘，安装后还原。
+# 核心承诺：用户数据和 Live ISO 都位于目标系统盘之外。
+# Calamares 在分区前再次比较目标根分区与保留介质的物理盘祖先。
 major_install_with_home_backup() {
     log_step "Ming OS major 大版本升级（保留用户文件）"
-    local cdir; cdir=$(cache_dir)
-    local sfile; sfile=$(state_file)
-    local manifest="${cdir}/update_info.json"
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        log_error "major OTA 备份与启动项暂存需要管理员权限。"
+        return 1
+    fi
 
-    if [[ ! -f "${manifest}" ]]; then
+    local manifest sfile version
+    if ! manifest=$(find_cached_manifest); then
         log_error "未找到已下载的更新 manifest，请先运行：ming-update download"
         return 1
     fi
+    if ! sfile="$(find_download_state_file)"; then
+        log_error "未找到普通用户或系统缓存中的下载状态。"
+        return 1
+    fi
+    version="$(jq -r '.version // "unknown"' "${sfile}" 2>/dev/null)"
 
     local update_type
     update_type=$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null)
@@ -592,41 +982,127 @@ major_install_with_home_backup() {
         log_warn "当前缓存的更新类型为 ${update_type}，建议使用 ming-update patch 而非 major 升级。"
     fi
 
-    # 检查 /home 是否有独立分区
-    local home_separate=false
-    if findmnt -rno SOURCE /home >/dev/null 2>&1; then
-        local home_src; home_src=$(findmnt -rno SOURCE /home)
-        if [[ "${home_src}" != "$(findmnt -rno SOURCE /)" ]]; then
-            home_separate=true
-        fi
+    # SOURCE differs for Btrfs subvolumes, so preservation requires a distinct block device.
+    local home_separate=false home_src=""
+    if home_is_independent_device; then
+        home_separate=true
+        home_src="$(findmnt -nro SOURCE -T /home 2>/dev/null || true)"
     fi
 
+    local backup_uuid="" backup_manifest="" backup_manifest_relative=""
+    local strategy="" preservation_dir="" mount_target=""
+    local machine backup_dir backup_disk=""
+    machine="$(cat /etc/machine-id 2>/dev/null || echo unknown)"
+
     if [[ "${home_separate}" == "true" ]]; then
-        log_info "/home 有独立分区（${home_src}），Calamares 安装时自动保留，用户文件安全。"
+        strategy="separate_home"
+        backup_uuid="$(findmnt -nro UUID /home 2>/dev/null || true)"
+        if [[ -z "${backup_uuid}" ]]; then
+            log_error "独立 /home 分区缺少可验证 UUID，拒绝暂存 major OTA。"
+            return 1
+        fi
+        preservation_dir="/home/.ming-ota"
+        mkdir -p "${preservation_dir}"
+        chmod 700 "${preservation_dir}"
+        mount_target="$(findmnt -nro TARGET -T /home 2>/dev/null || true)"
+        [[ -n "${mount_target}" ]] || {
+            log_error "无法确定独立 /home 的挂载点。"
+            return 1
+        }
+        backup_manifest="/home/.ming-ota/home-preservation.json"
+        backup_manifest_relative="/.ming-ota/home-preservation.json"
+        local plan_tmp
+        plan_tmp="$(mktemp "${backup_manifest}.tmp.XXXXXX")"
+        jq -n \
+            --arg strategy "${strategy}" \
+            --arg source "${home_src}" \
+            --arg backup_uuid "${backup_uuid}" \
+            --arg created_at "$(date -Iseconds)" \
+            '{schema: 1, complete: true, completed: true, strategy: $strategy,
+              source: $source, backup_uuid: $backup_uuid, disk_uuid: $backup_uuid,
+              created_at: $created_at}' > "${plan_tmp}"
+        chmod 600 "${plan_tmp}"
+        mv -f "${plan_tmp}" "${backup_manifest}"
+        log_info "/home 有独立分区（${home_src}），已建立 UUID 保留计划。"
     else
-        # 单分区：检查数据盘（多盘合一存储）是否可用作备份位置
-        local backup_disk=""
+        # 同盘 /home 或单分区必须完整备份到另一块物理磁盘。
         if [[ -f /run/ming-os/storage-info ]]; then
             backup_disk=$(grep '^data_mount=' /run/ming-os/storage-info 2>/dev/null | cut -d= -f2)
         fi
-        if [[ -n "${backup_disk}" && -d "${backup_disk}" ]]; then
-            log_info "将在 Calamares 安装前把 /home 备份到 ${backup_disk}/ming-home-backup"
-            log_info "安装完成后自动还原。"
-            # 写入 Calamares postinstall hook 配置，供 ming-fix-installed-identity 脚本在安装后执行还原
-            echo "home_backup_src=/home" > /tmp/ming-major-upgrade.conf
-            echo "home_backup_dst=${backup_disk}/ming-home-backup" >> /tmp/ming-major-upgrade.conf
-            echo "restore_after_install=true" >> /tmp/ming-major-upgrade.conf
+        backup_disk="${MING_OTA_BACKUP_DEST:-${backup_disk}}"
+        if [[ -z "${backup_disk}" || ! -d "${backup_disk}" ]]; then
+            log_error "未检测到独立物理备份盘；major OTA 不会继续。"
+            return 1
+        fi
+        strategy="completed_backup"
+        backup_dir="${backup_disk%/}/ming-ota-backup/${machine}/${version}"
+        log_info "正在把 /home 原子备份到 ${backup_dir}。"
+        /usr/local/sbin/ming-ota-backup backup --source /home --dest "${backup_dir}" || return 1
+        backup_manifest="${backup_dir}/manifest.json"
+        /usr/local/sbin/ming-ota-backup verify --manifest "${backup_manifest}" || return 1
+        backup_uuid="$(jq -r '.backup_uuid // .disk_uuid // ""' "${backup_manifest}")"
+        mount_target="$(findmnt -nro TARGET -T "${backup_manifest}" 2>/dev/null || true)"
+        if [[ -z "${backup_uuid}" || -z "${mount_target}" ]]; then
+            log_error "无法确定备份盘 UUID 或 manifest 相对路径。"
+            return 1
+        fi
+        if [[ "${mount_target}" == "/" ]]; then
+            backup_manifest_relative="/${backup_manifest#/}"
         else
-            log_warn "未检测到独立 /home 分区或数据盘，major 升级将依赖 Calamares 的"
-            log_warn "'replacePartition' 模式（只格式化根分区，不触碰 /home 目录）。"
-            log_warn "强烈建议安装前手动备份重要文件到 U 盘。"
-            notify-send -i dialog-warning "Ming OS 重要提示" \
-                "major 升级前请手动备份重要文件。安装程序会尽量保留 /home，但无独立分区时请谨慎。" \
-                2>/dev/null || true
+            backup_manifest_relative="/${backup_manifest#${mount_target}/}"
         fi
     fi
 
-    # 调用原 install_update 暂存 ISO 启动项
+    local source_iso checksum iso_name media_dir staged_iso staged_tmp
+    local iso_bytes free_bytes staged_uuid
+    source_iso="$(jq -r '.iso_path // ""' "${sfile}" 2>/dev/null)"
+    checksum="$(jq -r '.checksum // ""' "${sfile}" 2>/dev/null)"
+    [[ -f "${source_iso}" && ! -L "${source_iso}" && "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "下载状态中的 ISO 或 SHA256 无效。"
+        return 1
+    }
+    iso_name="$(basename -- "${source_iso}")"
+    media_dir="${mount_target%/}/ming-ota-media/${machine}/${version}"
+    install -d -m 0700 "${media_dir}"
+    staged_iso="${media_dir}/${iso_name}"
+    staged_tmp="${staged_iso}.tmp.$$"
+    iso_bytes="$(stat -c '%s' "${source_iso}")"
+    free_bytes="$(df --output=avail -B1 "${media_dir}" | tail -n 1 | tr -d ' ')"
+    if [[ ! "${free_bytes}" =~ ^[0-9]+$ || "${free_bytes}" -lt $((iso_bytes + 268435456)) ]]; then
+        log_error "保留介质空间不足，无法安全暂存 OTA ISO。"
+        return 1
+    fi
+    rm -f -- "${staged_tmp}"
+    if ! cp --reflink=auto --sparse=always -- "${source_iso}" "${staged_tmp}"; then
+        rm -f -- "${staged_tmp}"
+        log_error "复制 OTA ISO 到保留介质失败。"
+        return 1
+    fi
+    chmod 0600 "${staged_tmp}"
+    if [[ "$(sha256sum -- "${staged_tmp}" | awk '{print $1}')" != "${checksum,,}" ]]; then
+        rm -f -- "${staged_tmp}"
+        log_error "保留介质上的 OTA ISO 校验失败。"
+        return 1
+    fi
+    mv -f -- "${staged_tmp}" "${staged_iso}"
+    staged_uuid="$(findmnt -nro UUID -T "${staged_iso}" 2>/dev/null || true)"
+    if [[ -z "${staged_uuid}" || "${staged_uuid}" != "${backup_uuid}" ]]; then
+        rm -f -- "${staged_iso}"
+        log_error "OTA ISO 与备份 manifest 不在同一验证文件系统。"
+        return 1
+    fi
+
+    update_state_fields "${sfile}" \
+        '. + {iso_path: $iso, backup_uuid: $uuid, backup_manifest: $manifest,
+              backup_manifest_relative: $relative,
+              home_preservation: {strategy: $strategy, prepared: true}}' \
+        --arg iso "${staged_iso}" \
+        --arg uuid "${backup_uuid}" \
+        --arg manifest "${backup_manifest}" \
+        --arg relative "${backup_manifest_relative}" \
+        --arg strategy "${strategy}"
+
+    # install_update 会再次检查 manifest 与保留字段，门禁通过后才写入 GRUB。
     install_update
 }
 # 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
@@ -669,7 +1145,7 @@ auto_shutdown_update() {
     fi
 
     _notify "下载完成，正在暂存启动项…"
-    if ! install_update; then
+    if ! major_install_with_home_backup; then
         _notify "安装暂存失败，已取消自动关机。"
         return 1
     fi
@@ -688,6 +1164,7 @@ case "${1:-help}" in
     install) major_install_with_home_backup ;;
     auto-shutdown) auto_shutdown_update ;;
     status) show_status ;;
+    doctor) ota_doctor ;;
     config) configure_update ;;
     help|--help|-h) show_help ;;
     *) log_error "Unknown command: $1"; show_help; exit 1 ;;
@@ -1042,6 +1519,7 @@ RELEASEFILE
 main() {
     echo "=====> [06_ota_update] Deploying OTA update system <====="
     install_ota_dependencies
+    deploy_ota_backup_engine
     deploy_ota_cli
     deploy_systemd_services
     deploy_gui_tool

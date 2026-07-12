@@ -24,22 +24,94 @@ echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
-    chroot_exec apt-get update
-    chroot_exec /usr/local/sbin/apt-build install \
+    # Interrupted b43 installer postinst scripts download from GitHub and can
+    # block every later apt invocation. They are intentionally not part of the
+    # deterministic ISO; purge leftovers before touching apt.
+    chroot_exec dpkg --purge --force-all \
+        firmware-b43-installer firmware-b43legacy-installer \
+        >/dev/null 2>&1 || true
+    if ! chroot_exec apt-get update; then
+        log_error "resume 构建无法更新 APT 索引"
+        return 1
+    fi
+    if ! chroot_exec /usr/local/sbin/apt-build install \
+        xserver-xorg \
+        xserver-xorg-input-libinput \
+        xfce4 \
+        xfce4-panel \
+        xfce4-session \
+        xfce4-settings \
+        xfce4-terminal \
+        xfce4-appfinder \
+        xfce4-whiskermenu-plugin \
+        xfce4-notifyd \
+        xfdesktop4 \
+        thunar \
+        tumbler \
+        lightdm \
+        lightdm-gtk-greeter \
+        e2fsprogs \
+        fonts-noto-cjk \
+        fonts-noto-cjk-extra \
+        fonts-wqy-microhei \
+        fonts-wqy-zenhei \
         xfce4-screensaver \
+        python3-gi \
+        gir1.2-gtk-4.0 \
+        gir1.2-adw-1 \
+        libadwaita-1-0 \
+        gvfs \
+        gvfs-backends \
+        brightnessctl \
+        xdotool \
         wmctrl \
+        pulseaudio \
+        pulseaudio-utils \
+        alsa-utils \
+        bluez \
+        upower \
+        pkexec \
+        polkitd \
+        lxpolkit \
+        libnotify-bin \
+        x11-utils \
         network-manager \
         wpasupplicant \
         iw \
-        rfkill
+        rfkill; then
+        log_error "resume 构建无法安装必需运行时依赖"
+        return 1
+    fi
     settle_chroot_dpkg "resume runtime packages"
 
-    for bin in xfce4-screensaver xfce4-screensaver-command wmctrl; do
+    local package
+    for package in \
+        python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
+        pulseaudio pulseaudio-utils alsa-utils bluez upower pkexec polkitd \
+        lxpolkit libnotify-bin x11-utils; do
+        if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
+            log_error "resume required runtime package is not installed: ${package}"
+            return 1
+        fi
+    done
+
+    chroot_exec systemctl enable lightdm.service >/dev/null 2>&1 || true
+
+    for bin in lightdm startxfce4 xfce4-session xfce4-panel xfdesktop xfce4-screensaver xfce4-screensaver-command wmctrl mkfs.ext4; do
         if ! chroot_exec /bin/sh -c "command -v '${bin}'" >/dev/null 2>&1; then
             log_error "resume 构建缺少必要命令: ${bin}"
             exit 1
         fi
     done
+    if ! chroot_exec systemctl list-unit-files lightdm.service 2>/dev/null | grep -Fq lightdm.service; then
+        log_error "resume 构建缺少 lightdm.service"
+        exit 1
+    fi
+    if ! chroot_exec fc-match ':lang=zh-cn' | grep -Eiq 'Noto|WenQuanYi|CJK'; then
+        log_error "resume 构建缺少可供 Qt/Calamares 使用的中文字体"
+        exit 1
+    fi
 }
 
 resume_main() {
@@ -56,6 +128,7 @@ resume_main() {
     # 执行剩余模块（03 及之后）
     local modules=(
         "01_base.sh"
+        "02_apps.sh"
         "03_desktop.sh"
         "04_garlic_claw.sh"
         "05_security_tools.sh"
@@ -67,17 +140,28 @@ resume_main() {
         local mod_path="/tmp/ming-build/modules/${mod}"
         log_step "执行模块: ${mod}"
         chroot_exec bash "${mod_path}"
+        settle_chroot_dpkg "${mod}"
         log_info "模块 ${mod} 完成"
     done
 
     # unpackfs 配置已由 modules/01_base.sh 正确写入 chroot，
     # resume_build 不需要也不应该在这里单独覆盖它（否则会把旧路径写回去）
 
+    local audit_output
+    audit_output="$(chroot_exec dpkg --audit)"
+    if [[ -n "${audit_output}" ]]; then
+        log_error "resume build has unfinished dpkg packages"
+        printf '%s\n' "${audit_output}" >&2
+        exit 1
+    fi
+
+    # initramfs hooks require the chroot runtime mounts. Keep this in the same
+    # order as a full build so resume cannot silently produce a weaker image.
+    generate_initramfs
+
     clean_chroot
     umount_chroot
     trap - EXIT
-
-    generate_initramfs
 
     # 调用主脚本里完整的 build_iso（含 build_iso_manual → grub-mkimage + El Torito + EFI）
     build_iso

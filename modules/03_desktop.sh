@@ -22,6 +22,332 @@ readonly MING_GREEN_DARK="#1E5D55"
 readonly MING_BG="#F4F7F3"
 readonly MING_ACCENT="#2F8A7D"
 
+install_ota_target_guard() {
+    local source=/tmp/ming-build/assets/ming-ota-target-guard.py
+    local module_dir=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-ota-target-guard
+    [[ -s "${source}" ]] || {
+        echo "ERROR: missing OTA target guard asset: ${source}" >&2
+        return 1
+    }
+    install -d -m 0755 /usr/local/lib/ming-os "${module_dir}" /etc/calamares/modules
+    install -m 0644 "${source}" /usr/local/lib/ming-os/ming_ota_target_guard.py
+    cat > "${module_dir}/module.desc" << 'MINGOTAGUARDDESC'
+---
+type: "job"
+name: "ming-ota-target-guard"
+interface: "python"
+script: "main.py"
+MINGOTAGUARDDESC
+    cat > "${module_dir}/main.py" << 'MINGOTAGUARDPY'
+#!/usr/bin/env python3
+import importlib.util
+import pathlib
+
+import libcalamares
+
+path = pathlib.Path("/usr/local/lib/ming-os/ming_ota_target_guard.py")
+spec = importlib.util.spec_from_file_location("ming_ota_target_guard", path)
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+
+
+def run():
+    if not pathlib.Path("/run/ming-ota-preflight.ok").is_file():
+        return None
+    ok, message = guard.validate_from_marker(
+        libcalamares.globalstorage.value("partitions")
+    )
+    return None if ok else ("Ming OTA safety check failed", message)
+MINGOTAGUARDPY
+    cat > /etc/calamares/modules/ming-ota-target-guard.conf << 'MINGOTAGUARDCONF'
+---
+MINGOTAGUARDCONF
+    chmod 0644 "${module_dir}/main.py"
+}
+
+install_ming_settings() {
+    local asset_dir="/tmp/ming-build/assets"
+    local lib_dir="/usr/local/lib/ming-os"
+    mkdir -p "${lib_dir}" /usr/local/bin
+
+    for asset in ming-settings.py ming-settings-backend.py ming-display-control.py; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "ERROR: missing Ming Settings asset: ${asset}" >&2
+            return 1
+        fi
+    done
+
+    install -m 0755 "${asset_dir}/ming-settings.py" /usr/local/bin/ming-settings
+    install -m 0755 "${asset_dir}/ming-settings-backend.py" "${lib_dir}/ming-settings-backend"
+    install -m 0755 "${asset_dir}/ming-display-control.py" /usr/local/bin/ming-display-control
+    cat > /usr/local/bin/ming-control-center << 'MINGCONTROLWRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+log_dir="${HOME}/.cache/ming-os"
+if ! mkdir -p "${log_dir}" 2>/dev/null; then
+    log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+fi
+log_file="${log_dir}/ming-settings-launch.log"
+
+if ! runtime_error="$(/usr/bin/python3 - <<'PY' 2>&1
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gtk
+PY
+)"; then
+    printf '[%s] GTK4/Adwaita runtime check failed: %s\n' \
+        "$(date '+%F %T')" "${runtime_error}" >>"${log_file}" 2>/dev/null || true
+    message="Ming 设置缺少 GTK4/Adwaita 运行依赖。请安装 gir1.2-gtk-4.0 和 gir1.2-adw-1 后重试。日志：${log_file}"
+    if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+        zenity --error --title="Ming 设置无法启动" --text="${message}" --width=520 2>/dev/null || \
+            notify-send "Ming 设置无法启动" "${message}" 2>/dev/null || true
+    else
+        notify-send "Ming 设置无法启动" "${message}" 2>/dev/null || true
+    fi
+    exit 1
+fi
+
+exec /usr/local/bin/ming-settings "$@"
+MINGCONTROLWRAPPER
+    chmod 0755 /usr/local/bin/ming-control-center
+
+    # The Xfce backend remains installed, but its obsolete visible control
+    # center must not compete with Ming Settings in launchers or search.
+    local desktop_file
+    for desktop_file in \
+        /usr/share/applications/xfce-settings-manager.desktop \
+        /usr/share/applications/xfce4-settings-manager.desktop \
+        /usr/share/applications/xfce4-display-settings.desktop; do
+        [[ -f "${desktop_file}" ]] || continue
+        if grep -q '^NoDisplay=' "${desktop_file}"; then
+            sed -i 's/^NoDisplay=.*/NoDisplay=true/' "${desktop_file}"
+        else
+            sed -i '/^\[Desktop Entry\]/a NoDisplay=true' "${desktop_file}"
+        fi
+    done
+
+    # Some applications invoke the old executable directly instead of its
+    # desktop entry.  Preserve it once, then route that compatibility command
+    # to the Ming display page so it cannot bypass the confirmed rollback UI.
+    local xfce_display_binary=/usr/bin/xfce4-display-settings
+    local xfce_display_real="${lib_dir}/xfce4-display-settings.real"
+    if [[ -e "${xfce_display_binary}" ]] \
+        && ! grep -Fq 'Ming OS display settings compatibility launcher' "${xfce_display_binary}" 2>/dev/null \
+        && [[ ! -e "${xfce_display_real}" ]]; then
+        mv -- "${xfce_display_binary}" "${xfce_display_real}"
+    fi
+    cat > "${xfce_display_binary}" << 'MINGXFCECOMPATDISPLAY'
+#!/usr/bin/env bash
+# Ming OS display settings compatibility launcher; do not call the preserved
+# xfce4-display-settings.real here, otherwise callers bypass confirmation.
+exec /usr/local/bin/ming-control-center --page display "$@"
+MINGXFCECOMPATDISPLAY
+    chmod 0755 "${xfce_display_binary}"
+}
+
+cleanup_retired_ming_entries() {
+    cat > /usr/local/bin/ming-migrate-all-disks << 'MINGMIGRATEDISKS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+hub="${HOME}/所有磁盘"
+destination="${HOME}/Documents/所有磁盘-旧文件"
+bookmarks="${HOME}/.config/gtk-3.0/bookmarks"
+
+if [[ -d "${hub}" && ! -L "${hub}" ]]; then
+    mkdir -p "${destination}"
+    shopt -s dotglob nullglob
+    for item in "${hub}"/*; do
+        name="$(basename "${item}")"
+        generated=false
+        if [[ -L "${item}" ]]; then
+            case "${name}" in
+                我的文件|桌面|下载|文档|系统盘) generated=true ;;
+            esac
+        elif [[ "${name}" == "README.txt" ]] && grep -Fq 'Ming OS 所有磁盘' "${item}" 2>/dev/null; then
+            generated=true
+        elif [[ "${name}" == "释放空间.desktop" ]] && grep -Fq 'Exec=ming-control-center' "${item}" 2>/dev/null; then
+            generated=true
+        fi
+        if [[ "${generated}" == "true" ]]; then
+            rm -f -- "${item}"
+            continue
+        fi
+        target="${destination}/${name}"
+        if [[ -e "${target}" || -L "${target}" ]]; then
+            target="${target}.$(date +%Y%m%d-%H%M%S)"
+        fi
+        mv -- "${item}" "${target}"
+    done
+    rmdir -- "${hub}" 2>/dev/null || true
+fi
+
+if [[ -f "${bookmarks}" ]]; then
+    sed -i '\|file://.*/所有磁盘|d' "${bookmarks}"
+fi
+rm -f -- \
+    "${HOME}/Desktop/Ming 应用库.desktop" \
+    "${HOME}/Desktop/所有磁盘.desktop" \
+    "${HOME}/Desktop/ming-app-library.desktop" \
+    "${HOME}/Desktop/ming-disk-hub.desktop"
+MINGMIGRATEDISKS
+    chmod 0755 /usr/local/bin/ming-migrate-all-disks
+
+    rm -f /usr/share/applications/ming-disk-hub.desktop
+    rm -f /usr/local/bin/ming-disk-hub
+    rm -f "/home/${MING_USER}/.config/plank/dock1/launchers/ming-disk-hub.dockitem"
+    rm -f "/home/${MING_USER}/Desktop/Ming 应用库.desktop" \
+          "/home/${MING_USER}/Desktop/所有磁盘.desktop" \
+          "/home/${MING_USER}/Desktop/ming-app-library.desktop" \
+          "/home/${MING_USER}/Desktop/ming-disk-hub.desktop"
+
+    mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > "/home/${MING_USER}/.config/autostart/ming-migrate-all-disks.desktop" << 'MINGMIGRATEAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Files Migration
+Exec=sh -c '/usr/local/bin/ming-migrate-all-disks && rm -f ~/.config/autostart/ming-migrate-all-disks.desktop'
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+MINGMIGRATEAUTO
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-migrate-all-disks.desktop"
+}
+
+install_ming_shell_components() {
+    local asset_dir="/tmp/ming-build/assets"
+    local lib_dir="/usr/local/lib/ming-os"
+    local asset
+    mkdir -p "${lib_dir}" /usr/local/bin "/home/${MING_USER}/.local/share/applications"
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-hardware-status.py ming-app-drawer.py ming-launch.py; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "ERROR: missing Ming shell asset: ${asset}" >&2
+            return 1
+        fi
+    done
+
+    install -m 0644 "${asset_dir}/ming-shell-common.py" "${lib_dir}/ming-shell-common.py"
+    install -m 0644 "${asset_dir}/ming-notifications.py" "${lib_dir}/ming-notifications.py"
+    install -m 0644 "${asset_dir}/ming-device-control.py" "${lib_dir}/ming-device-control.py"
+    # Drawer and broker load the common module beside their executable.
+    install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
+    install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
+    install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
+    install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
+    install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
+    install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
+
+    mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop" << 'MINGLAUNCHAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Launch Broker
+Exec=/usr/local/bin/ming-launch --server
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=1
+MINGLAUNCHAUTO
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop"
+
+    cat > /usr/local/bin/ming-app-library << 'MINGDRAWERCOMPAT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/bin/ming-app-drawer --toggle "$@"
+MINGDRAWERCOMPAT
+    chmod 0755 /usr/local/bin/ming-app-library
+
+    cat > /usr/share/applications/ming-app-library.desktop << 'MINGDRAWERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Ming 应用抽屉
+Name[zh_CN]=Ming 应用抽屉
+Comment=Browse and launch installed applications
+Comment[zh_CN]=从底部抽屉浏览并启动应用
+Exec=/usr/local/bin/ming-app-drawer --toggle
+Icon=ming-app-library
+Terminal=false
+Categories=Utility;System;
+StartupNotify=false
+NoDisplay=true
+MINGDRAWERDESKTOP
+    cp /usr/share/applications/ming-app-library.desktop "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications/ming-app-library.desktop"
+}
+
+install_ming_files() {
+    local asset_dir="/tmp/ming-build/assets"
+    local lib_dir="/usr/local/lib/ming-os"
+    mkdir -p "${lib_dir}" /usr/local/bin "/home/${MING_USER}/.config"
+    for asset in ming-files.py ming-files-model.py; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "ERROR: missing Ming Files asset: ${asset}" >&2
+            return 1
+        fi
+    done
+
+    install -m 0755 "${asset_dir}/ming-files.py" "${lib_dir}/ming-files.py"
+    install -m 0644 "${asset_dir}/ming-files-model.py" "${lib_dir}/ming-files-model.py"
+    cat > /usr/local/bin/ming-files << 'MINGFILESWRAPPER'
+#!/usr/bin/env bash
+set -uo pipefail
+log="${HOME}/.cache/ming-os/ming-files.log"
+mkdir -p "$(dirname "${log}")"
+python3 /usr/local/lib/ming-os/ming-files.py "$@" 2>>"${log}"
+rc=$?
+if [[ "${rc}" -ne 0 ]] && command -v thunar >/dev/null 2>&1; then
+    notify-send "Ming 文件" "Ming Files 运行组件不可用，已切换到兼容文件管理器。日志：${log}" 2>/dev/null || true
+    exec thunar "$@"
+fi
+exit "${rc}"
+MINGFILESWRAPPER
+    chmod 0755 /usr/local/bin/ming-files
+
+    cat > /usr/share/applications/ming-files.desktop << 'MINGFILESDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Ming 文件
+Name[zh_CN]=Ming 文件
+Comment=Browse files, disks and network locations
+Comment[zh_CN]=浏览文件、磁盘与网络位置
+Exec=/usr/local/bin/ming-files %U
+Icon=files-icon
+Terminal=false
+Categories=System;FileManager;
+MimeType=inode/directory;application/x-gnome-saved-search;
+StartupNotify=true
+MINGFILESDESKTOP
+    cp /usr/share/applications/ming-files.desktop "/home/${MING_USER}/.local/share/applications/"
+    python3 - "/home/${MING_USER}/.config/mimeapps.list" << 'MINGMIMEAPPS'
+import configparser
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+config = configparser.ConfigParser(interpolation=None, strict=False)
+config.optionxform = str
+if path.exists():
+    config.read(path, encoding="utf-8")
+for section in ("Default Applications", "Added Associations"):
+    if not config.has_section(section):
+        config.add_section(section)
+config["Default Applications"]["inode/directory"] = "ming-files.desktop"
+config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
+existing = config["Added Associations"].get("inode/directory", "")
+items = [item for item in existing.split(";") if item]
+items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]
+config["Added Associations"]["inode/directory"] = ";".join(items) + ";"
+with path.open("w", encoding="utf-8") as handle:
+    config.write(handle, space_around_delimiters=False)
+MINGMIMEAPPS
+    chown -R "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-files.desktop" \
+        "/home/${MING_USER}/.config/mimeapps.list"
+}
+
 # ======================== HiDPI 自动缩放 ========================
 
 configure_hidpi_autoscale() {
@@ -31,6 +357,12 @@ configure_hidpi_autoscale() {
 # 支持: 5:4 / 4:3 / 16:9 / 16:10 / 21:9 / 32:9 及纵向旋转
 
 SCALE_CONFIG="${HOME}/.config/ming-os/scale-done"
+SCALE_PREFERENCE="${HOME}/.config/ming-os/scale-preference.json"
+if [[ -s "${SCALE_PREFERENCE}" ]]; then
+    # Ming Settings wrote an explicit accessibility choice.  A repair or
+    # resolution change must not silently replace it with an auto default.
+    exit 0
+fi
 if [[ -f "${SCALE_CONFIG}" ]]; then
     exit 0
 fi
@@ -116,8 +448,8 @@ PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ -f "${PLANK_SETTINGS}" ]]; then
     sed -i "s/^IconSize=.*/IconSize=${DOCK_ICON}/" "${PLANK_SETTINGS}" 2>/dev/null || true
     if [[ "${LOW_MEMORY}" -eq 1 ]]; then
-        sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=110/" "${PLANK_SETTINGS}" 2>/dev/null || true
+        sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
     fi
 fi
 
@@ -755,7 +1087,7 @@ window {
 window decoration {
   border-radius: 12px;
   box-shadow: 0 12px 28px rgba(26, 67, 56, 0.09);
-  margin: 8px;
+  margin: 0;
 }
 
 button {
@@ -1057,7 +1389,7 @@ XFWMMING
 [Desktop Entry]
 Type=X-GNOME-Metatheme
 Name=Ming Glass
-Comment=Ming OS 26.3.1 Light Paper Theme
+Comment=Ming OS 26.3.2 Light Paper Theme
 Encoding=UTF-8
 
 [X-GNOME-Metatheme]
@@ -1328,7 +1660,7 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;firefox-esr.dockitem;;spark-store.dockitem;;wechat.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1359,24 +1691,92 @@ ItemsAlignment=3
 FadeOpacity=1.0
 PLANKSETTINGS
 
-    # Dock 启动器（.dockitem 指向系统 .desktop）
-    _plank_launcher() {
+    # Late modules install some launchers after this module. Keep generation in
+    # one idempotent helper and let 07_finalize run it again before seeding skel.
+    cat > /usr/local/sbin/ming-refresh-dock-launchers << 'MINGREFRESHDOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+
+target_user="${1:-${SUDO_USER:-$(id -un)}}"
+user_home="$(getent passwd "${target_user}" | awk -F: 'NR == 1 { print $6 }')"
+if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
+    echo "ERROR: cannot resolve Dock home for ${target_user}" >&2
+    exit 1
+fi
+
+plank_dir="${user_home}/.config/plank/dock1"
+mkdir -p "${plank_dir}/launchers"
+missing=0
+
+_plank_launcher() {
         local name="$1" target="$2"
+        local target_path="/usr/share/applications/${target}"
+        local proxy_path="/usr/share/applications/ming-dock-${name}.desktop"
+        local display_name icon wm_class exec_line
+        case "${name}" in
+            ming-edge)
+                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/microsoft-edge.desktop
+                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/microsoft-edge-stable.desktop
+                ;;
+            spark-store)
+                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/ming-install-spark-store.desktop
+                ;;
+        esac
+        [[ -f "${target_path}" ]] || {
+            echo "WARN: Dock target missing: ${target}" >&2
+            return 1
+        }
+        display_name="$(awk -F= '/^Name\[zh_CN\]=/{print substr($0,index($0,"=")+1); exit} /^Name=/{fallback=substr($0,index($0,"=")+1)} END{if (!found && fallback) print fallback}' "${target_path}" | head -n1)"
+        icon="$(awk -F= '/^Icon=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
+        wm_class="$(awk -F= '/^StartupWMClass=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
+        case "${name}" in
+            ming-settings) wm_class="${wm_class:-uno.scallion.MingSettings}" ;;
+            ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
+            ming-edge) wm_class="${wm_class:-microsoft-edge}" ;;
+            ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
+            ming-update) wm_class="${wm_class:-Zenity}" ;;
+        esac
+        exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
+        cat > "${proxy_path}" << DOCKPROXY
+[Desktop Entry]
+Type=Application
+Name=${display_name:-${name}}
+Exec=${exec_line}
+Icon=${icon:-application-x-executable}
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=${wm_class:-${name}}
+DOCKPROXY
         cat > "${plank_dir}/launchers/${name}.dockitem" << DOCKITEM
 [PlankDockItemPreferences]
-Launcher=file:///usr/share/applications/${target}
+Launcher=file://${proxy_path}
 DOCKITEM
-    }
+}
 
-    _plank_launcher "ming-app-library" "ming-app-library.desktop"
-    _plank_launcher "firefox-esr" "firefox-esr.desktop"
-    _plank_launcher "ming-files" "ming-files.desktop"
-    _plank_launcher "spark-store" "spark-store.desktop"
-    _plank_launcher "wechat" "ming-wechat.desktop"
-    _plank_launcher "garlic-claw" "garlic-claw.desktop"
-    _plank_launcher "ming-update" "ming-update.desktop"
-    _plank_launcher "ming-settings" "ming-settings.desktop"
-    _plank_launcher "ming-terminal" "ming-terminal.desktop"
+cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
+[PlankDockItemPreferences]
+Launcher=file:///usr/share/applications/ming-app-library.desktop
+DRAWERDOCKITEM
+for launcher in \
+    "ming-edge:ming-edge.desktop" \
+    "ming-files:ming-files.desktop" \
+    "spark-store:spark-store.desktop" \
+    "garlic-claw:garlic-claw.desktop" \
+    "ming-update:ming-update.desktop" \
+    "ming-settings:ming-settings.desktop" \
+    "ming-terminal:ming-terminal.desktop"; do
+    _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
+done
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
+fi
+exit "${missing}"
+MINGREFRESHDOCK
+    chmod 0755 /usr/local/sbin/ming-refresh-dock-launchers
+    /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
+        echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
     # Ming 纸感 Dock 主题
     local theme_dir="/usr/share/plank/themes/Ming"
@@ -1396,13 +1796,13 @@ HorizPadding=16
 TopPadding=-8
 BottomPadding=8
 ItemPadding=6
-IndicatorSize=5
+IndicatorSize=4
 IconShadowSize=3
 UrgentBounceHeight=1.50
 LaunchBounceHeight=1.05
 FadeOpacity=1.0
 ClickTime=220
-UrgentBounceTime=620
+UrgentBounceTime=600
 LaunchBounceTime=520
 ActiveTime=220
 SlideTime=240
@@ -1431,8 +1831,8 @@ APPS = [
     ('ming-settings.desktop', 'ming-control-center', 'Ming 设置'),
     ('ming-app-library.desktop', 'ming-app-library', '应用库'),
     ('ming-files.desktop', 'files-icon', '文件'),
-    ('firefox-esr.desktop', 'firefox', 'Firefox'),
-    ('ming-wechat.desktop', 'wechat', '微信'),
+    ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
+    ('spark-store.desktop', 'spark-store', 'Spark'),
     ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
     ('ming-update.desktop', 'ming-update-icon', '系统更新'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
@@ -1454,7 +1854,6 @@ window#ming-dock-window {
   padding: 5px;
   background: rgba(255, 255, 255, 0.22);
   border: 1px solid transparent;
-  transition: 160ms ease-out;
 }
 .dock-button:hover {
   background: rgba(47, 138, 125, 0.14);
@@ -1534,8 +1933,11 @@ class MingDock(Gtk.Window):
         self.stick()
         self.set_keep_above(True)
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 710)
+        try:
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 710)
+        except GLib.Error:
+            pass
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         box.get_style_context().add_class('dock')
@@ -1543,6 +1945,7 @@ class MingDock(Gtk.Window):
             box.pack_start(DockButton(basename, icon, fallback), False, False, 0)
         self.add(box)
         self.connect('size-allocate', lambda *_args: self.place())
+        self.get_screen().connect('size-changed', lambda *_args: self.place())
         GLib.timeout_add_seconds(2, self.place)
         self.show_all()
         self.place()
@@ -1583,9 +1986,50 @@ ming_log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
 }
 
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+dock_process_running() {
+    pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1
+}
+
+dock_window_visible() {
+    dock_process_running || return 1
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    local size sw sh
+    size="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
+    sw="${size%x*}"
+    sh="${size#*x}"
+    [[ "${sw}" =~ ^[0-9]+$ && "${sh}" =~ ^[0-9]+$ ]] || { sw=32768; sh=32768; }
+    x11_call wmctrl -lG 2>/dev/null | awk -v sw="${sw}" -v sh="${sh}" '
+        /Ming Dock$/ && $3 < sw && $4 < sh && $5 > 0 && $6 > 0 { found=1 }
+        END { exit !found }
+    '
+}
+
+stop_ming_dock() {
+    pkill -TERM -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 || true
+}
+
+start_plank_fallback() {
+    command -v plank >/dev/null 2>&1 || return 1
+    stop_ming_dock
+    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
+    local log_file
+    log_file="$(ming_log_dir)/ming-dock.log"
+    ming_log "${log_file}" "starting single-instance Plank fallback"
+    (nohup plank >>"${log_file}" 2>&1 &) || true
+}
+
 start_ming_dock() {
-    command -v ming-dock >/dev/null 2>&1 || return 0
-    pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 && return 0
+    command -v ming-dock >/dev/null 2>&1 || return 1
+    dock_window_visible && return 0
+    if dock_process_running; then
+        stop_ming_dock
+        sleep 1
+    fi
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
@@ -1593,13 +2037,37 @@ start_ming_dock() {
     log_file="$(ming_log_dir)/ming-dock.log"
     ming_log "${log_file}" "starting ming-dock DISPLAY=${DISPLAY}"
     (nohup ming-dock >>"${log_file}" 2>&1 &) || (nohup ming-dock >/dev/null 2>&1 &)
+    for _ready_try in $(seq 1 10); do
+        dock_window_visible && return 0
+        sleep 0.25
+    done
+    ming_log "${log_file}" "ming-dock did not publish a visible in-bounds window"
+    stop_ming_dock
+    return 1
 }
 
 case "${1:-start}" in
     --session)
+        lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-dock-watchdog.lock"
+        if ! mkdir "${lock_dir}" 2>/dev/null; then
+            exit 0
+        fi
+        trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
         sleep 3
-        for _ in $(seq 1 24); do
-            start_ming_dock
+        failures=0
+        while true; do
+            if start_ming_dock; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                if [[ "${failures}" -ge 3 ]]; then
+                    start_plank_fallback || true
+                    while true; do
+                        pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || start_plank_fallback || true
+                        sleep 5
+                    done
+                fi
+            fi
             sleep 5
         done
         ;;
@@ -1609,6 +2077,553 @@ case "${1:-start}" in
 esac
 MINGDOCKWATCH
     chmod 0755 /usr/local/bin/ming-dock-watchdog
+
+cat > /usr/local/bin/ming-window-control << 'MINGWINDOWCONTROL'
+#!/usr/bin/env bash
+# Conservative Xfwm/EWMH recovery.  It never terminates client applications.
+set -u
+
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/ming-os"
+mkdir -p "${state_dir}" 2>/dev/null || state_dir="${XDG_RUNTIME_DIR:-/tmp}"
+log_file="${log_dir}/window-manager.log"
+rate_file="${state_dir}/window-manager.last-repair"
+
+log() {
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
+}
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+status_fields() {
+    xfwm_running=false
+    wmctrl_available=false
+    wm_name="missing"
+    wm_name_matches=false
+    wm_mismatch="wmctrl-unavailable"
+    ewmh=false
+    active_window="none"
+    picom_running=false
+    picom_profile="none"
+    window_healthy=false
+
+    if pgrep -u "$(id -u)" -x xfwm4 >/dev/null 2>&1; then
+        xfwm_running=true
+    fi
+
+    local wm_info=""
+    if wm_info="$(x11_call wmctrl -m 2>/dev/null)"; then
+        wmctrl_available=true
+        wm_name="$(awk -F: '/^Name:/ {sub(/^[[:space:]]*/, "", $2); print $2; exit}' <<<"${wm_info}" | tr -cd '[:alnum:]. _-')"
+        wm_name="${wm_name:-unknown}"
+        if [[ "${wm_name,,}" == "xfwm4" ]]; then
+            wm_name_matches=true
+            wm_mismatch="none"
+        else
+            wm_mismatch="wmctrl-reports-${wm_name}"
+        fi
+    fi
+
+    local root_props=""
+    if root_props="$(x11_call xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null)" \
+        && grep -qE 'window id #[[:space:]]*0x[0-9a-fA-F]+' <<<"${root_props}"; then
+        ewmh=true
+    fi
+
+    local active_props=""
+    if active_props="$(x11_call xprop -root _NET_ACTIVE_WINDOW 2>/dev/null)"; then
+        active_window="$(grep -oE '0x[0-9a-fA-F]+' <<<"${active_props}" | head -n1 || true)"
+        active_window="${active_window:-none}"
+    fi
+
+    local picom_cmd=""
+    if picom_cmd="$(pgrep -a -u "$(id -u)" -x picom 2>/dev/null)"; then
+        picom_running=true
+        case "${picom_cmd}" in
+            *picom-fallback.conf*) picom_profile="software" ;;
+            *picom-lowmem.conf*) picom_profile="low-memory" ;;
+            *) picom_profile="main" ;;
+        esac
+    fi
+
+    if ${xfwm_running} && ${wmctrl_available} && ${ewmh} && ${wm_name_matches}; then
+        window_healthy=true
+    fi
+}
+
+status_json() {
+    status_fields
+    MING_XFWM_RUNNING="${xfwm_running}" MING_WMCTRL_AVAILABLE="${wmctrl_available}" \
+    MING_WM_NAME="${wm_name}" MING_WM_NAME_MATCHES="${wm_name_matches}" \
+    MING_EWMH="${ewmh}" MING_HEALTHY="${window_healthy}" \
+    MING_MISMATCH="${wm_mismatch}" MING_ACTIVE_WINDOW="${active_window}" \
+    MING_PICOM_RUNNING="${picom_running}" MING_PICOM_PROFILE="${picom_profile}" \
+    MING_LOG_FILE="${log_file}" python3 - <<'PY'
+import json
+import os
+
+boolean = lambda name: os.environ.get(name) == "true"
+print(json.dumps({
+    "xfwm": {"running": boolean("MING_XFWM_RUNNING"),
+             "wmctrl": boolean("MING_WMCTRL_AVAILABLE"),
+             "name": os.environ["MING_WM_NAME"],
+             "matches_ewmh": boolean("MING_WM_NAME_MATCHES")},
+    "ewmh": boolean("MING_EWMH"),
+    "healthy": boolean("MING_HEALTHY"),
+    "mismatch": os.environ["MING_MISMATCH"],
+    "active_window": os.environ["MING_ACTIVE_WINDOW"],
+    "picom": {"running": boolean("MING_PICOM_RUNNING"),
+              "profile": os.environ["MING_PICOM_PROFILE"]},
+    "log": os.environ["MING_LOG_FILE"],
+}, ensure_ascii=False))
+PY
+}
+
+x11_id_is_valid() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+require_window() {
+    local window_id="$1"
+    x11_id_is_valid "${window_id}" || {
+        printf '窗口 ID 必须是十六进制 X11 ID（例如 0x01200007）。\n' >&2
+        return 22
+    }
+    x11_call xprop -id "${window_id}" >/dev/null 2>&1 || {
+        printf '未找到指定窗口：%s\n' "${window_id}" >&2
+        return 3
+    }
+}
+
+repair_window_manager() {
+    [[ -n "${DISPLAY:-}" ]] || {
+        log 'repair refused: no X11 DISPLAY is available'
+        printf '当前没有可用的图形会话，未执行窗口管理器修复。\n' >&2
+        return 2
+    }
+    command -v flock >/dev/null 2>&1 || {
+        log 'repair refused: flock is unavailable'
+        return 1
+    }
+    command -v xfwm4 >/dev/null 2>&1 || {
+        log 'repair refused: xfwm4 is unavailable'
+        return 1
+    }
+
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ming-window-control.lock" || return 1
+    if ! flock -n 9; then
+        log 'repair skipped: another window-manager repair is active'
+        return 75
+    fi
+
+    status_fields
+    if ${window_healthy}; then
+        log 'repair skipped: Xfwm/EWMH is already healthy'
+        return 0
+    fi
+
+    local now last_repair=0
+    now="$(date +%s)"
+    [[ -r "${rate_file}" ]] && read -r last_repair < "${rate_file}" || true
+    if [[ "${last_repair}" =~ ^[0-9]+$ ]] && (( now - last_repair < 60 )); then
+        log 'repair skipped: rate limited after a recent attempt'
+        return 75
+    fi
+    printf '%s\n' "${now}" > "${rate_file}" 2>/dev/null || true
+
+    log "repair starting: xfwm=${xfwm_running} wmctrl=${wmctrl_available} wm_name=${wm_name} ewmh=${ewmh} mismatch=${wm_mismatch}"
+    # xfwm4 --replace reclaims only the window-manager selection; it does not
+    # kill WPS, Quark, or any other client application.
+    nohup xfwm4 --replace >>"${log_file}" 2>&1 &
+    for _attempt in $(seq 1 8); do
+        sleep 1
+        status_fields
+        if ${window_healthy}; then
+            log 'repair succeeded: Xfwm/EWMH recovered'
+            return 0
+        fi
+    done
+    log "repair failed: xfwm=${xfwm_running} wmctrl=${wmctrl_available} wm_name=${wm_name} ewmh=${ewmh} mismatch=${wm_mismatch}"
+    return 1
+}
+
+window_action() {
+    local action="$1" window_id="$2"
+    require_window "${window_id}" || return $?
+    command -v wmctrl >/dev/null 2>&1 || {
+        printf '窗口控制组件 wmctrl 不可用。\n' >&2
+        return 127
+    }
+    case "${action}" in
+        focus)
+            x11_call wmctrl -i -a "${window_id}"
+            ;;
+        maximize)
+            x11_call wmctrl -i -r "${window_id}" -b add,maximized_vert,maximized_horz && \
+                x11_call wmctrl -i -a "${window_id}"
+            ;;
+        restore)
+            x11_call wmctrl -i -r "${window_id}" -b remove,maximized_vert,maximized_horz,hidden && \
+                x11_call wmctrl -i -a "${window_id}"
+            ;;
+        close)
+            # wmctrl sends the EWMH _NET_CLOSE_WINDOW request.  The client is
+            # allowed to veto it or prompt for unsaved work; no process is killed.
+            x11_call wmctrl -i -c "${window_id}"
+            ;;
+    esac
+}
+
+case "${1:-}" in
+    status)
+        [[ "${2:-}" == "--json" && "$#" -eq 2 ]] || {
+            printf 'Usage: %s status --json\n' "$0" >&2
+            exit 2
+        }
+        status_json
+        ;;
+    repair)
+        [[ "$#" -eq 1 ]] || { printf 'Usage: %s repair\n' "$0" >&2; exit 2; }
+        repair_window_manager
+        ;;
+    focus|maximize|restore|close)
+        [[ "${2:-}" == "--window-id" && -n "${3:-}" && "$#" -eq 3 ]] || {
+            printf 'Usage: %s %s --window-id 0x01200007\n' "$0" "$1" >&2
+            exit 2
+        }
+        window_action "$1" "$3"
+        ;;
+    *)
+        printf 'Usage: %s {status --json|repair|focus|maximize|restore|close --window-id HEX}\n' "$0" >&2
+        exit 2
+        ;;
+esac
+MINGWINDOWCONTROL
+    chmod 0755 /usr/local/bin/ming-window-control
+
+cat > /usr/local/bin/ming-desktop-healthcheck << 'MINGDESKHEALTH'
+#!/usr/bin/env bash
+set -u
+
+json=false
+repair=false
+for argument in "$@"; do
+    case "${argument}" in
+        --json) json=true ;;
+        --repair) repair=true ;;
+        *) printf 'Usage: %s [--json] [--repair]\n' "$0" >&2; exit 2 ;;
+    esac
+done
+
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+log_file="${log_dir}/desktop-health.log"
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true; }
+
+has_proc() {
+    pgrep -u "$(id -u)" -f "$1" >/dev/null 2>&1
+}
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+window_manager_snapshot() {
+    window_manager_running=false
+    window_manager_ewmh=false
+    window_manager_healthy=false
+    window_manager_visible=false
+    window_manager_stacking="missing"
+    window_manager_geometry="n/a"
+    window_manager_log="${HOME}/.cache/ming-os/window-manager.log"
+    local status=""
+    if [[ ! -x /usr/local/bin/ming-window-control ]]; then
+        log "window manager helper is missing"
+        return 0
+    fi
+    status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
+    if grep -Fq '"xfwm":{"running":true' <<<"${status}"; then
+        window_manager_running=true
+        window_manager_visible=true
+    fi
+    if grep -Fq '"ewmh":true' <<<"${status}"; then
+        window_manager_ewmh=true
+        window_manager_stacking="ewmh"
+    fi
+    if grep -Fq '"healthy":true' <<<"${status}"; then
+        window_manager_healthy=true
+    fi
+}
+
+x11_id_is_valid() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+window_id() {
+    local kind="$1"
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    case "${kind}" in
+        desktop) x11_call wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /ming desktop/ && $1 ~ /^0[xX][0-9a-fA-F]+$/ { print $1; exit }' ;;
+        dock)
+            local fallback_id="" candidate_id candidate_geometry screen=""
+            local xprop_available=false
+            command -v xprop >/dev/null 2>&1 && xprop_available=true
+            ${xprop_available} || screen="$(screen_geometry)"
+            while read -r candidate_id; do
+                [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
+                [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
+                if ${xprop_available} && x11_call xprop -id "${candidate_id}" 2>/dev/null | grep -q '_NET_WM_WINDOW_TYPE_DOCK'; then
+                    printf '%s\n' "${candidate_id}"
+                    return 0
+                fi
+                if ! ${xprop_available}; then
+                    candidate_geometry="$(window_geometry "${candidate_id}")"
+                    if geometry_is_in_bounds "${candidate_geometry}" "${screen}" && \
+                       geometry_is_bottom "${candidate_geometry}" "${screen}"; then
+                        printf '%s\n' "${candidate_id}"
+                        return 0
+                    fi
+                fi
+            done < <(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }')
+            [[ -n "${fallback_id}" ]] && printf '%s\n' "${fallback_id}"
+            ;;
+    esac
+}
+
+window_geometry() {
+    local id="$1"
+    x11_id_is_valid "${id}" || return 1
+    x11_call wmctrl -lGx 2>/dev/null | awk -v id="${id}" '$1 == id { printf "%s,%s,%s,%s", $3, $4, $5, $6; exit }'
+}
+
+screen_geometry() {
+    local dimensions
+    dimensions="$(x11_call xrandr --current 2>/dev/null | sed -n 's/.*current \([0-9][0-9]*\) x \([0-9][0-9]*\).*/0 0 \1 \2/p' | head -n1)"
+    if [[ -z "${dimensions}" ]] && command -v xdpyinfo >/dev/null 2>&1; then
+        dimensions="$(x11_call xdpyinfo 2>/dev/null | sed -n 's/.*dimensions:[[:space:]]*\([0-9][0-9]*\)x\([0-9][0-9]*\).*/0 0 \1 \2/p' | head -n1)"
+    fi
+    [[ -n "${dimensions}" ]] || dimensions="0 0 32768 32768"
+    printf '%s\n' "${dimensions}"
+}
+
+geometry_is_visible() {
+    local geometry="$1" screen="$2"
+    local x y width height sx sy sw sh
+    IFS=, read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${x:-}" =~ ^-?[0-9]+$ && "${y:-}" =~ ^-?[0-9]+$ && "${width:-}" =~ ^[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
+    (( width > 0 && height > 0 && x < sx + sw && y < sy + sh && x + width > sx && y + height > sy ))
+}
+
+geometry_is_in_bounds() {
+    local geometry="$1" screen="$2"
+    local x y width height sx sy sw sh
+    IFS=, read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${x:-}" =~ ^-?[0-9]+$ && "${y:-}" =~ ^-?[0-9]+$ && "${width:-}" =~ ^[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
+    (( width > 0 && height > 0 && x >= sx && y >= sy && x + width <= sx + sw && y + height <= sy + sh ))
+}
+
+geometry_is_bottom() {
+    local geometry="$1" screen="$2"
+    local x y width height sx sy sw sh
+    IFS=, read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${y:-}" =~ ^-?[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
+    (( y + height >= sy + (sh * 3 / 4) ))
+}
+
+window_stacking() {
+    local id="$1" role="$2" properties=""
+    if x11_id_is_valid "${id}" && command -v xprop >/dev/null 2>&1; then
+        properties="$(x11_call xprop -id "${id}" 2>/dev/null || true)"
+    fi
+    if [[ "${role}" == "dock" ]]; then
+        if grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"${properties}" && grep -q '_NET_WM_STATE_ABOVE' <<<"${properties}"; then
+            printf 'dock+above'
+        elif grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"${properties}"; then
+            printf 'dock'
+        else
+            printf 'normal'
+        fi
+    elif grep -q '_NET_WM_WINDOW_TYPE_DESKTOP' <<<"${properties}"; then
+        printf 'desktop'
+    else
+        printf 'normal'
+    fi
+}
+
+repair_components() {
+    log "repair requested"
+    if command -v ming-window-control >/dev/null 2>&1; then
+        /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+            || log "window-manager repair did not recover Xfwm/EWMH"
+    fi
+    if command -v ming-phone-desktop-watchdog >/dev/null 2>&1; then
+        /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || log "desktop repair failed"
+    fi
+    if command -v ming-plank-watchdog >/dev/null 2>&1; then
+        /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || log "dock repair failed"
+    fi
+    if ! has_proc 'ming-launch[[:space:]]+--server' && [[ -x /usr/local/bin/ming-launch ]]; then
+        (nohup /usr/local/bin/ming-launch --server >>"${log_file}" 2>&1 &) || log "launch broker repair failed"
+    fi
+    sleep 1
+    log "repair completed"
+}
+
+${repair} && repair_components
+
+window_manager_snapshot
+
+desktop_running=false
+desktop_visible=false
+desktop_stacking="missing"
+desktop_geometry="none"
+if has_proc '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)'; then
+    desktop_running=true
+fi
+desktop_id="$(window_id desktop)"
+if [[ -n "${desktop_id}" ]]; then
+    desktop_stacking="$(window_stacking "${desktop_id}" desktop)"
+    desktop_geometry="$(window_geometry "${desktop_id}")"
+    if [[ -n "${desktop_geometry}" ]] && geometry_is_visible "${desktop_geometry}" "$(screen_geometry)"; then
+        desktop_visible=true
+    else
+        desktop_geometry="${desktop_geometry:-unknown}"
+    fi
+fi
+
+dock_running=false
+dock_visible=false
+dock_healthy=false
+dock_stacking="missing"
+dock_geometry="none"
+if pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+    dock_running=true
+fi
+dock_id="$(window_id dock)"
+if [[ -n "${dock_id}" ]]; then
+    dock_stacking="$(window_stacking "${dock_id}" dock)"
+    dock_geometry="$(window_geometry "${dock_id}")"
+    if [[ -n "${dock_geometry}" ]] && \
+       geometry_is_in_bounds "${dock_geometry}" "$(screen_geometry)" && \
+       geometry_is_bottom "${dock_geometry}" "$(screen_geometry)"; then
+        dock_visible=true
+        if [[ "${dock_stacking}" == "dock" || "${dock_stacking}" == "dock+above" ]]; then
+            dock_healthy=true
+        fi
+    else
+        dock_geometry="${dock_geometry:-unknown}"
+    fi
+fi
+
+broker_running=false
+has_proc 'ming-launch[[:space:]]+--server' && broker_running=true
+
+if ${json}; then
+    MING_DESKTOP_RUNNING="${desktop_running}" MING_DESKTOP_VISIBLE="${desktop_visible}" \
+    MING_DESKTOP_STACKING="${desktop_stacking}" MING_DESKTOP_GEOMETRY="${desktop_geometry}" \
+    MING_DOCK_RUNNING="${dock_running}" MING_DOCK_VISIBLE="${dock_visible}" \
+    MING_DOCK_STACKING="${dock_stacking}" MING_DOCK_GEOMETRY="${dock_geometry}" \
+    MING_BROKER_RUNNING="${broker_running}" MING_WM_RUNNING="${window_manager_running}" \
+    MING_WM_VISIBLE="${window_manager_visible}" MING_WM_STACKING="${window_manager_stacking}" \
+    MING_WM_GEOMETRY="${window_manager_geometry}" MING_WM_EWMH="${window_manager_ewmh}" \
+    MING_WM_HEALTHY="${window_manager_healthy}" MING_WM_LOG="${window_manager_log}" python3 - <<'PY'
+import json
+import os
+
+boolean = lambda name: os.environ.get(name) == "true"
+component = lambda prefix: {"running": boolean(prefix + "_RUNNING"),
+                            "visible": boolean(prefix + "_VISIBLE"),
+                            "stacking": os.environ[prefix + "_STACKING"],
+                            "geometry": os.environ[prefix + "_GEOMETRY"]}
+payload = {
+    "desktop": component("MING_DESKTOP"),
+    "dock": component("MING_DOCK"),
+    "launch_broker": {"running": boolean("MING_BROKER_RUNNING"), "visible": False,
+                      "stacking": "n/a", "geometry": "n/a"},
+    "window_manager": {"running": boolean("MING_WM_RUNNING"),
+                       "visible": boolean("MING_WM_VISIBLE"),
+                       "stacking": os.environ["MING_WM_STACKING"],
+                       "geometry": os.environ["MING_WM_GEOMETRY"],
+                       "ewmh": boolean("MING_WM_EWMH"),
+                       "healthy": boolean("MING_WM_HEALTHY"),
+                       "log": os.environ["MING_WM_LOG"]},
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+else
+    printf 'desktop: running=%s visible=%s stacking=%s geometry=%s\n' "${desktop_running}" "${desktop_visible}" "${desktop_stacking}" "${desktop_geometry}"
+    printf 'dock: running=%s visible=%s stacking=%s geometry=%s\n' "${dock_running}" "${dock_visible}" "${dock_stacking}" "${dock_geometry}"
+    printf 'launch_broker: running=%s visible=false stacking=n/a geometry=n/a\n' "${broker_running}"
+    printf 'window_manager: running=%s ewmh=%s healthy=%s log=%s\n' \
+        "${window_manager_running}" "${window_manager_ewmh}" "${window_manager_healthy}" "${window_manager_log}"
+fi
+
+${desktop_running} && ${desktop_visible} && ${dock_running} && ${dock_healthy} && ${broker_running} && ${window_manager_healthy}
+MINGDESKHEALTH
+    chmod 0755 /usr/local/bin/ming-desktop-healthcheck
+
+cat > /usr/local/bin/ming-window-manager-watchdog << 'MINGWINDOWWATCH'
+#!/usr/bin/env bash
+# Observe Xfwm/EWMH separately from the desktop/Dock watchdogs.  A transient
+# X11 query failure is not enough to replace the window manager.
+set -u
+
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+log_file="${log_dir}/window-manager.log"
+log() { printf '[%s] watchdog: %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true; }
+
+window_manager_healthy() {
+    local status=""
+    status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
+    grep -Fq '"healthy":true' <<<"${status}"
+}
+
+run_session() {
+    local lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-window-manager-watchdog.lock"
+    exec 9>"${lock_file}" || exit 1
+    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+        exit 0
+    fi
+
+    local failure_count=0 last_repair=0 now
+    sleep 3
+    while true; do
+        if window_manager_healthy; then
+            failure_count=0
+        else
+            failure_count=$((failure_count + 1))
+            log "health failure ${failure_count}/3"
+            now="$(date +%s)"
+            if (( failure_count >= 3 )) && (( now - last_repair >= 60 )); then
+                log 'three consecutive failures; requesting conservative Xfwm/EWMH repair'
+                /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+                    || log 'repair attempt did not report recovery'
+                last_repair="${now}"
+                failure_count=0
+            fi
+        fi
+        sleep 10
+    done
+}
+
+case "${1:-start}" in
+    --session) run_session ;;
+    --check) window_manager_healthy ;;
+    *)
+        /usr/local/bin/ming-window-control status --json
+        ;;
+esac
+MINGWINDOWWATCH
+    chmod 0755 /usr/local/bin/ming-window-manager-watchdog
 
 cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'
 #!/usr/bin/env bash
@@ -1719,22 +2734,231 @@ PHONEDESKWATCH
 #!/usr/bin/env bash
 set -u
 
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+log_file="${log_dir}/plank.log"
+stacking_promotion_attempted_for=""
+
+log() {
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
+}
+
+stop_legacy_dock() {
+    pkill -TERM -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 || true
+}
+
+write_default_plank_settings() {
+    local settings="$1"
+    cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
+[PlankDockPreferences]
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+Position=3
+Alignment=3
+IconSize=40
+ZoomEnabled=true
+ZoomPercent=148
+HideMode=0
+UnhideDelay=0
+HideDelay=0
+Theme=Ming
+Monitor=
+LockItems=false
+PressureReveal=false
+ShowDockItem=true
+ItemsAlignment=3
+FadeOpacity=1.0
+PLANKRUNTIMESETTINGS
+}
+
+ensure_plank_settings() {
+    local settings="${HOME}/.config/plank/dock1/settings"
+    local skel_settings="/etc/skel/.config/plank/dock1/settings"
+    local restored=false
+    mkdir -p "$(dirname "${settings}")" 2>/dev/null || true
+    if [[ ! -f "${settings}" ]]; then
+        if [[ -s "${skel_settings}" ]]; then
+            cp "${skel_settings}" "${settings}" 2>/dev/null || write_default_plank_settings "${settings}"
+        else
+            write_default_plank_settings "${settings}"
+        fi
+        restored=true
+        log "restored complete Plank settings profile"
+    fi
+    if grep -q '^HideMode=' "${settings}"; then
+        sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
+    else
+        printf 'HideMode=0\n' >>"${settings}"
+    fi
+    if ${restored} && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+        /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >>"${log_file}" 2>&1 || \
+            log "Dock launcher refresh after settings restore failed"
+    fi
+}
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+valid_window_id() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+plank_window_id() {
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    local fallback_id="" candidate_id candidate_geometry screen=""
+    local xprop_available=false
+    command -v xprop >/dev/null 2>&1 && xprop_available=true
+    ${xprop_available} || screen="$(screen_geometry)"
+    while read -r candidate_id; do
+        [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
+        [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
+        if ${xprop_available} && x11_call xprop -id "${candidate_id}" 2>/dev/null | grep -q '_NET_WM_WINDOW_TYPE_DOCK'; then
+            printf '%s\n' "${candidate_id}"
+            return 0
+        fi
+        if ! ${xprop_available}; then
+            candidate_geometry="$(window_geometry "${candidate_id}")"
+            if geometry_in_bounds "${candidate_geometry}" "${screen}" && \
+               position_is_bottom "${candidate_geometry}" "${screen}"; then
+                printf '%s\n' "${candidate_id}"
+                return 0
+            fi
+        fi
+    done < <(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }')
+    [[ -n "${fallback_id}" ]] && printf '%s\n' "${fallback_id}"
+}
+
+window_geometry() {
+    local window_id="$1"
+    valid_window_id "${window_id}" || return 1
+    x11_call wmctrl -lGx 2>/dev/null | awk -v id="${window_id}" '$1 == id { printf "%s %s %s %s\n", $3, $4, $5, $6; exit }'
+}
+
+screen_geometry() {
+    local dimensions
+    dimensions="$(x11_call xrandr --current 2>/dev/null | sed -n 's/.*current \([0-9][0-9]*\) x \([0-9][0-9]*\).*/0 0 \1 \2/p' | head -n1)"
+    [[ -n "${dimensions}" ]] || dimensions="0 0 32768 32768"
+    printf '%s\n' "${dimensions}"
+}
+
+geometry_in_bounds() {
+    local geometry="$1" screen="$2"
+    local x y width height sx sy sw sh
+    read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${x:-}" =~ ^-?[0-9]+$ && "${y:-}" =~ ^-?[0-9]+$ && "${width:-}" =~ ^[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
+    (( width > 0 && height > 0 && x >= sx && y >= sy && x + width <= sx + sw && y + height <= sy + sh ))
+}
+
+position_is_bottom() {
+    local geometry="$1" screen="$2"
+    local x y width height sx sy sw sh
+    read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    (( y + height >= sy + (sh * 3 / 4) ))
+}
+
+window_has_property() {
+    local window_id="$1" property="$2"
+    valid_window_id "${window_id}" || return 1
+    command -v xprop >/dev/null 2>&1 || return 1
+    x11_call xprop -id "${window_id}" 2>/dev/null | grep -q "${property}"
+}
+
+plank_health_reason() {
+    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || { printf 'not-running\n'; return; }
+    local window_id geometry screen
+    window_id="$(plank_window_id)"
+    [[ -n "${window_id}" ]] || { printf 'window-not-visible\n'; return; }
+    if command -v xprop >/dev/null 2>&1 && \
+       ! window_has_property "${window_id}" '_NET_WM_WINDOW_TYPE_DOCK'; then
+        printf 'wrong-window-type\n'
+        return
+    fi
+    geometry="$(window_geometry "${window_id}")"
+    screen="$(screen_geometry)"
+    geometry_in_bounds "${geometry}" "${screen}" || { printf 'out-of-bounds\n'; return; }
+    position_is_bottom "${geometry}" "${screen}" || { printf 'wrong-position\n'; return; }
+    printf 'healthy\n'
+}
+
+plank_window_visible() {
+    [[ "$(plank_health_reason)" == "healthy" ]]
+}
+
+repair_plank_stacking() {
+    local window_id
+    window_id="$(plank_window_id)"
+    valid_window_id "${window_id}" || return 1
+    x11_call wmctrl -i -r "${window_id}" -b add,above,sticky >/dev/null 2>&1 || return 1
+}
+
+diagnose_and_promote_stacking() {
+    local window_id
+    window_id="$(plank_window_id)"
+    [[ -n "${window_id}" ]] || return 0
+    if ! command -v xprop >/dev/null 2>&1; then
+        log "xprop unavailable; accepting running visible Dock without stacking diagnostics"
+        return 0
+    fi
+    if ! window_has_property "${window_id}" '_NET_WM_STATE_ABOVE'; then
+        [[ "${stacking_promotion_attempted_for}" == "${window_id}" ]] && return 0
+        stacking_promotion_attempted_for="${window_id}"
+        log "not-above: ABOVE state is absent; requesting one non-destructive promotion"
+        repair_plank_stacking || log "ABOVE promotion request was not accepted"
+    fi
+    return 0
+}
+
+stop_plank() {
+    pkill -TERM -u "$(id -u)" -x plank >/dev/null 2>&1 || true
+}
+
 start_plank() {
-    command -v plank >/dev/null 2>&1 || return 0
-    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
-    mkdir -p "${HOME}/.cache/ming-os"
+    command -v plank >/dev/null 2>&1 || return 1
+    stop_legacy_dock
+    ensure_plank_settings
+    local reason
+    reason="$(plank_health_reason)"
+    if [[ "${reason}" == "healthy" ]]; then
+        diagnose_and_promote_stacking
+        return 0
+    fi
+    log "Plank health failure: ${reason}; starting recovery"
+    if pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+        stop_plank
+        sleep 1
+    fi
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
-    echo "[$(date '+%F %T')] starting plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" >>"${HOME}/.cache/ming-os/plank.log"
-    (nohup plank >>"${HOME}/.cache/ming-os/plank.log" 2>&1 &) || true
+    log "starting Plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+    (nohup plank >>"${log_file}" 2>&1 &) || return 1
+    for _ready_try in $(seq 1 20); do
+        reason="$(plank_health_reason)"
+        if [[ "${reason}" == "healthy" ]]; then
+            diagnose_and_promote_stacking
+            log "Plank recovery succeeded"
+            return 0
+        fi
+        sleep 0.25
+    done
+    log "Plank recovery failed: $(plank_health_reason)"
+    stop_plank
+    return 1
 }
 
 case "${1:-start}" in
     --session)
+        lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
+        exec 9>"${lock_file}" || exit 1
+        if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+            exit 0
+        fi
         sleep 3
-        for _ in $(seq 1 24); do
-            start_plank
+        while true; do
+            start_plank || log "Plank recovery attempt failed"
             sleep 5
         done
         ;;
@@ -1745,7 +2969,7 @@ esac
 PLANKWATCH
     chmod 0755 /usr/local/bin/ming-plank-watchdog
 
-    # Ming Dock 自启动（替代 Plank，避免会话恢复时空 Dock 或位置漂移）
+    # Plank is the primary Dock: it owns zoom, running indicators and minimized-window restore.
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
     rm -f "${autostart_dir}/plank.desktop"
@@ -1753,7 +2977,7 @@ PLANKWATCH
 [Desktop Entry]
 Type=Application
 Name=Ming Dock
-Exec=/usr/local/bin/ming-dock-watchdog --session
+Exec=/usr/local/bin/ming-plank-watchdog --session
 Comment=Ming OS Dock
 Icon=ming-os-menu
 Hidden=false
@@ -1762,8 +2986,21 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
 MINGDOCKAUTO
 
+    cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Window Manager Health
+Comment=检测并保守恢复 Xfwm 窗口控制
+Exec=/usr/local/bin/ming-window-manager-watchdog --session
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
+MINGWINDOWMANAGERAUTO
+
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
-        "${autostart_dir}/ming-dock.desktop"
+        "${autostart_dir}/ming-dock.desktop" \
+        "${autostart_dir}/ming-window-manager.desktop"
 }
 
 # ======================== Ming Shell: 控制中心与品牌化入口 ========================
@@ -1771,102 +3008,6 @@ MINGDOCKAUTO
 configure_ming_shell() {
     mkdir -p "/home/${MING_USER}/.config/xfce4/terminal" \
              "/home/${MING_USER}/.local/share/applications"
-
-    cat > /usr/local/bin/ming-files << 'MINGFILES'
-#!/usr/bin/env bash
-exec thunar "$@"
-MINGFILES
-    chmod +x /usr/local/bin/ming-files
-
-    cat > /usr/local/bin/ming-disk-hub << 'DISKHUB'
-#!/usr/bin/env bash
-set -euo pipefail
-
-hub="${HOME}/所有磁盘"
-mkdir -p "${hub}"
-index_file="${hub}/README.txt"
-: > "${index_file}"
-cat > "${index_file}" <<'INDEXHEAD'
-Ming OS 所有磁盘
-
-这里把系统盘、用户文件、数据盘和 U 盘集中到一个入口。
-它不会合并或移动真实数据，只是用友好的入口减少“C盘/D盘”式空间焦虑。
-
-INDEXHEAD
-
-make_link() {
-    local target="$1"
-    local name="$2"
-    [[ -e "${target}" ]] || return 0
-    ln -sfn "${target}" "${hub}/${name}" 2>/dev/null || true
-    printf '%s -> %s\n' "${name}" "${target}" >> "${index_file}"
-}
-
-make_link "${HOME}" "我的文件"
-make_link "${HOME}/Desktop" "桌面"
-make_link "${HOME}/Downloads" "下载"
-make_link "${HOME}/Documents" "文档"
-make_link "/" "系统盘"
-
-idx=1
-while IFS='|' read -r mountpoint label size fstype avail usep; do
-    [[ -n "${mountpoint}" && "${mountpoint}" != "/" ]] || continue
-    case "${mountpoint}" in
-        /run/user/*|/proc*|/sys*|/dev*|/boot/efi) continue ;;
-    esac
-    clean_label="${label:-数据盘${idx}}"
-    clean_label="${clean_label//\//-}"
-    if [[ -n "${size}" ]]; then
-        name="${clean_label} (${size})"
-    else
-        name="${clean_label}"
-    fi
-    make_link "${mountpoint}" "${name}"
-    if [[ -n "${avail}" || -n "${usep}" ]]; then
-        printf '  可用空间：%s，已用：%s，格式：%s\n' "${avail:---}" "${usep:---}" "${fstype:---}" >> "${index_file}"
-    fi
-    idx=$((idx + 1))
-done < <(lsblk -rpo MOUNTPOINT,LABEL,SIZE,FSTYPE 2>/dev/null | awk 'NR>1 && $1 != "" {print $1 "|" $2 "|" $3 "|" $4}' | while IFS='|' read -r mp label size fstype; do
-    stats="$(df -hP "${mp}" 2>/dev/null | awk 'NR==2 {print $4 "|" $5}')"
-    printf '%s|%s|%s|%s|%s\n' "${mp}" "${label}" "${size}" "${fstype}" "${stats}"
-done)
-
-cat > "${hub}/释放空间.desktop" <<'FREESPACE'
-[Desktop Entry]
-Name=释放空间
-Comment=打开 Ming 设置清理缓存和临时文件
-Exec=ming-control-center
-Icon=edit-clear
-Terminal=false
-Type=Application
-Categories=Utility;System;
-FREESPACE
-chmod +x "${hub}/释放空间.desktop" 2>/dev/null || true
-
-mkdir -p "${HOME}/.config/gtk-3.0"
-bookmarks="${HOME}/.config/gtk-3.0/bookmarks"
-touch "${bookmarks}"
-grep -qxF "file://${hub} 所有磁盘" "${bookmarks}" 2>/dev/null || echo "file://${hub} 所有磁盘" >> "${bookmarks}"
-
-if [[ "${1:-}" == "--open" ]]; then
-    exec thunar "${hub}"
-fi
-DISKHUB
-    chmod +x /usr/local/bin/ming-disk-hub
-
-    cat > /usr/share/applications/ming-disk-hub.desktop << 'DISKHUBAPP'
-[Desktop Entry]
-Name=All Disks
-Name[zh_CN]=所有磁盘
-Comment=Open local files, system disk, and mounted data disks
-Comment[zh_CN]=集中查看系统盘、个人文件和已挂载的数据盘
-Exec=/usr/local/bin/ming-disk-hub --open
-Icon=drive-harddisk
-Terminal=false
-Type=Application
-Categories=System;FileManager;
-StartupNotify=true
-DISKHUBAPP
 
     cat > /usr/local/bin/ming-terminal << 'MINGTERM'
 #!/usr/bin/env bash
@@ -2007,7 +3148,7 @@ class StatusCenter(Gtk.ApplicationWindow):
             ('连接网络', 'network-wireless', 'nm-connection-editor'),
             ('声音', 'multimedia-volume-control', 'pavucontrol'),
             ('电源', 'battery', 'xfce4-power-manager-settings'),
-            ('显示', 'video-display', 'xfce4-display-settings'),
+            ('显示', 'video-display', 'ming-control-center --page display'),
             ('设置', 'ming-control-center', 'ming-control-center'),
             ('应用库', 'ming-app-library', 'ming-app-library'),
             ('锁屏', 'system-lock-screen', 'ming-lock'),
@@ -2152,10 +3293,20 @@ def load_apps():
                 apps.append(app)
     return sorted(apps, key=lambda item: item['name'].lower())
 
+def responsive_window_size(preferred_width=760, preferred_height=520):
+    screen = Gdk.Screen.get_default()
+    if not screen:
+        return preferred_width, preferred_height
+    return (
+        max(520, min(preferred_width, screen.get_width() - 64)),
+        max(420, min(preferred_height, screen.get_height() - 80)),
+    )
+
 class AppLibrary(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title='Ming 应用库')
-        self.set_default_size(840, 560)
+        window_width, window_height = responsive_window_size()
+        self.set_default_size(window_width, window_height)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_icon_name('ming-app-library')
         self.apps = load_apps()
@@ -2167,7 +3318,7 @@ class AppLibrary(Gtk.ApplicationWindow):
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         root.get_style_context().add_class('root')
-        root.set_border_width(24)
+        root.set_border_width(18)
         self.add(root)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -2182,7 +3333,7 @@ class AppLibrary(Gtk.ApplicationWindow):
         title_box.pack_start(subtitle, False, False, 0)
         header.pack_start(title_box, True, True, 0)
 
-        for label, cmd in [('整理桌面', 'ming-helper organize-desktop'), ('所有磁盘', 'ming-helper disks'), ('系统设置', 'ming-control-center')]:
+        for label, cmd in [('整理桌面', 'ming-helper organize-desktop'), ('Ming 文件', 'ming-files'), ('系统设置', 'ming-control-center')]:
             btn = Gtk.Button(label=label)
             btn.get_style_context().add_class('quick-button')
             btn.connect('clicked', lambda _b, c=cmd: subprocess.Popen(c, shell=True))
@@ -2200,8 +3351,8 @@ class AppLibrary(Gtk.ApplicationWindow):
         scroller.set_shadow_type(Gtk.ShadowType.NONE)
         self.flow = Gtk.FlowBox()
         self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.flow.set_max_children_per_line(6)
-        self.flow.set_min_children_per_line(3)
+        self.flow.set_max_children_per_line(5)
+        self.flow.set_min_children_per_line(1)
         self.flow.set_row_spacing(12)
         self.flow.set_column_spacing(12)
         scroller.add(self.flow)
@@ -2226,7 +3377,7 @@ class AppLibrary(Gtk.ApplicationWindow):
     def make_tile(self, app):
         btn = Gtk.Button()
         btn.get_style_context().add_class('app-tile')
-        btn.set_size_request(118, 108)
+        btn.set_size_request(112, 102)
         btn.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         btn.connect('clicked', lambda _b: self.launch(app))
         btn.connect('button-press-event', lambda widget, event: self.show_app_menu(widget, event, app))
@@ -2292,7 +3443,6 @@ media_dir="${desktop}/影音"
 games_dir="${desktop}/游戏"
 tools_dir="${desktop}/工具"
 common_dir="${desktop}/常用"
-disks_link="${desktop}/所有磁盘"
 state_dir="${HOME}/.config/ming-os"
 
 mkdir -p "${apps_dir}" "${system_dir}" "${internet_dir}" "${office_dir}" "${media_dir}" "${games_dir}" "${tools_dir}" "${common_dir}" "${state_dir}" "${desktop}"
@@ -2315,7 +3465,7 @@ target_for() {
     local cats name
     cats="$(desktop_categories "${file}")"
     name="$(desktop_name "${file}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "${cats}" == *network* || "${name}" == *firefox* || "${name}" == *微信* || "${name}" == *浏览器* ]]; then
+    if [[ "${cats}" == *network* || "${name}" == *edge* || "${name}" == *firefox* || "${name}" == *微信* || "${name}" == *浏览器* ]]; then
         echo "${internet_dir}"
     elif [[ "${cats}" == *office* || "${name}" == *wps* || "${name}" == *文档* || "${name}" == *表格* ]]; then
         echo "${office_dir}"
@@ -2368,33 +3518,8 @@ Categories=Settings;System;
 StartupNotify=true
 CONTROL
 
-cat > "${desktop}/Ming 应用库.desktop" << APPLIBDESKTOP
-[Desktop Entry]
-Name=Ming 应用库
-Comment=像手机应用库一样搜索、打开、整理已安装软件
-Exec=/usr/local/bin/ming-app-library
-Icon=ming-app-library
-Terminal=false
-Type=Application
-Categories=Utility;System;
-StartupNotify=true
-APPLIBDESKTOP
-
-cat > "${desktop}/所有磁盘.desktop" << DISKDESKTOP
-[Desktop Entry]
-Name=所有磁盘
-Comment=把系统盘、数据盘、U盘集中到一个入口
-Exec=/usr/local/bin/ming-disk-hub --open
-Icon=drive-harddisk
-Terminal=false
-Type=Application
-Categories=System;FileManager;
-StartupNotify=true
-DISKDESKTOP
-chmod +x "${desktop}/Ming 设置.desktop" "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
-
-/usr/local/bin/ming-disk-hub >/tmp/ming-disk-hub.log 2>&1 || true
-rm -f "${disks_link}" 2>/dev/null || true
+chmod +x "${desktop}/Ming 设置.desktop" 2>/dev/null || true
+rm -f "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
 
 gio set "${apps_dir}" metadata::custom-icon-name application-x-executable 2>/dev/null || true
 gio set "${system_dir}" metadata::custom-icon-name ming-control-center 2>/dev/null || true
@@ -2404,14 +3529,13 @@ gio set "${media_dir}" metadata::custom-icon-name multimedia-player 2>/dev/null 
 gio set "${games_dir}" metadata::custom-icon-name applications-games 2>/dev/null || true
 gio set "${tools_dir}" metadata::custom-icon-name applications-utilities 2>/dev/null || true
 gio set "${common_dir}" metadata::custom-icon-name emblem-favorite 2>/dev/null || true
-gio set "${HOME}/所有磁盘" metadata::custom-icon-name drive-harddisk 2>/dev/null || true
 
 if command -v ming-phone-desktop >/dev/null 2>&1; then
     ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
 else
     sync_apps
 fi
-for item in "${desktop}/Ming 设置.desktop" "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop"; do
+for item in "${desktop}/Ming 设置.desktop"; do
     [[ -f "${item}" ]] || continue
     ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
 done
@@ -2428,7 +3552,6 @@ if [[ "${1:-}" == "--watch" ]]; then
         else
             sync_apps
         fi
-        /usr/local/bin/ming-disk-hub >/tmp/ming-disk-hub.log 2>&1 || true
         # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
         for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
             if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
@@ -2543,7 +3666,7 @@ case "${1:-}" in
         info "桌面已经刷新。\n\n新安装的软件会自动出现在 Ming 手机式桌面；把一个图标拖到另一个图标上，就会自动生成文件夹。"
         ;;
     disks)
-        exec /usr/local/bin/ming-disk-hub --open
+        exec /usr/local/bin/ming-files
         ;;
     memory)
         mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
@@ -2602,14 +3725,13 @@ TASKS = [
     ('修复应用商店', 'ming-app-store', '商店打不开时点这里', 'ming-helper repair-store'),
     ('应用库', 'ming-app-library', '搜索并打开所有已安装应用', 'ming-app-library'),
     ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'ming-helper organize-desktop'),
-    ('所有磁盘', 'drive-harddisk', '像一个盘一样查看系统盘和数据盘', 'ming-helper disks'),
     ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'ming-helper memory'),
     ('声音和音量', 'multimedia-volume-control', '调节扬声器、麦克风和输出设备', 'pavucontrol'),
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
     ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
-    ('高级设置', 'ming-settings', '给懂电脑的人使用', 'xfce4-settings-manager'),
+    ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
 CSS = b'''
@@ -2700,7 +3822,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Ming OS 26.3.1 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.3.2 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -2810,6 +3932,7 @@ Terminal=false
 Type=Application
 Categories=Utility;System;
 StartupNotify=true
+NoDisplay=true
 APPLIBAPP
 
     cp /usr/share/applications/ming-control-center.desktop "/home/${MING_USER}/.local/share/applications/"
@@ -2824,31 +3947,10 @@ APPLIBAPP
 
 ensure_wps_office() {
     mkdir -p "/home/${MING_USER}/Desktop" "/usr/share/applications"
-    if command -v wps >/dev/null 2>&1 || dpkg -s wps-office >/dev/null 2>&1; then
-        cat > /usr/share/applications/wps-office.desktop << 'WPSDESKTOP'
-[Desktop Entry]
-Name=WPS Office
-Name[zh_CN]=WPS Office
-Comment=Kingsoft WPS Office for Linux
-Exec=wps
-Icon=wps-office
-Terminal=false
-Type=Application
-Categories=Office;WordProcessor;Spreadsheet;Presentation;
-StartupNotify=true
-WPSDESKTOP
-        cp /usr/share/applications/wps-office.desktop "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-        chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-        chmod +x "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-        return 0
-    fi
-
-    if [[ -x /usr/local/bin/ming-install-wps && -f /usr/share/applications/ming-install-wps.desktop ]]; then
-        cp /usr/share/applications/ming-install-wps.desktop /usr/share/applications/wps-office.desktop 2>/dev/null || true
-        cp /usr/share/applications/ming-install-wps.desktop "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-        chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-        chmod +x "/home/${MING_USER}/Desktop/wps-office.desktop" 2>/dev/null || true
-    fi
+    rm -f "/home/${MING_USER}/Desktop/wps-office.desktop" \
+          /usr/share/applications/wps-office.desktop 2>/dev/null || true
+    # WPS is optional in 26.3.2. Keep ming-install-wps.desktop in App Library,
+    # but do not create a desktop or Dock launcher for it.
 }
 
 # ======================== Picom 用户级配置 ========================
@@ -2856,7 +3958,7 @@ WPSDESKTOP
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.1 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
+# Ming OS 26.3.2 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
 # 说明：Debian 仓库的 picom 主线版不支持 jonaburg/FT-Labs
 #       分支的 animations 块；强行写入会导致配置解析失败、合成器拒绝启动，
 #       这正是历史版本“美化没生效”的元凶之一。这里只用主线支持的特性：
@@ -2864,7 +3966,7 @@ configure_picom() {
 #       缩放动画，实现 macOS 风格的丝滑观感。
 backend = "glx";
 vsync = true;
-unredir-if-possible = true;
+unredir-if-possible = false;
 glx-no-stencil = true;
 glx-no-rebind-pixmap = true;
 use-damage = true;
@@ -2877,7 +3979,7 @@ blur-background = true;
 blur-background-frame = true;
 blur-background-fixed = true;
 blur-background-exclude = [
-  "class_g = 'firefox'",
+  "class_g = 'Microsoft-edge'",
   "class_g = 'Chromium'",
   "class_g = 'Code'",
   "window_type = 'dock'",
@@ -2896,6 +3998,7 @@ shadow-exclude = [
   "class_g = 'Conky'",
   "class_g ?= 'Notify-osd'",
   "class_g = 'Cairo-clock'",
+  "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
@@ -2903,21 +4006,17 @@ shadow-exclude = [
 # ---- 圆角窗口 ----
 corner-radius = 12;
 rounded-corners-exclude = [
+  "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
   "window_type = 'notification'",
 ];
 
 # ---- 透明度 ----
-inactive-opacity = 0.92;
-active-opacity = 0.98;
-frame-opacity = 0.90;
+inactive-opacity = 1.0;
+active-opacity = 1.0;
+frame-opacity = 1.0;
 inactive-opacity-override = false;
-opacity-rule = [
-  "85:class_g = 'firefox'",
-  "90:class_g = 'Thunar'",
-  "90:class_g = 'Xfce4-terminal'",
-];
 
 # ---- 渐入渐出 ----
 fading = true;
@@ -2955,18 +4054,24 @@ shadow-radius = 6;
 shadow-opacity = 0.20;
 shadow-offset-x = -4;
 shadow-offset-y = -4;
+shadow-exclude = [
+  "class_g = 'Microsoft-edge'",
+  "window_type = 'dock'",
+  "window_type = 'desktop'",
+];
 fading = true;
 fade-in-step = 0.06;
 fade-out-step = 0.06;
-inactive-opacity = 0.95;
+inactive-opacity = 1.0;
 active-opacity = 1.0;
+frame-opacity = 1.0;
 PICOMFALLBACK
 
     # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
     cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'
 backend = "glx";
 vsync = true;
-unredir-if-possible = true;
+unredir-if-possible = false;
 glx-no-stencil = true;
 glx-no-rebind-pixmap = true;
 use-damage = true;
@@ -2998,14 +4103,76 @@ fade-in-step = 0.05;
 fade-out-step = 0.05;
 fade-delta = 5;
 
-inactive-opacity = 0.95;
+inactive-opacity = 1.0;
 active-opacity = 1.0;
-frame-opacity = 0.95;
+frame-opacity = 1.0;
 
 detect-rounded-corners = true;
 detect-client-opacity = true;
 detect-transient = true;
 PICOMLOWMEM
+
+    cat > /usr/local/bin/ming-picom << 'MINGPICOM'
+#!/usr/bin/env bash
+set -u
+
+log="/tmp/ming-picom.log"
+main_conf="${HOME}/.config/picom/picom.conf"
+fallback_conf="/etc/xdg/picom/picom-fallback.conf"
+lowmem_conf="/etc/xdg/picom/picom-lowmem.conf"
+config="${main_conf}"
+reason="modern-gpu"
+
+mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+gpu="$(LC_ALL=C lspci 2>/dev/null | grep -Ei 'vga|3d|display' | tr '\n' ' ' || true)"
+renderer=""
+if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+    renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
+fi
+
+if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
+    config="${fallback_conf}"
+    reason="low-memory-${mem_mb}mb"
+elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ]]; then
+    config="${fallback_conf}"
+    reason="safe-graphics-cmdline"
+elif [[ ! -d /dev/dri ]]; then
+    config="${fallback_conf}"
+    reason="no-dri"
+elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
+    config="${fallback_conf}"
+    reason="software-renderer"
+elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; then
+    config="${fallback_conf}"
+    reason="virtual-machine-gpu"
+elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
+    config="${lowmem_conf}"
+    reason="balanced-low-memory-${mem_mb}mb"
+elif echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
+    config="${fallback_conf}"
+    reason="old-intel-gpu"
+fi
+
+if [[ ! -f "${config}" ]]; then
+    config="${fallback_conf}"
+    reason="${reason}-missing-main"
+fi
+
+{
+    printf '[%s] backend config=%s reason=%s mem_mb=%s renderer=%s gpu=%s\n' \
+        "$(date '+%F %T')" "${config}" "${reason}" "${mem_mb}" "${renderer:-unknown}" "${gpu:-unknown}"
+} >> "${log}" 2>/dev/null || true
+
+if ! command -v picom >/dev/null 2>&1; then
+    printf '[%s] picom command missing\n' "$(date '+%F %T')" >> "${log}" 2>/dev/null || true
+    exit 0
+fi
+
+pgrep -u "$(id -u)" -x picom >/dev/null 2>&1 && exit 0
+exec picom --config "${config}" --log-level=warn
+MINGPICOM
+    chmod 0755 /usr/local/bin/ming-picom
 
     chown -R "${MING_USER}:${MING_USER}" /home/${MING_USER}/.config/picom
 }
@@ -3104,18 +4271,18 @@ Categories=System;FileManager;
 StartupNotify=true
 THUNARDESKTOP
 
-    cat > "${desktop_dir}/firefox.desktop" << FFDESKTOP
+    cat > "${desktop_dir}/ming-edge.desktop" << EDGEDESKTOP
 [Desktop Entry]
 Name=浏览器
-Name[zh_CN]=Firefox 浏览器
+Name[zh_CN]=Microsoft Edge 浏览器
 Comment=浏览互联网
-Exec=firefox-esr
-Icon=firefox-esr
+Exec=/usr/local/bin/ming-edge
+Icon=microsoft-edge
 Terminal=false
 Type=Application
 Categories=Network;WebBrowser;
 StartupNotify=true
-FFDESKTOP
+EDGEDESKTOP
 
     cat > "${desktop_dir}/ming-app-library.desktop" << APPLIBDESKTOP
 [Desktop Entry]
@@ -3154,13 +4321,13 @@ deploy_release_readme() {
     mkdir -p "${doc_dir}"
 
     cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Ming OS 26.3.1 Release And Website Handoff
+# Ming OS 26.3.2 Release And Website Handoff
 
-This document is the current website and AI handoff source for Ming OS. Use `26.3.1` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
+This document is the current website and AI handoff source for Ming OS. Use `26.3.2` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
 ## Positioning
 
-Ming OS 26.3.1 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
+Ming OS 26.3.2 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
 
 This is the version to use when producing:
 
@@ -3174,17 +4341,17 @@ This is the version to use when producing:
 ## Public Links
 
 - Official website: `https://scallion.uno`
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.1`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 
 ## Feature Summary
 
 - Debian 13 / Trixie base.
-- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2631`.
+- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2632`.
 - Fixes the 26.2.5 `invalid magic number` / `you need to load the kernel first` class of failures.
 - Live/Ventoy auto-login as `ming`.
 - Ming wallpaper applies by default.
@@ -3211,7 +4378,7 @@ It should not be sold as a minimal Linux demo. It is a complete desktop with:
 
 - boot repair;
 - auto-login;
-- low-memory WeChat support;
+- optional WeChat installer and low-memory wrapper;
 - update tooling;
 - installer branding;
 - desktop organization;
@@ -3223,43 +4390,43 @@ It should not be sold as a minimal Linux demo. It is a complete desktop with:
 The complete ISO is available on the official website. GitHub Release uses split assets:
 
 ```text
-ming-os-26.3.1-home-amd64.iso.part01
-ming-os-26.3.1-home-amd64.iso.part02
-ming-os-26.3.1-home-amd64.iso.sha256
+ming-os-26.3.2-home-amd64.iso.part01
+ming-os-26.3.2-home-amd64.iso.part02
+ming-os-26.3.2-home-amd64.iso.sha256
 SHA256SUMS
 ```
 
 Merge on Linux/macOS/WSL:
 
 ```bash
-cat ming-os-26.3.1-home-amd64.iso.part01 ming-os-26.3.1-home-amd64.iso.part02 > ming-os-26.3.1-home-amd64.iso
-sha256sum -c ming-os-26.3.1-home-amd64.iso.sha256
+cat ming-os-26.3.2-home-amd64.iso.part01 ming-os-26.3.2-home-amd64.iso.part02 > ming-os-26.3.2-home-amd64.iso
+sha256sum -c ming-os-26.3.2-home-amd64.iso.sha256
 ```
 
 Merge on Windows PowerShell:
 
 ```powershell
-cmd /c copy /b ming-os-26.3.1-home-amd64.iso.part01+ming-os-26.3.1-home-amd64.iso.part02 ming-os-26.3.1-home-amd64.iso
-Get-FileHash ming-os-26.3.1-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.3.2-home-amd64.iso.part01+ming-os-26.3.2-home-amd64.iso.part02 ming-os-26.3.2-home-amd64.iso
+Get-FileHash ming-os-26.3.2-home-amd64.iso -Algorithm SHA256
 ```
 
 ## Prompt For Another AI Building The Scallion Product Page
 
-You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.1`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
+You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.2`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
 
 Required links:
 
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.iso`
-- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.1`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
 
 Page goals:
 
 - Explain that Ming OS is a Debian 13 / Trixie based Chinese desktop system.
-- Make `Ming OS 26.3.1` the visible product name in the first viewport.
-- Highlight boot reliability, Live auto-login, low-memory WeChat support, graphical update button, Ming Settings, Android-like app folders, All Disks, and the Ming-branded installer.
-- Tell users clearly that 2GB RAM can run the OS, but a WeChat account with many friends and groups may still be heavy; recommend Web WeChat as the fallback.
+- Make `Ming OS 26.3.2` the visible product name in the first viewport.
+- Highlight boot reliability, Live auto-login, optional WeChat/WPS installers, graphical update button, Ming Settings, Android-like app folders, All Disks, and the Ming-branded installer.
+- Tell users clearly that 2GB RAM can run the OS, but optional WeChat/WPS installs may still be heavy.
 - Provide a clear ISO download button, GitHub button, and OTA status area.
 
 Suggested message hierarchy:
@@ -3271,10 +4438,10 @@ Suggested message hierarchy:
 
 Suggested structure:
 
-- Hero: title `Ming OS 26.3.1`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
+- Hero: title `Ming OS 26.3.2`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
-- Feature section: WeChat low-memory mode, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
+- Feature section: optional WeChat/WPS installers, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
 - Download section: show official full ISO and GitHub split download instructions.
 - Compatibility section: Rufus ISO/DD, Ventoy/Live, BIOS/UEFI, VirtualBox.
 
@@ -3294,7 +4461,7 @@ Design direction:
 - keep files and disks easy to find;
 - make updates clear and checkable;
 - keep the system branded as Ming OS after installation;
-- protect low-memory machines from heavy WeChat sessions.
+- protect low-memory machines from heavy optional apps.
 RELEASEREADME
 }
 
@@ -3410,7 +4577,7 @@ CALAMARES
         "/etc/skel/Desktop/Install Debian.desktop" \
         "/etc/skel/Desktop/安装 Debian.desktop" 2>/dev/null || true
 
-    # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用
+    # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用。
     cat > "${autostart_dir}/ming-desktop-organizer.desktop" << DESKORGAUTO
 [Desktop Entry]
 Type=Application
@@ -3443,7 +4610,7 @@ PHONEDESKTOPAUTO
 setup_welcome_wizard() {
     cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'
 #!/usr/bin/env python3
-# Ming OS 26.3.1 首次启动欢迎引导
+# Ming OS 26.3.2 首次启动欢迎引导
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -3674,6 +4841,12 @@ dialog() {
     if command -v yad >/dev/null 2>&1; then yad "$@"; else zenity "$@"; fi
 }
 
+repair_desktop_session() {
+    if command -v ming-desktop-healthcheck >/dev/null 2>&1; then
+        /usr/local/bin/ming-desktop-healthcheck --repair >/dev/null 2>&1 || true
+    fi
+}
+
 # 始终先确保免密自动登录已就位（双保险，独立于用户选择）
 ensure_autologin() {
     # 入 autologin / nopasswdlogin 组
@@ -3711,6 +4884,7 @@ if [[ "${RC}" != "0" ]]; then
     echo "skipped" > "${MARKER}"
     dialog --title="已跳过" --text="已为您启用免密自动登录。\n开机将直接进入桌面。" \
         --width=380 --button="好的:0" 2>/dev/null || true
+    repair_desktop_session
     exit 0
 fi
 
@@ -3729,6 +4903,7 @@ if [[ "${FRC}" != "0" ]]; then
     ensure_autologin
     mkdir -p "$(dirname "${MARKER}")"
     echo "skipped" > "${MARKER}"
+    repair_desktop_session
     exit 0
 fi
 
@@ -3760,6 +4935,7 @@ echo "configured" > "${MARKER}"
 dialog --title="完成" \
     --text="账户设置完成。\n开机仍会自动进入桌面，无需输入密码。" \
     --width=380 --button="开始使用:0" 2>/dev/null || true
+repair_desktop_session
 exit 0
 OOBEACCOUNT
     chmod +x /usr/local/bin/ming-oobe-account
@@ -3860,6 +5036,12 @@ cat > /etc/calamares/settings.conf <<'SETTINGS'
 ---
 modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
 instances:
+- id: ming-ota-preflight
+  module: shellprocess
+  config: ming-ota-preflight.conf
+- id: ming-ota-target-guard
+  module: ming-ota-target-guard
+  config: ming-ota-target-guard.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
@@ -3880,20 +5062,19 @@ sequence:
   - partition
   - summary
 - exec:
+  - shellprocess@ming-ota-preflight
+  - ming-ota-target-guard@ming-ota-target-guard
   - partition
   - mount
   - unpackfs
   - machineid
   - fstab
-  - locale
-  - keyboard
-  - localecfg
   - networkcfg
   - hwclock
   - initramfs
   - grubcfg
-  - shellprocess@ming-bootloader
   - shellprocess@ming-identity
+  - shellprocess@ming-bootloader
   - umount
 - show:
   - finished
@@ -3938,6 +5119,7 @@ defaultGroups:
   - users
   - audio
   - video
+  - render
   - plugdev
   - netdev
   - bluetooth
@@ -4075,8 +5257,8 @@ for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
     if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
         continue
     fi
-    if command -v parted >/dev/null 2>&1; then
-        parted -s "${disk}" mklabel msdos >> "${LOG}" 2>&1 || true
+    if command -v wipefs >/dev/null 2>&1; then
+        wipefs -n "${disk}" >> "${LOG}" 2>&1 || true
     fi
 done
 
@@ -4085,13 +5267,19 @@ CALAMARESPREFLIGHT
     chmod +x /usr/local/sbin/ming-calamares-preflight
 
     # 静态兜底：确保无论 preflight 是否成功执行，
-    # settings.conf/users.conf/partition.conf 都是一键安装版本。
+    # settings.conf/users.conf/partition.conf are the 26.3.2 safe-partition installer defaults.
     # 这一步由 03_desktop.sh 负责写入，resume_build 也会执行到这里。
     mkdir -p /etc/calamares/modules
     cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'
 ---
 modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
 instances:
+- id: ming-ota-preflight
+  module: shellprocess
+  config: ming-ota-preflight.conf
+- id: ming-ota-target-guard
+  module: ming-ota-target-guard
+  config: ming-ota-target-guard.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
@@ -4111,20 +5299,19 @@ sequence:
   - partition
   - summary
 - exec:
+  - shellprocess@ming-ota-preflight
+  - ming-ota-target-guard@ming-ota-target-guard
   - partition
   - mount
   - unpackfs
   - machineid
   - fstab
-  - locale
-  - keyboard
-  - localecfg
   - networkcfg
   - hwclock
   - initramfs
   - grubcfg
-  - shellprocess@ming-bootloader
   - shellprocess@ming-identity
+  - shellprocess@ming-bootloader
   - umount
 - show:
   - finished
@@ -4142,10 +5329,10 @@ alwaysShowPartitionLabels: true
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
-initialPartitioningChoice: erase
+initialPartitioningChoice: none
 initialSwapChoice: none
 requiredStorage: 12
-allowManualPartitioning: false
+allowManualPartitioning: true
 STATICPARTCONF
 
     cat > /etc/calamares/modules/users.conf << 'STATICUSERSCONF'
@@ -4154,6 +5341,7 @@ defaultGroups:
   - users
   - audio
   - video
+  - render
   - plugdev
   - netdev
   - bluetooth
@@ -4205,6 +5393,9 @@ export LC_ALL=zh_CN.UTF-8
 
 mkdir -p /tmp/ming-installer
 chmod 1777 /tmp/ming-installer 2>/dev/null || true
+mkdir -p /run/lock
+exec 9>/run/lock/ming-calamares.lock
+flock -n 9 || exit 0
 
 run_preflight() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -4309,8 +5500,8 @@ prepare_installer_disks() {
         if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
             continue
         fi
-        if command -v parted >/dev/null 2>&1; then
-            parted -s "${disk}" mklabel msdos >> /tmp/ming-installer/preflight.log 2>&1 || true
+        if command -v wipefs >/dev/null 2>&1; then
+            wipefs -n "${disk}" >> /tmp/ming-installer/preflight.log 2>&1 || true
         fi
     done
 }
@@ -4350,10 +5541,26 @@ LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
 
-    # Kiosk session：无 WM → Calamares 无标题栏无关闭按钮，关了自动重启
+    # Dedicated installer session with a minimal WM for reliable keyboard and
+    # mouse focus. Calamares is maximized and automatically restarted on exit.
     cat > /usr/local/bin/ming-installer-session << 'KIOSK'
 #!/usr/bin/env bash
 xsetroot -solid '#0c1f1c'
+if command -v xfwm4 >/dev/null 2>&1; then
+    xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &
+fi
+
+focus_installer() {
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    for _focus_try in $(seq 1 40); do
+        if wmctrl -lx 2>/dev/null | grep -qi 'calamares\.calamares'; then
+            wmctrl -x -r calamares.calamares -b add,maximized_vert,maximized_horz 2>/dev/null || true
+            wmctrl -x -a calamares.calamares 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.25
+    done
+}
 prepare_installer_disks() {
     mkdir -p /tmp/ming-installer
     chmod 1777 /tmp/ming-installer 2>/dev/null || true
@@ -4374,8 +5581,8 @@ prepare_installer_disks() {
         if lsblk -nr -o MOUNTPOINT "${disk}" 2>/dev/null | grep -q '/'; then
             continue
         fi
-        if command -v parted >/dev/null 2>&1; then
-            parted -s "${disk}" mklabel gpt >> /tmp/ming-installer/preflight.log 2>&1 || true
+        if command -v wipefs >/dev/null 2>&1; then
+            wipefs -n "${disk}" >> /tmp/ming-installer/preflight.log 2>&1 || true
         fi
     done
 }
@@ -4396,6 +5603,7 @@ while true; do
         continue
     fi
     chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    focus_installer &
     /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
     # 已触发关机/重启则退出循环
     systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null && break
@@ -4435,7 +5643,11 @@ WantedBy=graphical.target
 SYSTEMDSERVICE
 
 
-    systemctl enable ming-live-installer.service 2>/dev/null || true
+    # The dedicated ming-installer LightDM session owns automatic startup.
+    # Keep this service available for diagnostics, but disabled so it cannot
+    # race the session launcher and create overlapping Calamares windows.
+    systemctl disable ming-live-installer.service 2>/dev/null || true
+    rm -f /etc/systemd/system/graphical.target.wants/ming-live-installer.service
 }
 
 # ======================== Xfce 全局设置 ========================
@@ -4465,13 +5677,13 @@ configure_xfce_settings() {
     <property name="focus_delay" type="int" value="200"/>
     <property name="focus_hint" type="bool" value="true"/>
     <property name="focus_new" type="bool" value="true"/>
-    <property name="frame_opacity" type="int" value="95"/>
+    <property name="frame_opacity" type="int" value="100"/>
     <property name="full_width_title" type="bool" value="true"/>
     <property name="horiz_scroll_opacity" type="bool" value="false"/>
-    <property name="inactive_opacity" type="int" value="92"/>
+    <property name="inactive_opacity" type="int" value="100"/>
     <property name="maximized_offset" type="int" value="0"/>
     <property name="mousewheel_rollup" type="bool" value="true"/>
-    <property name="move_opacity" type="int" value="85"/>
+    <property name="move_opacity" type="int" value="100"/>
     <property name="placement_mode" type="string" value="center"/>
     <property name="placement_ratio" type="int" value="50"/>
     <property name="popup_opacity" type="int" value="100"/>
@@ -4479,7 +5691,7 @@ configure_xfce_settings() {
     <property name="raise_delay" type="int" value="200"/>
     <property name="raise_on_click" type="bool" value="true"/>
     <property name="raise_on_focus" type="bool" value="false"/>
-    <property name="resize_opacity" type="int" value="85"/>
+    <property name="resize_opacity" type="int" value="100"/>
     <property name="scroll_workspaces" type="bool" value="true"/>
     <property name="shadow_delta_x" type="int" value="0"/>
     <property name="shadow_delta_y" type="int" value="0"/>
@@ -4732,7 +5944,7 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,firefox-esr.desktop,spark-store.desktop,ming-wechat.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,ming-edge.desktop,spark-store.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter
@@ -4830,27 +6042,29 @@ MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
     sed -i "s/^IconSize=.*/IconSize=36/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomPercent=.*/ZoomPercent=110/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
 fi
 
-# Ming 手机桌面接管壁纸、图标和点击。不要在这里直接关闭 xfdesktop；
-# phone watchdog 会在确认 Ming 桌面存活后再关闭它，避免失败时黑屏。
+# Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
+# 停止 xfdesktop，因此启动失败时仍保留原生桌面作为安全后备。
 xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
 
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
 mkdir -p "${HOME}/.cache/sessions"
 rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
-xfce4-panel --quit >/dev/null 2>&1 || true
+if pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
+    pkill -TERM -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 || true
+fi
 
 # 确保 Ming 手机桌面在运行。它必须早于 Dock 出现，避免只剩空壁纸。
 if command -v ming-phone-desktop-watchdog &>/dev/null; then
     /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || true
 fi
 
-# 确保 Ming Dock 在运行（picom 启动后）
-if command -v ming-dock-watchdog &>/dev/null; then
-    /usr/local/bin/ming-dock-watchdog >/dev/null 2>&1 || true
+# Ensure the primary Plank Dock is visible after the compositor/session settles.
+if command -v ming-plank-watchdog &>/dev/null; then
+    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
 fi
 
 if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then
@@ -5049,13 +6263,18 @@ TOUCHEGGAUTO
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Ming OS 26.3.1 Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
 
     generate_ming_icons
     configure_hidpi_autoscale
     install_themes
     setup_wallpaper
     configure_ming_shell
+    install_ming_settings
+    cleanup_retired_ming_entries
+    install_ming_shell_components
+    install_ota_target_guard
+    install_ming_files
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
@@ -5071,7 +6290,7 @@ main() {
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.3.1 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.3.2 Dock 桌面定制完成 <====="
 }
 
 main

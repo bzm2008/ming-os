@@ -28,17 +28,34 @@ readonly DEFAULT_DESKTOP_LAYOUT="${USER_HOME}/.config/ming-os/desktop-layout.jso
 
 readonly DESKTOP_LAUNCHERS=(
     "ming-settings.desktop"
-    "ming-app-library.desktop"
     "ming-files.desktop"
-    "firefox-esr.desktop"
-    "ming-wechat.desktop"
-    "wps-office.desktop"
+    "ming-edge.desktop"
     "spark-store.desktop"
     "ming-update.desktop"
-    "ming-disk-hub.desktop"
     "garlic-claw.desktop"
     "ming-terminal.desktop"
 )
+
+refresh_dock_launchers() {
+    local helper="/usr/local/sbin/ming-refresh-dock-launchers"
+    if [[ ! -x "${helper}" ]]; then
+        echo "[07_finalize][ERROR] Dock launcher refresh helper is missing" >&2
+        return 1
+    fi
+    if ! "${helper}" "${MING_USER}"; then
+        echo "[07_finalize][ERROR] Dock launcher refresh reported missing targets" >&2
+        return 1
+    fi
+
+    local name
+    for name in ming-update ming-settings; do
+        if [[ ! -s "/usr/share/applications/ming-dock-${name}.desktop" \
+           || ! -s "${USER_HOME}/.config/plank/dock1/launchers/${name}.dockitem" ]]; then
+            echo "[07_finalize][ERROR] final Dock launcher missing: ${name}" >&2
+            return 1
+        fi
+    done
+}
 
 # Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
 copy_default_launcher() {
@@ -47,11 +64,9 @@ copy_default_launcher() {
     local source="/usr/share/applications/${launcher}"
 
     case "${launcher}" in
-        firefox-esr.desktop)
-            [[ -f "${source}" ]] || source="/usr/share/applications/firefox.desktop"
-            ;;
-        wps-office.desktop)
-            [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-wps.desktop"
+        ming-edge.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge.desktop"
+            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge-stable.desktop"
             ;;
         spark-store.desktop)
             [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-spark-store.desktop"
@@ -186,6 +201,7 @@ verify_appearance_assets() {
 main() {
     echo "=====> [07_finalize] 开始收尾与配置固化 (${MING_OS_VERSION}) <====="
 
+    refresh_dock_launchers || return 1
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

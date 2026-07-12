@@ -1,0 +1,34 @@
+# Ming OS GRUB theme: text-first so old BIOS and software-rendered VMs remain usable.
+title-text: "Ming OS"
+title-color: "#eaf7f2"
+title-font: "Unifont Regular 22"
+desktop-color: "#07110f"
+message-color: "#b8ccc5"
+message-bg-color: "#07110f"
+terminal-font: "Unifont Regular 16"
+terminal-border: "0"
+
++ boot_menu {
+    left = 12%
+    top = 23%
+    width = 76%
+    height = 56%
+    item_font = "Unifont Regular 16"
+    item_color = "#eaf7f2"
+    selected_item_color = "#43d19e"
+    item_height = 38
+    item_padding = 8
+    item_spacing = 4
+    scrollbar = false
+}
+
++ label {
+    id = __timeout__
+    left = 12%
+    top = 84%
+    width = 76%
+    align = "center"
+    color = "#8fa9a0"
+    font = "Unifont Regular 14"
+    text = "Automatic startup in %d seconds"
+}

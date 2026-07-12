@@ -29,6 +29,12 @@ __pycache__/
 **/__pycache__/
 *.pyc
 
+# Codex/desktop inspection artifacts and one-off local helpers
+/scratch/
+/.superpowers/
+/_tmp_*.sh
+/Calamares
+
 # OS files
 .DS_Store
 Thumbs.db

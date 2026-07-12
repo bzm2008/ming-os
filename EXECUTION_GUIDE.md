@@ -1,30 +1,30 @@
-# Ming OS 26.3.1 Execution Guide
+# Ming OS 26.3.2 Execution Guide
 
-This guide tracks the current public Ming OS `26.3.1` release. Older Onion OS 26.2.x and Ming OS 26.3.0-r* notes are historical context only and must not be treated as the recommended download target.
+This guide tracks the Ming OS `26.3.2` release candidate. Older Onion OS 26.2.x and Ming OS 26.3.0-r* notes are historical context only and must not be treated as the recommended download target.
 
 ## Release Artifact
 
 ```text
-output/ming-os-26.3.1-home-amd64.iso
+output/ming-os-26.3.2-home-amd64.iso
 ```
 
 ```text
-Size:   2695856128
-SHA256: 5188940fad9365921e440b60f5509d8d8fe53cf3c61c666b0c65e4a1f1bb3f48
-Label:  MING_OS_2631
+Size:   TBD after final build
+SHA256: TBD after final build
+Label:  MING_OS_2632
 Kernel: 6.12.94+deb13-amd64
 ```
 
 Official public URL:
 
 ```text
-https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.download
+https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download
 ```
 
 GitHub release:
 
 ```text
-https://github.com/bzm2008/ming-os/releases/tag/v26.3.1
+https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
 ```
 
 ## Must-Pass Checks
@@ -32,7 +32,7 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.1
 - ISO contains `/live/vmlinuz`, `/live/initrd`, and `/live/filesystem.squashfs`.
 - Extracted `/live/vmlinuz` is a Linux bzImage, not zeroed data.
 - `xorriso -report_el_torito` shows both BIOS and UEFI boot images.
-- GRUB menu identifies Ming OS 26.3.1.
+- BIOS isolinux and UEFI GRUB menus identify Ming OS 26.3.2.
 - GRUB Linux lines do not include the problematic `splash` / `install` parameters.
 - Calamares `unpackfs.conf` points to `/run/ming-installer/filesystem.squashfs`.
 - Calamares defaults are Chinese-friendly: Asia/Shanghai timezone, zh_CN.UTF-8 locale, and a safe physical keyboard layout.
@@ -42,11 +42,11 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.1
 
 ## VirtualBox Smoke Status
 
-The current candidate has passed:
+The current candidate must pass before publishing:
 
-- BIOS VM reaches GRUB and then the Ming OS 26.3.1 installer.
-- UEFI VM reaches GRUB and then the Ming OS 26.3.1 installer.
-- ISO metadata and kernel checks passed locally before publishing.
+- BIOS VM reaches GRUB, completes installation, and reboots into the installed system.
+- UEFI VM reaches GRUB, completes installation, and reboots into the installed system.
+- ISO metadata, kernel, El Torito, isohybrid, and isolinux checks pass locally before publishing.
 
 This is enough for a guarded public candidate, but broad user promotion should still follow real USB tests on old BIOS and mixed UEFI hardware.
 
@@ -79,13 +79,13 @@ Expected public response:
 
 ```json
 {
-  "version": "26.3.1",
+  "version": "26.3.2",
   "ready": true,
   "status": "ready",
-  "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.1-home-amd64.download",
-  "checksum": "5188940fad9365921e440b60f5509d8d8fe53cf3c61c666b0c65e4a1f1bb3f48",
+  "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download",
+  "checksum": "<sha256 after build>",
   "checksum_type": "sha256",
-  "size": 2695856128
+  "size": "<bytes after build>"
 }
 ```
 
@@ -94,22 +94,22 @@ Expected public response:
 If uploading split assets:
 
 ```text
-ming-os-26.3.1-home-amd64.iso.part01
-ming-os-26.3.1-home-amd64.iso.part02
-ming-os-26.3.1-home-amd64.iso.sha256
+ming-os-26.3.2-home-amd64.iso.part01
+ming-os-26.3.2-home-amd64.iso.part02
+ming-os-26.3.2-home-amd64.iso.sha256
 SHA256SUMS
 ```
 
 Merge and verify:
 
 ```bash
-cat ming-os-26.3.1-home-amd64.iso.part* > ming-os-26.3.1-home-amd64.iso
-sha256sum -c ming-os-26.3.1-home-amd64.iso.sha256
+cat ming-os-26.3.2-home-amd64.iso.part* > ming-os-26.3.2-home-amd64.iso
+sha256sum -c ming-os-26.3.2-home-amd64.iso.sha256
 ```
 
 ## User Communication
 
-- Current recommended release: Ming OS 26.3.1.
+- Current recommended release: Ming OS 26.3.2.
 - Do not point users to 26.2.x or failed 26.3.0-r builds as the main download.
 - Ming OS targets old 64-bit PCs first; 32-bit/i386 remains deferred.
 - Ask users with boot issues to report the exact stop point: before GRUB, at GRUB, during kernel load, in installer, or after installed reboot.

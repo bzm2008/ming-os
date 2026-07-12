@@ -46,6 +46,7 @@ install_base_packages() {
     apt install -y --no-install-recommends \
         linux-image-amd64 \
         linux-headers-amd64 \
+        dkms \
         systemd \
         systemd-sysv \
         dbus \
@@ -72,9 +73,12 @@ install_base_packages() {
         grub2-common \
         grub-pc-bin \
         grub-efi-amd64-bin \
+        grub-efi-amd64-signed \
+        shim-signed \
         efibootmgr \
         eject \
         wmctrl \
+        e2fsprogs \
         dosfstools \
         libpwquality-tools \
         cracklib-runtime \
@@ -104,6 +108,10 @@ install_base_packages() {
         inetutils-ping \
         traceroute \
         dnsutils \
+        network-manager-openvpn \
+        network-manager-openvpn-gnome \
+        mobile-broadband-provider-info \
+        modemmanager \
         wireless-tools \
         iw \
         rfkill \
@@ -113,14 +121,36 @@ install_base_packages() {
         acpi-support \
         laptop-detect \
         powertop \
+        mbpfan \
+        smartmontools \
         earlyoom \
         irqbalance \
         tlp \
         tlp-rdw \
         alsa-ucm-conf \
+        xserver-xorg-video-modesetting \
         xserver-xorg-input-all \
         xserver-xorg-input-libinput \
-        xserver-xorg-input-synaptics
+        xserver-xorg-input-synaptics \
+        libwacom-common \
+        libwacom-bin \
+        iio-sensor-proxy \
+        i965-va-driver \
+        intel-media-va-driver \
+        vainfo \
+        mokutil \
+        thermald
+
+    # These contrib installers download firmware from GitHub in postinst and can
+    # hang an otherwise reproducible ISO build. Clean leftovers from resumed
+    # chroots and keep them out of the default image.
+    dpkg --purge --force-all firmware-b43-installer firmware-b43legacy-installer \
+        >/dev/null 2>&1 || true
+
+    # These packages cover the radio stacks shipped by Ming OS. They are
+    # mandatory: a missing regulatory database or Bluetooth/Wi-Fi firmware is
+    # a build error, not an optional hardware enhancement.
+    install_required_radio_firmware || return 1
 
     # Firmware and microcode packaging shifts across Debian snapshots. Install
     # what exists without letting renamed packages break the whole base system.
@@ -129,32 +159,519 @@ install_base_packages() {
         firmware-linux-free \
         firmware-linux-nonfree \
         firmware-misc-nonfree \
-        firmware-iwlwifi \
-        firmware-realtek \
-        firmware-atheros \
         firmware-ath9k-htc \
-        firmware-brcm80211 \
+        b43-fwcutter \
         firmware-sof-signed \
         firmware-intel-graphics \
         firmware-amd-graphics \
         firmware-nvidia-graphics \
-        firmware-mediatek \
-        firmware-ralink \
         firmware-ti-connectivity \
-        bluez-firmware \
         intel-microcode \
         amd64-microcode; do
         apt install -y --no-install-recommends "${pkg}" || true
     done
 
-    echo "loop" >> /etc/modules
-    echo "iwlmvm" >> /etc/modules || true
-    echo "iwlwifi" >> /etc/modules || true
+    # Older resume builds may already contain wl. Keep the default image on
+    # in-tree drivers and retain STA only as a verified offline fallback.
+    if dpkg-query -W -f='${Status}' broadcom-sta-dkms 2>/dev/null | grep -Fq 'install ok installed'; then
+        apt purge -y broadcom-sta-dkms || return 1
+    fi
+    cache_broadcom_sta_driver || return 1
+    deploy_broadcom_driver_manager || return 1
+
+    cat > /etc/modules-load.d/ming-hardware.conf << 'HWLOAD'
+# Keep systemd-modules-load conservative. Broad hardware probing is handled by
+# ming-hardware-preload.service so missing model-specific modules never fail boot.
+loop
+HWLOAD
+
+    cat > /usr/local/sbin/ming-hardware-preload << 'HWPRELOAD'
+#!/usr/bin/env bash
+set -u
+
+LOG=/tmp/ming-hardware-preload.log
+modules=(
+iwlmvm
+iwlwifi
+ath9k
+ath10k_pci
+r8169
+btusb
+btintel
+btrtl
+btbcm
+ath3k
+usbhid
+i2c_hid
+hid_multitouch
+bcm5974
+hid_apple
+applespi
+applesmc
+apple_gmux
+spi_pxa2xx_platform
+spi_pxa2xx_pci
+thinkpad_acpi
+ideapad_laptop
+huawei_wmi
+intel_lpss
+intel_lpss_pci
+surface_aggregator
+surface_hid_core
+)
+
+mkdir -p /tmp
+for module in "${modules[@]}"; do
+    if modprobe -q "${module}" 2>/dev/null; then
+        printf '%s loaded %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
+    else
+        printf '%s skipped %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
+    fi
+done
+
+{
+    printf '%s Broadcom devices and kernel bindings\n' "$(date '+%F %T')"
+    lspci -Dnnk -d 14e4: 2>/dev/null || true
+    printf '%s wireless interfaces\n' "$(date '+%F %T')"
+    for wireless_path in /sys/class/net/*/wireless; do
+        [[ -d "${wireless_path}" ]] && printf '%s\n' "${wireless_path%/wireless}"
+    done
+} >> "${LOG}" 2>/dev/null || true
+exit 0
+HWPRELOAD
+    chmod 0755 /usr/local/sbin/ming-hardware-preload
+
+    cat > /etc/systemd/system/ming-hardware-preload.service << 'HWPRELOADSVC'
+[Unit]
+Description=Ming OS priority hardware module preload
+After=local-fs.target systemd-modules-load.service
+Before=NetworkManager.service bluetooth.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-hardware-preload
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+HWPRELOADSVC
+    systemctl enable ming-hardware-preload.service 2>/dev/null || true
 
     mkdir -p /etc/modprobe.d
     cat > /etc/modprobe.d/ming-blacklist.conf << BLACKLIST
 blacklist i2c_piix4
 BLACKLIST
+
+    mkdir -p /etc/modprobe.d
+    cat > /etc/modprobe.d/ming-old-hardware.conf << 'OLDHWMOD'
+# Make Broadcom/Intel/Realtek era laptops less fragile on first boot.
+options iwlwifi power_save=0 bt_coex_active=1 11n_disable=8
+options iwlmvm power_scheme=1
+options psmouse synaptics_intertouch=0
+options snd_hda_intel power_save=0
+OLDHWMOD
+
+}
+
+install_required_radio_firmware() {
+    local package
+    local required_packages=(
+        wireless-regdb
+        bluez-firmware
+        firmware-mediatek
+        firmware-libertas
+        firmware-misc-nonfree
+        firmware-iwlwifi
+        firmware-realtek
+        firmware-atheros
+        firmware-brcm80211
+    )
+
+    apt install -y --no-install-recommends "${required_packages[@]}" || return 1
+    for package in "${required_packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "${package}" 2>/dev/null \
+            | grep -Fq 'install ok installed'; then
+            echo "[ERROR] required radio firmware package is not installed: ${package}" >&2
+            return 1
+        fi
+    done
+}
+
+install_required_wifi_firmware() {
+    install_required_radio_firmware
+}
+
+cache_broadcom_sta_driver() {
+    local cache_dir="/usr/share/ming-os/driver-cache/broadcom"
+    local extract_dir
+    local debs=()
+
+    install -d -m 0755 "${cache_dir}"
+    rm -f "${cache_dir}"/broadcom-sta-dkms_*.deb \
+        "${cache_dir}/broadcom-sta.ids" \
+        "${cache_dir}/SHA256SUMS"
+
+    if ! (cd "${cache_dir}" && apt-get download broadcom-sta-dkms); then
+        echo "[ERROR] 无法从当前 Debian 仓库缓存 broadcom-sta-dkms" >&2
+        return 1
+    fi
+
+    shopt -s nullglob
+    debs=("${cache_dir}"/broadcom-sta-dkms_*.deb)
+    shopt -u nullglob
+    if [[ "${#debs[@]}" -ne 1 || ! -s "${debs[0]:-}" ]]; then
+        echo "[ERROR] Broadcom STA 缓存必须且只能包含一个有效 deb" >&2
+        return 1
+    fi
+
+    extract_dir=$(mktemp -d)
+    if ! dpkg-deb -x "${debs[0]}" "${extract_dir}"; then
+        rm -rf "${extract_dir}"
+        return 1
+    fi
+    if [[ ! -s "${extract_dir}/usr/share/broadcom-sta/broadcom-sta.ids" ]]; then
+        echo "[ERROR] broadcom-sta-dkms 包内缺少设备 ID 清单" >&2
+        rm -rf "${extract_dir}"
+        return 1
+    fi
+    install -m 0644 \
+        "${extract_dir}/usr/share/broadcom-sta/broadcom-sta.ids" \
+        "${cache_dir}/broadcom-sta.ids"
+    rm -rf "${extract_dir}"
+
+    (
+        cd "${cache_dir}"
+        sha256sum "$(basename "${debs[0]}")" broadcom-sta.ids > SHA256SUMS
+        sha256sum -c SHA256SUMS
+    ) || return 1
+}
+
+configure_macbook_input_modules() {
+    local module
+    local initrd
+    local initrd_modules
+    local kernel_version
+    local module_file
+
+    kernel_version=$(find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | sort -V | tail -1)
+    if [[ -z "${kernel_version}" ]]; then
+        echo "[WARN] 未发现已安装内核，跳过 MacBook initramfs 模块配置" >&2
+        return 0
+    fi
+
+    install -d -m 0755 /etc/initramfs-tools
+    touch /etc/initramfs-tools/modules
+    for module in applespi spi_pxa2xx_platform intel_lpss_pci; do
+        if modinfo -k "${kernel_version}" "${module}" >/dev/null 2>&1; then
+            grep -Fxq "${module}" /etc/initramfs-tools/modules 2>/dev/null \
+                || printf '%s\n' "${module}" >> /etc/initramfs-tools/modules
+        else
+            echo "[WARN] 目标内核 ${kernel_version} 不提供 MacBook 模块 ${module}，跳过 initramfs 固化" >&2
+        fi
+    done
+
+    update-initramfs -u -k all || return 1
+    initrd=$(find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print 2>/dev/null \
+        | sort -V | tail -1)
+    if [[ -z "${initrd}" || ! -s "${initrd}" ]]; then
+        echo "[ERROR] 无法验证 MacBook initramfs 模块" >&2
+        return 1
+    fi
+    if ! initrd_modules="$(lsinitramfs "${initrd}" 2>/dev/null)"; then
+        echo "[ERROR] 无法读取 MacBook initramfs 模块清单" >&2
+        return 1
+    fi
+    for module_file in applespi spi-pxa2xx-platform intel-lpss-pci; do
+        if ! grep -Eq "/${module_file}\.ko(\.|$)" <<< "${initrd_modules}"; then
+            if modinfo -k "${kernel_version}" "${module_file//-/_}" >/dev/null 2>&1; then
+                echo "[ERROR] ${module_file} 未进入 ${initrd}" >&2
+                return 1
+            fi
+            echo "[WARN] ${module_file} 未出现在 ${initrd}，目标内核不提供该模块" >&2
+        fi
+    done
+}
+
+deploy_broadcom_driver_manager() {
+    cat > /usr/local/sbin/ming-broadcom-driver << 'BROADCOMDRIVER'
+#!/usr/bin/env bash
+set -uo pipefail
+
+CACHE_DIR=/usr/share/ming-os/driver-cache/broadcom
+IDS_FILE="${CACHE_DIR}/broadcom-sta.ids"
+SUMS_FILE="${CACHE_DIR}/SHA256SUMS"
+LOG=/var/log/ming-broadcom-driver.log
+
+usage() {
+    echo "Usage: ming-broadcom-driver status --json | install | restore" >&2
+}
+
+bool_json() {
+    [[ "$1" == "true" ]] && printf true || printf false
+}
+
+secure_boot_state() {
+    if [[ ! -d /sys/firmware/efi ]]; then
+        printf disabled
+    elif ! command -v mokutil >/dev/null 2>&1; then
+        printf unknown
+    elif mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+        printf enabled
+    elif mokutil --sb-state 2>/dev/null | grep -qi disabled; then
+        printf disabled
+    else
+        printf unknown
+    fi
+}
+
+load_state() {
+    broadcom_line=$(lspci -Dnn -d 14e4: 2>/dev/null \
+        | grep -Ei 'network controller|ethernet controller|wireless' \
+        | head -1 || true)
+    detected=false
+    supported=false
+    wifi_present=false
+    pci_id=""
+    pci_slot=""
+    model=""
+    active_module="none"
+    sta_installed=false
+    secure_boot=$(secure_boot_state)
+
+    if [[ -n "${broadcom_line}" ]]; then
+        detected=true
+        pci_slot=$(awk '{print $1}' <<< "${broadcom_line}")
+        pci_id=$(grep -oE '\[14e4:[[:xdigit:]]{4}\]' <<< "${broadcom_line}" \
+            | tail -1 | tr -d '[]:' | tr '[:upper:]' '[:lower:]')
+        model=$(sed -E 's/^[^ ]+[[:space:]]+//' <<< "${broadcom_line}")
+        active_module=$(lspci -Dnnk -s "${pci_slot}" 2>/dev/null \
+            | awk -F': ' '/Kernel driver in use:/ {print $2; exit}')
+        active_module=${active_module:-none}
+        if [[ -n "${pci_id}" && -s "${IDS_FILE}" ]] \
+            && grep -Ev '^[[:space:]]*(#|$)' "${IDS_FILE}" \
+                | tr '[:upper:]' '[:lower:]' | grep -Fxq "${pci_id}"; then
+            supported=true
+        fi
+    fi
+
+    for wireless_path in /sys/class/net/*/wireless; do
+        if [[ -d "${wireless_path}" ]]; then
+            wifi_present=true
+            break
+        fi
+    done
+
+    if dpkg-query -W -f='${Status}' broadcom-sta-dkms 2>/dev/null \
+        | grep -Fq 'install ok installed'; then
+        sta_installed=true
+    fi
+
+    action=none
+    if [[ "${sta_installed}" == true ]]; then
+        action=restore
+    elif [[ "${supported}" != true ]]; then
+        action=unsupported
+    elif [[ "${wifi_present}" == true ]]; then
+        action=none
+    elif [[ "${secure_boot}" != disabled ]]; then
+        action=blocked_secure_boot
+    else
+        action=install
+    fi
+}
+
+print_status() {
+    local json=${1:-false}
+    load_state
+    if [[ "${json}" == true ]]; then
+        jq -n \
+            --argjson detected "$(bool_json "${detected}")" \
+            --argjson supported "$(bool_json "${supported}")" \
+            --argjson wifi_present "$(bool_json "${wifi_present}")" \
+            --arg active_module "${active_module}" \
+            --arg secure_boot "${secure_boot}" \
+            --argjson sta_installed "$(bool_json "${sta_installed}")" \
+            --arg action "${action}" \
+            --arg pci_id "${pci_id}" \
+            --arg model "${model}" \
+            '{detected:$detected,supported:$supported,wifi_present:$wifi_present,
+              active_module:$active_module,secure_boot:$secure_boot,
+              sta_installed:$sta_installed,action:$action,pci_id:$pci_id,model:$model}'
+    else
+        printf 'detected=%s\nsupported=%s\nwifi_present=%s\nactive_module=%s\nsecure_boot=%s\nsta_installed=%s\naction=%s\npci_id=%s\nmodel=%s\n' \
+            "${detected}" "${supported}" "${wifi_present}" "${active_module}" \
+            "${secure_boot}" "${sta_installed}" "${action}" "${pci_id}" "${model}"
+    fi
+}
+
+require_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        echo "此操作需要通过系统授权运行。" >&2
+        exit 1
+    fi
+    touch "${LOG}" && chmod 0600 "${LOG}"
+    exec > >(tee -a "${LOG}") 2>&1
+    printf '\n[%s] ming-broadcom-driver %s\n' "$(date '+%F %T')" "$*"
+}
+
+verify_cache() {
+    [[ -s "${IDS_FILE}" && -s "${SUMS_FILE}" ]] || return 1
+    (cd "${CACHE_DIR}" && sha256sum -c SHA256SUMS)
+}
+
+rollback_sta() {
+    dpkg --purge broadcom-sta-dkms >/dev/null 2>&1 || true
+    rm -f /etc/modprobe.d/broadcom-sta-dkms.conf \
+        /etc/modprobe.d/broadcom-sta.conf 2>/dev/null || true
+    depmod -a 2>/dev/null || true
+}
+
+install_sta() {
+    local debs=()
+    require_root install
+    load_state
+    if [[ "${supported}" != true || "${wifi_present}" == true ]]; then
+        echo "当前硬件不适用 Broadcom STA，或开源驱动已经提供无线接口。" >&2
+        exit 2
+    fi
+    if [[ "${secure_boot}" != disabled ]]; then
+        echo "Secure Boot 已开启或状态未知，不能加载未注册 MOK 的 DKMS 模块。" >&2
+        exit 3
+    fi
+    if ! verify_cache; then
+        echo "Broadcom 离线驱动缓存校验失败。" >&2
+        exit 4
+    fi
+
+    shopt -s nullglob
+    debs=("${CACHE_DIR}"/broadcom-sta-dkms_*.deb)
+    shopt -u nullglob
+    if [[ "${#debs[@]}" -ne 1 ]]; then
+        echo "Broadcom 离线驱动包数量异常。" >&2
+        exit 4
+    fi
+
+    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "${debs[0]}"; then
+        rollback_sta
+        echo "Broadcom STA 安装失败，已恢复开源驱动配置。" >&2
+        exit 5
+    fi
+    if ! dkms status 2>/dev/null | grep -Fq 'broadcom-sta/' \
+        || ! modinfo wl >/dev/null 2>&1; then
+        rollback_sta
+        echo "Broadcom STA DKMS 未能为当前内核生成 wl 模块，已回滚。" >&2
+        exit 5
+    fi
+    if ! update-initramfs -u -k all; then
+        rollback_sta
+        update-initramfs -u -k all >/dev/null 2>&1 || true
+        echo "更新 initramfs 失败，Broadcom STA 已回滚。" >&2
+        exit 5
+    fi
+    echo "Broadcom 兼容驱动已安装。请重启电脑后检查 Wi-Fi。"
+}
+
+restore_open_drivers() {
+    require_root restore
+    rollback_sta
+    if ! update-initramfs -u -k all; then
+        echo "恢复开源驱动后更新 initramfs 失败，请查看 ${LOG}。" >&2
+        exit 5
+    fi
+    echo "已恢复内核开源 Broadcom 驱动配置。请重启电脑。"
+}
+
+case "${1:-status}" in
+    status)
+        [[ "${2:-}" == "--json" ]] && print_status true || print_status false
+        ;;
+    install)
+        install_sta
+        ;;
+    restore)
+        restore_open_drivers
+        ;;
+    *)
+        usage
+        exit 64
+        ;;
+esac
+BROADCOMDRIVER
+    chmod 0755 /usr/local/sbin/ming-broadcom-driver
+}
+
+configure_macbook_fan_and_disk_health() {
+    cat > /usr/local/sbin/ming-is-intel-mac << 'MACDETECT'
+#!/usr/bin/env bash
+set -u
+identity="$(cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null || true)"
+grep -Eiq 'Apple|MacBook|Macmini|iMac|MacPro' <<< "${identity}"
+MACDETECT
+    chmod 0755 /usr/local/sbin/ming-is-intel-mac
+
+    install -d -m 0755 /etc/systemd/system/mbpfan.service.d
+    cat > /etc/systemd/system/mbpfan.service.d/ming-hardware-guard.conf << 'MBPFANGUARD'
+[Unit]
+Description=MacBook fan control (Apple hardware only)
+
+[Service]
+ExecCondition=/usr/local/sbin/ming-is-intel-mac
+ExecStartPre=/sbin/modprobe coretemp
+ExecStartPre=/sbin/modprobe applesmc
+MBPFANGUARD
+    systemctl enable mbpfan.service 2>/dev/null || true
+
+    # SMART checks are user-triggered. Do not keep old HDDs awake with a
+    # permanent monitoring daemon.
+    systemctl disable smartmontools.service smartd.service 2>/dev/null || true
+    cat > /usr/local/bin/ming-disk-health << 'DISKHEALTH'
+#!/usr/bin/env bash
+set -uo pipefail
+
+LOG=/tmp/ming-disk-health.log
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "此检查需要系统授权。" >&2
+    exit 1
+fi
+
+: > "${LOG}"
+chmod 0644 "${LOG}"
+{
+    echo "Ming OS 磁盘健康检查"
+    date
+    echo
+    lsblk -o NAME,TYPE,SIZE,MODEL,SERIAL,FSTYPE,MOUNTPOINTS 2>/dev/null || true
+    echo
+} >> "${LOG}"
+
+found=false
+while read -r name type; do
+    [[ "${type}" == disk ]] || continue
+    case "${name}" in
+        loop*|ram*|zram*|sr*) continue ;;
+    esac
+    found=true
+    device="/dev/${name}"
+    {
+        echo "===== ${device} ====="
+        timeout 15 smartctl -H -A -l error "${device}" 2>&1 || true
+        echo
+    } >> "${LOG}"
+done < <(lsblk -dn -o NAME,TYPE 2>/dev/null)
+
+if [[ "${found}" != true ]]; then
+    echo "未发现可读取 SMART 的物理磁盘。" >> "${LOG}"
+fi
+
+if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+    zenity --text-info --title="Ming OS 磁盘健康" --width=900 --height=680 \
+        --filename="${LOG}" 2>/dev/null || true
+else
+    cat "${LOG}"
+fi
+DISKHEALTH
+    chmod 0755 /usr/local/bin/ming-disk-health
 }
 
 install_hardware_support_packages() {
@@ -263,12 +780,12 @@ configure_users() {
     echo "${MING_USER}:${MING_USER_PASS}" | chpasswd
 
     # 创建必要的组（如果不存在）
-    for grp in lpadmin plugdev nopasswdlogin autologin; do
+    for grp in lpadmin plugdev nopasswdlogin autologin render; do
         getent group "${grp}" >/dev/null 2>&1 || groupadd -r "${grp}" 2>/dev/null || true
     done
 
     # 将 ming 用户加入必要组（逐个添加，跳过不存在的组）
-    for grp in sudo adm cdrom dip plugdev lpadmin netdev audio video input scanner bluetooth nopasswdlogin autologin; do
+    for grp in sudo adm cdrom dip plugdev lpadmin netdev audio video render input scanner bluetooth nopasswdlogin autologin; do
         getent group "${grp}" >/dev/null 2>&1 && usermod -aG "${grp}" "${MING_USER}" || true
     done
 
@@ -293,6 +810,7 @@ configure_network() {
         network-manager \
         network-manager-gnome \
         wpasupplicant \
+        bluez \
         ifupdown
 
     apt install -y --no-install-recommends iwd || true
@@ -321,7 +839,10 @@ NameResolvingService=systemd
 DisableRoamingScan=false
 IWDCFG
 
-    systemctl disable iwd 2>/dev/null || true
+    # Keep the default backend deterministic for older Wi-Fi hardware. iwd is
+    # installed as an opt-in alternative, but must never run with wpa_supplicant.
+    systemctl disable --now iwd.service 2>/dev/null || true
+    systemctl enable --now wpa_supplicant.service 2>/dev/null || true
 
     mkdir -p /etc/network
 
@@ -350,6 +871,25 @@ wifi.scan-rand-mac-address=no
 NMCFG
 
     systemctl enable NetworkManager 2>/dev/null || true
+    systemctl enable ModemManager 2>/dev/null || true
+
+    cat > /etc/systemd/system/ming-regdom.service << 'REGDOMSVC'
+[Unit]
+Description=Ming OS CN wireless regulatory domain
+After=systemd-modules-load.service
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+# iw may report no phy on wired-only machines. The setting remains harmless and
+# must never make a no-Wi-Fi boot fail.
+ExecStart=-/usr/sbin/iw reg set CN
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+REGDOMSVC
+    systemctl enable ming-regdom.service 2>/dev/null || true
 
     # 禁止 rfkill 软阻断 WiFi 无线电
     mkdir -p /etc/systemd/system/NetworkManager.service.d
@@ -374,12 +914,37 @@ WantedBy=multi-user.target
 RFKILLSVC
     systemctl enable ming-rfkill.service 2>/dev/null || true
 
-    mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
-    cat > /etc/systemd/system/NetworkManager-wait-online.service.d/override.conf << NMONLINE
+    mkdir -p /etc/systemd/system/bluetooth.service.d
+    cat > /etc/systemd/system/bluetooth.service.d/ming-radio-unblock.conf << BTUNBLOCK
 [Service]
-ExecStart=
-ExecStart=/usr/bin/nm-online -s -q -t 60
-NMONLINE
+ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
+ExecStartPost=-/bin/sh -c 'command -v btmgmt >/dev/null 2>&1 && btmgmt power on || true'
+BTUNBLOCK
+
+    if dpkg-query -W -f='${db:Status-Abbrev}' bluez 2>/dev/null | grep -qx 'ii '; then
+        systemctl enable bluetooth.service 2>/dev/null || true
+    else
+        echo "[WARN] bluez is unavailable; bluetooth.service will not be enabled" >&2
+    fi
+
+    mkdir -p /etc/bluetooth
+    cat > /etc/bluetooth/main.conf << BTCFG
+[General]
+Name = Ming OS
+ControllerMode = dual
+FastConnectable = true
+DiscoverableTimeout = 0
+PairableTimeout = 0
+
+[Policy]
+AutoEnable=true
+BTCFG
+
+    # Network availability must never delay the graphical session.  Time
+    # synchronisation is retried by NetworkManager events after a connection
+    # is actually usable; remove old resume-build drop-ins that waited here.
+    systemctl disable --now NetworkManager-wait-online.service 2>/dev/null || true
+    rm -rf /etc/systemd/system/NetworkManager-wait-online.service.d
 
     echo "ming-os" > /etc/hostname
 
@@ -390,6 +955,146 @@ NMONLINE
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 HOSTSCFG
+}
+
+deploy_time_sync() {
+    cat > /usr/local/sbin/ming-time-sync << 'MINGTIMESYNC'
+#!/usr/bin/env bash
+# Synchronise time only after NetworkManager reports a usable network.  This
+# helper is deliberately event-driven: it must not hold up boot on an offline
+# machine or repeatedly restart timesyncd when there is no connection.
+set -uo pipefail
+
+LOG=/var/log/ming-time-sync.log
+LOCK=/run/ming-time-sync.lock
+MODE="${1:-sync}"
+
+log() {
+    mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "${LOG}" 2>/dev/null || true
+}
+
+read_timedatectl() {
+    local max_seconds="$1"
+    shift
+    timeout --foreground "${max_seconds}s" timedatectl "$@" 2>/dev/null || true
+}
+
+print_status_json() {
+    local synchronized service network state
+    synchronized="$(read_timedatectl 5 show -p NTPSynchronized --value)"
+    service="$(timeout --foreground 5s systemctl is-active systemd-timesyncd 2>/dev/null || true)"
+    network="$(timeout --foreground 5s nm-online -q -t 4 >/dev/null 2>&1 && printf online || printf offline)"
+    case "${synchronized,,}" in
+        yes|true|1) state=synchronized ;;
+        *)
+            if [[ "${service}" == active || "${service}" == activating ]]; then
+                state=waiting
+            else
+                state=error
+            fi
+            ;;
+    esac
+    python3 - "${state}" "${synchronized}" "${service:-unknown}" "${network}" <<'PY'
+import json
+import sys
+state, synchronized, service, network = sys.argv[1:]
+print(json.dumps({
+    "state": state,
+    "synchronized": synchronized.strip().lower() in {"yes", "true", "1"},
+    "service": service or "unknown",
+    "network": network,
+    "log": "/var/log/ming-time-sync.log",
+}, ensure_ascii=False))
+PY
+}
+
+synchronise() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        echo "ming-time-sync sync requires system authorization" >&2
+        return 1
+    fi
+
+    mkdir -p /run 2>/dev/null || return 1
+    exec 9>"${LOCK}"
+    if ! flock -n 9; then
+        log "a time synchronisation is already running; skip duplicate request"
+        return 0
+    fi
+
+    # Keep this guard before every timesyncd-changing operation.  Offline
+    # starts are normal on old laptops and must not churn the time service.
+    if ! nm-online -q -t 12; then
+        log "network is not ready; leave systemd-timesyncd unchanged"
+        return 0
+    fi
+
+    if ! timeout --foreground 10s timedatectl set-ntp true; then
+        log "cannot enable NTP through timedatectl"
+        return 1
+    fi
+    if ! timeout --foreground 10s systemctl restart systemd-timesyncd; then
+        log "cannot restart systemd-timesyncd"
+        return 1
+    fi
+
+    local deadline synchronized remaining probe_timeout sleep_for
+    deadline=$((SECONDS + 45))
+    while (( SECONDS < deadline )); do
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        probe_timeout=$(( remaining < 5 ? remaining : 5 ))
+        synchronized="$(read_timedatectl "${probe_timeout}" show -p NTPSynchronized --value)"
+        case "${synchronized,,}" in
+            yes|true|1)
+                log "time synchronised successfully"
+                return 0
+                ;;
+        esac
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep_for=$(( remaining < 3 ? remaining : 3 ))
+        sleep "${sleep_for}"
+    done
+    log "NTP is still waiting after 45 seconds; service remains enabled"
+    return 0
+}
+
+case "${MODE}" in
+    status)
+        [[ "${2:-}" == "--json" ]] || {
+            echo "Usage: ming-time-sync status --json | sync" >&2
+            exit 2
+        }
+        print_status_json
+        ;;
+    sync)
+        synchronise
+        ;;
+    *)
+        echo "Usage: ming-time-sync status --json | sync" >&2
+        exit 2
+        ;;
+esac
+MINGTIMESYNC
+    chmod 0755 /usr/local/sbin/ming-time-sync
+
+    install -d -m 0755 /etc/NetworkManager/dispatcher.d
+    cat > /etc/NetworkManager/dispatcher.d/90-ming-time-sync << 'MINGTIMEDISPATCH'
+#!/bin/sh
+# NetworkManager invokes dispatchers as root.  Return immediately so DHCP and
+# connection activation never wait for NTP; ming-time-sync serialises bursts.
+set -u
+
+event="${2:-}"
+case "${event}" in
+    up|dhcp4-change|dhcp6-change|connectivity-change)
+        nohup /usr/local/sbin/ming-time-sync sync >/dev/null 2>&1 &
+        ;;
+esac
+exit 0
+MINGTIMEDISPATCH
+    chmod 0755 /etc/NetworkManager/dispatcher.d/90-ming-time-sync
 }
 
 deploy_hardware_diagnostics() {
@@ -405,33 +1110,128 @@ echo "Ming OS network repair"
 date
 echo
 
-if [[ "${BACKEND}" == "--use-iwd" ]]; then
-    mkdir -p /etc/NetworkManager/conf.d
-    cat > /etc/NetworkManager/conf.d/wifi-backend.conf <<'EOF'
+switch_backend() {
+    local backend="$1"
+    local old_service new_service config_path config_tmp config_backup config_existed=false
+    config_path=/etc/NetworkManager/conf.d/wifi-backend.conf
+    case "${backend}" in
+        iwd)
+            old_service=wpa_supplicant.service
+            new_service=iwd.service
+            if ! systemctl list-unit-files iwd.service --no-legend 2>/dev/null | grep -q '^iwd\.service'; then
+                echo "iwd is not installed; keep wpa_supplicant active." >&2
+                return 1
+            fi
+            ;;
+        wpa_supplicant)
+            old_service=iwd.service
+            new_service=wpa_supplicant.service
+            ;;
+        *)
+            echo "Unknown Wi-Fi backend: ${backend}" >&2
+            return 2
+            ;;
+    esac
+
+    mkdir -p /etc/NetworkManager/conf.d || return 1
+    config_backup="$(mktemp "${config_path}.backup.XXXXXX")" || return 1
+    if [[ -f "${config_path}" ]]; then
+        if ! cp -p "${config_path}" "${config_backup}"; then
+            rm -f "${config_backup}"
+            return 1
+        fi
+        config_existed=true
+    fi
+
+    rollback_backend() {
+        echo "Rolling back Wi-Fi backend switch." >&2
+        if ! systemctl disable --now "${new_service}"; then
+            echo "Cannot stop ${new_service}; refusing to start ${old_service}." >&2
+            return 1
+        fi
+        if [[ "${config_existed}" == true ]]; then
+            if ! cp -pf "${config_backup}" "${config_path}"; then
+                echo "Cannot restore ${config_path}; refusing to start ${old_service}." >&2
+                return 1
+            fi
+        else
+            if ! rm -f "${config_path}"; then
+                echo "Cannot remove ${config_path}; refusing to start ${old_service}." >&2
+                return 1
+            fi
+        fi
+        if ! systemctl enable --now "${old_service}"; then
+            echo "Cannot restore ${old_service}; both Wi-Fi backends remain stopped." >&2
+            return 1
+        fi
+        if ! systemctl restart NetworkManager; then
+            echo "Cannot restart NetworkManager after rollback." >&2
+            return 1
+        fi
+        return 0
+    }
+
+    if ! systemctl disable --now "${old_service}"; then
+        echo "Cannot stop ${old_service}; backend was not changed." >&2
+        rm -f "${config_backup}"
+        return 1
+    fi
+    if ! systemctl enable --now "${new_service}"; then
+        echo "Cannot start ${new_service}; restoring ${old_service}." >&2
+        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
+        rm -f "${config_backup}"
+        return 1
+    fi
+
+    config_tmp="$(mktemp "${config_path}.XXXXXX")" || {
+        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
+        rm -f "${config_backup}"
+        return 1
+    }
+    if [[ "${backend}" == "iwd" ]]; then
+        cat > "${config_tmp}" <<'EOF'
 [device]
 wifi.backend=iwd
 wifi.iwd.autoconnect=yes
 wifi.scan-rand-mac-address=no
 EOF
-    systemctl enable iwd 2>/dev/null || true
-    echo "Selected Wi-Fi backend: iwd"
-elif [[ "${BACKEND}" == "--use-wpa" || -z "${BACKEND}" ]]; then
-    mkdir -p /etc/NetworkManager/conf.d
-    cat > /etc/NetworkManager/conf.d/wifi-backend.conf <<'EOF'
+    else
+        cat > "${config_tmp}" <<'EOF'
 [device]
 wifi.backend=wpa_supplicant
 wifi.scan-rand-mac-address=no
 EOF
-    systemctl disable iwd 2>/dev/null || true
-    echo "Selected Wi-Fi backend: wpa_supplicant"
-else
-    echo "Unknown option: ${BACKEND}"
-fi
+    fi
+    if ! mv -f "${config_tmp}" "${config_path}"; then
+        rm -f "${config_tmp}"
+        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
+        rm -f "${config_backup}"
+        return 1
+    fi
+    if ! systemctl restart NetworkManager; then
+        echo "NetworkManager restart failed; restoring the previous backend." >&2
+        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
+        rm -f "${config_backup}"
+        return 1
+    fi
+    rm -f "${config_backup}"
+    echo "Selected Wi-Fi backend: ${backend}"
+}
+
+case "${BACKEND}" in
+    --use-iwd)
+        switch_backend iwd || exit $?
+        ;;
+    --use-wpa|"")
+        switch_backend wpa_supplicant || exit $?
+        ;;
+    *)
+        echo "Unknown option: ${BACKEND}" >&2
+        exit 2
+        ;;
+esac
 
 rfkill unblock all 2>/dev/null || true
-systemctl restart wpa_supplicant 2>/dev/null || true
-systemctl restart iwd 2>/dev/null || true
-systemctl restart NetworkManager 2>/dev/null || true
 sleep 2
 
 echo
@@ -449,14 +1249,151 @@ lspci -nn 2>/dev/null | grep -Ei 'network|wireless|wifi|802\.11|ethernet' || tru
 lsusb 2>/dev/null | grep -Ei 'network|wireless|wifi|802\.11|bluetooth|realtek|atheros|broadcom|intel|ralink|mediatek' || true
 
 echo
+echo "== Bluetooth hardware =="
+bluetoothctl list 2>/dev/null || true
+btmgmt info 2>/dev/null || true
+systemctl --no-pager --full status bluetooth 2>/dev/null | sed -n '1,60p' || true
+
+echo
 echo "== missing firmware hints =="
-dmesg 2>/dev/null | grep -Ei 'firmware|iwlwifi|ath|brcm|b43|rtl|rt2|mt76|failed|missing' | tail -80 || true
+dmesg 2>/dev/null | grep -Ei 'firmware|iwlwifi|ath|brcm|b43|rtl|rt2|mt76|btusb|bluetooth|failed|missing' | tail -100 || true
 
 if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     zenity --text-info --title="Ming OS 网络修复结果" --width=820 --height=620 --filename="${LOG}" 2>/dev/null || true
 fi
 NETREPAIR
     chmod 0755 /usr/local/bin/ming-network-repair
+
+    cat > /usr/local/sbin/ming-radio-repair << 'RADIOREPAIR'
+#!/usr/bin/env bash
+set -uo pipefail
+
+if [[ "${1:-}" != "bluetooth" || "$#" -ne 1 ]]; then
+    echo "Usage: ming-radio-repair bluetooth" >&2
+    exit 2
+fi
+
+# The repair command changes rfkill state, kernel modules and system services.
+# Always cross the policy boundary through polkit when launched by a desktop user.
+if [[ "${EUID}" -ne 0 ]]; then
+    exec pkexec /usr/local/sbin/ming-radio-repair bluetooth
+fi
+
+LOG=/var/log/ming-radio-repair.log
+touch "${LOG}" 2>/dev/null || {
+    echo "Unable to open ${LOG}" >&2
+    exit 1
+}
+exec > >(tee -a "${LOG}") 2>&1
+
+echo "Ming OS Bluetooth radio repair"
+date -Is
+
+if [[ ! -x /usr/local/bin/ming-device-control ]]; then
+    echo "ming-device-control is unavailable" >&2
+    exit 1
+fi
+
+status_json() {
+    /usr/local/bin/ming-device-control bluetooth-status --json
+}
+
+status_state() {
+    python3 -c 'import json, sys; print(json.load(sys.stdin).get("state", "unknown"))'
+}
+
+status_hard_blocked() {
+    python3 -c 'import json, sys; print("true" if json.load(sys.stdin).get("rfkill", {}).get("hard_blocked") else "false")'
+}
+
+before_json="$(status_json 2>/dev/null || true)"
+before_state="$(printf '%s' "${before_json}" | status_state 2>/dev/null || printf 'unknown')"
+before_hard_blocked="$(printf '%s' "${before_json}" | status_hard_blocked 2>/dev/null || printf 'false')"
+printf 'before-state=%s\n' "${before_state}"
+printf 'before-hard-rfkill=%s\n' "${before_hard_blocked}"
+printf 'before-json=%s\n' "${before_json}"
+
+if [[ "${before_state}" == "diagnostic_unavailable" ]]; then
+    echo "Bluetooth hardware diagnosis is incomplete; refusing service/module changes. Export diagnostics first." >&2
+    exit 1
+fi
+
+if [[ "${before_hard_blocked}" == "true" ]]; then
+    echo "Bluetooth is hard-blocked by a physical switch or BIOS; software repair cannot change it." >&2
+    exit 1
+fi
+
+if [[ "${before_state}" == "no_hardware" ]]; then
+    echo "No Bluetooth hardware detected; no repair is required."
+    exit 0
+fi
+
+if systemctl list-unit-files bluetooth.service --no-legend 2>/dev/null \
+        | awk '{print $1}' | grep -Fxq bluetooth.service; then
+    systemctl stop bluetooth.service 2>/dev/null || true
+else
+    echo "bluetooth.service is unavailable; continuing with a hardware-only check"
+fi
+
+/usr/sbin/rfkill unblock bluetooth 2>/dev/null || true
+
+mainline_modules=(btusb btintel btrtl btbcm ath3k)
+loaded_modules=()
+while read -r module; do
+    [[ -n "${module}" ]] && loaded_modules+=("${module}")
+done < <(lsmod 2>/dev/null | awk 'NR > 1 {print $1}' \
+    | grep -Ex 'btusb|btintel|btrtl|btbcm|ath3k' || true)
+
+if [[ "${#loaded_modules[@]}" -eq 0 ]]; then
+    echo "No loaded mainline Bluetooth module needs reloading."
+else
+    printf 'detected-modules=%s\n' "${loaded_modules[*]}"
+fi
+
+removed_modules=()
+for module in ath3k btbcm btrtl btintel btusb; do
+    if [[ " ${loaded_modules[*]} " == *" ${module} "* ]]; then
+        if modprobe -r "${module}" 2>/dev/null; then
+            removed_modules+=("${module}")
+            printf 'unloaded=%s\n' "${module}"
+        else
+            printf 'kept-loaded=%s\n' "${module}"
+        fi
+    fi
+done
+for module in btusb btintel btrtl btbcm ath3k; do
+    if [[ " ${removed_modules[*]} " == *" ${module} "* ]]; then
+        if modprobe "${module}" 2>/dev/null; then
+            printf 'reloaded=%s\n' "${module}"
+        else
+            printf 'reload-failed=%s\n' "${module}"
+        fi
+    fi
+done
+
+if systemctl list-unit-files bluetooth.service --no-legend 2>/dev/null \
+        | awk '{print $1}' | grep -Fxq bluetooth.service; then
+    systemctl enable bluetooth.service 2>/dev/null || true
+    systemctl start bluetooth.service 2>/dev/null || true
+fi
+
+after_json="$(status_json 2>/dev/null || true)"
+if [[ -z "${after_json}" ]] || ! printf '%s' "${after_json}" | python3 -c 'import json, sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+    echo "Bluetooth status verification did not return JSON" >&2
+    exit 1
+fi
+after_state="$(printf '%s' "${after_json}" | status_state)"
+printf 'after-state=%s\n' "${after_state}"
+printf 'after-json=%s\n' "${after_json}"
+
+if [[ "${after_state}" == "no_hardware" || "${after_state}" == "ready" ]]; then
+    exit 0
+fi
+
+echo "Bluetooth remains in state ${after_state}; inspect ${LOG}" >&2
+exit 1
+RADIOREPAIR
+    chmod 0755 /usr/local/sbin/ming-radio-repair
 
     cat > /usr/local/bin/ming-driver-diagnose << 'DRIVERDIAG'
 #!/usr/bin/env bash
@@ -485,6 +1422,40 @@ lsmod 2>/dev/null | grep -Ei 'i915|nouveau|amdgpu|radeon|snd|iwl|ath|brcm|b43|rt
 echo
 echo "== Missing firmware / driver errors =="
 dmesg 2>/dev/null | grep -Ei 'firmware|microcode|drm|i915|nouveau|amdgpu|radeon|iwlwifi|ath|brcm|b43|rtl|rt2|mt76|snd|failed|error' | tail -140 || true
+
+echo
+echo "== Broadcom driver recommendation =="
+if [[ -x /usr/local/sbin/ming-broadcom-driver ]]; then
+    /usr/local/sbin/ming-broadcom-driver status 2>&1 || true
+else
+    echo "Broadcom driver manager is unavailable"
+fi
+
+echo
+echo "== Secure Boot and DKMS =="
+mokutil --sb-state 2>/dev/null || echo "Secure Boot state unavailable"
+dkms status 2>/dev/null || true
+
+echo
+echo "== VA-API =="
+vainfo --display drm 2>&1 | sed -n '1,80p' || true
+
+echo
+echo "== In-tree legacy laptop modules =="
+for module in rtw88_8821cu applespi spi_pxa2xx_platform intel_lpss_pci; do
+    if modinfo "${module}" >/dev/null 2>&1; then
+        echo "${module}: available"
+    else
+        echo "${module}: missing"
+    fi
+done
+latest_initrd=$(find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print 2>/dev/null \
+    | sort -V | tail -1)
+if [[ -n "${latest_initrd}" ]]; then
+    echo "initramfs=${latest_initrd}"
+    lsinitramfs "${latest_initrd}" 2>/dev/null \
+        | grep -E '/(applespi|spi-pxa2xx-platform|intel-lpss-pci)\.ko' || true
+fi
 
 if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     zenity --text-info --title="Ming OS 驱动检测" --width=860 --height=640 --filename="${LOG}" 2>/dev/null || true
@@ -667,14 +1638,20 @@ LSBRELEASE
     cat > /etc/ming-release << RELEASE
 Ming OS ${MING_OS_VERSION} Home Edition
 RELEASE
-    mkdir -p /usr/share /etc/default/grub.d
+    mkdir -p /usr/share /etc/default/grub.d /boot/grub/themes/ming
     ln -sf /etc/ming-release /usr/share/ming-release
+    if [[ ! -s /tmp/ming-build/assets/grub-theme/theme.txt ]]; then
+        echo "ERROR: Ming GRUB theme asset is missing" >&2
+        return 1
+    fi
+    install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
     cat > /etc/default/grub.d/10-ming-os.cfg << GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
-GRUB_TIMEOUT=0
-GRUB_TIMEOUT_STYLE=hidden
+GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
+GRUB_TERMINAL_INPUT=console
+GRUB_TIMEOUT=3
+GRUB_TIMEOUT_STYLE=menu
 GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
@@ -686,12 +1663,103 @@ GRUBCFG
 
 configure_installer_identity() {
     mkdir -p /usr/local/sbin
+    install -d -m 0755 /usr/local/lib/ming-os
+    install -m 0644 /tmp/ming-build/assets/ming-ota-target-guard.py \
+        /usr/local/lib/ming-os/ming_ota_target_guard.py
+
+    local ota_guard_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-ota-target-guard
+    install -d -m 0755 "${ota_guard_module}"
+    cat > "${ota_guard_module}/module.desc" << 'MINGOTAGUARDDESC'
+---
+type: "job"
+name: "ming-ota-target-guard"
+interface: "python"
+script: "main.py"
+MINGOTAGUARDDESC
+    cat > "${ota_guard_module}/main.py" << 'MINGOTAGUARDPY'
+#!/usr/bin/env python3
+import importlib.util
+import pathlib
+
+import libcalamares
+
+
+GUARD_PATH = pathlib.Path("/usr/local/lib/ming-os/ming_ota_target_guard.py")
+SPEC = importlib.util.spec_from_file_location("ming_ota_target_guard", GUARD_PATH)
+GUARD = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GUARD)
+
+
+def run():
+    if not pathlib.Path("/run/ming-ota-preflight.ok").is_file():
+        return None
+    partitions = libcalamares.globalstorage.value("partitions")
+    ok, message = GUARD.validate_from_marker(partitions)
+    if ok:
+        return None
+    return "Ming OTA safety check failed", message
+MINGOTAGUARDPY
+    chmod 0644 "${ota_guard_module}/main.py"
+
+    cat > /usr/local/sbin/ming-ota-preflight << 'MINGOTAPREFLIGHT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+log=/tmp/ming-installer/ota-preflight.log
+marker=/run/ming-ota-preflight.ok
+mkdir -p /tmp/ming-installer /run
+exec >>"${log}" 2>&1
+rm -f "${marker}"
+
+cmdline_value() {
+    local key="$1" token
+    for token in $(cat /proc/cmdline 2>/dev/null); do
+        case "${token}" in "${key}"=*) printf '%s\n' "${token#*=}"; return 0 ;; esac
+    done
+    return 1
+}
+
+grep -qw 'ming.ota=1' /proc/cmdline 2>/dev/null || exit 0
+uuid="$(cmdline_value ming.ota_backup_uuid || true)"
+relative="$(cmdline_value ming.ota_manifest || true)"
+[[ "${uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]] || { echo "invalid OTA UUID"; exit 31; }
+relative="${relative#/}"
+[[ -n "${relative}" && "${relative}" != *'..'* && "${relative}" != *$'\n'* ]] \
+    || { echo "invalid OTA manifest path"; exit 31; }
+
+device="$(blkid -U "${uuid}" 2>/dev/null | head -n 1 || true)"
+[[ -b "${device}" ]] || { echo "OTA backup device is missing"; exit 31; }
+mount_dir=/run/ming-ota-preflight-mount
+mkdir -p "${mount_dir}"
+mount -o ro,nosuid,nodev,noexec "${device}" "${mount_dir}"
+trap 'umount "${mount_dir}" 2>/dev/null || true' EXIT
+
+manifest="$(readlink -f "${mount_dir}/${relative}" 2>/dev/null || true)"
+[[ -n "${manifest}" && "${manifest}" == "${mount_dir}/"* && -f "${manifest}" && ! -L "${manifest}" ]] \
+    || { echo "OTA manifest escaped its backup mount"; exit 31; }
+manifest_uuid="$(jq -r '.backup_uuid // .disk_uuid // ""' "${manifest}" 2>/dev/null || true)"
+strategy="$(jq -r '.strategy // "completed_backup"' "${manifest}" 2>/dev/null || true)"
+[[ "${manifest_uuid}" == "${uuid}" ]] || { echo "OTA manifest UUID mismatch"; exit 31; }
+
+if [[ "${strategy}" == "separate_home" ]]; then
+    [[ "$(jq -r '.complete // false' "${manifest}")" == "true" ]] \
+        || { echo "separate home plan is incomplete"; exit 31; }
+else
+    /usr/local/sbin/ming-ota-backup verify --manifest "${manifest}"
+fi
+
+printf 'uuid=%s\nmanifest=/%s\nstrategy=%s\n' "${uuid}" "${relative}" "${strategy}" > "${marker}"
+chmod 0600 "${marker}"
+echo "OTA preflight passed before partitioning"
+MINGOTAPREFLIGHT
+    chmod 0755 /usr/local/sbin/ming-ota-preflight
+
     cat > /usr/local/sbin/ming-fix-installed-identity << 'MINGIDENTITY'
 #!/usr/bin/env bash
 set -uo pipefail
 
 target="${1:-}"
-version="${MING_OS_VERSION:-26.3.1}"
+version="${MING_OS_VERSION:-26.3.2}"
 
 find_target_root() {
     local candidate
@@ -722,7 +1790,7 @@ ensure_ming_user() {
     local user_name="user"
     local user_home="/home/${user_name}"
     local groups=(
-        users sudo adm cdrom dip plugdev lp lpadmin netdev audio video input
+        users sudo adm cdrom dip plugdev lp lpadmin netdev audio video render input
         scanner bluetooth nopasswdlogin autologin
     )
     local grp
@@ -762,6 +1830,123 @@ ensure_kernel_boot_links() {
     if [[ -n "${initrd}" && -s "${initrd}" ]]; then
         ln -sfn "boot/$(basename "${initrd}")" "${target}/initrd.img" 2>/dev/null || true
     fi
+}
+
+cmdline_value() {
+    local key="$1" token
+    for token in $(cat /proc/cmdline 2>/dev/null); do
+        case "${token}" in
+            "${key}"=*) printf '%s\n' "${token#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+restore_ota_home() {
+    grep -qw 'ming.ota=1' /proc/cmdline 2>/dev/null || return 0
+
+    local backup_uuid manifest_arg manifest_rel backup_device mount_dir manifest_path engine strategy manifest_uuid home_fstype
+    backup_uuid="$(cmdline_value ming.ota_backup_uuid || true)"
+    manifest_arg="$(cmdline_value ming.ota_manifest || true)"
+    mkdir -p "${target}/var/log"
+    exec 8>>"${target}/var/log/ming-ota-restore.log"
+    printf '[%s] OTA restore requested\n' "$(date -Is)" >&8
+
+    if [[ -z "${backup_uuid}" || -z "${manifest_arg}" ]]; then
+        echo "ERROR: OTA restore parameters are incomplete" >&8
+        return 31
+    fi
+    if [[ ! -s /run/ming-ota-preflight.ok ]] \
+        || ! grep -Fxq "uuid=${backup_uuid}" /run/ming-ota-preflight.ok \
+        || ! grep -Fxq "manifest=${manifest_arg}" /run/ming-ota-preflight.ok; then
+        echo "ERROR: destructive OTA did not pass the pre-partition verification gate" >&8
+        return 31
+    fi
+    manifest_rel="${manifest_arg#/}"
+    case "/${manifest_rel}/" in
+        */../*|*/./*) echo "ERROR: unsafe OTA manifest path" >&8; return 31 ;;
+    esac
+
+    backup_device="$(blkid -U "${backup_uuid}" 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${backup_device}" || ! -b "${backup_device}" ]]; then
+        echo "ERROR: OTA backup disk UUID was not found: ${backup_uuid}" >&8
+        return 31
+    fi
+
+    mount_dir="/run/ming-ota-backup"
+    mkdir -p "${mount_dir}"
+    if mountpoint -q "${mount_dir}" 2>/dev/null; then
+        umount "${mount_dir}" || return 31
+    fi
+    if ! mount -o ro "${backup_device}" "${mount_dir}"; then
+        echo "ERROR: could not mount OTA backup disk read-only" >&8
+        return 31
+    fi
+
+    manifest_path="$(readlink -f "${mount_dir}/${manifest_rel}" 2>/dev/null || true)"
+    if [[ -z "${manifest_path}" || "${manifest_path}" != "${mount_dir}/"* \
+        || ! -s "${manifest_path}" || -L "${manifest_path}" ]]; then
+        echo "ERROR: OTA manifest is missing or outside the backup mount" >&8
+        umount "${mount_dir}" || true
+        return 31
+    fi
+
+    strategy="$(jq -r '.strategy // "completed_backup"' "${manifest_path}" 2>/dev/null || true)"
+    manifest_uuid="$(jq -r '.backup_uuid // .disk_uuid // ""' "${manifest_path}" 2>/dev/null || true)"
+    if [[ "${strategy}" == "separate_home" ]]; then
+        if [[ "$(jq -r '.complete // false' "${manifest_path}" 2>/dev/null)" != "true" \
+            || "${manifest_uuid}" != "${backup_uuid}" ]]; then
+            echo "ERROR: separate /home preservation manifest is invalid" >&8
+            umount "${mount_dir}" || true
+            return 31
+        fi
+        home_fstype="$(blkid -s TYPE -o value "${backup_device}" 2>/dev/null | head -n 1 || true)"
+        if [[ -z "${home_fstype}" ]]; then
+            echo "ERROR: separate /home filesystem type is unknown" >&8
+            umount "${mount_dir}" || true
+            return 31
+        fi
+        mkdir -p "${target}/home" "${target}/etc"
+        touch "${target}/etc/fstab"
+        if ! grep -Eq '^[^#]+[[:space:]]+/home[[:space:]]' "${target}/etc/fstab"; then
+            printf 'UUID=%s /home %s defaults,nofail,x-systemd.device-timeout=10 0 2\n' \
+                "${backup_uuid}" "${home_fstype}" >> "${target}/etc/fstab"
+        fi
+        echo "separate /home preservation plan accepted: UUID=${backup_uuid} /home" >&8
+        umount "${mount_dir}" || true
+        return 0
+    fi
+
+    engine="${target}/usr/local/sbin/ming-ota-backup"
+    if [[ ! -x "${engine}" ]]; then
+        engine="/usr/local/sbin/ming-ota-backup"
+    fi
+    if [[ ! -x "${engine}" ]]; then
+        echo "ERROR: ming-ota-backup restore engine is missing" >&8
+        umount "${mount_dir}" || true
+        return 31
+    fi
+
+    if ! "${engine}" verify --manifest "${manifest_path}" >&8 2>&8; then
+        echo "ERROR: OTA backup verification failed" >&8
+        umount "${mount_dir}" || true
+        return 31
+    fi
+    if [[ -L "${target}/home" ]]; then
+        echo "ERROR: OTA restore target /home must not be a symbolic link" >&8
+        umount "${mount_dir}" || true
+        return 31
+    fi
+    mkdir -p "${target}/home"
+    if ! "${engine}" restore --manifest "${manifest_path}" --target "${target}/home" \
+        --system-target "${target}" >&8 2>&8; then
+        echo "ERROR: ming-ota-backup restore failed" >&8
+        umount "${mount_dir}" || true
+        return 31
+    fi
+    sync
+    umount "${mount_dir}" || true
+    printf '[%s] OTA restore completed; backup retained on %s\n' "$(date -Is)" "${backup_uuid}" >&8
 }
 
 write_file /etc/os-release <<OSRELEASE
@@ -827,8 +2012,70 @@ XKBOPTIONS=""
 BACKSPACE="guess"
 TARGETKEYBOARD
 
+restore_ota_home || exit $?
 ensure_ming_user
 ensure_kernel_boot_links
+
+mkdir -p "${target}/etc/grub.d"
+cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBENTRY'
+#!/bin/sh
+set -e
+
+cat <<'EOF'
+menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
+    load_video
+    insmod gzio
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    initrd /initrd.img
+}
+
+menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+    load_video
+    insmod gzio
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+    initrd /initrd.img
+}
+
+menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+    load_video
+    insmod gzio
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+    initrd /initrd.img
+}
+EOF
+TARGETGRUBENTRY
+chmod 0755 "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
+
+root_uuid="$(findmnt -n -o UUID --target "${target}" 2>/dev/null | head -n 1 || true)"
+if [[ -z "${root_uuid}" ]]; then
+    root_source_for_uuid="$(findmnt -n -o SOURCE --target "${target}" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${root_source_for_uuid}" ]]; then
+        root_uuid="$(blkid -s UUID -o value "${root_source_for_uuid}" 2>/dev/null | head -n 1 || true)"
+    fi
+fi
+if [[ -n "${root_uuid}" ]]; then
+    sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
+else
+    sed -i 's/search --no-floppy --set=root --file \/vmlinuz/search --no-floppy --set=root --file \/vmlinuz/; s/root=UUID=__MING_ROOT_UUID__ //' "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
+fi
+
+for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
+    if [[ -f "${target}/etc/grub.d/${noisy_grub}" ]]; then
+        chmod 0644 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+    fi
+done
 
 mkdir -p "${target}/etc/security"
 cat > "${target}/etc/security/pwquality.conf" <<'TARGETPWQUALITY'
@@ -847,9 +2094,10 @@ cat > "${target}/etc/default/grub.d/10-ming-os.cfg" <<GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
 # 老旧硬件友好 + 隐藏内核日志：安静启动、低日志级别、隐藏 systemd 状态刷屏
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
-GRUB_TIMEOUT=0
-GRUB_TIMEOUT_STYLE=hidden
+GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
+GRUB_TERMINAL_INPUT=console
+GRUB_TIMEOUT=3
+GRUB_TIMEOUT_STYLE=menu
 GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
@@ -869,18 +2117,41 @@ cat > "${target}/etc/lightdm/lightdm.conf.d/60-ming-autologin.conf" <<LIGHTDM
 [Seat:*]
 autologin-user=user
 autologin-user-timeout=0
+autologin-session=xfce
 user-session=xfce
+greeter-session=lightdm-gtk-greeter
+allow-guest=false
 LIGHTDM
+
+# The installed system should boot directly to the graphical desktop. Some
+# installer paths leave systemd on multi-user.target, which is why a healthy
+# install can still land on tty1 after reboot.
+if chroot "${target}" systemctl list-unit-files lightdm.service >/dev/null 2>&1; then
+    chroot "${target}" systemctl enable lightdm.service >/dev/null 2>&1 || true
+    mkdir -p "${target}/etc/systemd/system"
+    ln -sfn /lib/systemd/system/lightdm.service "${target}/etc/systemd/system/display-manager.service" 2>/dev/null || true
+fi
+if chroot "${target}" systemctl list-unit-files graphical.target >/dev/null 2>&1; then
+    chroot "${target}" systemctl set-default graphical.target >/dev/null 2>&1 || true
+else
+    ln -sfn /lib/systemd/system/graphical.target "${target}/etc/systemd/system/default.target" 2>/dev/null || true
+fi
 
 echo "user ALL=(ALL) NOPASSWD: ALL" > "${target}/etc/sudoers.d/user" 2>/dev/null || true
 chmod 440 "${target}/etc/sudoers.d/user" 2>/dev/null || true
 
-# The installed system is produced by unpacking the Live filesystem, so remove
-# Live-only installer launchers and sessions from the target before first boot.
+# The installed system is produced by unpacking the Live filesystem. Restore
+# the real util-linux binary before removing Live-only installer components.
+if [[ -x "${target}/usr/lib/ming-os/sfdisk.real" ]]; then
+    install -m 0755 "${target}/usr/lib/ming-os/sfdisk.real" "${target}/usr/sbin/sfdisk"
+    rm -f "${target}/usr/lib/ming-os/sfdisk.real"
+fi
+
 rm -f \
     "${target}/usr/share/applications/calamares.desktop" \
     "${target}/usr/share/applications/calamares-install-debian.desktop" \
     "${target}/usr/share/xsessions/ming-installer.desktop" \
+    "${target}/usr/local/sbin/sfdisk" \
     "${target}/etc/systemd/system/ming-live-installer.service" \
     "${target}/etc/systemd/system/graphical.target.wants/ming-live-installer.service" \
     2>/dev/null || true
@@ -913,7 +2184,8 @@ for svc in NetworkManager networking systemd-networkd; do
         chroot "${target}" systemctl enable "${svc}" 2>/dev/null || true
     fi
 done
-# 写 /etc/modules-load.d 确保常见网卡模块在下次开机自动加载
+# 写 /etc/modules-load.d 确保常见非 Broadcom 网卡模块在下次开机自动加载。
+# Broadcom 驱动彼此冲突，必须交给 modalias/udev 或 Ming 驱动管理器选择。
 mkdir -p "${target}/etc/modules-load.d"
 cat > "${target}/etc/modules-load.d/ming-network.conf" << 'NETMOD'
 # Ming OS：确保常见老网卡驱动在开机时加载
@@ -924,7 +2196,6 @@ ath9k
 ath10k_pci
 rtl8192ee
 rtl8188ee
-brcmfmac
 e1000e
 NETMOD
 # 确保固件被 initramfs 包含（update-initramfs 已在前面运行）
@@ -961,23 +2232,33 @@ echo "target_root=${root}"
 
 root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
 echo "root_source=${root_source}"
-boot_disk=""
-if [ -n "${root_source}" ] && [ -b "${root_source}" ]; then
-    pkname="$(lsblk -no PKNAME "${root_source}" 2>/dev/null | head -n 1 || true)"
-    if [ -n "${pkname}" ] && [ -b "/dev/${pkname}" ]; then
-        boot_disk="/dev/${pkname}"
+resolve_boot_disk() {
+    local root_source="$1" name type
+    local -a physical_disks=()
+
+    [ -n "${root_source}" ] && [ -b "${root_source}" ] || {
+        echo "ERROR: cannot resolve target root block device for GRUB"
+        return 1
+    }
+
+    while read -r name type; do
+        [ "${type}" = disk ] || continue
+        [[ " ${physical_disks[*]-} " == *" ${name} "* ]] || physical_disks+=("${name}")
+    done < <(lsblk -s -nrpo NAME,TYPE "${root_source}" 2>/dev/null || true)
+
+    if [ "${#physical_disks[@]}" -ne 1 ]; then
+        echo "ERROR: expected one physical GRUB disk for ${root_source}, found ${#physical_disks[@]}"
+        return 1
     fi
-fi
-if [ -z "${boot_disk}" ]; then
-    boot_disk="$(lsblk -ndo NAME,TYPE,TRAN /dev/sd? /dev/vd? /dev/nvme?n? /dev/mmcblk? 2>/dev/null | awk '$2=="disk" && $3!="usb" {print "/dev/"$1; exit}')"
-fi
-if [ -z "${boot_disk}" ]; then
-    boot_disk="$(lsblk -ndo NAME,TYPE /dev/sd? /dev/vd? /dev/nvme?n? /dev/mmcblk? 2>/dev/null | awk '$2=="disk"{print "/dev/"$1; exit}')"
-fi
-if [ -z "${boot_disk}" ] || [ ! -b "${boot_disk}" ]; then
-    echo "ERROR: cannot find install disk for GRUB"
-    exit 20
-fi
+    boot_disk="${physical_disks[0]}"
+    [ -b "${boot_disk}" ] || {
+        echo "ERROR: resolved GRUB disk is not a block device: ${boot_disk}"
+        return 1
+    }
+}
+
+boot_disk=""
+resolve_boot_disk "${root_source}" || exit 20
 echo "boot_disk=${boot_disk}"
 
 for mountpoint in dev proc sys run; do
@@ -1036,11 +2317,13 @@ install_uefi_grub() {
 }
 
 install_bios_grub() {
-    if command -v grub-install >/dev/null 2>&1; then
-        grub-install --target=i386-pc --recheck --force \
+    local modules="part_gpt part_msdos ext2 search search_fs_uuid normal configfile linux"
+    if [ -x "${root}/usr/sbin/grub-install" ]; then
+        chroot "${root}" /usr/sbin/grub-install \
+            --target=i386-pc --recheck --force --modules="${modules}" "${boot_disk}"
+    elif command -v grub-install >/dev/null 2>&1; then
+        grub-install --target=i386-pc --recheck --force --modules="${modules}" \
             --boot-directory="${root}/boot" "${boot_disk}"
-    elif [ -x "${root}/usr/sbin/grub-install" ]; then
-        chroot "${root}" /usr/sbin/grub-install --target=i386-pc --recheck --force "${boot_disk}"
     else
         echo "ERROR: grub-install is missing in live and target environments"
         exit 21
@@ -1066,38 +2349,41 @@ prefer_ming_uefi_boot() {
 }
 
 if [ -d /sys/firmware/efi ]; then
-    if install_uefi_grub; then
-        echo "Ming UEFI bootloader path completed"
-        prefer_ming_uefi_boot
-    else
-        # UEFI 安装失败（无论是 ESP 未挂载还是 grub-install 出错），
-        # 都降级到 BIOS GRUB——确保老主板/半残 UEFI 机器仍可引导
-        echo "WARN: UEFI bootloader install failed; falling back to BIOS GRUB"
-        install_bios_grub
-        echo "Ming BIOS fallback bootloader path completed"
-    fi
+    install_uefi_grub || {
+        echo "ERROR: UEFI bootloader installation failed; refusing an unusable BIOS fallback"
+        exit 23
+    }
+    echo "Ming UEFI bootloader path completed"
+    prefer_ming_uefi_boot
 else
     install_bios_grub
     echo "Ming BIOS bootloader path completed"
 fi
 
-# 更新 GRUB 配置（失败不致命，grub.cfg 可能已由 Calamares grubcfg 模块写好）
+# A GRUB core without a usable config drops users at grub>, so final config
+# generation and validation are installation hard gates.
 if [ -x "${root}/usr/sbin/update-grub" ]; then
-    chroot "${root}" /usr/sbin/update-grub 2>/tmp/ming-installer/update-grub.log || \
-        echo "WARN: update-grub returned non-zero; check /tmp/ming-installer/update-grub.log"
+    chroot "${root}" /usr/sbin/update-grub \
+        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
 elif [ -x "${root}/usr/sbin/grub-mkconfig" ]; then
     chroot "${root}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg \
-        2>/tmp/ming-installer/update-grub.log || true
+        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
 else
-    grub-mkconfig -o "${root}/boot/grub/grub.cfg" 2>/dev/null || true
+    grub-mkconfig -o "${root}/boot/grub/grub.cfg" \
+        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
 fi
 
-# grub.cfg 存在即视为成功；空文件不阻断安装（Calamares grubcfg 模块会兜底）
-if [ -s "${root}/boot/grub/grub.cfg" ]; then
-    echo "grub.cfg OK: $(wc -l < "${root}/boot/grub/grub.cfg") lines"
-else
-    echo "WARN: grub.cfg is missing or empty after update-grub"
+if [ ! -s "${root}/boot/grub/grub.cfg" ] \
+    || grep -Fq '__MING_ROOT_UUID__' "${root}/boot/grub/grub.cfg"; then
+    echo "ERROR: final grub.cfg is missing, empty, or still contains a placeholder"
+    exit 22
 fi
+if [ -x "${root}/usr/bin/grub-script-check" ]; then
+    chroot "${root}" /usr/bin/grub-script-check /boot/grub/grub.cfg || exit 22
+elif command -v grub-script-check >/dev/null 2>&1; then
+    grub-script-check "${root}/boot/grub/grub.cfg" || exit 22
+fi
+echo "grub.cfg OK: $(wc -l < "${root}/boot/grub/grub.cfg") lines"
 echo "Ming bootloader install completed"
 MINGBOOTLOADER
     chmod +x /usr/local/sbin/ming-install-bootloader
@@ -1106,6 +2392,49 @@ MINGBOOTLOADER
     # the module sequence from the package, but override the visible branding
     # and add a final identity repair that runs on the installed target.
     mkdir -p /etc/calamares/branding/ming /etc/calamares/modules
+
+    # KPMcore 24.12 sends a legacy standalone "write" command to sfdisk.
+    # util-linux 2.41 treats that line as another partition definition. Keep a
+    # Live-only compatibility wrapper at the trusted command path, strip that
+    # obsolete line for --append, and normalize the success text KPMcore parses.
+    install -d -m 0755 /usr/lib/ming-os
+    if [[ ! -x /usr/lib/ming-os/sfdisk.real ]]; then
+        install -m 0755 /usr/sbin/sfdisk /usr/lib/ming-os/sfdisk.real
+    fi
+    cat > /usr/sbin/sfdisk << 'SFDISKWRAPPER'
+#!/bin/sh
+export LC_ALL=C LANG=C LANGUAGE=C
+
+case " $* " in
+    *" --append "*)
+        input=$(mktemp)
+        output=$(mktemp)
+        error=$(mktemp)
+        trap 'rm -f "$input" "$output" "$error"' EXIT HUP INT TERM
+        cat > "$input"
+        sed '/^[[:space:]]*write[[:space:]]*$/d' "$input" \
+            | /usr/lib/ming-os/sfdisk.real "$@" > "$output" 2> "$error"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            number=$(sed -n 's/.*Created a new partition \([0-9][0-9]*\).*/\1/p' \
+                "$output" "$error" | tail -n 1)
+            if [ -n "$number" ]; then
+                printf 'Created a new partition %s\n' "$number"
+                exit 0
+            fi
+        fi
+        cat "$output"
+        cat "$error" >&2
+        exit "$rc"
+        ;;
+    *)
+        exec /usr/lib/ming-os/sfdisk.real "$@"
+        ;;
+esac
+SFDISKWRAPPER
+    chmod 0755 /usr/sbin/sfdisk
+    rm -f /usr/local/sbin/sfdisk
+
     cat > /etc/calamares/branding/ming/branding.desc << BRANDING
 ---
 componentName:  ming
@@ -1155,6 +2484,18 @@ script:
   - "/usr/local/sbin/ming-fix-installed-identity"
 IDENTITYCONF
 
+    cat > /etc/calamares/modules/ming-ota-preflight.conf << PREFLIGHTCONF
+---
+dontChroot: true
+timeout: 180
+script:
+  - "/usr/local/sbin/ming-ota-preflight"
+PREFLIGHTCONF
+
+    cat > /etc/calamares/modules/ming-ota-target-guard.conf << 'MINGOTAGUARDCONF'
+---
+MINGOTAGUARDCONF
+
     cat > /etc/calamares/modules/ming-bootloader.conf << BOOTLOADERCONF
 ---
 dontChroot: true
@@ -1193,14 +2534,8 @@ if [ -d /sys/firmware/efi ] && command -v efibootmgr >/dev/null 2>&1; then
     fi
 fi
 
-if command -v eject >/dev/null 2>&1; then
-    for dev in /dev/cdrom /dev/sr0 /dev/sr1; do
-        [ -e "${dev}" ] || continue
-        echo "Trying to eject ${dev}"
-        eject -r "${dev}" || eject "${dev}" || true
-    done
-fi
-
+# The running squashfs root still needs the Live medium to complete shutdown.
+# Ejecting it here causes an endless SQUASHFS error loop and a hard reset.
 sync
 systemctl -i reboot
 FINISHREBOOT
@@ -1239,11 +2574,11 @@ defaultFileSystemType: "ext4"
 # ext4 稳定可靠，是绝大多数老机器的最佳选择
 availableFileSystemTypes:
   - "ext4"
-initialPartitioningChoice: erase
+initialPartitioningChoice: none
 initialSwapChoice: none
 requiredStorage: 12
 # 关闭手动分区入口——普通用户不需要也不会用，只显示"清空整个磁盘"
-allowManualPartitioning: false
+allowManualPartitioning: true
 PARTITIONCONF
 
     cat > /etc/calamares/modules/mount.conf << 'MOUNTCONF'
@@ -1307,6 +2642,7 @@ defaultGroups:
   - users
   - audio
   - video
+  - render
   - plugdev
   - netdev
   - bluetooth
@@ -1353,6 +2689,12 @@ USERSCONF
 ---
 modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules ]
 instances:
+- id: ming-ota-preflight
+  module: shellprocess
+  config: ming-ota-preflight.conf
+- id: ming-ota-target-guard
+  module: ming-ota-target-guard
+  config: ming-ota-target-guard.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
@@ -1376,20 +2718,19 @@ sequence:
   - partition
   - summary
 - exec:
+  - shellprocess@ming-ota-preflight
+  - ming-ota-target-guard@ming-ota-target-guard
   - partition
   - mount
   - unpackfs
   - machineid
   - fstab
-  - locale
-  - keyboard
-  - localecfg
   - networkcfg
   - hwclock
   - initramfs
   - grubcfg
-  - shellprocess@ming-bootloader
   - shellprocess@ming-identity
+  - shellprocess@ming-bootloader
   - umount
 - show:
   - finished
@@ -1425,6 +2766,24 @@ CALAMARESDESKTOP
 }
 
 # ======================== 系统优化 ========================
+
+ensure_single_tmpfs_fstab_entry() {
+    local fstab="/etc/fstab"
+    local normalized
+
+    touch "${fstab}"
+    normalized=$(mktemp "${fstab}.ming.XXXXXX")
+    awk '
+        /^[[:space:]]*#/ { print; next }
+        NF >= 3 && $2 == "/tmp" && $3 == "tmpfs" { next }
+        { print }
+    ' "${fstab}" > "${normalized}"
+    printf '%s\n' \
+        'tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=512M 0 0' \
+        >> "${normalized}"
+    cat "${normalized}" > "${fstab}"
+    rm -f "${normalized}"
+}
 
 optimize_system() {
     # 安装 zram 工具
@@ -1514,7 +2873,7 @@ MEMSVC
 
     # 系统内核参数优化
     cat > /etc/sysctl.d/99-ming-performance.conf << 'SYSCTLCONF'
-# Ming OS 26.3.1 内核深度优化
+# Ming OS 26.3.2 内核深度优化
 # 目标：兼容 2GB+ RAM / 老 i3-i5-E3 / 老 AMD / 机械硬盘，同时保持桌面流畅
 
 # ---- 内存：老机器优先减少换页 ----
@@ -1580,9 +2939,7 @@ THPCONF
 
     # /tmp 挂载到 tmpfs（减少机械硬盘随机写，老机器流畅感提升明显）
     # 上限 512MB，超大 tmp 操作自动溢出到磁盘
-    cat >> /etc/fstab << 'TMPFSMOUNT'
-tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=512M 0 0
-TMPFSMOUNT
+    ensure_single_tmpfs_fstab_entry
 
     # BBR 模块（多数 Debian 内核已内建，兜底加载）
     mkdir -p /etc/modules-load.d
@@ -1629,7 +2986,7 @@ JOURNALCFG
 
     mkdir -p /etc/default
     cat > /etc/default/earlyoom << EARLYOOMCFG
-EARLYOOM_ARGS="-m 4 -s 8 -r 60 --prefer '^(firefox|chromium|wps|wechat|code)$' --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager)$'"
+EARLYOOM_ARGS="-m 4 -s 8 -r 60 --prefer '^(firefox|chromium|code)$' --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager)$'"
 EARLYOOMCFG
 
     # 配置 I/O 调度器（针对 SSD 和 HDD 的优化）
@@ -1822,50 +3179,60 @@ Section "InputClass"
 EndSection
 TOUCHSCREENCONF
 
-    # ======================== 英特尔显卡优化配置 ========================
-    # 关键：20-intel.conf 只能在确认有 Intel GPU 时才写入。
-    # 若无条件写入 Driver "intel"，在 VirtualBox/QEMU/AMD 机器上 X 服务器会
-    # 因找不到 intel DDX 驱动而加载失败，导致黑屏。
-    # 通过 systemd tmpfiles + 开机脚本动态检测，只在 Intel GPU 机器上生效。
+    # ======================== Intel Xorg compatibility migration ========================
+    # Let the in-tree i915/KMS stack select Xorg's modesetting backend.  The
+    # previous generated Intel DDX path causes black screens on Atom/Cherry
+    # Trail devices such as Mi Pad 2.  The retained helper only quarantines a
+    # header-marked config or the exact previous Ming-generated signature.
     cat > /usr/local/sbin/ming-intel-xorg-setup << 'INTELXORGSETUP'
 #!/bin/sh
-# 开机时检查是否有 Intel GPU，仅有 Intel 时写入 xorg.conf
+set -eu
+
 XCONF="/etc/X11/xorg.conf.d/20-intel.conf"
-vendor=$(cat /sys/class/drm/card0/device/vendor 2>/dev/null || echo "")
-if [ "${vendor}" = "0x8086" ]; then
-    mkdir -p /etc/X11/xorg.conf.d
-    cat > "${XCONF}" << 'EOF'
-Section "Device"
-    Identifier  "Intel Graphics"
-    Driver      "intel"
-    Option      "TearFree"    "true"
-    Option      "AccelMethod" "sna"
-    Option      "DRI"         "3"
-    Option      "TripleBuffer" "true"
-EndSection
-EOF
+DISABLED="${XCONF}.ming-legacy-disabled"
+HEADER="# Managed by Ming OS legacy Intel Xorg setup"
+LOG="/var/log/ming-intel-xorg-migration.log"
+
+mkdir -p "$(dirname "${LOG}")"
+is_ming_legacy_config() {
+    grep -Fxq "${HEADER}" "${XCONF}" && return 0
+    grep -Eq '^[[:space:]]*Identifier[[:space:]]+"Intel Graphics"[[:space:]]*$' "${XCONF}" \
+        && grep -Eq '^[[:space:]]*Driver[[:space:]]+"intel"[[:space:]]*$' "${XCONF}" \
+        && grep -Eq '^[[:space:]]*Option[[:space:]]+"TearFree"[[:space:]]+"true"[[:space:]]*$' "${XCONF}" \
+        && grep -Eq '^[[:space:]]*Option[[:space:]]+"AccelMethod"[[:space:]]+"sna"[[:space:]]*$' "${XCONF}" \
+        && grep -Eq '^[[:space:]]*Option[[:space:]]+"DRI"[[:space:]]+"3"[[:space:]]*$' "${XCONF}" \
+        && grep -Eq '^[[:space:]]*Option[[:space:]]+"TripleBuffer"[[:space:]]+"true"[[:space:]]*$' "${XCONF}"
+}
+
+if [ ! -f "${XCONF}" ]; then
+    exit 0
+fi
+if is_ming_legacy_config; then
+    mv -f "${XCONF}" "${DISABLED}"
+    printf '%s disabled Ming-managed legacy Intel Xorg config\n' "$(date '+%F %T')" >> "${LOG}"
 else
-    rm -f "${XCONF}"
+    printf '%s preserved user-owned Intel Xorg config: %s\n' "$(date '+%F %T')" "${XCONF}" >> "${LOG}"
 fi
 INTELXORGSETUP
     chmod 0755 /usr/local/sbin/ming-intel-xorg-setup
-    rm -f /etc/X11/xorg.conf.d/20-intel.conf
-
-    cat > /etc/systemd/system/ming-intel-xorg.service << 'INTELXORGSVC'
+    systemctl disable --now ming-intel-xorg.service 2>/dev/null || true
+    rm -f /etc/systemd/system/ming-intel-xorg.service \
+        /etc/systemd/system/multi-user.target.wants/ming-intel-xorg.service
+    cat > /etc/systemd/system/ming-intel-xorg-migration.service << 'INTELXORGMIGRATIONSVC'
 [Unit]
-Description=Ming OS Intel Xorg config (only on Intel GPU)
-DefaultDependencies=no
+Description=Ming OS Intel Xorg legacy configuration migration
+After=local-fs.target
 Before=display-manager.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/ming-intel-xorg-setup
-RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-INTELXORGSVC
-    systemctl enable ming-intel-xorg.service 2>/dev/null || true
+INTELXORGMIGRATIONSVC
+    systemctl enable ming-intel-xorg-migration.service 2>/dev/null || true
+    /usr/local/sbin/ming-intel-xorg-setup || true
 
     # ACPI 守护进程（处理笔记本热键/电源按钮）
     systemctl enable acpid 2>/dev/null || true
@@ -1876,14 +3243,10 @@ INTELXORGSVC
 configure_boot_speed() {
     echo "配置开机加速..."
 
-    # 蓝牙：等桌面就绪后再启动（延迟 5s），不卡 boot sequence
-    mkdir -p /etc/systemd/system/bluetooth.service.d
-    cat > /etc/systemd/system/bluetooth.service.d/delay.conf << 'EOF'
-[Unit]
-After=graphical.target
-[Service]
-ExecStartPre=/bin/sleep 5
-EOF
+    # Do not hold Bluetooth behind the graphical target. The radio service is
+    # enabled only after BlueZ is present and its rfkill drop-in is independent
+    # of the display stack; remove legacy delayed overrides on resumed builds.
+    rm -f /etc/systemd/system/bluetooth.service.d/delay.conf
 
     # 打印：改为 socket 按需激活，开机不自启
     systemctl disable cups 2>/dev/null || true
@@ -1902,8 +3265,15 @@ EOF
         systemctl mask "${svc}" 2>/dev/null || true
     done
 
-    # ModemManager：无 SIM 卡设备不需要
-    systemctl disable ModemManager 2>/dev/null || true
+    # ModemManager：保留启用以兼容 4G 模块/随身 Wi-Fi，但延迟启动避免拖慢普通机器。
+    mkdir -p /etc/systemd/system/ModemManager.service.d
+    cat > /etc/systemd/system/ModemManager.service.d/delay.conf << 'EOF'
+[Unit]
+After=graphical.target NetworkManager.service
+[Service]
+ExecStartPre=/bin/sleep 10
+EOF
+    systemctl enable ModemManager 2>/dev/null || true
 
     # 应用商店后台刷新：延迟 90s，不阻塞第一屏
     for svc in spark-store-refresh.service; do
@@ -1926,13 +3296,10 @@ DefaultTimeoutStartSec=15s
 DefaultTimeoutStopSec=10s
 EOF
 
-    # NetworkManager-wait-online：最多等 5s，避免无网络时卡启动
-    mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
-    cat > /etc/systemd/system/NetworkManager-wait-online.service.d/timeout.conf << 'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/nm-online -s -q --timeout=5
-EOF
+    # No NetworkManager-wait-online drop-in is shipped.  The dispatcher-owned
+    # ming-time-sync helper retries after actual network events instead.
+    systemctl disable --now NetworkManager-wait-online.service 2>/dev/null || true
+    rm -rf /etc/systemd/system/NetworkManager-wait-online.service.d
 
     echo "开机加速配置完成"
 }
@@ -2080,13 +3447,73 @@ STORAGEUDEV
     echo "无感知存储配置完成"
 }
 
+# ======================== Live / 已安装系统共同兜底 ========================
+
+configure_installed_system_static_defaults() {
+    # These files are unpacked into the target before Calamares shellprocess
+    # runs. The identity script rewrites them with the final root UUID later.
+    mkdir -p /etc/modules-load.d /etc/grub.d /etc/lightdm/lightdm.conf.d /boot/grub/themes/ming
+    if [[ ! -s /tmp/ming-build/assets/grub-theme/theme.txt ]]; then
+        echo "ERROR: Ming GRUB theme asset is missing" >&2
+        return 1
+    fi
+    install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
+
+    cat > /etc/modules-load.d/ming-network.conf << 'STATICNETMOD'
+# Ming OS: keep common non-Broadcom legacy network modules available at boot.
+# Broadcom selection is delegated to udev/modalias or ming-broadcom-driver.
+r8169
+r8168
+iwlwifi
+ath9k
+ath10k_pci
+rtl8192ee
+rtl8188ee
+e1000e
+STATICNETMOD
+
+    cat > /etc/grub.d/09_ming_os << 'STATICGRUB'
+#!/bin/sh
+set -e
+
+cat <<'EOF'
+menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    initrd /initrd.img
+}
+menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+    initrd /initrd.img
+}
+menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+    initrd /initrd.img
+}
+EOF
+STATICGRUB
+    chmod 0755 /etc/grub.d/09_ming_os
+
+    cat > /etc/lightdm/lightdm.conf.d/60-ming-autologin.conf << 'STATICLIGHTDM'
+[Seat:*]
+autologin-user=user
+autologin-user-timeout=0
+autologin-session=ming-installer
+user-session=ming-installer
+greeter-session=lightdm-gtk-greeter
+allow-guest=false
+STATICLIGHTDM
+}
+
 # ======================== 主流程 ========================
 
 main() {
     echo "=====> [01_base] 开始基础系统配置 <====="
 
     configure_apt_sources
-    install_base_packages
+    install_base_packages || return 1
     install_hardware_support_packages
     configure_installer_password_policy
     configure_locale
@@ -2094,9 +3521,13 @@ main() {
     configure_keyboard
     configure_users
     configure_network
+    deploy_time_sync
     deploy_hardware_diagnostics
     configure_os_identity
     configure_installer_identity
+    configure_installed_system_static_defaults
+    configure_macbook_input_modules
+    configure_macbook_fan_and_disk_health
     optimize_system
     configure_seamless_storage
     configure_boot_speed

@@ -1,0 +1,406 @@
+import ast
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PHONE_DESKTOP = ROOT / "assets" / "ming-phone-desktop.py"
+APP_DRAWER = ROOT / "assets" / "ming-app-drawer.py"
+SETTINGS = ROOT / "assets" / "ming-settings.py"
+APPS_MODULE = ROOT / "modules" / "02_apps.sh"
+DESKTOP_MODULE = ROOT / "modules" / "03_desktop.sh"
+OTA_MODULE = ROOT / "modules" / "06_ota_update.sh"
+BASE_MODULE = ROOT / "modules" / "01_base.sh"
+BUILD_SCRIPT = ROOT / "build_onion_os.sh"
+
+
+def load_interaction_state():
+    source = PHONE_DESKTOP.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.ClassDef) and item.name == "InteractionState"
+    )
+    module = ast.Module(body=[node], type_ignores=[])
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(module), str(PHONE_DESKTOP), "exec"), namespace)
+    return namespace["InteractionState"]
+
+
+class InteractionStateTests(unittest.TestCase):
+    def test_small_pointer_movement_activates_once(self):
+        state = load_interaction_state()(drag_threshold=12)
+        state.begin("mouse", 10, 10, 1000)
+        state.update(17, 14)
+        self.assertEqual("activate", state.finish(17, 14, 1010))
+        self.assertIsNone(state.finish(17, 14, 1011))
+
+    def test_large_pointer_movement_is_drag(self):
+        state = load_interaction_state()(drag_threshold=12)
+        state.begin("touch", 10, 10, 1000)
+        state.update(30, 10)
+        self.assertEqual("drag", state.finish(30, 10, 1100))
+
+    def test_cancel_never_activates(self):
+        state = load_interaction_state()(drag_threshold=12)
+        state.begin("touch", 10, 10, 1000)
+        state.cancel()
+        self.assertIsNone(state.finish(10, 10, 1010))
+
+    def test_touch_suppresses_compatibility_mouse_event(self):
+        state = load_interaction_state()(drag_threshold=12)
+        state.begin("touch", 10, 10, 1000)
+        self.assertEqual("activate", state.finish(10, 10, 1010))
+        self.assertTrue(state.should_ignore_mouse(1200))
+        self.assertFalse(state.should_ignore_mouse(1800))
+
+
+class DesktopSourceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.drawer = APP_DRAWER.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+
+    def test_tile_text_is_bounded(self):
+        for marker in [
+            "label.set_size_request(LABEL_W, LABEL_H)",
+            "label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)",
+            "label.set_ellipsize(Pango.EllipsizeMode.END)",
+            "label.set_lines(2)",
+        ]:
+            self.assertIn(marker, self.phone)
+
+    def test_android_desktop_is_enabled(self):
+        self.assertIn("Exec=/usr/local/bin/ming-phone-desktop-watchdog --session", self.desktop)
+        self.assertIn("X-GNOME-Autostart-enabled=true", self.desktop)
+        self.assertIn("ming-phone-desktop --sync", self.desktop)
+
+    def test_gtk3_shell_entries_lock_gdk3_before_importing_gdk(self):
+        for source in (self.phone, self.drawer):
+            require = 'gi.require_version("Gdk", "3.0")'
+            imported = "from gi.repository import Gdk"
+            self.assertIn(require, source)
+            self.assertLess(source.index(require), source.index(imported))
+
+    def test_plank_watchdog_is_session_long_and_visible(self):
+        self.assertIn("while true; do", self.desktop)
+        self.assertIn("plank_window_visible", self.desktop)
+        self.assertIn("ming-plank-watchdog --session", self.desktop)
+
+    def test_plank_window_lookup_uses_wm_class_column(self):
+        self.assertNotIn("tolower($4) ~ /plank/", self.desktop)
+        self.assertGreaterEqual(self.desktop.count("tolower($3) ~ /plank/"), 2)
+
+    def test_app_drawer_is_focusable_opaque_and_explicitly_closable(self):
+        self.assertNotIn("WindowTypeHint.DOCK", self.drawer)
+        self.assertNotIn(
+            "window#ming-app-drawer { background: transparent; }",
+            self.drawer,
+        )
+        self.assertIn('Gtk.Button(label="关闭")', self.drawer)
+        self.assertIn('window.connect("delete-event"', self.drawer)
+
+    def test_app_drawer_activates_on_explicit_primary_release(self):
+        self.assertIn('button.connect("button-release-event", self._activate_button, app)', self.drawer)
+        self.assertIn("def _activate_button", self.drawer)
+        self.assertNotIn('button.connect("clicked", self.launch, app, button)', self.drawer)
+
+    def test_drawer_keeps_context_menu_open_and_deduplicates_system_wrappers(self):
+        self.assertNotIn('window.connect("focus-out-event"', self.drawer)
+        for marker in [
+            "def canonical_identity(app):",
+            "def deduplicate_apps(apps):",
+            '"ming-control-center.desktop": "settings"',
+            '"ming-files.desktop": "files"',
+            '"ming-terminal.desktop": "terminal"',
+            '"ming-edge.desktop": "edge"',
+            'basename == "ming-update.desktop"',
+        ]:
+            self.assertIn(marker, self.drawer)
+
+    def test_desktop_preserves_last_known_good_layout_and_has_a_blank_area_menu(self):
+        for marker in [
+            "LAST_GOOD_LAYOUT_PATH",
+            "def layout_is_valid",
+            "primary layout invalid; restoring last known-good layout",
+            "app discovery was transiently empty; keeping last known-good layout",
+            "def show_desktop_context_menu",
+            "刷新桌面",
+            "打开应用抽屉",
+            "Ming 设置",
+            "终端",
+        ]:
+            self.assertIn(marker, self.phone)
+
+    def test_desktop_does_not_rebuild_all_tiles_on_a_fixed_timer(self):
+        self.assertNotIn(
+            "GLib.timeout_add_seconds(8, self.refresh_from_apps)",
+            self.phone,
+        )
+        self.assertIn("def refresh_if_apps_changed", self.phone)
+
+    def test_layer_enforcement_is_one_shot_and_non_blocking(self):
+        self.assertIn("threading.Thread(target=self.apply_desktop_layer", self.phone)
+        self.assertNotIn(
+            "GLib.timeout_add_seconds(4, self.enforce_desktop_layer)",
+            self.phone,
+        )
+
+    def test_shell_launches_use_socket_ack_and_direct_fallback(self):
+        common = (ROOT / "assets" / "ming-shell-common.py").read_text(encoding="utf-8")
+        self.assertIn("def send_launch_request", common)
+        self.assertIn("COMMON = load_shell_common()", self.phone)
+        self.assertIn("COMMON.send_launch_request", self.phone)
+        self.assertIn("COMMON.send_launch_request", self.drawer)
+        self.assertIn("无法打开此应用", self.drawer)
+
+    def test_status_panel_fills_its_allocated_width(self):
+        self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)
+        self.assertIn("box.set_hexpand(True)", self.phone)
+        self.assertIn("controls.attach(self.volume_scale, 0, 1, 3, 1)", self.phone)
+        self.assertIn("controls.attach(self.brightness_scale, 0, 3, 3, 1)", self.phone)
+
+    def test_desktop_uses_cairo_for_the_single_tile_visual_source(self):
+        fallback = self.phone[
+            self.phone.index("def draw_icon_fallback"):
+            self.phone.index("def item_at")
+        ]
+        self.assertNotIn("if self.tiles:", fallback)
+        self.assertIn("self.set_opacity(0.0)", self.phone)
+
+    def test_normal_windows_are_opaque(self):
+        for forbidden in [
+            "inactive-opacity = 0.92",
+            "active-opacity = 0.98",
+            "frame-opacity = 0.90",
+            '"85:class_g = \'Microsoft-edge\'"',
+            '"90:class_g = \'Thunar\'"',
+            '"90:class_g = \'Xfce4-terminal\'"',
+            "xfce4-panel --quit",
+        ]:
+            self.assertNotIn(forbidden, self.desktop)
+        for marker in [
+            "inactive-opacity = 1.0",
+            "active-opacity = 1.0",
+            "frame-opacity = 1.0",
+            'pkill -TERM -u "$(id -u)" -x xfce4-panel',
+        ]:
+            self.assertIn(marker, self.desktop)
+
+
+class DesktopPolishContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.settings = SETTINGS.read_text(encoding="utf-8")
+        cls.apps = APPS_MODULE.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        cls.ota = OTA_MODULE.read_text(encoding="utf-8")
+
+    def test_plank_is_the_single_primary_dock(self):
+        self.assertIn("Exec=/usr/local/bin/ming-plank-watchdog --session", self.desktop)
+        self.assertIn("plank_window_visible", self.desktop)
+        self.assertIn("IndicatorSize=4", self.desktop)
+        self.assertIn("UrgentBounceTime=600", self.desktop)
+        self.assertNotIn("Exec=/usr/local/bin/ming-dock-watchdog --session", self.desktop)
+
+    def test_virtualbox_parent_click_fallback_is_deduplicated(self):
+        self.assertIn('self.fixed.connect("button-release-event", self.on_fixed_button_release)', self.phone)
+        self.assertIn("dispatch_activation", self.phone)
+        self.assertIn("activation_consumed", self.phone)
+
+    def test_desktop_canvas_owns_mouse_and_touch_hit_testing(self):
+        self.assertIn('self.fixed.connect("touch-event", self.on_fixed_touch)', self.phone)
+        self.assertIn("def on_fixed_touch", self.phone)
+        self.assertIn("self.fixed_touch_state = InteractionState()", self.phone)
+        render = self.phone[self.phone.index("    def render(self):"):
+                            self.phone.index("    def place_overlays", self.phone.index("    def render(self):"))]
+        self.assertNotIn("DesktopTile(self, item)", render)
+
+    def test_parent_click_fallback_translates_child_window_coordinates(self):
+        self.assertIn("def fixed_event_coords", self.phone)
+        self.assertIn("event_window.get_origin()", self.phone)
+        self.assertIn("fixed_window.get_origin()", self.phone)
+        self.assertIn('self.fixed.connect("button-press-event", self.on_fixed_button_press)', self.phone)
+        self.assertIn('self.fixed.connect("motion-notify-event", self.on_fixed_motion)', self.phone)
+
+    def test_compatibility_mouse_activation_is_deduplicated_by_item(self):
+        self.assertIn("ACTIVATION_DEDUP_MS", self.phone)
+        self.assertIn("item_key", self.phone)
+        self.assertIn("event_time == previous_event_time", self.phone)
+
+    def test_launch_feedback_has_a_bounded_window_aware_lifetime(self):
+        self.assertIn("LAUNCH_FEEDBACK_TIMEOUT_MS = 4000", self.phone)
+        self.assertIn("class LaunchFeedbackOverlay", self.phone)
+        self.assertIn("window_is_ready", self.phone)
+        self.assertIn("启动时间较长，应用会继续在后台打开", self.phone)
+
+    def test_launch_feedback_window_probe_does_not_block_gtk(self):
+        self.assertIn("def start_window_probe", self.phone)
+        self.assertIn("threading.Thread(target=self.check_window_ready", self.phone)
+        self.assertIn("GLib.idle_add(self.apply_window_probe", self.phone)
+        self.assertIn("self.launch_feedback.set_sensitive(False)", self.phone)
+
+    def test_render_keeps_idle_launch_feedback_hidden(self):
+        self.assertIn("if not self.launch_feedback.item:", self.phone)
+        self.assertIn("self.launch_feedback.hide()", self.phone)
+
+    def test_status_widget_exposes_radio_battery_and_settings(self):
+        self.assertIn("class StatusWidget", self.phone)
+        for marker in ["nmcli", "bluetoothctl", "upower", "ming-control-center"]:
+            self.assertIn(marker, self.phone)
+
+    def test_status_wifi_button_uses_ming_diagnostics_not_empty_nm_editor(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn('self.wifi_button = self.action_button("Wi-Fi --", "ming-control-center")', status)
+        self.assertNotIn('"nm-connection-editor"', status)
+
+    def test_status_widget_exposes_safe_power_menu(self):
+        self.assertIn("self.power_button", self.phone)
+        self.assertIn("xfce4-session-logout", self.phone)
+        self.assertIn("gnome-session-quit", self.phone)
+
+    def test_spark_daemonized_zero_exit_is_success(self):
+        self.assertIn('if [[ "${rc}" -eq 0 ]]; then', self.apps)
+        self.assertIn("Spark Store launcher daemonized successfully", self.apps)
+        self.assertIn("pgrep -f", self.apps)
+        self.assertIn("wmctrl -lx", self.apps)
+
+    def test_settings_and_app_library_fit_the_monitor_workarea(self):
+        self.assertIn("responsive_window_size", self.settings)
+        self.assertNotIn("self.set_default_size(1000, 700)", self.settings)
+        self.assertIn("responsive_window_size", self.desktop)
+        self.assertNotIn("self.set_default_size(840, 560)", self.desktop)
+
+    def test_ota_resolves_home_before_user_paths(self):
+        home_resolution = 'HOME="${HOME:-$(resolve_home)}"'
+        user_config = 'readonly USER_CONFIG_DIR="${HOME}/.config/ming-update"'
+        self.assertIn("resolve_home()", self.ota)
+        self.assertIn(home_resolution, self.ota)
+        self.assertLess(self.ota.index(home_resolution), self.ota.index(user_config))
+
+    def test_privileged_ota_install_finds_unprivileged_manifest(self):
+        self.assertIn("find_cached_manifest()", self.ota)
+        self.assertIn("/home/*/.cache/ming-update/update_info.json", self.ota)
+        major = self.ota[self.ota.index("major_install_with_home_backup()"):
+                         self.ota.index("auto_shutdown_update()")]
+        self.assertIn("manifest=$(find_cached_manifest)", major)
+
+    def test_edge_and_spark_have_vm_safe_wrappers(self):
+        for marker in [
+            "homepage=/usr/share/ming-os/homepage/index.html",
+            'if [[ "$#" -eq 0 ]]',
+            "ming-spark-store",
+            "MING_SPARK_LOG",
+            "--ozone-platform=x11",
+            "--disable-gpu",
+        ]:
+            self.assertIn(marker, self.apps)
+
+    def test_edge_is_excluded_from_compositor_borders(self):
+        self.assertGreaterEqual(self.desktop.count("class_g = 'Microsoft-edge'"), 3)
+        self.assertIn("shadow-exclude", self.desktop)
+        self.assertIn("rounded-corners-exclude", self.desktop)
+
+
+class InstallerBootContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = BASE_MODULE.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        cls.build = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    def test_installer_never_ejects_the_live_root_before_reboot(self):
+        start = self.base.index("cat > /usr/local/sbin/ming-finish-install-reboot")
+        end = self.base.index("FINISHREBOOT", start + 64)
+        finish_script = self.base[start:end]
+        self.assertNotIn("eject ", finish_script)
+        self.assertIn("systemctl -i reboot", finish_script)
+        self.assertIn("must not eject the mounted live medium", self.build)
+
+    def test_identity_and_root_uuid_are_finalized_before_grub_install(self):
+        expected = "  - shellprocess@ming-identity\n  - shellprocess@ming-bootloader"
+        self.assertIn(expected, self.base)
+        self.assertGreaterEqual(self.desktop.count(expected), 2)
+
+    def test_bios_grub_uses_target_environment_and_rejects_bad_config(self):
+        start = self.base.index("install_bios_grub()")
+        end = self.base.index("prefer_ming_uefi_boot()", start)
+        bios_function = self.base[start:end]
+        self.assertLess(
+            bios_function.index('chroot "${root}" /usr/sbin/grub-install'),
+            bios_function.index("command -v grub-install"),
+        )
+        self.assertIn("grub-script-check", self.base)
+        self.assertIn("exit 22", self.base)
+
+    def test_uefi_install_never_falls_back_to_bios_grub(self):
+        start = self.base.index("if [ -d /sys/firmware/efi ]; then", self.base.index("install_uefi_grub()"))
+        end = self.base.index("# A GRUB core", start)
+        firmware_branch = self.base[start:end]
+        uefi_branch, bios_branch = firmware_branch.split("\nelse\n", 1)
+        self.assertNotIn("install_bios_grub", uefi_branch)
+        self.assertNotIn("falling back to BIOS", uefi_branch)
+        self.assertIn("install_uefi_grub", uefi_branch)
+        self.assertIn("install_bios_grub", bios_branch)
+
+    def test_bios_grub_requires_one_recursive_physical_disk_ancestor(self):
+        self.assertIn("resolve_boot_disk()", self.base)
+        start = self.base.index("resolve_boot_disk()")
+        end = self.base.index("install_uefi_grub()", start)
+        resolver = self.base[start:end]
+        self.assertIn('lsblk -s -nrpo NAME,TYPE "${root_source}"', resolver)
+        self.assertIn("physical_disks", resolver)
+        self.assertIn('"${#physical_disks[@]}" -ne 1', resolver)
+        self.assertIn('boot_disk="${physical_disks[0]}"', resolver)
+
+
+class HardwareAndWirelessContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = BASE_MODULE.read_text(encoding="utf-8")
+        cls.settings = SETTINGS.read_text(encoding="utf-8")
+        cls.build = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    def test_core_wifi_firmware_is_mandatory_and_validated(self):
+        self.assertIn("install_required_wifi_firmware", self.base)
+        for package in [
+            "firmware-iwlwifi",
+            "firmware-realtek",
+            "firmware-atheros",
+            "firmware-brcm80211",
+        ]:
+            self.assertIn(package, self.base)
+            self.assertIn(package, self.build)
+
+    def test_network_page_explains_empty_wifi_state(self):
+        for marker in [
+            "wifi_diagnostic_snapshot",
+            "未检测到无线网卡",
+            "硬件无线开关或 BIOS",
+            "缺少固件",
+            "rfkill",
+        ]:
+            self.assertIn(marker, self.settings)
+        wifi_helper = self.settings[self.settings.index("def wifi_diagnostic_snapshot"):
+                                    self.settings.index("class MingSettings")]
+        self.assertIn("lsusb", wifi_helper)
+        self.assertIn("USB", wifi_helper)
+
+    def test_hardware_page_lists_platform_and_bound_drivers(self):
+        for marker in [
+            "硬件状态",
+            "设备卡片",
+            "ming-hardware-status",
+            "型号：%s · 驱动：%s · 建议：%s",
+            "正常、注意或失败",
+            "原始诊断",
+        ]:
+            self.assertIn(marker, self.settings)
+
+
+if __name__ == "__main__":
+    unittest.main()

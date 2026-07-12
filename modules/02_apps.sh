@@ -3,8 +3,8 @@
 # Ming OS 模块 02: 应用软件安装
 # ============================================================================
 # 设计意图：
-#   安装桌面环境核心组件、中文输入法、预装应用（WPS/微信/Firefox）、
-#   星火应用商店以及中文字体。
+#   安装桌面环境核心组件、中文输入法、Firefox、星火应用商店以及中文字体。
+#   WPS 与微信仅保留按需安装入口，不随 26.3.2 镜像预装。
 #   所有安装均在 chroot 中以非交互模式完成。
 #
 # 输入：
@@ -17,8 +17,8 @@
 #   1. 安装 Xfce 4.18 桌面环境与 Compton 合成器
 #   2. 安装 LightDM 显示管理器（自动登录）
 #   3. 安装 Firefox ESR 浏览器
-#   4. 安装 WPS Office（官方 deb）及字体依赖
-#   5. 安装微信（腾讯官方 Linux 版 + Ming 低内存包装器）
+#   4. 写入 WPS Office 按需安装入口
+#   5. 写入微信按需安装入口与 Ming 低内存包装器
 #   6. 安装 Fcitx5 中文输入法
 #   7. 安装星火应用商店（按需安装应用，避免低内存设备后台批量装软件）
 #   8. 安装中文字体
@@ -26,12 +26,55 @@
 
 set -uo pipefail
 
+readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
+    python3-gi
+    gir1.2-gtk-4.0
+    gir1.2-adw-1
+    libadwaita-1-0
+    gvfs
+    gvfs-backends
+    brightnessctl
+    xdotool
+    wmctrl
+    rfkill
+    pulseaudio
+    pulseaudio-utils
+    alsa-utils
+    libasound2-plugins
+    pulseaudio-module-bluetooth
+    pavucontrol
+    bluez
+    upower
+    pkexec
+    polkitd
+    lxpolkit
+    libnotify-bin
+    x11-utils
+)
+
+run_required_step() {
+    local step="$1"
+    shift
+    if ! "${step}" "$@"; then
+        echo "[ERROR] [02_apps] required step failed: ${step}" >&2
+        return 1
+    fi
+}
+
+run_optional_step() {
+    local step="$1"
+    shift
+    if ! "${step}" "$@"; then
+        echo "[WARN] [02_apps] optional step failed: ${step}" >&2
+    fi
+    return 0
+}
+
 # ======================== 桌面环境 ========================
 
 install_xfce_desktop() {
     apt install -y --no-install-recommends \
         xserver-xorg \
-        xserver-xorg-video-intel \
         xserver-xorg-video-amdgpu \
         xserver-xorg-video-ati \
         xserver-xorg-video-nouveau \
@@ -58,14 +101,14 @@ install_xfce_desktop() {
         xdg-utils \
         desktop-base \
         xfce4-power-manager \
-        xfce4-power-manager-plugins
+        xfce4-power-manager-plugins || return 1
 
     apt install -y --no-install-recommends \
         picom \
         plank \
         librsvg2-bin \
         librsvg2-common \
-        imagemagick
+        imagemagick || return 1
 
     mkdir -p /etc/xdg/picom
     cat > /etc/xdg/picom/picom.conf << PICOMDEFAULT
@@ -248,7 +291,7 @@ PICOMWRAP
         lightdm-gtk-greeter \
         xfce4-screensaver \
         plymouth \
-        plymouth-themes
+        plymouth-themes || return 1
 
     mkdir -p /etc/plymouth
     echo -e "[Daemon]\nTheme=ming-os\nShowDelay=0" > /etc/plymouth/plymouthd.conf
@@ -318,7 +361,7 @@ PLYMOUTHSCRIPT
 LIVE_USERNAME="${MING_USER}"
 LIVE_USER_FULLNAME="Ming OS User"
 LIVE_HOSTNAME="ming-os"
-LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video plugdev netdev powerdev scanner bluetooth sudo adm lpadmin nopasswdlogin autologin"
+LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video render plugdev netdev powerdev scanner bluetooth sudo adm lpadmin nopasswdlogin autologin"
 LIVECONFIG
 
     mkdir -p /etc/lightdm/lightdm.conf.d
@@ -531,24 +574,143 @@ install_fonts() {
         fonts-wqy-microhei \
         fonts-wqy-zenhei \
         fonts-noto-cjk \
-        fonts-noto-cjk-extra
+        fonts-noto-cjk-extra || return 1
 
     apt install -y --no-install-recommends fonts-liberation fonts-croscore || true
 
-    fc-cache -f -v
+    fc-cache -f -v || return 1
 }
 
-# ======================== Firefox ESR ========================
+# ======================== Microsoft Edge ========================
 
-install_firefox() {
+install_edge() {
     apt install -y --no-install-recommends \
-        firefox-esr \
-        firefox-esr-l10n-zh-cn
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg \
+        xdg-utils
 
-    sudo -u "${MING_USER}" xdg-settings set default-web-browser firefox-esr.desktop 2>/dev/null || true
+    install -d -m 0755 /usr/share/keyrings
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+        | gpg --dearmor -o /usr/share/keyrings/microsoft-edge.gpg.tmp
+    mv -f /usr/share/keyrings/microsoft-edge.gpg.tmp /usr/share/keyrings/microsoft-edge.gpg
+    chmod 0644 /usr/share/keyrings/microsoft-edge.gpg
 
-    configure_firefox_policies
-    deploy_firefox_homepage
+    cat > /etc/apt/sources.list.d/microsoft-edge.list << 'EDGEREPO'
+deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main
+EDGEREPO
+    apt update
+    apt install -y --no-install-recommends microsoft-edge-stable
+
+    cat > /usr/local/bin/ming-edge << 'MINGEDGE'
+#!/usr/bin/env bash
+set -e
+homepage=/usr/share/ming-os/homepage/index.html
+edge_args=()
+
+edge_gpu_is_unverified() {
+    local probe_cache probe_tmp probe_json
+    if [[ ! -e /dev/dri/renderD128 ]] \
+        || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet) \
+        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|i915\.modeset=0' /proc/cmdline 2>/dev/null; then
+        return 0
+    fi
+    command -v ming-hardware-status >/dev/null 2>&1 || return 0
+    probe_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/edge-hardware.json"
+    mkdir -p "$(dirname "${probe_cache}")"
+    if [[ ! -s "${probe_cache}" ]] || ! find "${probe_cache}" -mmin -5 -print -quit 2>/dev/null | grep -q .; then
+        probe_tmp="${probe_cache}.tmp.$$"
+        if timeout 4 ming-hardware-status status --json > "${probe_tmp}" 2>/dev/null; then
+            mv -f "${probe_tmp}" "${probe_cache}"
+        else
+            rm -f "${probe_tmp}"
+        fi
+    fi
+    probe_json="$(cat "${probe_cache}" 2>/dev/null || true)"
+    grep -Fq '"edge_hardware_video": true' <<< "${probe_json}" && return 1
+    return 0
+}
+
+if edge_gpu_is_unverified; then
+    edge_args+=(--ozone-platform=x11 --disable-gpu)
+fi
+if [[ "$#" -eq 0 ]] && [[ -r "${homepage}" ]]; then
+    set -- "file://${homepage}"
+fi
+if command -v microsoft-edge-stable >/dev/null 2>&1; then
+    exec microsoft-edge-stable "${edge_args[@]}" "$@"
+elif command -v microsoft-edge >/dev/null 2>&1; then
+    exec microsoft-edge "${edge_args[@]}" "$@"
+elif command -v xdg-open >/dev/null 2>&1 && [[ "$#" -gt 0 ]]; then
+    exec xdg-open "$1"
+else
+    echo "Microsoft Edge is not installed." >&2
+    exit 127
+fi
+MINGEDGE
+    chmod 0755 /usr/local/bin/ming-edge
+
+    cat > /usr/share/applications/ming-edge.desktop << 'MINGEDGEDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Microsoft Edge
+Name[zh_CN]=Microsoft Edge Browser
+Comment=Browse the web with Microsoft Edge
+Exec=/usr/local/bin/ming-edge %U
+Icon=microsoft-edge
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=microsoft-edge
+MINGEDGEDESKTOP
+
+    mkdir -p "/home/${MING_USER}/.config"
+    cat > "/home/${MING_USER}/.config/mimeapps.list" << 'MIMECFG'
+[Default Applications]
+text/html=ming-edge.desktop
+text/xml=ming-edge.desktop
+application/xhtml+xml=ming-edge.desktop
+x-scheme-handler/http=ming-edge.desktop
+x-scheme-handler/https=ming-edge.desktop
+MIMECFG
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/mimeapps.list"
+    sudo -u "${MING_USER}" xdg-settings set default-web-browser ming-edge.desktop 2>/dev/null || true
+    update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200 2>/dev/null || true
+    update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200 2>/dev/null || true
+
+    configure_edge_policies
+    deploy_browser_homepage
+}
+
+configure_edge_policies() {
+    local pol_dirs=(
+        "/etc/opt/edge/policies/managed"
+        "/etc/chromium/policies/managed"
+    )
+    for d in "${pol_dirs[@]}"; do
+        mkdir -p "${d}"
+        cat > "${d}/ming-os.json" << 'EDGEPOLICY'
+{
+  "ExtensionSettings": {
+    "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
+      "installation_mode": "force_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx"
+    }
+  },
+  "HomepageLocation": "file:///usr/share/ming-os/homepage/index.html",
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["file:///usr/share/ming-os/homepage/index.html"],
+  "ShowHomeButton": true,
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "HideFirstRunExperience": true
+}
+EDGEPOLICY
+    done
+    echo "[02_apps] Edge policies deployed."
 }
 
 # ---- Firefox 适老化：policies.json（预装 uBlock Origin、屏蔽复杂菜单、锁定主页） ----
@@ -618,7 +780,7 @@ FXPOLICY
 }
 
 # ---- 极简本地导航主页（大字体、常用站点） ----
-deploy_firefox_homepage() {
+deploy_browser_homepage() {
     local hp="/usr/share/ming-os/homepage"
     mkdir -p "${hp}"
     cat > "${hp}/index.html" << 'HOMEPAGE'
@@ -701,7 +863,7 @@ padding:8vh 6vw;font-size:1.3rem;line-height:1.9}h1{color:#9FE7D7}a{color:#5fe0c
 <p><a href="index.html">返回导航首页</a></p>
 </body></html>
 HELPPAGE
-    echo "[02_apps] Firefox 极简本地导航主页已部署。"
+    echo "[02_apps] Browser homepage deployed."
 }
 
 # ======================== WPS Office ========================
@@ -771,7 +933,7 @@ Categories=Office;
 StartupNotify=true
 WPSINSTALLDESKTOP
 
-    if [[ "${MING_PREINSTALL_WPS:-1}" != "1" ]]; then
+    if [[ "${MING_PREINSTALL_WPS:-0}" != "1" ]]; then
         echo "[02_apps] MING_PREINSTALL_WPS=0，跳过 WPS 预装，保留按需安装脚本。"
         return 0
     fi
@@ -798,19 +960,6 @@ WPSINSTALLDESKTOP
 # ======================== 微信 (官方 Linux 版 + 低内存包装器) ========================
 
 install_wechat() {
-    local wechat_url="https://dldir1.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
-    local wechat_deb="/tmp/wechat.deb"
-
-    echo "下载微信官方 Linux 版..."
-    if wget -q --show-progress -O "${wechat_deb}" "${wechat_url}" 2>/dev/null; then
-        timeout 600 /usr/local/sbin/apt-build install "${wechat_deb}" || \
-            /usr/local/sbin/apt-build -f install || true
-        rm -f "${wechat_deb}"
-    else
-        echo "[WARN] 微信官方 deb 下载失败，跳过。用户可后续运行 ming-install-wechat 安装。"
-        rm -f "${wechat_deb}"
-    fi
-
     cat > /usr/local/bin/ming-install-wechat << 'WECHATINSTALL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -865,7 +1014,7 @@ if [[ "${mode}" == "auto" && "${mem_mb}" -le 2600 ]]; then
     mode="light"
 fi
 
-if [[ "${mode}" == "light" ]]; then
+    if [[ "${mode}" == "light" ]]; then
     note="${HOME}/.config/ming-os/wechat-low-memory-note"
     if [[ ! -f "${note}" ]] && command -v zenity >/dev/null 2>&1; then
         mkdir -p "$(dirname "${note}")"
@@ -883,26 +1032,27 @@ if [[ "${mode}" == "light" ]]; then
 
     find "${HOME}/.cache" -maxdepth 3 \( -iname '*wechat*' -o -iname '*weixin*' \) \
         -type f -size +16M -delete 2>/dev/null || true
-    export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu-shader-disk-cache --disable-accelerated-video-decode --disable-background-networking --disk-cache-size=67108864 --media-cache-size=33554432"
+    export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu-shader-disk-cache --disable-background-networking --disk-cache-size=67108864 --media-cache-size=33554432"
     export ELECTRON_DISABLE_SECURITY_WARNINGS=1
     export GDK_BACKEND=x11
 
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -i wechat "微信省内存模式" "已启用低缓存、低优先级和桌面保护策略。" 2>/dev/null || true
+        notify-send -i wechat "微信省内存模式" "已启用低缓存策略；通话音频不会受内存上限限制。" 2>/dev/null || true
     fi
-
-    if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-        exec systemd-run --user --scope \
-            -p MemoryHigh=1050M \
-            -p MemoryMax=1450M \
-            -p CPUWeight=60 \
-            -p IOWeight=50 \
-            nice -n 8 ionice -c3 "${wechat_bin}" "$@"
-    fi
-
-    exec nice -n 8 ionice -c3 "${wechat_bin}" "$@"
 fi
 
+audio_preflight() {
+    local log="${HOME}/.cache/ming-os/wechat-audio.log"
+    if command -v ming-device-control >/dev/null 2>&1; then
+        {
+            printf '[%s] checking call audio\n' "$(date '+%F %T')"
+            ming-device-control audio-repair-call
+            ming-device-control audio-status --json
+        } >> "${log}" 2>&1 || true
+    fi
+}
+
+audio_preflight
 exec "${wechat_bin}" "$@"
 WECHATWRAP
     chmod +x /usr/local/bin/ming-wechat
@@ -911,8 +1061,10 @@ WECHATWRAP
 #!/usr/bin/env bash
 set -e
 url="https://wx.qq.com/"
-if command -v firefox-esr >/dev/null 2>&1; then
-    exec firefox-esr --new-window "${url}"
+if command -v ming-edge >/dev/null 2>&1; then
+    exec ming-edge --new-window "${url}"
+elif command -v microsoft-edge-stable >/dev/null 2>&1; then
+    exec microsoft-edge-stable --new-window "${url}"
 elif command -v xdg-open >/dev/null 2>&1; then
     exec xdg-open "${url}"
 else
@@ -921,30 +1073,15 @@ fi
 WECHATWEB
     chmod +x /usr/local/bin/ming-wechat-web
 
-    mkdir -p /home/${MING_USER}/Desktop
-    cat > /home/${MING_USER}/Desktop/wechat.desktop << WECHATDESKTOP
+    cat > /usr/share/applications/ming-install-wechat.desktop << WECHATDESKTOPSYS
 [Desktop Entry]
-Name=微信
-Name[zh_CN]=微信
-Comment=Official WeChat for Linux with Ming low-memory guard
-Exec=/usr/local/bin/ming-wechat
+Name=Install WeChat
+Name[zh_CN]=安装微信
+Comment=Download and install official WeChat for Linux on demand
+Comment[zh_CN]=按需下载安装腾讯官方 Linux 版微信
+Exec=pkexec /usr/local/bin/ming-install-wechat
 Icon=wechat
-Terminal=false
-Type=Application
-Categories=Network;InstantMessaging;
-StartupNotify=true
-WECHATDESKTOP
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/wechat.desktop"
-    chmod +x "/home/${MING_USER}/Desktop/wechat.desktop"
-
-    cat > /usr/share/applications/ming-wechat.desktop << WECHATDESKTOPSYS
-[Desktop Entry]
-Name=微信
-Name[zh_CN]=微信
-Comment=Official WeChat for Linux with Ming low-memory guard
-Exec=/usr/local/bin/ming-wechat
-Icon=wechat
-Terminal=false
+Terminal=true
 Type=Application
 Categories=Network;InstantMessaging;
 StartupNotify=true
@@ -961,6 +1098,7 @@ Terminal=false
 Type=Application
 Categories=Network;InstantMessaging;
 StartupNotify=true
+NoDisplay=true
 WECHATWEBDESKTOP
 
     # 省内存图形管理工具（26.2.5）
@@ -1022,32 +1160,196 @@ Icon=wechat
 Terminal=false
 Type=Application
 Categories=Network;InstantMessaging;System;
+NoDisplay=true
 WECHATMGRDESKTOP
 }
 
 # ======================== Fcitx5 中文输入法 ========================
 
-install_fcitx5() {
-    apt install -y --no-install-recommends \
-        fcitx5 \
-        fcitx5-chinese-addons \
-        fcitx5-frontend-gtk3 \
-        fcitx5-frontend-gtk4 \
-        fcitx5-frontend-qt5 \
-        fcitx5-config-qt \
-        fcitx5-material-color
+seed_ming_input_file() {
+    local relative_path="$1"
+    local source="/etc/skel/${relative_path}"
+    local destination="/home/${MING_USER}/${relative_path}"
 
-    sudo -u "${MING_USER}" bash -c 'cat > ~/.xinputrc << XINPUTRC
+    install -d -m 0755 "$(dirname "${destination}")"
+    case "${relative_path}" in
+        .config/fcitx5/profile)
+            normalize_fcitx_profile "${destination}" "${source}" "${MING_USER}" || return 1
+            return 0
+            ;;
+        .config/fcitx5/conf/classicui.conf)
+            normalize_fcitx_classicui "${destination}" "${MING_USER}" || return 1
+            return 0
+            ;;
+        .xinputrc)
+            normalize_fcitx_xinputrc "${destination}" "${source}" "${MING_USER}" || return 1
+            return 0
+            ;;
+    esac
+    if [[ ! -e "${destination}" ]]; then
+        install -m 0644 -o "${MING_USER}" -g "${MING_USER}" "${source}" "${destination}"
+    fi
+}
+
+migrate_legacy_fcitx_profile_path() {
+    local profile_path="$1"
+    local backup_path="${profile_path}.legacy-directory"
+
+    [[ -d "${profile_path}" ]] || return 0
+    if [[ -z "$(find "${profile_path}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        rmdir "${profile_path}"
+        return
+    fi
+    if [[ -e "${backup_path}" && ! -d "${backup_path}" ]]; then
+        echo "[ERROR] cannot preserve legacy Fcitx5 profile directory: ${backup_path} already exists" >&2
+        return 1
+    fi
+    mv "${profile_path}" "${backup_path}"
+}
+
+backup_legacy_fcitx_file() {
+    local path="$1"
+    local backup_path="${path}.ming-legacy-backup"
+
+    [[ -f "${path}" ]] || return 0
+    [[ -e "${backup_path}" ]] || cp -a "${path}" "${backup_path}"
+}
+
+fcitx_profile_is_ming() {
+    local path="$1"
+    [[ -f "${path}" ]] \
+        && grep -Fxq "DefaultIM=pinyin" "${path}" \
+        && grep -Fxq "Name=pinyin" "${path}" \
+        && grep -Fxq "Name=rime" "${path}"
+}
+
+normalize_fcitx_profile() {
+    local path="$1"
+    local source="$2"
+    local owner="${3:-}"
+
+    migrate_legacy_fcitx_profile_path "${path}" || return 1
+    if fcitx_profile_is_ming "${path}"; then
+        return 0
+    fi
+    backup_legacy_fcitx_file "${path}" || return 1
+    install -d -m 0755 "$(dirname "${path}")"
+    install -m 0644 "${source}" "${path}"
+    [[ -z "${owner}" ]] || chown "${owner}:${owner}" "${path}"
+}
+
+fcitx_classicui_is_ming() {
+    local path="$1"
+    local key
+
+    [[ -f "${path}" ]] || return 1
+    for key in Theme Font MenuFont 'Vertical Candidate List'; do
+        [[ "$(grep -Ec "^${key}=" "${path}")" -eq 1 ]] || return 1
+    done
+    grep -Fxq "Theme=Ming-Candidate" "${path}" \
+        && grep -Fxq "Font=Noto Sans CJK SC 15" "${path}" \
+        && grep -Fxq "MenuFont=Noto Sans CJK SC 16" "${path}" \
+        && grep -Fxq "Vertical Candidate List=True" "${path}"
+}
+
+normalize_fcitx_classicui() {
+    local path="$1"
+    local owner="${2:-}"
+
+    if fcitx_classicui_is_ming "${path}"; then
+        return 0
+    fi
+    backup_legacy_fcitx_file "${path}" || return 1
+    install -d -m 0755 "$(dirname "${path}")"
+    touch "${path}"
+    sed -i -E '/^(Theme|Font|MenuFont|Vertical Candidate List)=/d' "${path}"
+    cat >> "${path}" << 'FCITX5CLASSICUI'
+Theme=Ming-Candidate
+Font=Noto Sans CJK SC 15
+MenuFont=Noto Sans CJK SC 16
+Vertical Candidate List=True
+FCITX5CLASSICUI
+    [[ -z "${owner}" ]] || chown "${owner}:${owner}" "${path}"
+}
+
+fcitx_xinputrc_is_ming() {
+    local path="$1"
+
+    [[ -f "${path}" ]] \
+        && grep -Fxq "export GTK_IM_MODULE=fcitx" "${path}" \
+        && grep -Fxq "export QT_IM_MODULE=fcitx" "${path}" \
+        && grep -Fxq "export XMODIFIERS=@im=fcitx" "${path}" \
+        && ! grep -Fq "run_im fcitx5" "${path}" \
+        && ! grep -Fq "fcitx5 -d --replace" "${path}"
+}
+
+normalize_fcitx_xinputrc() {
+    local path="$1"
+    local source="$2"
+    local owner="${3:-}"
+
+    if fcitx_xinputrc_is_ming "${path}"; then
+        return 0
+    fi
+    backup_legacy_fcitx_file "${path}" || return 1
+    install -d -m 0755 "$(dirname "${path}")"
+    install -m 0644 "${source}" "${path}"
+    [[ -z "${owner}" ]] || chown "${owner}:${owner}" "${path}"
+}
+
+write_ming_input_seeds() {
+    local skel_root="/etc/skel"
+
+    install -d -m 0755 \
+        "${skel_root}/.config/autostart" \
+        "${skel_root}/.config/fcitx5" \
+        "${skel_root}/.config/fcitx5/conf"
+
+    # This is an Fcitx5 data directory, outside package-owned /usr/share.
+    # XDG_DATA_DIRS includes /usr/local/share on Ming OS sessions.
+    install -d -m 0755 /usr/local/share/fcitx5/themes/Ming-Candidate
+    cat > /usr/local/share/fcitx5/themes/Ming-Candidate/theme.conf << 'MINGCANDIDATETHEME'
+[Metadata]
+Name=Ming Candidate
+Version=1
+Author=Ming OS
+
+[InputPanel]
+NormalColor=#1F2937
+HighlightCandidateColor=#0F766E
+HighlightColor=#FFFFFF
+HighlightBackgroundColor=#CCFBF1
+MINGCANDIDATETHEME
+
+    if ! fcitx_xinputrc_is_ming "${skel_root}/.xinputrc"; then
+        backup_legacy_fcitx_file "${skel_root}/.xinputrc" || return 1
+        cat > "${skel_root}/.xinputrc" << 'MINGXINPUTRC'
+# Compatibility environment only.  The Fcitx5 daemon is started exclusively
+# by ~/.config/autostart/fcitx5.desktop.
 export GTK_IM_MODULE=fcitx
 export QT_IM_MODULE=fcitx
 export XMODIFIERS=@im=fcitx
 export SDL_IM_MODULE=fcitx
-export GLFW_IM_MODULE=ibus
-fcitx5 -d --replace
-XINPUTRC'
+export GLFW_IM_MODULE=fcitx
+MINGXINPUTRC
+    fi
 
-    sudo -u "${MING_USER}" mkdir -p /home/${MING_USER}/.config/fcitx5/profile
-    sudo -u "${MING_USER}" bash -c 'cat > /home/'${MING_USER}'/.config/fcitx5/profile/default << FCITX5PROFILE
+    cat > "${skel_root}/.config/autostart/fcitx5.desktop" << 'FCITX5AUTO'
+[Desktop Entry]
+Type=Application
+Name=Fcitx 5
+Comment=Start Chinese input method
+Exec=sh -c 'sleep 2; fcitx5 -d --replace'
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+FCITX5AUTO
+
+    # Fcitx5 reads this exact file; profile is not a directory.
+    migrate_legacy_fcitx_profile_path "${skel_root}/.config/fcitx5/profile" || return 1
+    if ! fcitx_profile_is_ming "${skel_root}/.config/fcitx5/profile"; then
+        backup_legacy_fcitx_file "${skel_root}/.config/fcitx5/profile" || return 1
+        cat > "${skel_root}/.config/fcitx5/profile" << 'FCITX5PROFILE'
 [Groups/0]
 Name=Default
 Default Layout=us
@@ -1061,16 +1363,293 @@ Layout=
 Name=pinyin
 Layout=
 
+[Groups/0/Items/2]
+Name=rime
+Layout=
+
 [GroupOrder]
 0=Default
-FCITX5PROFILE'
+FCITX5PROFILE
+    fi
+
+    normalize_fcitx_classicui "${skel_root}/.config/fcitx5/conf/classicui.conf" || return 1
+
+    cat > "${skel_root}/.config/fcitx5/config" << 'FCITX5CONFIG'
+[Behavior]
+DefaultPageSize=7
+FCITX5CONFIG
+}
+
+ensure_fcitx5_environment() {
+    local line variable
+    touch /etc/environment
+    while IFS= read -r line; do
+        variable="${line%%=*}"
+        sed -i "\\|^${variable}=|d" /etc/environment
+        printf '%s\n' "${line}" >> /etc/environment
+    done << 'FCITX5ENV'
+GTK_IM_MODULE=fcitx
+QT_IM_MODULE=fcitx
+XMODIFIERS=@im=fcitx
+SDL_IM_MODULE=fcitx
+GLFW_IM_MODULE=fcitx
+FCITX5ENV
+
+    cat > /etc/X11/Xsession.d/80-ming-fcitx5 << 'FCITX5XSESSION'
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS=@im=fcitx
+export SDL_IM_MODULE=fcitx
+export GLFW_IM_MODULE=fcitx
+FCITX5XSESSION
+}
+
+install_fcitx5() {
+    apt install -y --no-install-recommends \
+        fcitx5 \
+        fcitx5-chinese-addons \
+        fcitx5-frontend-gtk2 \
+        fcitx5-frontend-gtk3 \
+        fcitx5-frontend-gtk4 \
+        fcitx5-frontend-qt5 \
+        fcitx5-frontend-qt6 \
+        fcitx5-config-qt \
+        fcitx5-material-color || return 1
+
+    apt install -y --no-install-recommends \
+        fcitx5-rime \
+        librime-data \
+        rime-data-luna-pinyin || return 1
+
+    write_ming_input_seeds || return 1
+    ensure_fcitx5_environment
+
+    # First-install seeds only.  Existing profiles, Rime user dictionaries and
+    # user customizations remain untouched during re-runs and upgrades.
+    seed_ming_input_file .xinputrc || return 1
+    seed_ming_input_file .config/autostart/fcitx5.desktop || return 1
+    seed_ming_input_file .config/fcitx5/profile || return 1
+    seed_ming_input_file .config/fcitx5/conf/classicui.conf || return 1
+    seed_ming_input_file .config/fcitx5/config || return 1
+
+    cat > /usr/local/bin/ming-input-healthcheck << 'MINGINPUTHEALTH'
+#!/usr/bin/env bash
+set -u
+errors=0
+check_file() {
+    if [[ -f "$1" ]]; then
+        printf '[OK] %s\n' "$1"
+    else
+        printf '[ERROR] missing %s\n' "$1" >&2
+        errors=$((errors + 1))
+    fi
+}
+for cmd in fcitx5 fcitx5-config-qt; do
+    if command -v "${cmd}" >/dev/null 2>&1; then
+        printf '[OK] %s available\n' "${cmd}"
+    else
+        printf '[ERROR] %s missing\n' "${cmd}" >&2
+        errors=$((errors + 1))
+    fi
+done
+check_file "${HOME}/.xinputrc"
+check_file "${HOME}/.config/autostart/fcitx5.desktop"
+check_file "${HOME}/.config/fcitx5/profile"
+grep -Fq 'DefaultIM=pinyin' "${HOME}/.config/fcitx5/profile" 2>/dev/null || {
+    printf '[ERROR] Fcitx5 default input method is not pinyin\n' >&2
+    errors=$((errors + 1))
+}
+env | grep -Eq '^XMODIFIERS=@im=fcitx$|XMODIFIERS=@im=fcitx' || {
+    printf '[WARN] current shell does not expose XMODIFIERS=@im=fcitx; check after graphical login\n' >&2
+}
+exit "${errors}"
+MINGINPUTHEALTH
+    chmod 0755 /usr/local/bin/ming-input-healthcheck
+
+    cat > /usr/local/sbin/ming-input-control << 'MINGINPUTCONTROL'
+#!/usr/bin/env bash
+set -u
+
+PROFILE_FILE="${MING_INPUT_PROFILE:-${HOME}/.config/fcitx5/profile}"
+CLASSICUI_FILE="${MING_INPUT_CLASSICUI:-${HOME}/.config/fcitx5/conf/classicui.conf}"
+RIME_SCHEMA="${MING_RIME_SCHEMA:-/usr/share/rime-data/luna_pinyin.schema.yaml}"
+RIME_ADDON="${MING_RIME_ADDON:-}"
+
+bool() {
+    if "$@"; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
+}
+
+profile_value() {
+    local key="$1"
+    grep -m1 -E "^${key}=" "${PROFILE_FILE}" 2>/dev/null | cut -d= -f2-
+}
+
+config_value() {
+    local key="$1"
+    grep -m1 -E "^${key}=" "${CLASSICUI_FILE}" 2>/dev/null | cut -d= -f2-
+}
+
+profile_has_rime() {
+    grep -Fxq 'Name=rime' "${PROFILE_FILE}" 2>/dev/null
+}
+
+rime_addon_available() {
+    if [[ -n "${RIME_ADDON}" ]]; then
+        [[ -r "${RIME_ADDON}" ]]
+        return
+    fi
+    find /usr/lib /usr/libexec -type f -path '*/fcitx5/rime.so' -print -quit 2>/dev/null | grep -q .
+}
+
+rime_schema_available() {
+    [[ -r "${RIME_SCHEMA}" ]]
+}
+
+rime_available() {
+    rime_addon_available && rime_schema_available && profile_has_rime
+}
+
+daemon_running() {
+    pgrep -x fcitx5 >/dev/null 2>&1
+}
+
+framework_available() {
+    command -v fcitx5 >/dev/null 2>&1
+}
+
+current_engine() {
+    local engine=""
+    if command -v fcitx5-remote >/dev/null 2>&1; then
+        engine="$(fcitx5-remote -n 2>/dev/null || true)"
+    fi
+    if [[ -n "${engine}" ]]; then
+        printf '%s' "${engine}"
+    else
+        profile_value DefaultIM
+    fi
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
+
+status_json() {
+    local framework_name="missing"
+    local default_engine theme font menu_font engine
+    local framework daemon rime_profile rime_addon rime_schema rime_ready deploy_capable
+
+    framework="$(bool framework_available)"
+    daemon="$(bool daemon_running)"
+    rime_profile="$(bool profile_has_rime)"
+    rime_addon="$(bool rime_addon_available)"
+    rime_schema="$(bool rime_schema_available)"
+    rime_ready="$(bool rime_available)"
+    if [[ "${framework}" == true ]]; then
+        framework_name="fcitx5"
+    fi
+    default_engine="$(profile_value DefaultIM)"
+    theme="$(config_value Theme)"
+    font="$(config_value Font)"
+    menu_font="$(config_value MenuFont)"
+    engine="$(current_engine)"
+    deploy_capable=false
+    if [[ "${daemon}" == true ]] && command -v fcitx5-remote >/dev/null 2>&1; then
+        deploy_capable=true
+    fi
+    [[ -n "${default_engine}" ]] || default_engine="missing"
+    [[ -n "${theme}" ]] || theme="missing"
+    if [[ "${font}" == 'Noto Sans CJK SC 15' && "${menu_font}" == 'Noto Sans CJK SC 16' ]]; then
+        font='Noto Sans CJK SC 15/16'
+    fi
+    [[ -n "${font}" ]] || font="missing"
+    [[ -n "${engine}" ]] || engine="missing"
+
+    printf '{"framework":{"name":"%s","available":%s},' "$(json_escape "${framework_name}")" "${framework}"
+    printf '"daemon":{"running":%s},' "${daemon}"
+    printf '"profile":{"default":"%s","rime_entry":%s},' "$(json_escape "${default_engine}")" "${rime_profile}"
+    printf '"addon":{"rime":%s},' "${rime_addon}"
+    printf '"theme":"%s","font":"%s",' "$(json_escape "${theme}")" "$(json_escape "${font}")"
+    printf '"current_engine":"%s",' "$(json_escape "${engine}")"
+    printf '"rime":{"available":%s,"schema":%s,"deploy_capable":%s}}\n' "${rime_ready}" "${rime_schema}" "${deploy_capable}"
+}
+
+fallback_to_pinyin() {
+    if command -v fcitx5-remote >/dev/null 2>&1; then
+        fcitx5-remote -s pinyin >/dev/null 2>&1 || true
+    fi
+    printf 'Rime schema or deployment is unavailable; fell back to pinyin.\n' >&2
+    return 1
+}
+
+set_engine() {
+    local requested="$1"
+    case "${requested}" in
+        pinyin)
+            if ! command -v fcitx5-remote >/dev/null 2>&1 || ! fcitx5-remote -s pinyin; then
+                printf 'Fcitx5 daemon is unavailable; could not select pinyin.\n' >&2
+                return 1
+            fi
+            ;;
+        rime)
+            if ! rime_available; then
+                fallback_to_pinyin
+                return 1
+            fi
+            if ! command -v fcitx5-remote >/dev/null 2>&1 || ! fcitx5-remote -s rime; then
+                fallback_to_pinyin
+                return 1
+            fi
+            if [[ "$(current_engine)" != rime ]]; then
+                fallback_to_pinyin
+                return 1
+            fi
+            ;;
+        *)
+            printf 'usage: ming-input-control set-engine <pinyin|rime>\n' >&2
+            return 2
+            ;;
+    esac
+}
+
+case "${1:-}" in
+    status)
+        if [[ "${2:-}" != --json || "$#" -ne 2 ]]; then
+            printf 'usage: ming-input-control status --json\n' >&2
+            exit 2
+        fi
+        status_json
+        ;;
+    set-engine)
+        if [[ "$#" -ne 2 ]]; then
+            printf 'usage: ming-input-control set-engine <pinyin|rime>\n' >&2
+            exit 2
+        fi
+        set_engine "$2"
+        ;;
+    *)
+        printf 'usage: ming-input-control {status --json|set-engine <pinyin|rime>}\n' >&2
+        exit 2
+        ;;
+esac
+MINGINPUTCONTROL
+    chmod 0755 /usr/local/sbin/ming-input-control
 }
 
 # ======================== 应用商店 (星火应用商店) ========================
 
 install_app_store() {
     apt install -y --no-install-recommends \
+        curl \
         jq \
+        wget \
         apt-transport-https \
         xdg-utils \
         xdg-desktop-portal \
@@ -1095,7 +1674,14 @@ echo "Downloading Spark Store: ${url}"
 wget -c --show-progress -O "${deb}" "${url}"
 mkdir -p /root/.config "${HOME:-/root}/.config"
 touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
-sudo apt install -y "${deb}" || sudo apt install -y -f
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    apt-get install -y "${deb}" || apt-get install -y -f
+elif command -v sudo >/dev/null 2>&1; then
+    sudo apt-get install -y "${deb}" || sudo apt-get install -y -f
+else
+    echo "Administrator privileges are required to install Spark Store." >&2
+    exit 1
+fi
 rm -f "${deb}"
 echo "Spark Store installed."
 SPARKINSTALL
@@ -1104,6 +1690,63 @@ SPARKINSTALL
     if ! /usr/local/bin/ming-install-spark-store; then
         echo "[WARN] 星火应用商店安装失败，保留 ming-install-spark-store 供用户联网后重试。"
     fi
+
+    cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'
+#!/usr/bin/env bash
+set -u
+
+MING_SPARK_LOG="${HOME}/.cache/ming-os/spark-store.log"
+mkdir -p "$(dirname "${MING_SPARK_LOG}")" 2>/dev/null || MING_SPARK_LOG="/tmp/ming-spark-store.log"
+
+spark_bin=""
+for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do
+    if [[ -x "${candidate}" ]]; then
+        spark_bin="${candidate}"
+        break
+    fi
+done
+
+if [[ -z "${spark_bin}" ]]; then
+    notify-send -i dialog-error "星火应用商店" "应用商店尚未安装，请从应用库运行“修复星火应用商店”。" 2>/dev/null || true
+    printf '[%s] Spark Store binary is missing\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
+    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/bin/ming-install-spark-store ]]; then
+        exec pkexec /usr/local/bin/ming-install-spark-store "$@"
+    fi
+    exit 127
+fi
+
+spark_args=()
+if [[ ! -e /dev/dri/renderD128 ]] || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet); then
+    spark_args+=(--ozone-platform=x11 --disable-gpu)
+fi
+
+printf '[%s] starting %s %s\n' "$(date '+%F %T')" "${spark_bin}" "${spark_args[*]}" >>"${MING_SPARK_LOG}"
+"${spark_bin}" "${spark_args[@]}" "$@" >>"${MING_SPARK_LOG}" 2>&1 &
+spark_pid=$!
+sleep 2
+if kill -0 "${spark_pid}" 2>/dev/null; then
+    printf '[%s] Spark Store process is running after startup window\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
+    exit 0
+fi
+
+wait "${spark_pid}"
+rc=$?
+if [[ "${rc}" -eq 0 ]]; then
+    printf '[%s] Spark Store launcher daemonized successfully\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
+    exit 0
+fi
+
+if pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 \
+    || (command -v wmctrl >/dev/null 2>&1 && wmctrl -lx 2>/dev/null | grep -qi 'spark-store'); then
+    printf '[%s] Spark Store is ready despite launcher exit rc=%s\n' "$(date '+%F %T')" "${rc}" >>"${MING_SPARK_LOG}"
+    exit 0
+fi
+
+printf '[%s] Spark Store startup failed rc=%s with no process or window\n' "$(date '+%F %T')" "${rc}" >>"${MING_SPARK_LOG}"
+notify-send -i dialog-error "星火应用商店" "启动失败，日志：${MING_SPARK_LOG}" 2>/dev/null || true
+exit "${rc}"
+MINGSPARK
+    chmod 0755 /usr/local/bin/ming-spark-store
 
     # 锁定关键包版本，避免 OTA / apt 操作误删或降级星火商店及其运行依赖，
     # 造成"商店打不开"。OTA 本身是镜像级（暂存启动项），但用户经星火装应用会跑
@@ -1153,7 +1796,7 @@ Name=星火应用商店
 Name[zh_CN]=星火应用商店
 Comment=Install Chinese Linux applications on demand
 Comment[zh_CN]=按需安装适合中文用户的 Linux 应用
-Exec=spark-store
+Exec=/usr/local/bin/ming-spark-store
 Icon=ming-app-store
 Terminal=false
 Type=Application
@@ -1171,7 +1814,7 @@ Name=星火应用商店
 Name[zh_CN]=星火应用商店
 Comment=Install Chinese Linux applications on demand
 Comment[zh_CN]=按需安装适合中文用户的 Linux 应用
-Exec=spark-store
+Exec=/usr/local/bin/ming-spark-store
 Icon=ming-app-store
 Terminal=false
 Type=Application
@@ -1229,15 +1872,33 @@ SVCUNIT
 
 # ======================== 附加实用工具 ========================
 
+install_required_desktop_runtime() {
+    local package
+    if ! apt install -y -o Dpkg::Options::=--force-confold --no-install-recommends \
+        "${REQUIRED_DESKTOP_RUNTIME_PACKAGES[@]}"; then
+        echo "[ERROR] [02_apps] failed to install required desktop runtime packages" >&2
+        return 1
+    fi
+
+    for package in "${REQUIRED_DESKTOP_RUNTIME_PACKAGES[@]}"; do
+        if ! dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
+            echo "[ERROR] [02_apps] required desktop runtime package is not installed: ${package}" >&2
+            return 1
+        fi
+    done
+}
+
 install_utilities() {
-    apt install -y --no-install-recommends \
+    apt install -y -o Dpkg::Options::=--force-confold --no-install-recommends \
         pavucontrol \
-        pulseaudio \
         pulseaudio-module-bluetooth \
-        bluez \
         bluez-tools \
         blueman \
-        alsa-utils \
+        bluetooth \
+        network-manager-openvpn \
+        network-manager-openvpn-gnome \
+        mobile-broadband-provider-info \
+        modemmanager \
         volumeicon-alsa \
         gnome-calculator \
         gnome-screenshot \
@@ -1250,27 +1911,14 @@ install_utilities() {
         yad \
         onboard \
         touchegg \
-        xdotool \
-        wmctrl \
-        python3-gi \
-        gir1.2-gtk-4.0 \
-        gir1.2-adw-1 \
-        libadwaita-1-0 \
-        gvfs \
-        gvfs-backends \
         udisks2 \
         udisks2-btrfs \
-        pkexec \
-        polkitd \
-        lxpolkit \
-        upower \
         dmidecode \
         x11-xserver-utils \
         arandr \
         autorandr \
         mesa-utils \
         inxi \
-        brightnessctl \
         redshift
 }
 
@@ -1315,15 +1963,17 @@ EOF
 main() {
     echo "=====> [02_apps] 开始安装应用软件 <====="
 
-    install_xfce_desktop
-    install_fonts
-    install_firefox
-    install_wps_office
-    install_wechat
-    install_fcitx5
-    install_app_store
-    install_utilities
-    deploy_eyecare
+    run_required_step install_xfce_desktop || return 1
+    run_required_step install_fonts || return 1
+    run_required_step install_required_desktop_runtime || return 1
+    run_required_step install_fcitx5 || return 1
+    run_required_step deploy_eyecare || return 1
+
+    run_optional_step install_edge
+    run_optional_step install_wps_office
+    run_optional_step install_wechat
+    run_optional_step install_app_store
+    run_optional_step install_utilities
 
     echo "=====> [02_apps] 应用软件安装完成 <====="
 }
