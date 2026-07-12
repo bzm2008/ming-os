@@ -791,13 +791,22 @@ validate_required_desktop_runtime() {
         lxpolkit libnotify-bin x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
         i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
         mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \
-        xserver-xorg-video-modesetting \
         fcitx5-rime librime-data rime-data-luna-pinyin; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "required desktop runtime package is not installed: ${package}"
             return 1
         fi
     done
+
+    # Debian Trixie ships the Xorg modesetting DDX from xserver-xorg-core;
+    # older releases exposed it as a separate xserver-xorg-video-modesetting
+    # package.  Gate the capability, accepting either packaging layout.
+    if ! chroot_exec test -s "/usr/lib/xorg/modules/drivers/modesetting_drv.so" \
+        && ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' \
+            xserver-xorg-video-modesetting 2>/dev/null | grep -qx 'ii '; then
+        log_error "required Xorg modesetting driver is missing (modesetting_drv.so or xserver-xorg-video-modesetting)"
+        return 1
+    fi
 
     if ! chroot_exec getent group render >/dev/null 2>&1; then
         log_error "required render group is missing from the target system"
