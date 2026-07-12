@@ -846,7 +846,10 @@ validate_required_desktop_runtime() {
         log_error "Ming window-control JSON runtime check failed"
         return 1
     fi
-    if ! chroot_exec /usr/local/bin/ming-desktop-healthcheck --json \
+    # The health helper intentionally returns non-zero when no graphical
+    # session exists (which is the normal build-chroot state).  Validate its
+    # JSON contract without treating that diagnostic status as malformed data.
+    if ! (chroot_exec /usr/local/bin/ming-desktop-healthcheck --json || true) \
         | python3 -c 'import json,sys; value=json.load(sys.stdin); window=value.get("window_manager"); raise SystemExit(0 if isinstance(window, dict) and isinstance(window.get("healthy"), bool) else 1)'; then
         log_error "Ming desktop-healthcheck JSON runtime check failed"
         return 1
