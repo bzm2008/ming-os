@@ -79,6 +79,8 @@ ensure_resume_runtime_packages() {
         libnotify-bin \
         x11-utils \
         desktop-file-utils \
+        im-config \
+        blueman \
         network-manager \
         wpasupplicant \
         iw \
@@ -94,7 +96,7 @@ ensure_resume_runtime_packages() {
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
-        lxpolkit libnotify-bin x11-utils desktop-file-utils; do
+        lxpolkit libnotify-bin x11-utils desktop-file-utils im-config blueman; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "resume required runtime package is not installed: ${package}"
             return 1

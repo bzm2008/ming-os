@@ -51,6 +51,8 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     libnotify-bin
     x11-utils
     desktop-file-utils
+    im-config
+    blueman
 )
 
 run_required_step() {
@@ -2143,6 +2145,11 @@ install_utilities() {
         mesa-utils \
         inxi \
         redshift
+
+    # Trixie does not currently publish touchegg.  Keep it an independent,
+    # best-effort enhancement so its absence cannot suppress Blueman or the
+    # other audio/network utilities above.
+    apt install -y --no-install-recommends touchegg || true
 }
 
 # ======================== 护眼模式（26.2.5） ========================

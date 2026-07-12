@@ -60,6 +60,7 @@ install_base_packages() {
         wget \
         jq \
         locales \
+        im-config \
         tzdata \
         console-setup \
         keyboard-configuration \

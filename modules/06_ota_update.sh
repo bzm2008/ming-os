@@ -1910,6 +1910,7 @@ OTAGUI
     # workflow.  All visible update choices now live in Ming Settings.
     cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'
 #!/usr/bin/env bash
+# Ming OS 更新管理器（兼容入口；实际界面统一位于 Ming 设置中心）
 # 系统更新兼容入口：统一跳转到铭设置的系统更新页。
 exec /usr/local/bin/ming-control-center --page update "$@"
 OTAGUIREDIRECT
