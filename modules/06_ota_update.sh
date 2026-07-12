@@ -63,6 +63,7 @@ readonly USER_STATE_FILE="${USER_CONFIG_DIR}/state.json"
 readonly USER_CONFIG_FILE="${USER_CONFIG_DIR}/config.json"
 readonly UPDATE_SERVER="https://ming.scallion.uno"
 readonly API_ENDPOINT="/api/onion-update"
+readonly BACKGROUND_AVAILABILITY_FILE="${CACHE_DIR}/background-availability.json"
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -110,6 +111,12 @@ find_cached_manifest() {
         printf '%s\n' "${candidate}"
         return 0
     fi
+    # Scheduled checks run as root; expose that root-owned, read-only cache to
+    # the unprivileged Settings process as its authoritative background result.
+    if [[ -r "${CACHE_DIR}/update_info.json" ]]; then
+        printf '%s\n' "${CACHE_DIR}/update_info.json"
+        return 0
+    fi
     if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
         for candidate in /home/*/.cache/ming-update/update_info.json; do
             if [[ -f "${candidate}" ]]; then
@@ -139,6 +146,28 @@ find_download_state_file() {
     if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
         for candidate in /home/*/.config/ming-update/state.json; do
             if state_candidate_is_downloaded "${candidate}"; then
+                printf '%s\n' "${candidate}"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+find_update_state_file() {
+    local candidate
+    candidate="$(state_file)"
+    if [[ -f "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+    if [[ -r "${STATE_FILE}" ]]; then
+        printf '%s\n' "${STATE_FILE}"
+        return 0
+    fi
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        for candidate in /home/*/.config/ming-update/state.json; do
+            if [[ -f "${candidate}" ]]; then
                 printf '%s\n' "${candidate}"
                 return 0
             fi
@@ -439,6 +468,69 @@ check_network() {
     curl -fsSL --connect-timeout 8 --max-time 15 "${server}" >/dev/null
 }
 
+record_background_availability() {
+    # A manual Settings check can expose an update in its own page, but only a
+    # scheduled/boot check may add the "更新并关机" action to the power menu.
+    [[ "${MING_UPDATE_BACKGROUND_CHECK:-0}" == "1" ]] || return 0
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || return 0
+
+    local manifest="${CACHE_DIR}/update_info.json"
+    if [[ ! -f "${manifest}" ]]; then
+        rm -f "${BACKGROUND_AVAILABILITY_FILE}"
+        return 0
+    fi
+
+    local available ready version update_type checked_at checked_at_epoch tmp
+    available="$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null || true)"
+    ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
+    version="$(jq -r '.version // .latest_version // empty' "${manifest}" 2>/dev/null || true)"
+    update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    if [[ "${available}" != "true" || "${ready}" != "true" || -z "${version}" ]]; then
+        rm -f "${BACKGROUND_AVAILABILITY_FILE}"
+        return 0
+    fi
+
+    checked_at="$(date -Iseconds)"
+    checked_at_epoch="$(date +%s)"
+    tmp="$(mktemp "${CACHE_DIR}/.background-availability.XXXXXX")"
+    jq -n \
+        --arg version "${version}" \
+        --arg update_type "${update_type}" \
+        --arg checked_at "${checked_at}" \
+        --argjson checked_at_epoch "${checked_at_epoch}" \
+        '{available: true, version: $version, update_type: $update_type,
+          checked_at: $checked_at, checked_at_epoch: $checked_at_epoch}' \
+        > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${BACKGROUND_AVAILABILITY_FILE}"
+}
+
+record_check_result() {
+    # Keep a per-user, atomic record of an explicit check.  It prevents an
+    # older root/background manifest from reappearing after the user just saw
+    # that the server has withdrawn an update.
+    local available="$1" ready="$2" version="$3" notes="$4" update_type="$5"
+    local cdir target tmp checked_at checked_at_epoch
+    cdir="$(cache_dir)"
+    target="${cdir}/check-result.json"
+    checked_at="$(date -Iseconds)"
+    checked_at_epoch="$(date +%s)"
+    tmp="$(mktemp "${cdir}/.check-result.XXXXXX")"
+    jq -n \
+        --argjson available "${available}" \
+        --argjson ready "${ready}" \
+        --arg version "${version}" \
+        --arg notes "${notes}" \
+        --arg update_type "${update_type}" \
+        --arg checked_at "${checked_at}" \
+        --argjson checked_at_epoch "${checked_at_epoch}" \
+        '{available: $available, ready: $ready, version: $version, notes: $notes,
+          update_type: $update_type, checked_at: $checked_at,
+          checked_at_epoch: $checked_at_epoch}' > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${target}"
+}
+
 check_update() {
     log_step "检查更新"
     init_config
@@ -484,7 +576,7 @@ check_update() {
         fi
     fi
 
-    local server_error ready has_update new_version notes
+    local server_error ready has_update new_version notes update_type
     server_error=$(printf '%s' "${response}" | jq -r '.error // ""')
     if [[ -n "${server_error}" ]]; then
         log_error "更新服务器错误：${server_error}"
@@ -495,10 +587,13 @@ check_update() {
     has_update=$(printf '%s' "${response}" | jq -r '.has_update // .update_available // false')
     new_version=$(printf '%s' "${response}" | jq -r '.version // .latest_version // "unknown"')
     notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "暂无更新说明。"')
+    update_type=$(printf '%s' "${response}" | jq -r '.update_type // "major"')
 
     if [[ "${has_update}" == "true" && "${ready}" != "true" ]]; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
+        record_check_result true false "${new_version}" "${notes}" "${update_type}"
+        record_background_availability
         log_warn "版本 ${new_version} 已登记，但下载包尚未就绪。"
         log_warn "${notes}"
         return 0
@@ -507,6 +602,8 @@ check_update() {
     if [[ "${has_update}" != "true" ]]; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
+        record_check_result false false "" "" ""
+        record_background_availability
         log_info "当前已是最新版本。"
         return 0
     fi
@@ -514,6 +611,8 @@ check_update() {
     printf '%s\n' "${response}" > "${manifest}"
     chmod 644 "${manifest}"
     set_config '.last_check' "$(date -Iseconds)"
+    record_check_result true true "${new_version}" "${notes}" "${update_type}"
+    record_background_availability
 
     log_info "发现新版本：${new_version}"
     printf '\n新版本：%s\n当前版本：%s\n\n更新说明：\n%s\n\n' "${new_version}" "${version}" "${notes}"
@@ -529,10 +628,10 @@ download_update() {
 
     local cdir manifest sfile
     cdir=$(cache_dir)
-    manifest="${cdir}/update_info.json"
+    manifest="$(find_cached_manifest 2>/dev/null || true)"
     sfile=$(state_file)
 
-    if [[ ! -f "${manifest}" ]]; then
+    if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
         log_error "没有缓存的更新信息。请先运行：ming-update check"
         return 1
     fi
@@ -726,22 +825,225 @@ GRUBMENU
     log_info "重启后请选择：Ming OS ${version} OTA Installer"
 }
 
-show_status() {
+manifest_apply_identity() {
+    # Only fields that change the privileged operation are compared.  A
+    # release-note edit must not turn a valid selected update into a different
+    # installation, while a different package list/ISO/checksum must stop it.
+    local manifest="$1"
+    jq -ce '
+        {
+          available: (.has_update // .update_available // false),
+          ready: (.ready // true),
+          version: (.version // .latest_version // ""),
+          update_type: (.update_type // "major"),
+          apt_packages: ((.apt_packages // []) |
+            if type == "array" then map(select(type == "string")) | sort else [] end),
+          checksum: (.checksum // .sha256 // ""),
+          filename: (.filename // .iso_name // ""),
+          download_url: (.download_url // .url // "")
+        }' "${manifest}" 2>/dev/null
+}
+
+selected_manifest_path_is_safe() {
+    local path="$1" resolved
+    [[ "${path}" == /* && -f "${path}" && ! -L "${path}" ]] || return 1
+    resolved="$(readlink -f -- "${path}")" || return 1
+    # Refuse path-component symlinks as well as a symlink at the final path.
+    [[ "${path}" == "${resolved}" ]] || return 1
+    [[ "${resolved}" == "${CACHE_DIR}/update_info.json" || \
+       "${resolved}" =~ ^/home/[^/]+/\.cache/ming-update/update_info\.json$ ]]
+}
+
+stage_selected_manifest() {
+    # Settings passes the manifest path and its fingerprint to pkexec.  Root
+    # reads a root-owned copy, checks the fingerprint, then compares every
+    # operation-relevant field with a freshly fetched authoritative result.
+    local source="$1" expected_sha256="$2" tmp actual selected authoritative
+    [[ "${expected_sha256}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "更新清单指纹格式无效。"
+        return 1
+    }
+    if ! selected_manifest_path_is_safe "${source}"; then
+        log_error "更新清单路径不受信任。请重新检查更新。"
+        return 1
+    fi
+
+    tmp="$(mktemp "${CACHE_DIR}/.selected-update-manifest.XXXXXX")"
+    if ! cat -- "${source}" > "${tmp}"; then
+        rm -f -- "${tmp}"
+        log_error "无法读取更新清单。"
+        return 1
+    fi
+    actual="$(sha256sum -- "${tmp}" | awk '{print $1}')"
+    if [[ "${actual,,}" != "${expected_sha256,,}" ]]; then
+        rm -f -- "${tmp}"
+        log_error "更新清单已变化，请重新检查更新。"
+        return 1
+    fi
+
+    selected="$(manifest_apply_identity "${tmp}" || true)"
+    authoritative="$(manifest_apply_identity "${CACHE_DIR}/update_info.json" || true)"
+    if [[ -z "${selected}" || -z "${authoritative}" || "${selected}" != "${authoritative}" ]]; then
+        rm -f -- "${tmp}"
+        log_error "服务器上的更新已变化；为避免安装错误版本，请重新检查更新。"
+        return 1
+    fi
+    chmod 0644 "${tmp}"
+    mv -f -- "${tmp}" "${CACHE_DIR}/update_info.json"
+}
+
+clear_applied_update_cache() {
+    # Clear both sides of a successfully applied selection.  Otherwise an
+    # unprivileged Settings cache would immediately re-offer the same update.
+    local selected_manifest="${1:-}" selected_result=""
+    rm -f -- \
+        "${CACHE_DIR}/update_info.json" \
+        "${CACHE_DIR}/check-result.json" \
+        "${BACKGROUND_AVAILABILITY_FILE}"
+    if [[ -n "${selected_manifest}" ]] && selected_manifest_path_is_safe "${selected_manifest}"; then
+        selected_result="${selected_manifest%/update_info.json}/check-result.json"
+        rm -f -- "${selected_manifest}" "${selected_result}"
+    fi
+}
+
+show_status_json() {
+    # This is intentionally the sole machine-readable update contract for the
+    # Settings page and the power menu.  Never mix progress/log output here.
     init_config
-    local cdir manifest sfile
-    cdir=$(cache_dir)
-    manifest="${cdir}/update_info.json"
-    sfile=$(state_file)
+    local current manifest state_path state_status manual_result manifest_path manifest_sha256 error=""
+    local available=false ready=false version="" notes="" update_type=""
+    local action="check" background_available=false background_version=""
+    local manual_result_present=false manual_available=false manual_ready=false manual_version="" manual_notes="" manual_update_type=""
+    local manual_checked_at_epoch=0 background_checked_at_epoch=0
+    current="$(current_version)"
+    manifest="$(find_cached_manifest 2>/dev/null || true)"
+
+    if [[ -n "${manifest}" && -f "${manifest}" ]]; then
+        available="$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null || true)"
+        ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
+        version="$(jq -r '.version // .latest_version // ""' "${manifest}" 2>/dev/null || true)"
+        notes="$(jq -r '.release_notes // .message // ""' "${manifest}" 2>/dev/null || true)"
+        update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    fi
+    [[ "${available}" == "true" ]] || available=false
+    [[ "${ready}" == "true" ]] || ready=false
+
+    # This file is private to the logged-in user.  It only changes that user's
+    # presentation of root's public background cache, never the root cache or
+    # any other user's update state.
+    manual_result="${USER_CACHE_DIR}/check-result.json"
+    if [[ -r "${manual_result}" ]]; then
+        manual_result_present=true
+        manual_available="$(jq -r '.available // false' "${manual_result}" 2>/dev/null || true)"
+        manual_ready="$(jq -r '.ready // false' "${manual_result}" 2>/dev/null || true)"
+        manual_version="$(jq -r '.version // ""' "${manual_result}" 2>/dev/null || true)"
+        manual_notes="$(jq -r '.notes // ""' "${manual_result}" 2>/dev/null || true)"
+        manual_update_type="$(jq -r '.update_type // ""' "${manual_result}" 2>/dev/null || true)"
+        manual_checked_at_epoch="$(jq -r '.checked_at_epoch // 0' "${manual_result}" 2>/dev/null || true)"
+    fi
+    [[ "${manual_available}" == "true" ]] || manual_available=false
+    [[ "${manual_ready}" == "true" ]] || manual_ready=false
+    [[ "${manual_checked_at_epoch}" =~ ^[0-9]+$ ]] || manual_checked_at_epoch=0
+
+    state_path="$(find_update_state_file 2>/dev/null || true)"
+    state_status=""
+    if [[ -n "${state_path}" && -f "${state_path}" ]]; then
+        state_status="$(jq -r '.status // ""' "${state_path}" 2>/dev/null || true)"
+        if [[ "${state_status}" == "staged" ]]; then
+            version="$(jq -r --arg version "${version}" '.version // $version' "${state_path}" 2>/dev/null || printf '%s' "${version}")"
+            available=true
+            ready=true
+            action="reboot"
+        fi
+    fi
+    if [[ -r "${BACKGROUND_AVAILABILITY_FILE}" ]]; then
+        background_version="$(jq -r '.version // ""' "${BACKGROUND_AVAILABILITY_FILE}" 2>/dev/null || true)"
+        background_checked_at_epoch="$(jq -r '.checked_at_epoch // 0' "${BACKGROUND_AVAILABILITY_FILE}" 2>/dev/null || true)"
+        [[ "${background_checked_at_epoch}" =~ ^[0-9]+$ ]] || background_checked_at_epoch=0
+        if [[ "$(jq -r '.available // false' "${BACKGROUND_AVAILABILITY_FILE}" 2>/dev/null || true)" == "true" && \
+              -n "${background_version}" && "${background_version}" == "${version}" ]]; then
+            background_available=true
+        fi
+    fi
+
+    # A newer explicit "no update" or "not ready" result wins over an older
+    # root background cache.  A staged OTA is intentionally exempt: it is
+    # already a protected local operation, not a server availability claim.
+    if [[ "${action}" != "reboot" && "${manual_result_present}" == "true" && \
+          "${manifest}" == "${CACHE_DIR}/update_info.json" && \
+          "${manual_checked_at_epoch}" -ge "${background_checked_at_epoch}" && \
+          ( "${manual_available}" != "true" || "${manual_ready}" != "true" ) ]]; then
+        available="${manual_available}"
+        ready="${manual_ready}"
+        version="${manual_version}"
+        notes="${manual_notes}"
+        update_type="${manual_update_type}"
+        action="check"
+        background_available=false
+    elif [[ "${action}" != "reboot" && "${available}" == "true" && "${ready}" == "true" ]]; then
+        action="apply"
+    fi
+
+    # A one-click privileged apply is allowed only when this status response
+    # can name and fingerprint the exact manifest shown to the user.
+    manifest_path=""
+    manifest_sha256=""
+    if [[ "${action}" == "apply" ]]; then
+        if selected_manifest_path_is_safe "${manifest}"; then
+            manifest_sha256="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+            if [[ "${manifest_sha256}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+                manifest_path="${manifest}"
+            else
+                action="check"
+                error="无法校验更新清单，请重新检查更新。"
+            fi
+        else
+            action="check"
+            error="更新清单路径不安全，请重新检查更新。"
+        fi
+    fi
+
+    jq -n \
+        --arg current_version "${current}" \
+        --arg new_version "${version}" \
+        --arg release_notes "${notes}" \
+        --arg update_type "${update_type}" \
+        --arg action "${action}" \
+        --arg manifest_path "${manifest_path}" \
+        --arg manifest_sha256 "${manifest_sha256}" \
+        --arg state_status "${state_status}" \
+        --arg error "${error}" \
+        --arg last_check "$(get_config '.last_check')" \
+        --argjson available "${available}" \
+        --argjson ready "${ready}" \
+        --argjson background_available "${background_available}" \
+        '{current_version: $current_version, available: $available, ready: $ready,
+          new_version: $new_version, release_notes: $release_notes,
+          update_type: $update_type, action: $action, state_status: $state_status,
+          manifest_path: $manifest_path, manifest_sha256: $manifest_sha256,
+          background_available: $background_available, last_check: $last_check,
+          error: $error}'
+}
+
+show_status() {
+    if [[ "${1:-}" == "--json" ]]; then
+        show_status_json
+        return
+    fi
+    init_config
+    local manifest sfile
+    manifest="$(find_cached_manifest 2>/dev/null || true)"
+    sfile="$(find_update_state_file 2>/dev/null || true)"
     log_step "更新状态"
     echo "当前版本：$(current_version)"
     echo "更新服务器：$(get_config '.update_server')"
     echo "频道：$(get_config '.channel')"
     echo "上次检查：$(get_config '.last_check')"
-    if [[ -f "${sfile}" ]]; then
+    if [[ -n "${sfile}" && -f "${sfile}" ]]; then
         jq . "${sfile}" || cat "${sfile}"
-    elif [[ -f "${manifest}" ]]; then
+    elif [[ -n "${manifest}" && -f "${manifest}" ]]; then
         echo "已缓存更新："
-        jq '{version, has_update, ready, download_url, checksum, size}' "${manifest}"
+        jq '{version, has_update, ready, update_type, download_url, checksum, size}' "${manifest}"
     else
         echo "没有缓存的更新。"
     fi
@@ -782,10 +1084,11 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|patch|download|install|auto-shutdown|status|doctor|config|help]
+Usage: ming-update [check|apply|patch|download|install|auto-shutdown|status [--json]|doctor|config|help]
 
 Commands:
   check             检查是否有可用更新（含分级：patch/minor/major）。
+  apply             按已确认更新的类型自动完成 patch/minor 或 major OTA 流程。
   patch             执行 patch 级小修复（apt 补丁 + 配置脚本，无需重启）。
   download          下载并校验 major ISO 更新包。
   install           将已下载的 ISO 暂存为 GRUB 启动项（major 升级，保留用户文件）。
@@ -955,6 +1258,45 @@ patch_update() {
     log_info "patch 更新完成：${patch_version}"
 }
 
+apply_manifest_apt_update() {
+    # A one-button patch/minor update must execute exactly the manifest that
+    # was displayed to the user.  Do not delegate to the legacy patch endpoint
+    # here: it can describe a different update or report no patch at all.
+    local manifest="$1" version package
+    local -a packages=()
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || {
+        log_error "应用更新需要管理员权限。请使用：pkexec ming-update apply"
+        return 1
+    }
+    [[ -f "${manifest}" && ! -L "${manifest}" ]] || {
+        log_error "更新清单不存在或不可信。"
+        return 1
+    }
+
+    mapfile -t packages < <(jq -r '.apt_packages[]? | select(type == "string")' "${manifest}" 2>/dev/null)
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        log_error "更新清单没有可安全应用的 APT 软件包；不会把未执行的更新标记为成功。"
+        return 1
+    fi
+    for package in "${packages[@]}"; do
+        if ! is_safe_apt_package "${package}"; then
+            log_error "更新清单包含非法 APT 包名：${package}"
+            return 1
+        fi
+    done
+
+    recover_dpkg || return 1
+    log_info "应用 ${#packages[@]} 个更新包：${packages[*]}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 \
+        install -- "${packages[@]}" </dev/null; then
+        log_error "APT 更新失败，已保留 dpkg 状态供 ming-update doctor 检查。"
+        return 1
+    fi
+    version="$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || echo unknown)"
+    set_config '.last_applied_update' "${version}"
+    log_info "更新完成：${version}"
+}
+
 # ======================== major ISO 升级（保留用户文件）========================
 # 核心承诺：用户数据和 Live ISO 都位于目标系统盘之外。
 # Calamares 在分区前再次比较目标根分区与保留介质的物理盘祖先。
@@ -1105,6 +1447,101 @@ major_install_with_home_backup() {
     # install_update 会再次检查 manifest 与保留字段，门禁通过后才写入 GRUB。
     install_update
 }
+
+apply_update() {
+    # The UI calls one privileged action after a successful check.  When it
+    # supplies a manifest path+fingerprint, root rechecks the server and then
+    # applies that exact displayed manifest (or refuses if it has changed).
+    init_config
+    local manifest update_type available ready already_checked=false
+    local selected_manifest="" selected_sha256=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --checked)
+                already_checked=true
+                shift
+                ;;
+            --manifest)
+                [[ $# -ge 2 && -z "${selected_manifest}" ]] || {
+                    log_error "--manifest 参数无效。"
+                    return 1
+                }
+                selected_manifest="$2"
+                shift 2
+                ;;
+            --sha256)
+                [[ $# -ge 2 && -z "${selected_sha256}" ]] || {
+                    log_error "--sha256 参数无效。"
+                    return 1
+                }
+                selected_sha256="$2"
+                shift 2
+                ;;
+            *)
+                log_error "未知 apply 参数：$1"
+                return 1
+                ;;
+        esac
+    done
+    if [[ -n "${selected_manifest}" || -n "${selected_sha256}" ]] && \
+       [[ -z "${selected_manifest}" || -z "${selected_sha256}" ]]; then
+        log_error "必须同时提供更新清单和 SHA256 指纹。"
+        return 1
+    fi
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        log_error "应用更新需要管理员权限。请使用：pkexec ming-update apply"
+        return 1
+    fi
+    if [[ "${already_checked}" != "true" ]]; then
+        log_info "重新确认更新信息，避免使用过期缓存。"
+        if ! check_update; then
+            log_error "无法重新确认更新信息，已取消执行。"
+            return 1
+        fi
+    fi
+    if [[ -n "${selected_manifest}" ]]; then
+        if ! stage_selected_manifest "${selected_manifest}" "${selected_sha256}"; then
+            return 1
+        fi
+    fi
+
+    # Root applies only its freshly confirmed cache.  Do not fall back to an
+    # arbitrary user's cache when no explicit Settings selection was supplied.
+    manifest="${CACHE_DIR}/update_info.json"
+    if [[ ! -f "${manifest}" || -L "${manifest}" ]]; then
+        log_error "没有已确认的更新。请先运行：ming-update check"
+        return 1
+    fi
+    available="$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null || true)"
+    ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
+    update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    if [[ "${available}" != "true" || "${ready}" != "true" ]]; then
+        log_error "更新尚未准备完成，请稍后再次检查。"
+        return 1
+    fi
+
+    case "${update_type}" in
+        patch|minor)
+            if apply_manifest_apt_update "${manifest}"; then
+                clear_applied_update_cache "${selected_manifest}"
+                return 0
+            fi
+            return 1
+            ;;
+        major)
+            if download_update && major_install_with_home_backup; then
+                clear_applied_update_cache "${selected_manifest}"
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            log_error "更新类型无效：${update_type}"
+            return 1
+            ;;
+    esac
+}
+
 # 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
 auto_shutdown_update() {
     log_step "Ming OS 自动更新并关机"
@@ -1117,19 +1554,19 @@ auto_shutdown_update() {
     }
 
     _notify "开始检查更新…"
-    if ! check_update; then
+    if ! MING_UPDATE_BACKGROUND_CHECK=1 check_update; then
         _notify "检查更新失败，已取消自动关机。"
         return 1
     fi
 
-    local manifest; manifest="$(cache_dir)/update_info.json"
-    if [[ ! -f "${manifest}" ]]; then
+    local manifest; manifest="$(find_cached_manifest 2>/dev/null || true)"
+    if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
         _notify "当前已是最新版本，无需更新。不执行关机。"
         return 0
     fi
 
     local has_update
-    has_update=$(jq -r '.has_update // false' "${manifest}" 2>/dev/null)
+    has_update=$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null)
     if [[ "${has_update}" != "true" ]]; then
         _notify "当前已是最新版本，无需更新。不执行关机。"
         return 0
@@ -1137,16 +1574,9 @@ auto_shutdown_update() {
 
     local new_version
     new_version=$(jq -r '.version // "unknown"' "${manifest}" 2>/dev/null)
-    _notify "发现新版本 ${new_version}，开始下载…"
-
-    if ! download_update; then
-        _notify "下载失败，已取消自动关机。"
-        return 1
-    fi
-
-    _notify "下载完成，正在暂存启动项…"
-    if ! major_install_with_home_backup; then
-        _notify "安装暂存失败，已取消自动关机。"
+    _notify "发现新版本 ${new_version}，开始自动更新…"
+    if ! apply_update --checked; then
+        _notify "更新未能完成，已取消自动关机。"
         return 1
     fi
 
@@ -1159,11 +1589,15 @@ auto_shutdown_update() {
 
 case "${1:-help}" in
     check) check_update ;;
+    apply)
+        shift
+        apply_update "$@"
+        ;;
     patch) patch_update ;;
     download) download_update ;;
     install) major_install_with_home_backup ;;
     auto-shutdown) auto_shutdown_update ;;
-    status) show_status ;;
+    status) show_status "${2:-}" ;;
     doctor) ota_doctor ;;
     config) configure_update ;;
     help|--help|-h) show_help ;;
@@ -1187,6 +1621,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+Environment=MING_UPDATE_BACKGROUND_CHECK=1
 ExecStart=/usr/local/bin/ming-update check
 StandardOutput=journal
 StandardError=journal
@@ -1238,14 +1673,14 @@ exec >> "${LOG}" 2>&1
 
 echo "[$(date '+%F %T')] Boot update check started"
 
-# 网络不通就退出，不阻塞
-/usr/local/bin/ming-update check >/tmp/ming-update-check.log 2>&1
+# 网络不通就退出，不阻塞；这个标记只由自动检查写入，供电源菜单判定。
+MING_UPDATE_BACKGROUND_CHECK=1 /usr/local/bin/ming-update check >/tmp/ming-update-check.log 2>&1
 rc=$?
 echo "[$(date '+%F %T')] ming-update check rc=${rc}"
 
-# 没有 manifest 说明没有更新，静默退出
-manifest="/var/cache/ming-update/$(id -un 2>/dev/null || echo root)/update_info.json"
-[ -f "${manifest}" ] || manifest="/var/cache/ming-update/root/update_info.json"
+# 没有 manifest 说明没有更新，静默退出。ming-update 的 root cache
+# 固定放在 /var/cache/ming-update，不要拼接一个并不存在的 root 子目录。
+manifest="/var/cache/ming-update/update_info.json"
 [ -f "${manifest}" ] || exit 0
 
 has_update=$(jq -r '.has_update // false' "${manifest}" 2>/dev/null)
@@ -1269,7 +1704,7 @@ notify-send \
     -i system-software-update \
     -a "Ming OS 更新" \
     "发现新版本 ${new_version}" \
-    "点击「铭设置」→「系统更新」可一键更新，或运行 sudo ming-update auto-shutdown 更新后关机。" \
+    "打开「铭设置」→「系统更新」可一键更新；电源菜单也会提供“更新并关机”。" \
     2>/dev/null || true
 
 echo "[$(date '+%F %T')] Notification sent for version ${new_version}"
@@ -1471,19 +1906,30 @@ OTAGUI
     chmod +x /usr/local/bin/ming-update-gui
     bash -n /usr/local/bin/ming-update-gui
 
+    # Keep old launchers working without retaining a second, divergent update
+    # workflow.  All visible update choices now live in Ming Settings.
+    cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'
+#!/usr/bin/env bash
+# 系统更新兼容入口：统一跳转到铭设置的系统更新页。
+exec /usr/local/bin/ming-control-center --page update "$@"
+OTAGUIREDIRECT
+    chmod +x /usr/local/bin/ming-update-gui
+    bash -n /usr/local/bin/ming-update-gui
+
     cat > /usr/share/applications/ming-update.desktop << DESKTOPFILE
 [Desktop Entry]
 Name=系统更新
 Name[zh_CN]=系统更新
 Comment=检查并安装 Ming OS 更新
 Comment[zh_CN]=检查并安装 Ming OS 系统更新
-Exec=/usr/local/bin/ming-update-gui
+Exec=/usr/local/bin/ming-control-center --page update
 Icon=ming-update-icon
 Terminal=false
 Type=Application
 Categories=System;Settings;
 Keywords=update;upgrade;system;
 StartupNotify=true
+NoDisplay=true
 DESKTOPFILE
 
     mkdir -p "/home/${MING_USER}/Desktop"

@@ -50,6 +50,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     lxpolkit
     libnotify-bin
     x11-utils
+    desktop-file-utils
 )
 
 run_required_step() {
@@ -663,16 +664,17 @@ EDGEREPO
 set -e
 homepage=/usr/share/ming-os/homepage/index.html
 edge_args=()
-edge_hardware_video=false
+edge_graphics_mode=software
 
-edge_gpu_is_unverified() {
+edge_gpu_mode() {
     local probe_cache probe_tmp probe_json
     if [[ ! -e /dev/dri/renderD128 ]] \
         || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet) \
-        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|i915\.modeset=0' /proc/cmdline 2>/dev/null; then
-        return 0
+        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|(i915|amdgpu|radeon|nouveau)\.modeset=0' /proc/cmdline 2>/dev/null; then
+        printf '%s\n' software
+        return
     fi
-    command -v ming-hardware-status >/dev/null 2>&1 || return 0
+    command -v ming-hardware-status >/dev/null 2>&1 || { printf '%s\n' software; return; }
     probe_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/edge-hardware.json"
     mkdir -p "$(dirname "${probe_cache}")"
     if [[ ! -s "${probe_cache}" ]] || ! find "${probe_cache}" -mmin -5 -print -quit 2>/dev/null | grep -q .; then
@@ -684,30 +686,44 @@ edge_gpu_is_unverified() {
         fi
     fi
     probe_json="$(cat "${probe_cache}" 2>/dev/null || true)"
-    if grep -Fq '"edge_hardware_video": true' <<< "${probe_json}" \
-        && grep -Fq '"driver": "i915"' <<< "${probe_json}" \
-        && grep -Fq '"xorg_backend": "modesetting"' <<< "${probe_json}" \
-        && grep -Fq '"render_access": true' <<< "${probe_json}" \
-        && grep -Fq '"h264": "available"' <<< "${probe_json}" \
-        && grep -Fq '"vp9": "available"' <<< "${probe_json}"; then
-        edge_hardware_video=true
-        return 1
+    if ! grep -Fq '"desktop_rendering": true' <<< "${probe_json}" \
+        || ! grep -Fq '"render_access": true' <<< "${probe_json}"; then
+        printf '%s\n' software
+    elif grep -Fq '"edge_hardware_video": true' <<< "${probe_json}"; then
+        printf '%s\n' video
+    else
+        # The compositor can still use the native GPU when VA-API has no
+        # matching codec.  Do not turn a healthy Radeon/Zhaoxin desktop into
+        # llvmpipe merely because browser video decode is unavailable.
+        printf '%s\n' desktop
     fi
-    return 0
 }
 
-if edge_gpu_is_unverified; then
+edge_graphics_mode="$(edge_gpu_mode)"
+if [[ "${edge_graphics_mode}" == software ]]; then
     # VirtualBox, no render node, safe-graphics mode, or failed VA-API all
     # use a deterministic software path to avoid black borders and hangs.
     edge_args+=(--ozone-platform=x11 --disable-gpu --disable-gpu-compositing)
-else
+elif [[ "${edge_graphics_mode}" == video ]]; then
     # Only enable Chromium's VA-API path after ming-hardware-status has
-    # confirmed i915 + render access and H.264/VP9 support on a real host.
+    # confirmed a real KMS/Mesa path, render access and at least one supported
+    # browser codec on a non-virtual host.
     edge_args+=(
         --enable-accelerated-video-decode
         --enable-features=VaapiVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo
         --use-gl=egl
     )
+else
+    edge_args+=(--ozone-platform=x11 --disable-accelerated-video-decode)
+fi
+# Keep browser playback independent from a stale PulseAudio user session.  This
+# is intentionally bounded and only repairs a missing/broken default output;
+# ming-audio-session preserves a valid user-selected HDMI, Bluetooth or USB
+# sink rather than overriding it with an internal device.
+if command -v ming-audio-session >/dev/null 2>&1; then
+    audio_log="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/audio-session.log"
+    mkdir -p "$(dirname "${audio_log}")" 2>/dev/null || true
+    (timeout 3 ming-audio-session ensure --json >>"${audio_log}" 2>&1 &) || true
 fi
 if [[ "$#" -eq 0 ]] && [[ -r "${homepage}" ]]; then
     set -- "file://${homepage}"
@@ -1039,10 +1055,21 @@ install_wechat() {
 set -euo pipefail
 url="https://dldir1.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
 deb="/tmp/WeChatLinux_x86_64.deb"
+trap 'rm -f "${deb}"' EXIT
 echo "Downloading official WeChat for Linux..."
 wget -c --show-progress -O "${deb}" "${url}"
-sudo apt install -y "${deb}" || sudo apt install -y -f
-rm -f "${deb}"
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    echo "Administrator privileges are required to install WeChat." >&2
+    exit 1
+fi
+if [[ -x /usr/local/sbin/ming-package-installer ]]; then
+    /usr/local/sbin/ming-package-installer install "${deb}"
+else
+    # The image-build fallback is still verified, because 03_desktop deploys
+    # the common installer after this optional application phase.
+    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" \
+        || { apt-get -y -o Dpkg::Use-Pty=0 -f install && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}"; }
+fi
 echo "WeChat installed."
 WECHATINSTALL
     chmod +x /usr/local/bin/ming-install-wechat
@@ -1051,27 +1078,86 @@ WECHATINSTALL
 #!/usr/bin/env bash
 set -uo pipefail
 
-find_wechat_bin() {
-    for bin in \
+MING_SHELL_COMMON="/usr/local/lib/ming-os/ming-shell-common.py"
+[[ -r "${MING_SHELL_COMMON}" ]] || MING_SHELL_COMMON="/usr/local/bin/ming-shell-common.py"
+
+find_wechat_argv() {
+    # Prefer a system desktop entry shipped by a dpkg-owned WeChat package.
+    # The shared parser rejects shell wrappers and validates the real program,
+    # so a store entry can retain required arguments without ever evaluating
+    # arbitrary third-party Exec text or user-controlled desktop files.
+    local package desktop owner candidate
+    local -a candidate_argv=()
+    shopt -s nullglob
+    for desktop in /usr/share/applications/*.desktop; do
+        owner="$(dpkg-query -S -- "${desktop}" 2>/dev/null || true)"
+        case "${owner,,}" in
+            *wechat*:*|*weixin*:*) ;;
+            *) continue ;;
+        esac
+        mapfile -d '' -t candidate_argv < <(
+            python3 - "${MING_SHELL_COMMON}" "${desktop}" <<'WECHATDESKTOPPY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("ming_shell_common", sys.argv[1])
+module = importlib.util.module_from_spec(spec) if spec else None
+try:
+    if module is None or spec is None or spec.loader is None:
+        raise RuntimeError("shared desktop parser is unavailable")
+    spec.loader.exec_module(module)
+    entry = module.parse_desktop_file(sys.argv[2])
+    if entry is None or module.desktop_launch_diagnostic(entry.argv):
+        raise RuntimeError("desktop entry is not safely launchable")
+    for argument in entry.argv:
+        sys.stdout.buffer.write(str(argument).encode("utf-8", "surrogateescape") + b"\0")
+except Exception:
+    pass
+WECHATDESKTOPPY
+        )
+        if (( ${#candidate_argv[@]} )); then
+            printf '%s\0' "${candidate_argv[@]}"
+            return 0
+        fi
+    done
+
+    # Keep direct package-owned executables and legacy paths as a fallback for
+    # packages that do not supply a desktop entry.  They are passed as one argv
+    # item, never through a shell.
+    for package in wechat weixin com.tencent.wechat; do
+        while IFS= read -r candidate; do
+            if [[ -x "${candidate}" ]] && [[ "${candidate}" != */share/applications/* ]]; then
+                printf '%s\0' "${candidate}"
+                return 0
+            fi
+        done < <(dpkg-query -L "${package}" 2>/dev/null || true)
+    done
+    for candidate in \
         /usr/bin/wechat \
         /usr/bin/weixin \
         /opt/wechat/wechat \
         /opt/weixin/weixin \
         /opt/apps/com.tencent.wechat/files/wechat \
         /opt/apps/com.tencent.wechat/files/bin/wechat; do
-        if [[ -x "${bin}" ]]; then
-            echo "${bin}"
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\0' "${candidate}"
             return 0
         fi
     done
-    command -v wechat 2>/dev/null || command -v weixin 2>/dev/null || return 1
+    candidate="$(command -v wechat 2>/dev/null || command -v weixin 2>/dev/null || true)"
+    if [[ -n "${candidate}" ]]; then
+        printf '%s\0' "${candidate}"
+        return 0
+    fi
+    return 1
 }
 
 mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 mode="${MING_WECHAT_MODE:-auto}"
-wechat_bin="$(find_wechat_bin || true)"
+wechat_argv=()
+mapfile -d '' -t wechat_argv < <(find_wechat_argv || true)
 
-if [[ -z "${wechat_bin}" ]]; then
+if (( ${#wechat_argv[@]} == 0 )); then
     if command -v zenity >/dev/null 2>&1; then
         zenity --question \
             --title="微信未安装" \
@@ -1079,7 +1165,12 @@ if [[ -z "${wechat_bin}" ]]; then
             --ok-label="安装" --cancel-label="取消" 2>/dev/null || exit 1
     fi
     pkexec /usr/local/bin/ming-install-wechat || sudo /usr/local/bin/ming-install-wechat || exit 1
-    wechat_bin="$(find_wechat_bin || true)"
+    mapfile -d '' -t wechat_argv < <(find_wechat_argv || true)
+fi
+
+if (( ${#wechat_argv[@]} == 0 )); then
+    notify-send -i dialog-error "微信" "安装后仍未找到可安全启动的微信入口，请在应用抽屉查看“启动器需修复”提示。" 2>/dev/null || true
+    exit 127
 fi
 
 mkdir -p "${HOME}/.cache/ming-os"
@@ -1117,9 +1208,13 @@ fi
 
 audio_preflight() {
     local log="${HOME}/.cache/ming-os/wechat-audio.log"
+    if command -v ming-audio-session >/dev/null 2>&1; then
+        (timeout 3 ming-audio-session ensure --json >> "${log}" 2>&1 &) || true
+    fi
     if command -v ming-device-control >/dev/null 2>&1; then
         {
-            printf '[%s] checking call audio\n' "$(date '+%F %T')"
+            printf '[%s] checking playback and call audio\n' "$(date '+%F %T')"
+            ming-device-control audio-repair-playback
             ming-device-control audio-repair-call
             ming-device-control audio-status --json
         } >> "${log}" 2>&1 || true
@@ -1127,7 +1222,7 @@ audio_preflight() {
 }
 
 audio_preflight
-exec "${wechat_bin}" "$@"
+exec "${wechat_argv[@]}" "$@"
 WECHATWRAP
     chmod +x /usr/local/bin/ming-wechat
 
@@ -1737,6 +1832,12 @@ set -euo pipefail
 api="https://gitee.com/api/v5/repos/spark-store-project/spark-store/releases/latest"
 fallback="https://gitee.com/spark-store-project/spark-store/releases/download/5.1.1/spark-store_5.1.1_amd64.deb"
 deb="/tmp/spark-store.deb"
+log="/var/log/ming-spark-store-install.log"
+
+cleanup() {
+    rm -f "${deb}"
+}
+trap cleanup EXIT
 
 echo "Resolving latest Spark Store release..."
 url="$(curl -fsSL "${api}" 2>/dev/null | jq -r '.assets[]? | select(.name | test("_amd64\\.deb$")) | .browser_download_url' | head -n1 || true)"
@@ -1748,15 +1849,37 @@ echo "Downloading Spark Store: ${url}"
 wget -c --show-progress -O "${deb}" "${url}"
 mkdir -p /root/.config "${HOME:-/root}/.config"
 touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
-if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-    apt-get install -y "${deb}" || apt-get install -y -f
-elif command -v sudo >/dev/null 2>&1; then
-    sudo apt-get install -y "${deb}" || sudo apt-get install -y -f
-else
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     echo "Administrator privileges are required to install Spark Store." >&2
     exit 1
 fi
-rm -f "${deb}"
+
+# At runtime the shared local-package installer validates architecture and
+# metadata, performs one controlled dependency repair, verifies dpkg state and
+# refreshes desktop/icon caches.  During the early image build 03_desktop has
+# not deployed it yet, so retain a strictly verified bootstrap fallback.
+if [[ -x /usr/local/sbin/ming-package-installer ]]; then
+    /usr/local/sbin/ming-package-installer install "${deb}" | tee -a "${log}"
+else
+    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1 \
+        || { apt-get -y -o Dpkg::Use-Pty=0 -f install >>"${log}" 2>&1 && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1; }
+    dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii' \
+        || { echo "Spark Store package verification failed." >&2; exit 1; }
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+# A graphical user may already be logged in while a package is installed.
+# Trigger a bounded catalog sync; the drawer also rescans when it opens.
+target_user=""
+if [[ -n "${SUDO_USER:-}" ]] && id "${SUDO_USER}" >/dev/null 2>&1; then
+    target_user="${SUDO_USER}"
+elif [[ -n "${PKEXEC_UID:-}" ]]; then
+    target_user="$(getent passwd "${PKEXEC_UID}" 2>/dev/null | cut -d: -f1 || true)"
+fi
+if [[ -n "${target_user}" ]]; then
+    runuser -u "${target_user}" -- ming-phone-desktop --sync >>"${log}" 2>&1 || true
+fi
 echo "Spark Store installed."
 SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store

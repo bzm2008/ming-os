@@ -1,5 +1,9 @@
 import ast
+import json
+import os
 import pathlib
+import shutil
+import tempfile
 import unittest
 
 
@@ -73,8 +77,10 @@ class DesktopSourceTests(unittest.TestCase):
             self.assertIn(marker, self.phone)
 
     def test_android_desktop_is_enabled(self):
-        self.assertIn("Exec=/usr/local/bin/ming-phone-desktop-watchdog --session", self.desktop)
+        self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
+        self.assertIn("X-Ming-Managed-Components=phone-desktop;plank;picom", self.desktop)
         self.assertIn("X-GNOME-Autostart-enabled=true", self.desktop)
+        self.assertIn("Exec=/usr/bin/true", self.desktop)
         self.assertIn("ming-phone-desktop --sync", self.desktop)
 
     def test_gtk3_shell_entries_lock_gdk3_before_importing_gdk(self):
@@ -170,6 +176,224 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertNotIn("if self.tiles:", fallback)
         self.assertIn("self.set_opacity(0.0)", self.phone)
 
+    def test_desktop_file_sync_has_manifest_marker_contract(self):
+        self.assertIn("desktop-generated-manifest.json", self.phone)
+        self.assertIn("X-Ming-Managed", self.phone)
+        self.assertIn("def load_desktop_manifest", self.phone)
+        self.assertIn("def save_desktop_manifest", self.phone)
+
+    def test_desktop_render_creates_transparent_hit_targets(self):
+        render = self.phone[self.phone.index("    def render(self):"):
+                            self.phone.index("    def place_overlays", self.phone.index("    def render(self):"))]
+        self.assertIn("DesktopTile(self, item)", render)
+        self.assertIn("self.fixed.put(tile", render)
+        self.assertIn("draw_icon_fallback", self.phone)
+
+    def test_legacy_shell_common_keeps_valid_desktop_launchers_usable(self):
+        """A partial hot deployment must not turn every desktop icon inert."""
+        self.assertIn("def legacy_desktop_entry", self.phone)
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        body = [node for node in tree.body if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)]
+        body.extend(node for node in tree.body if isinstance(node, ast.ImportFrom) and node.module != "gi.repository")
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "legacy_desktop_entry")
+        namespace = {
+            "Path": pathlib.Path,
+            "configparser": __import__("configparser"),
+            "os": os,
+            "re": __import__("re"),
+            "shlex": __import__("shlex"),
+            "shutil": shutil,
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher = pathlib.Path(temp_dir) / "terminal.desktop"
+            launcher.write_text(
+                "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python -V %U\n",
+                encoding="utf-8",
+            )
+            entry = namespace["legacy_desktop_entry"](launcher)
+        self.assertEqual(["python", "-V"], entry["argv"])
+        self.assertEqual("", entry["diagnostic"])
+        self.assertIn('legacy_argv = item.get("legacy_argv")', self.phone)
+
+    def test_layout_migration_keeps_positions_and_folder_children(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {
+            "app_id",
+            "_item_id",
+            "migrate_layout",
+            "empty_layout",
+            "layout_is_valid",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "json": json,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+        migrate_layout = namespace["migrate_layout"]
+        old = {
+            "version": 2,
+            "items": [
+                {"id": "app-a", "type": "app", "path": "/tmp/a.desktop", "x": 417, "y": 233},
+                {"id": "folder-a", "type": "folder", "name": "工具", "x": 721, "y": 355,
+                 "children": ["/tmp/a.desktop", "/tmp/b.desktop"]},
+            ],
+        }
+        migrated = migrate_layout(old)
+        self.assertEqual(417, migrated["items"][0]["x"])
+        self.assertEqual(233, migrated["items"][0]["y"])
+        self.assertEqual("工具", migrated["items"][1]["name"])
+        self.assertEqual(["/tmp/a.desktop", "/tmp/b.desktop"], migrated["items"][1]["children"])
+        self.assertEqual(7, migrated["version"])
+
+    def test_layout_save_is_atomic_and_bad_primary_keeps_last_good(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {
+            "app_id", "_item_id", "empty_layout", "layout_is_valid", "migrate_layout",
+            "read_layout", "load_layout", "_atomic_write_json", "save_layout",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "json": json,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+            "log": lambda *_args: None,
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = pathlib.Path(temp_dir)
+            namespace["STATE_DIR"] = state_dir
+            namespace["LAYOUT_PATH"] = state_dir / "desktop-layout.json"
+            namespace["LAST_GOOD_LAYOUT_PATH"] = state_dir / "desktop-layout.last-good.json"
+            good = {"version": 7, "items": [{"id": "good", "type": "app", "path": "/tmp/g.desktop", "x": 88, "y": 99}]}
+            namespace["LAST_GOOD_LAYOUT_PATH"].write_text(json.dumps(good), encoding="utf-8")
+            namespace["LAYOUT_PATH"].write_text("{not json", encoding="utf-8")
+            loaded = namespace["load_layout"]()
+            self.assertEqual("good", loaded["items"][0]["id"])
+            self.assertTrue(namespace["save_layout"](good))
+            written = json.loads(namespace["LAYOUT_PATH"].read_text(encoding="utf-8"))
+            self.assertEqual(7, written["version"])
+            self.assertEqual((88, 99), (written["items"][0]["x"], written["items"][0]["y"]))
+            # An empty refresh must not destroy the last known-good snapshot.
+            self.assertTrue(namespace["save_layout"]({"version": 7, "items": []}))
+            backup = json.loads(namespace["LAST_GOOD_LAYOUT_PATH"].read_text(encoding="utf-8"))
+            self.assertEqual("good", backup["items"][0]["id"])
+            self.assertFalse(any(state_dir.glob("*.tmp")))
+
+    def test_sync_files_preserves_user_desktop_entries_and_removes_only_managed(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {
+            "app_id", "safe_name", "legacy_desktop_entry", "read_app", "_desktop_has_marker", "_manifest_relative",
+            "_mark_desktop_file", "copy_desktop",
+            "empty_desktop_manifest", "load_desktop_manifest", "save_desktop_manifest",
+            "_atomic_write_json", "sync_files",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+            "log": lambda *_args: None,
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            desktop = root / "Desktop"
+            source_dir = root / "source"
+            source_dir.mkdir()
+            app = source_dir / "alpha.desktop"
+            app.write_text(
+                "[Desktop Entry]\nType=Application\nName=Alpha\nExec=alpha\nIcon=utilities-terminal\n",
+                encoding="utf-8",
+            )
+            desktop.mkdir()
+            user = desktop / "my-own.desktop"
+            user.write_text("[Desktop Entry]\nType=Application\nName=Mine\nExec=mine\n", encoding="utf-8")
+            stale = desktop / "stale.desktop"
+            stale.write_text(
+                "[Desktop Entry]\nType=Application\nName=Stale\nExec=stale\nX-Ming-Managed=true\n",
+                encoding="utf-8",
+            )
+            manifest = root / "desktop-generated-manifest.json"
+            manifest.write_text(json.dumps({"version": 1, "marker": "X-Ming-Managed", "managed_files": ["stale.desktop"]}), encoding="utf-8")
+            namespace["DESKTOP_DIR"] = desktop
+            namespace["DESKTOP_MANIFEST_PATH"] = manifest
+            layout = {"items": [{"id": "alpha", "type": "app", "path": str(app), "name": "Alpha", "pinned": True}]}
+            namespace["sync_files"](layout)
+            self.assertTrue(user.exists())
+            self.assertFalse(stale.exists())
+            generated = desktop / "Alpha.desktop"
+            self.assertTrue(generated.exists())
+            self.assertIn("X-Ming-Managed=true", generated.read_text(encoding="utf-8"))
+            self.assertIsNotNone(namespace["read_app"](generated))
+            saved_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertIn("Alpha.desktop", saved_manifest["managed_files"])
+
+    def test_drag_position_snaps_to_grid_and_stays_inside_workarea(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "clamp_grid_position")
+        namespace = {"Path": pathlib.Path, "load_shell_common": lambda: None, "__file__": str(PHONE_DESKTOP)}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+        clamp_grid_position = namespace["clamp_grid_position"]
+        x, y = clamp_grid_position(-40, 9999, width=640, height=480)
+        self.assertGreaterEqual(x, 34)
+        self.assertGreaterEqual(y, 92)
+        self.assertLessEqual(x, 640 - 82 - 34)
+        self.assertLessEqual(y, 480 - 96 - 34)
+        self.assertEqual((218, 292), clamp_grid_position(224, 311, width=640, height=480))
+
+    def test_folder_merge_remains_pinned_and_keeps_children(self):
+        self.assertIn('"pinned": True', self.phone[self.phone.index("def create_or_merge_folder"):self.phone.index("    def open_item", self.phone.index("def create_or_merge_folder"))])
+        self.assertIn('target.setdefault("children", [])', self.phone)
+        self.assertIn('"type": "folder"', self.phone)
+
+    def test_cairo_draws_folder_visuals_and_folder_children_are_interactive(self):
+        draw = self.phone[self.phone.index("    def draw_icon_fallback"):
+                          self.phone.index("    def item_at", self.phone.index("    def draw_icon_fallback"))]
+        self.assertIn('item.get("type") == "folder"', draw)
+        self.assertIn('icon_name = "folder"', draw)
+        folder = self.phone[self.phone.index("    def show_folder"):
+                            self.phone.index("    def child_menu", self.phone.index("    def show_folder"))]
+        self.assertIn('button.connect("clicked"', folder)
+        self.assertIn('button.connect("button-press-event"', folder)
+
     def test_normal_windows_are_opaque(self):
         for forbidden in [
             "inactive-opacity = 0.92",
@@ -200,7 +424,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         cls.ota = OTA_MODULE.read_text(encoding="utf-8")
 
     def test_plank_is_the_single_primary_dock(self):
-        self.assertIn("Exec=/usr/local/bin/ming-plank-watchdog --session", self.desktop)
+        self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
         self.assertIn("UrgentBounceTime=600", self.desktop)
@@ -217,7 +441,8 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("self.fixed_touch_state = InteractionState()", self.phone)
         render = self.phone[self.phone.index("    def render(self):"):
                             self.phone.index("    def place_overlays", self.phone.index("    def render(self):"))]
-        self.assertNotIn("DesktopTile(self, item)", render)
+        self.assertIn("DesktopTile(self, item)", render)
+        self.assertIn("self.fixed.put(tile", render)
 
     def test_parent_click_fallback_translates_child_window_coordinates(self):
         self.assertIn("def fixed_event_coords", self.phone)
@@ -225,6 +450,34 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("fixed_window.get_origin()", self.phone)
         self.assertIn('self.fixed.connect("button-press-event", self.on_fixed_button_press)', self.phone)
         self.assertIn('self.fixed.connect("motion-notify-event", self.on_fixed_motion)', self.phone)
+
+    def test_root_window_events_fall_back_to_canvas_for_virtualbox_input(self):
+        """No-window Gtk.Fixed children must not make the desktop inert.
+
+        VirtualBox/Xrender can deliver an icon click to the toplevel desktop
+        window instead of the transparent EventBox or Gtk.Fixed.  The root
+        window therefore needs an explicit mouse/touch route to the same
+        canvas state machine, including a live Cairo drag preview.
+        """
+        init = self.phone[
+            self.phone.index("class PhoneDesktop"):
+            self.phone.index("    @property\n    def window_origin")
+        ]
+        for marker in [
+            'self.connect("button-press-event", self.on_window_button_press)',
+            'self.connect("motion-notify-event", self.on_window_motion)',
+            'self.connect("button-release-event", self.on_window_button_release)',
+            'self.connect("touch-event", self.on_window_touch)',
+        ]:
+            self.assertIn(marker, init)
+        self.assertIn("def on_window_button_press", self.phone)
+        self.assertIn("def event_targets_root_canvas", self.phone)
+        self.assertIn("def preview_drag", self.phone)
+        fixed_motion = self.phone[
+            self.phone.index("    def on_fixed_motion"):
+            self.phone.index("    def on_fixed_button_release", self.phone.index("    def on_fixed_motion"))
+        ]
+        self.assertIn("self.preview_drag", fixed_motion)
 
     def test_compatibility_mouse_activation_is_deduplicated_by_item(self):
         self.assertIn("ACTIVATION_DEDUP_MS", self.phone)

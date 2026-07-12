@@ -21,6 +21,17 @@ class DockLifecycleContracts(unittest.TestCase):
         cls.healthcheck = cls.source.split(
             "cat > /usr/local/bin/ming-desktop-healthcheck << 'MINGDESKHEALTH'", 1
         )[1].split("MINGDESKHEALTH", 1)[0]
+        session_parts = cls.source.split(
+            "cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'", 1
+        )
+        cls.session_healthcheck = (
+            session_parts[1].split("MINGSESSIONHEALTH", 1)[0]
+            if len(session_parts) == 2
+            else ""
+        )
+        cls.autostart = cls.source.split(
+            "configure_autostart() {", 1
+        )[1].split("# ======================== 首次启动欢迎引导", 1)[0]
         cls.oobe = cls.source.split(
             "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1
         )[1].split("OOBEACCOUNT", 1)[0]
@@ -171,11 +182,83 @@ class DockLifecycleContracts(unittest.TestCase):
             )
 
     def test_generated_runtime_scripts_are_valid_bash(self):
-        for script in (self.watchdog, self.healthcheck, self.oobe):
+        for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):
             result = subprocess.run(
                 ["bash", "-n"], input=script.replace("\r", "").encode("utf-8")
             )
             self.assertEqual(0, result.returncode)
+
+    def test_session_coordinator_owns_the_long_lived_desktop_stack(self):
+        for marker in (
+            "PHONE_STARTUP_DEADLINE=8",
+            "PLANK_STARTUP_DEADLINE=8",
+            "PICOM_STARTUP_DEADLINE=5",
+            "PROBE_TIMEOUT=2",
+            "SUPERVISOR_INTERVAL=10",
+            "flock -n",
+            "ming-session-healthcheck.pid",
+            "ming-phone-desktop-watchdog",
+            "ming-plank-watchdog",
+            "ming-picom",
+            "while true; do",
+            "sleep 10",
+        ):
+            self.assertIn(marker, self.session_healthcheck)
+
+        self.assertIn(
+            "Exec=/usr/local/bin/ming-session-healthcheck --session",
+            self.autostart,
+        )
+        for direct in (
+            "Exec=/usr/local/bin/ming-phone-desktop-watchdog --session",
+            "Exec=/usr/local/bin/ming-plank-watchdog --session",
+            "Exec=/usr/local/bin/ming-picom",
+        ):
+            self.assertNotIn(direct, self.autostart)
+
+    def test_session_healthcheck_records_json_metrics_and_safe_fallbacks(self):
+        for marker in (
+            "session-startup.json",
+            "session-health.log",
+            "start_xfdesktop_fallback",
+            "MING_PHONE_DESKTOP",
+            "ming-phone-desktop.ready",
+            "picom-fallback.conf",
+            "xrender",
+            "timeout --foreground 2s",
+            '"phone_desktop"',
+            '"plank"',
+            '"picom"',
+        ):
+            self.assertIn(marker, self.session_healthcheck)
+
+    def test_session_metrics_include_recovery_and_duplicate_counters(self):
+        for marker in (
+            '"pid_count"',
+            '"elapsed_ms"',
+            '"restarts"',
+            '"recovered"',
+            '"duplicates"',
+            "process_count()",
+            "phone_restarts",
+            "plank_restarts",
+            "picom_restarts",
+        ):
+            self.assertIn(marker, self.session_healthcheck)
+
+    def test_phone_watchdog_lock_is_a_one_shot_duplicate_guard(self):
+        phone = self.source.split(
+            "cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'", 1
+        )[1].split("PHONEDESKWATCH", 1)[0]
+        lock_failure = phone.split('if ! mkdir "${lock_dir}"', 1)[1].split("fi", 1)[0]
+        self.assertIn("exit 0", lock_failure)
+        self.assertNotIn("start_phone_desktop", lock_failure)
+
+    def test_plank_watchdog_one_shot_repairs_share_the_session_lock(self):
+        self.assertIn("run_one_shot()", self.watchdog)
+        one_shot = self.watchdog.split("run_one_shot()", 1)[1].split("\n}", 1)[0]
+        self.assertIn("ming-plank-watchdog.lock", one_shot)
+        self.assertIn("flock -n 9", one_shot)
 
 
 if __name__ == "__main__":

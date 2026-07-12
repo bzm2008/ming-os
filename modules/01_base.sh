@@ -137,7 +137,15 @@ install_base_packages() {
         iio-sensor-proxy \
         i965-va-driver \
         intel-media-va-driver \
+        libgl1-mesa-dri \
+        mesa-va-drivers \
+        mesa-vdpau-drivers \
+        mesa-vulkan-drivers \
+        mesa-utils \
         vainfo \
+        lm-sensors \
+        firmware-amd-graphics \
+        amd64-microcode \
         mokutil \
         thermald
 
@@ -163,11 +171,9 @@ install_base_packages() {
         b43-fwcutter \
         firmware-sof-signed \
         firmware-intel-graphics \
-        firmware-amd-graphics \
         firmware-nvidia-graphics \
         firmware-ti-connectivity \
-        intel-microcode \
-        amd64-microcode; do
+        intel-microcode; do
         apt install -y --no-install-recommends "${pkg}" || true
     done
 
@@ -216,6 +222,7 @@ ideapad_laptop
 huawei_wmi
 intel_lpss
 intel_lpss_pci
+k10temp
 surface_aggregator
 surface_hid_core
 )
@@ -257,10 +264,9 @@ WantedBy=multi-user.target
 HWPRELOADSVC
     systemctl enable ming-hardware-preload.service 2>/dev/null || true
 
-    mkdir -p /etc/modprobe.d
-    cat > /etc/modprobe.d/ming-blacklist.conf << BLACKLIST
-blacklist i2c_piix4
-BLACKLIST
+    # i2c_piix4 is the in-tree SMBus driver used by many old AMD chipsets.
+    # Never blacklist it globally: that hides temperature and power sensors.
+    rm -f /etc/modprobe.d/ming-blacklist.conf
 
     mkdir -p /etc/modprobe.d
     cat > /etc/modprobe.d/ming-old-hardware.conf << 'OLDHWMOD'
@@ -971,6 +977,7 @@ deploy_service_profile() {
 # daemons out of the graphical boot path; set values to 1 for diagnostics.
 MING_KEEP_MODEMMANAGER=0
 MING_DEBUG_SERIAL=0
+MING_PHONE_DESKTOP=1
 MINGOSDEFAULT
 
     cat > /usr/local/sbin/ming-service-profile << 'MINGSERVICEPROFILE'
@@ -2232,6 +2239,28 @@ menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-li
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
     linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    initrd /initrd.img
+}
+
+menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+    load_video
+    insmod gzio
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+    initrd /initrd.img
+}
+
+menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+    load_video
+    insmod gzio
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF
@@ -3797,6 +3826,16 @@ menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu -
 menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
     search --no-floppy --set=root --file /vmlinuz
     linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    initrd /initrd.img
+}
+menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+    initrd /initrd.img
+}
+menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+    search --no-floppy --set=root --file /vmlinuz
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF

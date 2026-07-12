@@ -1,5 +1,6 @@
 """Regression contracts for Ming OS graphics, session and device recovery."""
 
+import ast
 import pathlib
 import io
 import json
@@ -190,6 +191,85 @@ class StatusWidgetStatePureTests(unittest.TestCase):
             namespace["save_widget_state"](True, state_path)
             self.assertEqual({"collapsed": True}, json.loads(state_path.read_text(encoding="utf-8")))
             self.assertEqual({"collapsed": True}, namespace["load_widget_state"](state_path))
+
+
+class ApplicationCatalogRefreshTests(unittest.TestCase):
+    @staticmethod
+    def load_phone_catalog_functions():
+        tree = ast.parse(PHONE)
+        wanted_assignments = {"APP_CATALOG_FINGERPRINT_VERSION"}
+        wanted_functions = {"app_catalog_fingerprint", "app_id", "read_app"}
+        body = [
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        ]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id in wanted_assignments for target in node.targets)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted_functions
+        )
+        names = {node.name for node in body if isinstance(node, ast.FunctionDef)}
+        if "app_catalog_fingerprint" not in names:
+            return None
+        namespace = {"Path": pathlib.Path, "__file__": str(ROOT / "assets" / "ming-phone-desktop.py")}
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(ROOT), "exec"),
+            namespace,
+        )
+        return namespace
+
+    def test_application_directory_fingerprint_changes_when_a_launcher_is_installed(self):
+        namespace = self.load_phone_catalog_functions()
+        if namespace is None:
+            self.fail("phone desktop needs a bounded application-directory fingerprint")
+        with tempfile.TemporaryDirectory() as tempdir:
+            applications = pathlib.Path(tempdir) / "applications"
+            applications.mkdir()
+            before = namespace["app_catalog_fingerprint"]((applications,))
+            (applications / "new-store-app.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=New Store App\nExec=new-store-app\n",
+                encoding="utf-8",
+            )
+            after = namespace["app_catalog_fingerprint"]((applications,))
+        self.assertNotEqual(before, after)
+
+    def test_phone_app_reader_keeps_a_broken_launcher_and_its_diagnostic(self):
+        namespace = self.load_phone_catalog_functions()
+        if namespace is None:
+            self.fail("phone desktop needs a bounded application-directory fingerprint")
+
+        class BrokenEntry:
+            path = pathlib.Path("/tmp/broken.desktop")
+            name = "Broken Store App"
+            icon = "application-x-executable"
+            categories = ("Utility",)
+            diagnostic = "找不到启动程序：/opt/broken-store-app/bin/launch"
+
+        class FakeCommon:
+            @staticmethod
+            def diagnose_desktop_file(_path):
+                return BrokenEntry()
+
+        namespace["COMMON"] = FakeCommon()
+        item = namespace["read_app"]("/tmp/broken.desktop")
+        self.assertEqual("Broken Store App", item["name"])
+        self.assertEqual(BrokenEntry.diagnostic, item.get("diagnostic"))
+
+    def test_phone_desktop_refreshes_the_catalog_when_directory_fingerprint_changes(self):
+        refresh = PHONE.split("    def refresh_if_apps_changed(self):", 1)[1].split(
+            "    def find_drop_target", 1
+        )[0]
+        self.assertIn("app_catalog_fingerprint()", refresh)
+        self.assertIn("sync_layout", refresh)
+
+    def test_phone_launch_fails_safely_when_the_shared_verifier_is_missing(self):
+        launch = PHONE.split("def launch_item", 1)[1].split("def write_generated_core_launcher", 1)[0]
+        self.assertIn('getattr(COMMON, "parse_desktop_file", None)', launch)
+        self.assertIn('getattr(COMMON, "desktop_launch_diagnostic", None)', launch)
 
 
 class StabilityRecoveryContracts(unittest.TestCase):
@@ -480,6 +560,12 @@ fi
             "展开",
         ):
             self.assertIn(marker, PHONE)
+
+    def test_status_widget_uses_a_single_height_animation_instead_of_an_immediate_size_jump(self):
+        self.assertIn("self._height_animation", PHONE)
+        self.assertIn("animate_collapsed_state", PHONE)
+        self.assertIn("content_revealer.set_reveal_child", PHONE)
+        self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
 
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):
         for marker in (

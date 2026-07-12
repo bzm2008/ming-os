@@ -788,8 +788,10 @@ validate_required_desktop_runtime() {
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
-        lxpolkit libnotify-bin x11-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
-        i965-va-driver intel-media-va-driver vainfo xserver-xorg-video-modesetting \
+        lxpolkit libnotify-bin x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
+        i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
+        mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \
+        xserver-xorg-video-modesetting \
         fcitx5-rime librime-data rime-data-luna-pinyin; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "required desktop runtime package is not installed: ${package}"
@@ -1134,6 +1136,8 @@ for path, marker in [
     ("usr/local/bin/ming-launch", "LaunchRequest"),
     ("usr/local/bin/ming-notifications", "parse_notification_log"),
     ("usr/local/bin/ming-device-control", "DeviceController"),
+    ("usr/local/bin/ming-audio-session", "audio-repair-playback"),
+    ("usr/local/sbin/ming-package-installer", "PackageInstaller"),
     ("usr/local/bin/ming-hardware-status", "HardwareStatus"),
     ("usr/local/bin/ming-files", "ming-files.py"),
     ("usr/local/lib/ming-os/ming-files.py", "class MingFiles"),
@@ -1199,6 +1203,8 @@ for helper in [
     "usr/local/bin/ming-phone-desktop-watchdog",
     "usr/local/bin/ming-edge",
     "usr/local/bin/ming-spark-store",
+    "usr/local/bin/ming-audio-session",
+    "usr/local/sbin/ming-package-installer",
 ]:
     require_file(helper)
 
@@ -1307,6 +1313,8 @@ for relative_path in [
     "usr/local/sbin/ming-performance-status",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
+    "usr/local/bin/ming-audio-session",
+    "usr/local/sbin/ming-package-installer",
 ]:
     validate_generated_executable(relative_path, "python")
 for relative_path in [
@@ -1429,6 +1437,7 @@ if "RestoreOnStartupURLs" not in edge_policy:
 
 require_path("usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so")
 require_path("usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so")
+require_path("usr/lib/x86_64-linux-gnu/dri/radeonsi_drv_video.so")
 require_path("usr/bin/vainfo")
 require_path("usr/lib/xorg/modules/drivers/modesetting_drv.so")
 for xorg_config in (root / "etc/X11/xorg.conf.d").glob("*.conf"):
@@ -1897,8 +1906,13 @@ menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V
     initrd /live/initrd
 }
 
-menuentry "Ming OS ${MING_OS_VERSION} 老 AMD 显卡 / Radeon 兼容模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
+    initrd /live/initrd
+}
+
+menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /live/initrd
 }
 

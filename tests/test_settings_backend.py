@@ -25,6 +25,7 @@ class FakeRunner:
         self.picom_command = ""
         self.default_sink = "alsa_output.pci"
         self.default_source = "alsa_input.pci"
+        self.sinks = "0\talsa_output.pci\tmodule\ts16le\tRUNNING"
         self.default_apps = {
             "default-web-browser": "browser.desktop",
             "x-scheme-handler/mailto": "mail.desktop",
@@ -54,7 +55,7 @@ class FakeRunner:
             return 0, "", ""
         if argv[:3] == ["pactl", "list", "short"]:
             if argv[3] == "sinks":
-                return 0, "0\talsa_output.pci\tmodule\ts16le\tRUNNING", ""
+                return 0, self.sinks, ""
             return 0, (
                 "0\talsa_input.pci\tmodule\ts16le\tRUNNING\n"
                 "1\talsa_output.pci.monitor\tmodule\ts16le\tIDLE"
@@ -274,6 +275,24 @@ class SettingsBackendTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("alsa_output.pci", result["value"])
 
+    def test_audio_output_selection_labels_internal_and_hdmi_and_persists_manual_choice(self):
+        internal = "alsa_output.pci-0000_00_1b.0.analog-stereo"
+        hdmi = "alsa_output.pci-0000_01_00.1.hdmi-stereo"
+        self.runner.sinks = "\n".join((
+            "0\t%s\tmodule\ts16le\tRUNNING" % internal,
+            "1\t%s\tmodule\ts16le\tIDLE" % hdmi,
+        ))
+        self.runner.default_sink = hdmi
+
+        devices = self.backend.list_audio_devices("output")
+
+        self.assertEqual("主板模拟输出（内置扬声器，例如 ALC887）", devices["items"][0]["label"])
+        self.assertEqual("HDMI / 显卡音频", devices["items"][1]["label"])
+        self.assertTrue(devices["items"][1]["selected"])
+        self.assertTrue(self.backend.set_audio_device("output", internal)["ok"])
+        stored = json.loads(self.backend.local_path.read_text(encoding="utf-8"))
+        self.assertEqual(internal, stored["audio_output_selection"])
+
     def test_lid_power_policy_updates_both_ac_and_battery_and_reads_back(self):
         result = self.backend.set_value("lid_close_action", "suspend")
         self.assertTrue(result["ok"])
@@ -352,6 +371,11 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
             '"登录时自动启动"',
         ]:
             self.assertIn(marker, self.source)
+
+    def test_audio_output_row_uses_a_generic_internal_output_description(self):
+        self.assertIn("主板模拟输出（内置扬声器，例如 ALC887）", self.source)
+        self.assertIn("选择声音从主板模拟输出、HDMI、蓝牙或 USB 输出", self.source)
+        self.assertNotIn("主板 ALC887、", self.source)
 
     def test_pages_are_built_lazily_and_backend_values_load_asynchronously(self):
         self.assertIn("self.page_builders", self.source)

@@ -51,15 +51,16 @@ class Rect:
 
 
 class DesktopEntry:
-    __slots__ = ("path", "name", "comment", "icon", "argv", "categories")
+    __slots__ = ("path", "name", "comment", "icon", "argv", "categories", "diagnostic")
 
-    def __init__(self, path, name, comment, icon, argv, categories):
+    def __init__(self, path, name, comment, icon, argv, categories, diagnostic=""):
         self.path = pathlib.Path(path)
         self.name = name
         self.comment = comment
         self.icon = icon
         self.argv = tuple(argv)
         self.categories = tuple(categories)
+        self.diagnostic = str(diagnostic or "")
 
 
 class CommandResult:
@@ -155,6 +156,88 @@ def desktop_exec_argv(command):
     return tuple(argv)
 
 
+def desktop_exec_program(argv):
+    """Return the actual program from an already-sanitised desktop argv."""
+    if not isinstance(argv, (tuple, list)) or not argv:
+        raise ValueError("desktop Exec has no executable")
+    probe = tuple(argv)
+    if pathlib.PurePath(probe[0]).name == "env":
+        offset = 1
+        while offset < len(probe) and (probe[offset].startswith("-") or "=" in probe[offset]):
+            offset += 1
+        probe = probe[offset:]
+    if not probe:
+        raise ValueError("desktop Exec has no executable")
+    return probe[0]
+
+
+def desktop_launch_diagnostic(argv):
+    """Return a user-facing reason when a validated launcher cannot start."""
+    try:
+        executable = desktop_exec_program(argv)
+    except ValueError:
+        return "启动命令不完整，无法确定要运行的程序。"
+    candidate = pathlib.Path(executable)
+    if candidate.is_absolute() or executable.startswith("/"):
+        if not candidate.is_file():
+            return "找不到启动程序：{}".format(executable)
+        if not os.access(str(candidate), os.X_OK):
+            return "启动程序没有执行权限：{}".format(executable)
+        return ""
+    if "/" in executable or "\\" in executable:
+        return "启动程序路径必须是绝对路径或系统命令：{}".format(executable)
+    if shutil.which(executable) is None:
+        return "找不到启动程序：{}".format(executable)
+    return ""
+
+
+def _diagnostic_message(reason):
+    reason = str(reason or "")
+    if "shell command wrappers" in reason:
+        return "为保护系统安全，不支持通过 shell -c 启动的第三方入口。"
+    if "shell syntax" in reason or "shell operators" in reason:
+        return "为保护系统安全，不支持带有 shell 语法的第三方入口。"
+    if "cannot be parsed" in reason:
+        return "启动命令格式无法解析，请重新安装该软件。"
+    if "empty" in reason or "no executable" in reason:
+        return "启动器没有有效的启动命令，请重新安装该软件。"
+    if "TryExec" in reason:
+        return "启动器依赖的程序不可用，请重新安装该软件。"
+    return "启动器配置无效：{}".format(reason or "未知错误")
+
+
+def _diagnostic_entry_from_raw(path, locale_name, reason):
+    """Read only display metadata for an unlaunchable application launcher."""
+    path = pathlib.Path(path)
+    try:
+        if path.suffix != ".desktop" or not path.is_file() or path.stat().st_size > MAX_DESKTOP_BYTES:
+            return None
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            parser.read_file(stream)
+    except (OSError, configparser.Error):
+        return None
+    if not parser.has_section("Desktop Entry"):
+        return None
+    section = parser["Desktop Entry"]
+    if section.get("Type", "Application") != "Application":
+        return None
+    if section.getboolean("Hidden", fallback=False) or section.getboolean("NoDisplay", fallback=False):
+        return None
+    name = _localized(section, "Name", locale_name or os.environ.get("LANG", "")) or path.stem
+    categories = tuple(item for item in section.get("Categories", "").split(";") if item)
+    return DesktopEntry(
+        path=path,
+        name=name,
+        comment=_localized(section, "Comment", locale_name or os.environ.get("LANG", "")),
+        icon=section.get("Icon", "").strip(),
+        argv=(),
+        categories=categories,
+        diagnostic=_diagnostic_message(reason),
+    )
+
+
 def parse_desktop_file(path, locale_name=None):
     path = pathlib.Path(path)
     if path.suffix != ".desktop" or not path.is_file():
@@ -198,6 +281,33 @@ def parse_desktop_file(path, locale_name=None):
         icon=section.get("Icon", "").strip(),
         argv=argv,
         categories=categories,
+    )
+
+
+def diagnose_desktop_file(path, locale_name=None):
+    """Describe a launcher without ever turning an unsafe Exec into an argv.
+
+    A normal catalog should keep a broken third-party launcher visible so the
+    user gets an actionable reason.  The normal parser remains strict for
+    actual launch paths; only this diagnostic view supplies an empty argv.
+    """
+    try:
+        entry = parse_desktop_file(path, locale_name=locale_name)
+    except ValueError as exc:
+        return _diagnostic_entry_from_raw(path, locale_name, str(exc))
+    if entry is None:
+        return _diagnostic_entry_from_raw(path, locale_name, "TryExec dependency is unavailable")
+    diagnostic = desktop_launch_diagnostic(entry.argv)
+    if not diagnostic:
+        return entry
+    return DesktopEntry(
+        path=entry.path,
+        name=entry.name,
+        comment=entry.comment,
+        icon=entry.icon,
+        argv=(),
+        categories=entry.categories,
+        diagnostic=diagnostic,
     )
 
 

@@ -126,6 +126,38 @@ def drawer_transition(reduced_motion):
     }
 
 
+class DrawerAnimation:
+    """A reversible progress clock; the controller owns exactly one GLib source."""
+
+    def __init__(self, duration_ms=ANIMATION_DURATION_MS):
+        self.duration_ms = max(1, int(duration_ms))
+        self.progress = 0.0
+        self.target = 0.0
+        self.last_tick_ms = None
+
+    @property
+    def active(self):
+        return abs(self.target - self.progress) > 0.0001
+
+    def set_target(self, target, now_ms):
+        self.advance(now_ms)
+        self.target = max(0.0, min(1.0, float(target)))
+        self.last_tick_ms = float(now_ms)
+        return self.progress
+
+    def advance(self, now_ms):
+        now_ms = float(now_ms)
+        if self.last_tick_ms is None:
+            self.last_tick_ms = now_ms
+            return self.progress
+        elapsed = max(0.0, now_ms - self.last_tick_ms)
+        direction = 1.0 if self.target > self.progress else -1.0
+        if self.active:
+            self.progress = max(0.0, min(1.0, self.progress + direction * elapsed / self.duration_ms))
+        self.last_tick_ms = now_ms
+        return self.progress
+
+
 def add_to_desktop_argv(app):
     path = app.path.as_posix() if isinstance(app.path, pathlib.Path) else str(app.path)
     return "ming-phone-desktop", "--add", path
@@ -185,7 +217,7 @@ def discover_apps(paths=None):
                 continue
             seen.add(path.name)
             try:
-                entry = COMMON.parse_desktop_file(path)
+                entry = COMMON.diagnose_desktop_file(path)
             except (OSError, ValueError):
                 continue
             if entry is not None:
@@ -230,6 +262,9 @@ class DrawerController:
         self.category = "全部"
         self.window = self._build_window()
         self._server = None
+        self._animation = DrawerAnimation()
+        self._animation_source = 0
+        self._animation_geometry = None
 
     def _workarea(self):
         display = self.Gdk.Display.get_default()
@@ -267,6 +302,7 @@ class DrawerController:
         }
         .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
         .drawer-label { color: #1D2924; font-weight: 700; font-size: 11px; }
+        .drawer-diagnostic { color: #A33A32; font-size: 9px; font-weight: 700; }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -344,6 +380,11 @@ class DrawerController:
             label.get_style_context().add_class("drawer-label")
             content.pack_start(image, True, True, 0)
             content.pack_start(label, False, False, 0)
+            if getattr(app, "diagnostic", ""):
+                diagnostic = self.Gtk.Label(label="启动器需修复")
+                diagnostic.set_ellipsize(3)
+                diagnostic.get_style_context().add_class("drawer-diagnostic")
+                content.pack_start(diagnostic, False, False, 0)
             button.add(content)
             button.add_events(self.Gdk.EventMask.BUTTON_RELEASE_MASK)
             button.connect("button-release-event", self._activate_button, app)
@@ -372,6 +413,19 @@ class DrawerController:
         return True
 
     def launch(self, app, widget):
+        diagnostic = getattr(app, "diagnostic", "")
+        if diagnostic:
+            dialog = self.Gtk.MessageDialog(
+                transient_for=self.window,
+                flags=0,
+                message_type=self.Gtk.MessageType.ERROR,
+                buttons=self.Gtk.ButtonsType.CLOSE,
+                text="此应用暂时无法启动",
+            )
+            dialog.format_secondary_text(diagnostic + "\n请重新安装该软件后再试。")
+            dialog.run()
+            dialog.destroy()
+            return False
         rect = None
         if widget and widget.get_window():
             origin = widget.get_window().get_origin()
@@ -395,41 +449,72 @@ class DrawerController:
             dialog.format_secondary_text("启动命令不可用，请查看桌面启动日志。")
             dialog.run()
             dialog.destroy()
-            return
+            return False
         self.recent.touch(app.path)
         self.hide()
+        return True
 
     def show(self):
+        # Always rebuild the catalog before presentation.  This is intentionally
+        # above the reduced-motion branch so an install is visible even when
+        # animations are disabled.
+        self.apps = discover_apps()
+        self.refresh()
         geometry = drawer_geometry(self._workarea())
         transition = drawer_transition(reduced_motion_enabled())
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:
             self.window.move(int(geometry.x), int(geometry.y))
-        else:
-            self.window.move(int(geometry.x), int(geometry.y + geometry.height))
-        self.window.set_opacity(transition["start_opacity"])
-        self.window.show_all()
-        self.window.present()
-        if transition["duration_ms"] == 0:
+            self.window.show_all()
+            self.window.present()
             self.search.grab_focus()
             return
-        started = self.GLib.get_monotonic_time()
-
-        def step():
-            elapsed = (self.GLib.get_monotonic_time() - started) / 1000.0
-            progress = min(1.0, elapsed / transition["duration_ms"])
-            eased = COMMON.ease_out_cubic(progress)
-            y = geometry.y + geometry.height * (1.0 - eased)
-            self.window.move(int(geometry.x), int(y))
-            return progress < 1.0
-        self.GLib.timeout_add(16, step)
+        self._animation_geometry = geometry
+        if not self.window.get_visible():
+            self.window.move(int(geometry.x), int(geometry.y + geometry.height))
+            self.window.show_all()
+            self.window.present()
+        self.window.set_opacity(transition["start_opacity"])
+        self._animate_to(1.0, geometry)
         self.search.grab_focus()
 
     def hide(self):
-        self.window.hide()
+        if not self.window.get_visible():
+            return
+        transition = drawer_transition(reduced_motion_enabled())
+        if transition["duration_ms"] == 0:
+            self.window.hide()
+            return
+        self._animate_to(0.0, drawer_geometry(self._workarea()))
+
+    def _animate_to(self, target, geometry):
+        self._animation_geometry = geometry
+        self._animation.set_target(target, self.GLib.get_monotonic_time() / 1000.0)
+        if self._animation_source:
+            return
+
+        def step():
+            current = self._animation.advance(self.GLib.get_monotonic_time() / 1000.0)
+            active_geometry = self._animation_geometry or geometry
+            # Ease the physical motion but preserve linear progress internally,
+            # allowing a second toggle to reverse from the exact current point.
+            eased = COMMON.ease_out_cubic(current)
+            y = active_geometry.y + active_geometry.height * (1.0 - eased)
+            self.window.move(int(active_geometry.x), int(y))
+            if self._animation.active:
+                return True
+            self._animation_source = 0
+            if self._animation.target <= 0.0:
+                self.window.hide()
+            return False
+
+        self._animation_source = self.GLib.timeout_add(16, step)
 
     def toggle(self):
-        self.hide() if self.window.get_visible() else self.show()
+        if self.window.get_visible() and self._animation.target > 0.0:
+            self.hide()
+        else:
+            self.show()
 
     def serve(self):
         self._server = COMMON.claim_runtime_socket("app-drawer", backlog=4)

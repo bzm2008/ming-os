@@ -220,8 +220,8 @@ install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
     local asset
-    mkdir -p "${lib_dir}" /usr/local/bin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-hardware-status.py ming-app-drawer.py ming-launch.py; do
+    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -235,9 +235,95 @@ install_ming_shell_components() {
     install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
     install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
+    install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
+    install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+
+    # Thunar custom actions do not display a command's stdout.  Keep privilege
+    # elevation in the narrow installer, while this unprivileged wrapper turns
+    # its structured result into an explicit success/failure dialog and asks
+    # the running phone desktop to rescan newly installed launchers.
+    cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'
+#!/usr/bin/env bash
+set -uo pipefail
+
+package_file="${1:-}"
+if [[ -z "${package_file}" || ! -f "${package_file}" ]]; then
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="安装 DEB 软件包" --text="找不到要安装的本地 DEB 软件包。" --width=420 2>/dev/null || true
+    else
+        notify-send -u critical "安装 DEB 软件包" "找不到要安装的本地 DEB 软件包。" 2>/dev/null || true
+    fi
+    exit 2
+fi
+
+result_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-package-result.XXXXXX" 2>/dev/null || true)"
+if [[ -z "${result_file}" ]]; then
+    notify-send -u critical "安装 DEB 软件包" "无法创建安装结果文件。" 2>/dev/null || true
+    exit 1
+fi
+trap 'rm -f "${result_file}"' EXIT
+
+if pkexec /usr/local/sbin/ming-package-installer install "${package_file}" >"${result_file}" 2>&1; then
+    installer_rc=0
+else
+    installer_rc=$?
+fi
+
+if python3 - "${result_file}" "${installer_rc}" << 'MINGPACKAGEUIPY'
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+return_code = int(sys.argv[2])
+try:
+    result = json.loads(raw)
+except (TypeError, ValueError):
+    result = {}
+ok = bool(result.get("ok")) and return_code == 0
+package = str(result.get("package") or "该软件")
+version = str(result.get("version") or "")
+log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
+launcher_warnings = result.get("launcher_warnings")
+launcher_warnings = launcher_warnings if isinstance(launcher_warnings, list) else []
+if ok:
+    title = "软件安装完成"
+    detail = "已安装：%s%s\n应用抽屉和桌面将自动刷新。\n日志：%s" % (
+        package, (" " + version) if version else "", log_path)
+    if launcher_warnings:
+        title = "软件已安装，但启动器需要修复"
+        warnings = [str(item.get("error") or "启动器不可用")
+                    for item in launcher_warnings if isinstance(item, dict)]
+        detail += "\n\n注意：" + "；".join(warnings[:3])
+else:
+    title = "软件安装失败"
+    reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
+    detail = "%s\n日志：%s" % (reason[:1200], log_path)
+if shutil.which("zenity"):
+    subprocess.run(
+        ["zenity", "--info" if ok else "--error", "--title=" + title,
+         "--text=" + detail, "--width=520"], check=False)
+elif shutil.which("notify-send"):
+    subprocess.run(
+        ["notify-send", "-u", "normal" if ok else "critical", title, detail], check=False)
+else:
+    print(title + "\n" + detail, file=sys.stderr)
+raise SystemExit(0 if ok else 1)
+MINGPACKAGEUIPY
+then
+    if command -v ming-phone-desktop >/dev/null 2>&1; then
+        ming-phone-desktop --sync >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+exit 1
+MINGPACKAGEGUI
+    chmod 0755 /usr/local/bin/ming-package-install-gui
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop" << 'MINGLAUNCHAUTO'
@@ -252,6 +338,22 @@ X-GNOME-Autostart-Delay=1
 MINGLAUNCHAUTO
     chown "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop"
+
+    # Start the user-level PulseAudio health check after the graphical session
+    # is ready.  The helper is bounded, records diagnostics in the user's
+    # cache and never replaces an already valid HDMI/Bluetooth/USB selection.
+    cat > "/home/${MING_USER}/.config/autostart/ming-audio-session.desktop" << 'MINGAUDIOAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Audio Session Recovery
+Exec=/usr/local/bin/ming-audio-session ensure --json
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+MINGAUDIOAUTO
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/autostart/ming-audio-session.desktop"
 
     cat > /usr/local/bin/ming-app-library << 'MINGDRAWERCOMPAT'
 #!/usr/bin/env bash
@@ -2671,7 +2773,10 @@ phone_desktop_ready() {
 wait_phone_desktop_ready() {
     local log_file="$1"
     local attempt
-    for attempt in $(seq 1 20); do
+    # The session coordinator owns the fixed eight-second desktop startup
+    # budget.  Keep this one-shot helper bounded to the same deadline so a
+    # repair cannot outlive the supervisor's startup window.
+    for attempt in $(seq 1 16); do
         if phone_desktop_running && phone_desktop_ready; then
             return 0
         fi
@@ -2682,6 +2787,12 @@ wait_phone_desktop_ready() {
 }
 
 start_phone_desktop() {
+    if [[ "${MING_PHONE_DESKTOP:-1}" != "1" ]]; then
+        ming_log "$(ming_log_dir)/ming-phone-desktop.log" \
+            'MING_PHONE_DESKTOP is not 1; keeping xfdesktop fallback'
+        start_xfdesktop_fallback
+        return 1
+    fi
     command -v ming-phone-desktop >/dev/null 2>&1 || return 0
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -2710,7 +2821,8 @@ start_phone_desktop() {
 
 lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-phone-desktop-watchdog.lock"
 if ! mkdir "${lock_dir}" 2>/dev/null; then
-    start_phone_desktop
+    # A concurrent coordinator/repair already owns the one-shot startup.
+    # Never launch a second desktop while the lock is held.
     exit 0
 fi
 trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
@@ -2935,7 +3047,9 @@ start_plank() {
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
     log "starting Plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
     (nohup plank >>"${log_file}" 2>&1 &) || return 1
-    for _ready_try in $(seq 1 20); do
+    # Keep the one-shot repair within the coordinator's fixed eight-second
+    # Plank startup budget (32 x 250ms).
+    for _ready_try in $(seq 1 32); do
         reason="$(plank_health_reason)"
         if [[ "${reason}" == "healthy" ]]; then
             diagnose_and_promote_stacking
@@ -2947,6 +3061,16 @@ start_plank() {
     log "Plank recovery failed: $(plank_health_reason)"
     stop_plank
     return 1
+}
+
+run_one_shot() {
+    local lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
+    exec 9>"${lock_file}" || exit 1
+    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+        log "Plank one-shot repair already owns ${lock_file}"
+        exit 0
+    fi
+    start_plank
 }
 
 case "${1:-start}" in
@@ -2963,7 +3087,7 @@ case "${1:-start}" in
         done
         ;;
     *)
-        start_plank
+        run_one_shot
         ;;
 esac
 PLANKWATCH
@@ -2973,17 +3097,20 @@ PLANKWATCH
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
     rm -f "${autostart_dir}/plank.desktop"
+    # Compatibility filename retained for upgrades; the direct Dock session
+    # loop is disabled so only ming-session-healthcheck owns the long-lived
+    # Plank lifecycle.
     cat > "${autostart_dir}/ming-dock.desktop" << 'MINGDOCKAUTO'
 [Desktop Entry]
 Type=Application
 Name=Ming Dock
-Exec=/usr/local/bin/ming-plank-watchdog --session
-Comment=Ming OS Dock
+Exec=/usr/bin/true
+Comment=Ming OS Dock; legacy ming-plank-watchdog --session is one-shot only
 Icon=ming-os-menu
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=2
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-session-healthcheck
 MINGDOCKAUTO
 
     cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
@@ -3002,6 +3129,491 @@ MINGWINDOWMANAGERAUTO
         "${autostart_dir}/ming-dock.desktop" \
         "${autostart_dir}/ming-window-manager.desktop"
 }
+
+# ======================== 统一会话启动/健康协调器 ========================
+#
+# Phone Desktop、Plank 与 Picom 都保留可单次调用的 watchdog，便于外观
+# 修复和设置页做幂等 repair；真正的登录期常驻循环只有这个协调器。
+configure_session_healthcheck() {
+    cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'
+#!/usr/bin/env bash
+# Ming OS unified session startup and health coordinator.
+set -u
+
+readonly PHONE_STARTUP_DEADLINE=8
+readonly PLANK_STARTUP_DEADLINE=8
+readonly PICOM_STARTUP_DEADLINE=5
+# Startup watchdogs are bounded as timeout --foreground 8s / 8s / 5s.
+readonly PROBE_TIMEOUT=2
+readonly SUPERVISOR_INTERVAL=10
+readonly AUDIO_CHECK_INTERVAL=30
+
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+mkdir -p "${log_dir}" 2>/dev/null || true
+health_log="${log_dir}/session-health.log"
+metrics_file="${log_dir}/session-startup.json"
+lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
+pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
+touch "${health_log}" 2>/dev/null || true
+
+# Image builds may provide a system-wide default.  An explicitly exported
+# session value still wins so MING_PHONE_DESKTOP=1/0 is honored at login.
+ming_phone_desktop_env="${MING_PHONE_DESKTOP-__unset__}"
+if [[ -r /etc/default/ming-os ]]; then
+    . /etc/default/ming-os
+fi
+if [[ "${ming_phone_desktop_env}" != "__unset__" ]]; then
+    MING_PHONE_DESKTOP="${ming_phone_desktop_env}"
+fi
+: "${MING_PHONE_DESKTOP:=1}"
+
+# Per-component counters are intentionally kept in the coordinator process so
+# the JSON snapshot can explain whether a repair was needed without scraping
+# human log text.  They reset on a fresh login, while the log remains append-only.
+phone_elapsed_ms=0
+plank_elapsed_ms=0
+picom_elapsed_ms=0
+phone_restarts=0
+plank_restarts=0
+picom_restarts=0
+phone_recovered=false
+plank_recovered=false
+picom_recovered=false
+last_audio_check=0
+
+now_ms() {
+    local value
+    value="$(date +%s%3N 2>/dev/null || true)"
+    [[ "${value}" =~ ^[0-9]+$ ]] && printf '%s\n' "${value}" || printf '%s\n' "$(( $(date +%s) * 1000 ))"
+}
+
+process_count() {
+    local kind="$1" count="0"
+    case "${kind}" in
+        phone)
+            count="$(probe_timeout pgrep -u "$(id -u)" -f \
+                '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' 2>/dev/null | wc -l || true)"
+            ;;
+        plank)
+            count="$(probe_timeout pgrep -u "$(id -u)" -x plank 2>/dev/null | wc -l || true)"
+            ;;
+        picom)
+            count="$(probe_timeout pgrep -u "$(id -u)" -x picom 2>/dev/null | wc -l || true)"
+            ;;
+    esac
+    [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+    printf '%s\n' "${count}"
+}
+
+log() {
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${health_log}" 2>/dev/null || true
+}
+
+# Every X11 probe is bounded.  Process probes use the same helper so a broken
+# DISPLAY cannot stall the session supervisor.
+# timeout --foreground 2s is the hard probe ceiling.
+probe_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${PROBE_TIMEOUT}s" "$@"
+    else
+        "$@"
+    fi
+}
+
+x11_call() {
+    probe_timeout "$@"
+}
+
+run_bounded() {
+    local deadline="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${deadline}s" "$@"
+    else
+        "$@"
+    fi
+}
+
+ensure_audio_session() {
+    # PulseAudio normally handles hotplug itself, but old HDA codecs can wake
+    # from suspend with a stale default sink/profile.  Recheck from the already
+    # user-scoped session coordinator at a low cadence.  The helper is bounded
+    # and preserves a valid user-selected HDMI, Bluetooth or USB output.
+    local now
+    now="$(date +%s 2>/dev/null || printf '0')"
+    [[ "${now}" =~ ^[0-9]+$ ]] || now=0
+    if (( last_audio_check > 0 && now > 0 && now - last_audio_check < AUDIO_CHECK_INTERVAL )); then
+        return 0
+    fi
+    last_audio_check="${now}"
+    command -v ming-audio-session >/dev/null 2>&1 || return 0
+    log 'checking audio session after login, resume or device change'
+    (run_bounded 6 /usr/local/bin/ming-audio-session ensure --json \
+        >>"${health_log}" 2>&1 &) || true
+}
+
+phone_desktop_running() {
+    probe_timeout pgrep -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' \
+        >/dev/null 2>&1
+}
+
+phone_desktop_ready() {
+    phone_desktop_running && [[ -s "${HOME}/.cache/ming-os/ming-phone-desktop.ready" ]]
+}
+
+xfdesktop_running() {
+    probe_timeout pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1
+}
+
+start_xfdesktop_fallback() {
+    xfdesktop_running && return 0
+    command -v xfdesktop >/dev/null 2>&1 || {
+        log 'xfdesktop fallback unavailable'
+        return 1
+    }
+    log 'starting xfdesktop fallback'
+    (nohup xfdesktop >>"${health_log}" 2>&1 &) || true
+    return 0
+}
+
+stop_xfdesktop_after_phone_ready() {
+    phone_desktop_ready || return 1
+    probe_timeout xfdesktop --quit >/dev/null 2>&1 || true
+    probe_timeout pkill -TERM -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || true
+}
+
+plank_running() {
+    probe_timeout pgrep -u "$(id -u)" -x plank >/dev/null 2>&1
+}
+
+plank_window_visible() {
+    plank_running || return 1
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ {found=1} END {exit !found}'
+}
+
+picom_running() {
+    probe_timeout pgrep -u "$(id -u)" -x picom >/dev/null 2>&1
+}
+
+wait_for_process() {
+    local kind="$1"
+    local deadline="$2"
+    local deadline_at=$(( $(now_ms) + deadline * 1000 ))
+    wait_for_process_until "${kind}" "${deadline_at}"
+}
+
+wait_for_process_until() {
+    local kind="$1"
+    local deadline_at="$2"
+    local current_ms
+    while true; do
+        case "${kind}" in
+            phone) phone_desktop_ready && return 0 ;;
+            plank) plank_window_visible && return 0 ;;
+            picom) picom_running && return 0 ;;
+        esac
+        current_ms="$(now_ms)"
+        [[ "${current_ms}" =~ ^[0-9]+$ ]] || current_ms="${deadline_at}"
+        (( current_ms >= deadline_at )) && break
+        sleep 0.1
+    done
+    return 1
+}
+
+start_phone_desktop() {
+    local started_at finished_at deadline_at
+    if [[ "${MING_PHONE_DESKTOP:-1}" != "1" ]]; then
+        log 'MING_PHONE_DESKTOP is not 1; keeping native xfdesktop'
+        phone_recovered=false
+        start_xfdesktop_fallback
+        return 1
+    fi
+    if ! command -v ming-phone-desktop >/dev/null 2>&1; then
+        log 'ming-phone-desktop is unavailable; keeping native xfdesktop'
+        phone_recovered=false
+        start_xfdesktop_fallback
+        return 1
+    fi
+    if phone_desktop_ready; then
+        phone_recovered=true
+        stop_xfdesktop_after_phone_ready || true
+        return 0
+    fi
+    phone_restarts=$((phone_restarts + 1))
+    started_at="$(now_ms)"
+    deadline_at=$((started_at + PHONE_STARTUP_DEADLINE * 1000))
+    log "starting Ming Phone Desktop (deadline=${PHONE_STARTUP_DEADLINE}s)"
+    (run_bounded "${PHONE_STARTUP_DEADLINE}" \
+        /usr/local/bin/ming-phone-desktop-watchdog >>"${health_log}" 2>&1 &) || true
+    if wait_for_process_until phone "${deadline_at}"; then
+        finished_at="$(now_ms)"
+        phone_elapsed_ms=$((finished_at - started_at))
+        phone_recovered=true
+        stop_xfdesktop_after_phone_ready || true
+        log 'Ming Phone Desktop ready'
+        return 0
+    fi
+    finished_at="$(now_ms)"
+    phone_elapsed_ms=$((finished_at - started_at))
+    phone_recovered=false
+    log 'Ming Phone Desktop startup failed; using xfdesktop fallback'
+    start_xfdesktop_fallback
+    return 1
+}
+
+start_plank_dock() {
+    local started_at finished_at deadline_at
+    if plank_window_visible; then
+        plank_recovered=true
+        return 0
+    fi
+    command -v ming-plank-watchdog >/dev/null 2>&1 || {
+        log 'ming-plank-watchdog is unavailable'
+        return 1
+    }
+    plank_restarts=$((plank_restarts + 1))
+    started_at="$(now_ms)"
+    deadline_at=$((started_at + PLANK_STARTUP_DEADLINE * 1000))
+    log "starting Plank Dock (deadline=${PLANK_STARTUP_DEADLINE}s)"
+    (run_bounded "${PLANK_STARTUP_DEADLINE}" \
+        /usr/local/bin/ming-plank-watchdog >>"${health_log}" 2>&1 &) || true
+    if wait_for_process_until plank "${deadline_at}"; then
+        finished_at="$(now_ms)"
+        plank_elapsed_ms=$((finished_at - started_at))
+        plank_recovered=true
+        log 'Plank Dock ready'
+        return 0
+    fi
+    finished_at="$(now_ms)"
+    plank_elapsed_ms=$((finished_at - started_at))
+    plank_recovered=false
+    log 'Plank Dock startup failed'
+    return 1
+}
+
+start_xrender_picom() {
+    local deadline_at="${1:-$(( $(now_ms) + PICOM_STARTUP_DEADLINE * 1000 ))}"
+    command -v picom >/dev/null 2>&1 || return 1
+    picom_running && return 0
+    log 'starting Picom xrender fallback'
+    (nohup picom --config /etc/xdg/picom/picom-fallback.conf \
+        >>"${health_log}" 2>&1 &) || true
+    wait_for_process_until picom "${deadline_at}"
+}
+
+start_picom() {
+    local started_at finished_at deadline_at
+    if picom_running; then
+        picom_recovered=true
+        return 0
+    fi
+    picom_restarts=$((picom_restarts + 1))
+    started_at="$(now_ms)"
+    deadline_at=$((started_at + PICOM_STARTUP_DEADLINE * 1000))
+    if command -v ming-picom >/dev/null 2>&1; then
+        log "starting Picom (deadline=${PICOM_STARTUP_DEADLINE}s)"
+        (nohup /usr/local/bin/ming-picom >>"${health_log}" 2>&1 &) || true
+        if wait_for_process_until picom "${deadline_at}"; then
+            finished_at="$(now_ms)"
+            picom_elapsed_ms=$((finished_at - started_at))
+            picom_recovered=true
+            return 0
+        fi
+    fi
+    if start_xrender_picom "${deadline_at}"; then
+        finished_at="$(now_ms)"
+        picom_elapsed_ms=$((finished_at - started_at))
+        picom_recovered=true
+        return 0
+    fi
+    finished_at="$(now_ms)"
+    picom_elapsed_ms=$((finished_at - started_at))
+    picom_recovered=false
+    return 1
+}
+
+write_metrics() {
+    local phase="$1"
+    local phone_fallback="${2:-false}"
+    local phone_enabled=false phone_running=false phone_ready=false
+    local xfdesktop=false dock=false dock_visible=false compositor=false
+    local compositor_backend=none
+    local phone_pid_count=0 plank_pid_count=0 picom_pid_count=0
+    local phone_duplicates=0 plank_duplicates=0 picom_duplicates=0
+    [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && phone_enabled=true
+    phone_desktop_running && phone_running=true
+    phone_desktop_ready && phone_ready=true
+    xfdesktop_running && xfdesktop=true
+    plank_running && dock=true
+    plank_window_visible && dock_visible=true
+    picom_running && compositor=true
+    phone_pid_count="$(process_count phone)"
+    plank_pid_count="$(process_count plank)"
+    picom_pid_count="$(process_count picom)"
+    (( phone_pid_count > 1 )) && phone_duplicates=$((phone_pid_count - 1))
+    (( plank_pid_count > 1 )) && plank_duplicates=$((plank_pid_count - 1))
+    (( picom_pid_count > 1 )) && picom_duplicates=$((picom_pid_count - 1))
+    if ${compositor}; then
+        local compositor_cmd
+        compositor_cmd="$(probe_timeout pgrep -a -u "$(id -u)" -x picom 2>/dev/null || true)"
+        case "${compositor_cmd}" in
+            *picom-fallback.conf*) compositor_backend=xrender ;;
+            *picom-lowmem.conf*) compositor_backend=low-memory ;;
+            *) compositor_backend=auto ;;
+        esac
+    fi
+    MING_METRICS_FILE="${metrics_file}" \
+    MING_PHASE="${phase}" MING_PHONE_ENABLED="${phone_enabled}" \
+    MING_PHONE_RUNNING="${phone_running}" MING_PHONE_READY="${phone_ready}" \
+    MING_PHONE_FALLBACK="${phone_fallback}" MING_XFDESKTOP="${xfdesktop}" \
+    MING_DOCK_RUNNING="${dock}" MING_DOCK_VISIBLE="${dock_visible}" \
+    MING_PICOM_RUNNING="${compositor}" MING_PICOM_BACKEND="${compositor_backend}" \
+    MING_PHONE_PID_COUNT="${phone_pid_count}" MING_PLANK_PID_COUNT="${plank_pid_count}" \
+    MING_PICOM_PID_COUNT="${picom_pid_count}" MING_PHONE_DUPLICATES="${phone_duplicates}" \
+    MING_PLANK_DUPLICATES="${plank_duplicates}" MING_PICOM_DUPLICATES="${picom_duplicates}" \
+    MING_PHONE_ELAPSED_MS="${phone_elapsed_ms}" MING_PLANK_ELAPSED_MS="${plank_elapsed_ms}" \
+    MING_PICOM_ELAPSED_MS="${picom_elapsed_ms}" MING_PHONE_RESTARTS="${phone_restarts}" \
+    MING_PLANK_RESTARTS="${plank_restarts}" MING_PICOM_RESTARTS="${picom_restarts}" \
+    MING_PHONE_RECOVERED="${phone_recovered}" MING_PLANK_RECOVERED="${plank_recovered}" \
+    MING_PICOM_RECOVERED="${picom_recovered}" \
+    MING_HEALTH_LOG="${health_log}" python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+boolean = lambda name: os.environ.get(name) == "true"
+integer = lambda name: int(os.environ.get(name, "0") or 0)
+payload = {
+    "timestamp": datetime.now(timezone.utc).isoformat(),
+    "phase": os.environ.get("MING_PHASE", "unknown"),
+    "phone_desktop": {
+        "enabled": boolean("MING_PHONE_ENABLED"),
+        "running": boolean("MING_PHONE_RUNNING"),
+        "ready": boolean("MING_PHONE_READY"),
+        "fallback": boolean("MING_PHONE_FALLBACK"),
+        "pid_count": integer("MING_PHONE_PID_COUNT"),
+        "elapsed_ms": integer("MING_PHONE_ELAPSED_MS"),
+        "restarts": integer("MING_PHONE_RESTARTS"),
+        "recovered": boolean("MING_PHONE_RECOVERED"),
+        "duplicates": integer("MING_PHONE_DUPLICATES"),
+    },
+    "xfdesktop": {"running": boolean("MING_XFDESKTOP")},
+    "plank": {
+        "running": boolean("MING_DOCK_RUNNING"),
+        "visible": boolean("MING_DOCK_VISIBLE"),
+        "pid_count": integer("MING_PLANK_PID_COUNT"),
+        "elapsed_ms": integer("MING_PLANK_ELAPSED_MS"),
+        "restarts": integer("MING_PLANK_RESTARTS"),
+        "recovered": boolean("MING_PLANK_RECOVERED"),
+        "duplicates": integer("MING_PLANK_DUPLICATES"),
+    },
+    "picom": {
+        "running": boolean("MING_PICOM_RUNNING"),
+        "backend": os.environ.get("MING_PICOM_BACKEND", "none"),
+        "pid_count": integer("MING_PICOM_PID_COUNT"),
+        "elapsed_ms": integer("MING_PICOM_ELAPSED_MS"),
+        "restarts": integer("MING_PICOM_RESTARTS"),
+        "recovered": boolean("MING_PICOM_RECOVERED"),
+        "duplicates": integer("MING_PICOM_DUPLICATES"),
+    },
+    "deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
+    "startup_deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
+    "probe_timeout": 2,
+    "supervisor_interval": 10,
+    "health_log": os.environ.get("MING_HEALTH_LOG", ""),
+    "duplicates": {
+        "phone_desktop": integer("MING_PHONE_DUPLICATES"),
+        "plank": integer("MING_PLANK_DUPLICATES"),
+        "picom": integer("MING_PICOM_DUPLICATES"),
+    },
+}
+payload["healthy"] = (
+    (payload["phone_desktop"]["ready"] or
+     (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
+    and payload["plank"]["visible"]
+    and payload["picom"]["running"]
+)
+path = Path(os.environ["MING_METRICS_FILE"])
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
+startup_once() {
+    local phone_fallback=false
+    log 'session startup check begin'
+    start_phone_desktop || phone_fallback=true
+    start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
+    start_picom || log 'Picom is not healthy after startup deadline'
+    ensure_audio_session
+    write_metrics startup "${phone_fallback}"
+    log 'session startup check complete'
+}
+
+supervise_once() {
+    local phone_fallback=false
+    log 'session supervisor check begin'
+    if ! start_phone_desktop; then
+        phone_fallback=true
+    fi
+    start_plank_dock || log 'Plank Dock repair did not recover a visible window'
+    start_picom || log 'Picom repair did not recover a compositor'
+    ensure_audio_session
+    write_metrics supervisor "${phone_fallback}"
+    log 'session supervisor check complete'
+}
+
+acquire_coordinator_lock() {
+    exec 9>"${lock_file}" || return 1
+    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+        log 'session coordinator already owns the lock'
+        return 1
+    fi
+    if [[ -s "${pid_file}" ]]; then
+        local old_pid
+        read -r old_pid <"${pid_file}" || old_pid=""
+        if [[ "${old_pid}" =~ ^[0-9]+$ && "${old_pid}" != "$$" ]] && \
+           probe_timeout kill -0 "${old_pid}" >/dev/null 2>&1; then
+            log "session coordinator pid ${old_pid} is still alive"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$$" >"${pid_file}" 2>/dev/null || true
+    trap 'rm -f "${pid_file}" 2>/dev/null || true' EXIT
+    return 0
+}
+
+case "${1:---once}" in
+    --session)
+        acquire_coordinator_lock || exit 0
+        startup_once
+        while true; do
+            sleep "${SUPERVISOR_INTERVAL}" # fixed supervisor cadence: sleep 10
+            supervise_once
+        done
+        ;;
+    --once)
+        acquire_coordinator_lock || exit 0
+        startup_once
+        ;;
+    --check)
+        [[ -s "${metrics_file}" ]] && cat "${metrics_file}" || write_metrics check
+        ;;
+    *)
+        printf 'Usage: %s --session|--once|--check\n' "$0" >&2
+        exit 2
+        ;;
+esac
+MINGSESSIONHEALTH
+    chmod 0755 /usr/local/bin/ming-session-healthcheck
+}
+
 
 # ======================== Ming Shell: 控制中心与品牌化入口 ========================
 
@@ -4470,16 +5082,18 @@ configure_autostart() {
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
 
-    # Picom 合成器 (GLX自动探测，老旧GPU回退xrender)
+    # Picom is owned by ming-session-healthcheck.  Keep a disabled compatibility
+    # entry for the Settings backend, but never launch Picom directly at login.
     cat > "${autostart_dir}/picom.desktop" << PICOMAUTOSTART
 [Desktop Entry]
 Type=Application
 Name=Picom Compositor
 Comment=窗口合成器
-Exec=/usr/local/bin/ming-picom
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
+Exec=/usr/bin/true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-session-healthcheck
 PICOMAUTOSTART
 
     # NetworkManager 小程序
@@ -4589,17 +5203,35 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=5
 DESKORGAUTO
 
+    # Compatibility filename retained for Settings/upgrade migrations.  The
+    # old session watchdog is intentionally disabled; the unified coordinator
+    # is the only long-lived desktop stack owner.
     cat > "${autostart_dir}/ming-phone-desktop.desktop" << PHONEDESKTOPAUTO
 [Desktop Entry]
 Type=Application
 Name=Ming Phone Desktop
 Comment=手机式桌面图标和拖拽文件夹
-Exec=/usr/local/bin/ming-phone-desktop-watchdog --session
+Exec=/usr/bin/true
+Comment=Managed by ming-session-healthcheck; legacy ming-phone-desktop-watchdog --session is one-shot only
+# Legacy image contract retained as comments: X-GNOME-Autostart-enabled=true Hidden=false.
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-session-healthcheck
+PHONEDESKTOPAUTO
+
+    cat > "${autostart_dir}/ming-session-healthcheck.desktop" << SESSIONHEALTHAUTO
+[Desktop Entry]
+Type=Application
+Name=Ming Session Health
+Comment=统一启动并监测手机桌面、Dock 与合成器
+Exec=/usr/local/bin/ming-session-healthcheck --session
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-PHONEDESKTOPAUTO
+X-GNOME-Autostart-Delay=2
+X-Ming-Managed-Components=phone-desktop;plank;picom
+SESSIONHEALTHAUTO
 
     chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}"
 }
@@ -4962,6 +5594,16 @@ configure_simplified_menus() {
 <?xml version="1.0" encoding="UTF-8"?>
 <actions>
 <action>
+    <icon>package-x-generic</icon>
+    <name>安装 DEB 软件包</name>
+    <submenu></submenu>
+    <command>/usr/local/bin/ming-package-install-gui "%f"</command>
+    <description>验证并安装本地 Debian 软件包</description>
+    <range>*</range>
+    <patterns>*.deb</patterns>
+    <other-files/>
+</action>
+<action>
     <icon>folder-new</icon>
     <name>新建文件夹</name>
     <submenu></submenu>
@@ -4980,6 +5622,37 @@ configure_simplified_menus() {
     <range></range>
     <patterns>*</patterns>
     <directories/>
+</action>
+<action>
+    <icon>accessories-text-editor</icon>
+    <name>以管理员身份编辑</name>
+    <submenu></submenu>
+    <command>pkexec mousepad %f</command>
+    <description>使用管理员权限编辑文本文件</description>
+    <range>*</range>
+    <patterns>*</patterns>
+    <text-files/>
+</action>
+<action>
+    <icon>folder</icon>
+    <name>以管理员身份打开</name>
+    <submenu></submenu>
+    <command>pkexec thunar %f</command>
+    <description>使用管理员权限打开文件夹</description>
+    <range>*</range>
+    <patterns>*</patterns>
+    <directories/>
+</action>
+<action>
+    <icon>utilities-terminal</icon>
+    <name>询问 Garlic Claw</name>
+    <submenu></submenu>
+    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
+    <description>使用 Garlic Claw AI 助手分析文件</description>
+    <range>*</range>
+    <patterns>*</patterns>
+    <text-files/>
+    <other-files/>
 </action>
 <action>
     <icon>document-properties</icon>
@@ -5979,6 +6652,15 @@ configure_appearance_enforcer() {
 WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
 WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
 
+appearance_phone_env="${MING_PHONE_DESKTOP-__unset__}"
+if [[ -r /etc/default/ming-os ]]; then
+    . /etc/default/ming-os
+fi
+if [[ "${appearance_phone_env}" != "__unset__" ]]; then
+    MING_PHONE_DESKTOP="${appearance_phone_env}"
+fi
+: "${MING_PHONE_DESKTOP:=1}"
+
 # 等待 xfdesktop / xfconfd 就绪
 for i in $(seq 1 15); do
     if xfconf-query -c xfce4-desktop -l &>/dev/null; then break; fi
@@ -6057,8 +6739,11 @@ if pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
 fi
 
 # 确保 Ming 手机桌面在运行。它必须早于 Dock 出现，避免只剩空壁纸。
-if command -v ming-phone-desktop-watchdog &>/dev/null; then
+# MING_PHONE_DESKTOP=0 保留 Xfce 原生桌面作为显式兼容模式。
+if [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && command -v ming-phone-desktop-watchdog &>/dev/null; then
     /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || true
+elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1; then
+    (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 
 # Ensure the primary Plank Dock is visible after the compositor/session settles.
@@ -6279,6 +6964,7 @@ main() {
     configure_xfce_panel         # 顶部 macOS 菜单栏
     configure_plank_dock         # 底部可放大 Dock
     configure_picom
+    configure_session_healthcheck # 统一启动/健康协调器（唯一常驻入口）
     configure_touch_input        # 触屏手势 + Onboard 虚拟键盘
     configure_notification_filter
     configure_simplified_menus   # 只动 Thunar 右键菜单，不再覆盖桌面/xfwm 配置

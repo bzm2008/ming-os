@@ -9,6 +9,7 @@ import configparser
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
@@ -532,8 +533,34 @@ class SettingsBackend:
             name = fields[1].strip()
             if not name or (kind == "input" and name.endswith(".monitor")):
                 continue
-            items.append({"id": name, "label": name, "selected": name == current["value"]})
+            items.append({
+                "id": name,
+                "label": self._audio_device_label(kind, name),
+                "selected": name == current["value"],
+            })
         return {"ok": True, "kind": kind, "value": current["value"], "items": items, "error": ""}
+
+    @staticmethod
+    def _audio_device_label(kind, name):
+        """Turn PulseAudio implementation names into safe, actionable labels."""
+        lowered = name.lower()
+        if kind == "output":
+            if "hdmi" in lowered or "displayport" in lowered or "dp-" in lowered:
+                return "HDMI / 显卡音频"
+            if lowered.startswith("bluez_output"):
+                return "蓝牙音频"
+            if ".usb" in lowered or "usb_" in lowered:
+                return "USB 音频设备"
+            if "analog" in lowered and ("alsa_output.pci" in lowered or "platform" in lowered):
+                return "主板模拟输出（内置扬声器，例如 ALC887）"
+            return "其他音频输出"
+        if lowered.startswith("bluez_input"):
+            return "蓝牙麦克风"
+        if ".usb" in lowered or "usb_" in lowered:
+            return "USB 麦克风"
+        if "analog" in lowered and ("alsa_input.pci" in lowered or "platform" in lowered):
+            return "主板模拟输入（内置麦克风）"
+        return "其他音频输入"
 
     def get_audio_device(self, kind):
         command = {
@@ -560,7 +587,35 @@ class SettingsBackend:
         readback = self.get_audio_device(kind)
         if not readback["ok"] or readback["value"] != name:
             return self._result(False, kind, readback.get("value"), "音频设备写入后未生效")
+        if kind == "output":
+            try:
+                data = self._read_local()
+                data["audio_output_selection"] = name
+                self._write_local(data)
+            except OSError as exc:
+                return self._result(False, kind, name, "已切换输出但无法保存选择：%s" % exc)
         return readback
+
+    @staticmethod
+    def _valid_audio_output_id(name):
+        """Persist only a PulseAudio sink identifier already validated by the UI."""
+        return bool(
+            isinstance(name, str) and 1 <= len(name) <= 512 and
+            re.fullmatch(r"[A-Za-z0-9_.:+@=-]+", name))
+
+    def remember_audio_output(self, name):
+        """Persist an explicit output choice after DeviceControl has read it back."""
+        if not self._valid_audio_output_id(name):
+            return self._result(False, "audio_output_selection",
+                                error="音频输出标识无效，未保存选择。")
+        try:
+            data = self._read_local()
+            data["audio_output_selection"] = name
+            self._write_local(data)
+        except OSError as exc:
+            return self._result(False, "audio_output_selection", name,
+                                "无法保存音频输出选择：%s" % exc)
+        return self._result(True, "audio_output_selection", name)
 
     def _application_entries(self):
         entries = {}
@@ -716,6 +771,9 @@ def main(argv=None):
         result = backend.get_audio_device(argv[2])
     elif argv[0] == "audio" and len(argv) == 4 and argv[1] == "set":
         result = backend.set_audio_device(argv[2], argv[3])
+    elif (argv[0] == "audio" and len(argv) == 4 and argv[1] == "remember" and
+          argv[2] == "output"):
+        result = backend.remember_audio_output(argv[3])
     elif argv[0] == "default-app" and len(argv) == 3 and argv[1] == "list":
         result = backend.list_default_apps(argv[2])
     elif argv[0] == "default-app" and len(argv) == 3 and argv[1] == "get":

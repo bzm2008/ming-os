@@ -24,7 +24,9 @@ class GrubPerformanceContracts(unittest.TestCase):
         for source in (BUILD, BASE):
             blocks = menuentry_blocks(source)
             self.assertTrue(blocks, "expected generated GRUB menu entries")
-            safe_blocks = [block for block in blocks if "Safe Graphics" in block or "安全显卡模式" in block]
+            safe_blocks = [block for block in blocks if any(marker in block for marker in (
+                "Safe Graphics", "安全显卡模式", "Radeon Legacy", "Radeon GCN",
+            ))]
             self.assertTrue(safe_blocks, "safe graphics fallback must remain labelled")
             self.assertTrue(any("nomodeset" in block for block in safe_blocks))
             for block in blocks:
@@ -110,13 +112,36 @@ class EdgeVaapiContracts(unittest.TestCase):
         self.assertIn('"edge_hardware_video": true', wrapper)
         self.assertIn('"render_access": true', wrapper)
 
-    def test_build_gate_requires_both_vaapi_backends_and_font_matching(self):
+    def test_edge_wrapper_uses_generic_capability_result_not_intel_only_driver_name(self):
+        start = APPS.index("cat > /usr/local/bin/ming-edge << 'MINGEDGE'")
+        end = APPS.index("\nMINGEDGE", start + len("cat > /usr/local/bin/ming-edge << 'MINGEDGE'"))
+        wrapper = APPS[start:end]
+        self.assertIn('"desktop_rendering": true', wrapper)
+        self.assertNotIn('"driver": "i915"', wrapper)
+        self.assertIn("(i915|amdgpu|radeon|nouveau)\\.modeset=0", wrapper)
+
+    def test_build_gate_requires_intel_and_radeon_vaapi_backends_and_font_matching(self):
         self.assertIn("i965_drv_video.so", BUILD)
         self.assertIn("iHD_drv_video.so", BUILD)
+        self.assertIn("radeonsi_drv_video.so", BUILD)
         self.assertIn("fc-match", BUILD)
         self.assertIn("fonts-noto-core", BUILD)
         self.assertIn("fonts-noto-cjk", BUILD)
         self.assertIn("fonts-noto-mono", BUILD)
+
+    def test_amd_graphics_stack_is_required_and_i2c_piix4_is_not_blacklisted(self):
+        for package in (
+            "firmware-amd-graphics", "amd64-microcode", "libgl1-mesa-dri",
+            "mesa-va-drivers", "mesa-vdpau-drivers", "mesa-vulkan-drivers", "lm-sensors",
+        ):
+            self.assertIn(package, BASE)
+        self.assertNotIn("blacklist i2c_piix4", BASE)
+
+    def test_amd_recovery_menu_entries_are_explicit_and_default_entries_remain_clean(self):
+        self.assertIn("Radeon Legacy", BUILD)
+        self.assertIn("radeon.modeset=1 amdgpu.modeset=0", BUILD)
+        self.assertIn("Radeon GCN", BUILD)
+        self.assertIn("amdgpu.si_support=1 radeon.si_support=0", BUILD)
 
     def test_grub_gate_checks_default_entry_without_rejecting_safe_fallback(self):
         self.assertIn("default_entry", BUILD)

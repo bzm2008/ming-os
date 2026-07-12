@@ -52,6 +52,20 @@ class FakeInputRunner(FakeRunner):
         return super().__call__(command, timeout=timeout)
 
 
+class BinaryRecordingRunner(FakeRunner):
+    """Simulate parecord writing raw PCM to the file supplied in argv."""
+
+    def __call__(self, command, timeout=8):
+        command = tuple(command)
+        if "parecord" in command:
+            self.commands.append(command)
+            if command[-1].startswith("--"):
+                return 1, "", "missing output file"
+            pathlib.Path(command[-1]).write_bytes(b"\x00\xff" * 4096)
+            return 124, "", ""
+        return super().__call__(command, timeout=timeout)
+
+
 class WifiClassificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -184,6 +198,23 @@ class DeviceControlTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("pactl", result["backend"])
         self.assertEqual(63, result["value"])
+        self.assertTrue(result["available"])
+        self.assertEqual("ready", result["state"])
+        self.assertEqual(63, result["requested"])
+        self.assertTrue(0 <= result["value"] <= 100)
+
+    def test_volume_without_usable_backend_is_explicitly_unavailable(self):
+        controller = self.device.DeviceController(
+            runner=FakeRunner({}), executable=lambda _name: False)
+
+        result = controller.set_volume(63)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["available"])
+        self.assertEqual("unavailable", result["state"])
+        self.assertEqual("", result["backend"])
+        self.assertIsNone(result["value"])
+        self.assertEqual(63, result["requested"])
 
     def test_volume_falls_back_to_amixer_when_pactl_fails(self):
         runner = FakeRunner({
@@ -233,6 +264,354 @@ class DeviceControlTests(unittest.TestCase):
         self.assertTrue(status["duplex_profile_active"])
         self.assertFalse(status["input_muted"])
         self.assertFalse(status["output_muted"])
+
+    def test_pactl_card_parser_accepts_real_indented_card_fields(self):
+        cards = self.device.DeviceController._pactl_cards(
+            "Card #42\n"
+            "\tName: alsa_card.pci-0000_00_1f.3\n"
+            "\tProfiles:\n"
+            "\t\toutput:analog-stereo+input:analog-stereo: Analog Stereo Duplex (available: yes)\n"
+            "\tActive Profile: output:analog-stereo+input:analog-stereo\n"
+        )
+
+        self.assertEqual("alsa_card.pci-0000_00_1f.3", cards[0]["name"])
+        self.assertEqual(
+            "output:analog-stereo+input:analog-stereo", cards[0]["active_profile"])
+        self.assertEqual(
+            [{"name": "output:analog-stereo+input:analog-stereo", "available": True}],
+            cards[0]["profiles"],
+        )
+
+    def test_audio_status_reports_missing_pulseaudio_server_without_amixer_fallback(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (1, "", "Connection failure: Connection refused"),
+            ("amixer", "sget", "Master"): (0, "Front Left: Playback 40 [50%] [on]", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("no_server", status["state"])
+        self.assertFalse(status["server_available"])
+        self.assertFalse(status["playback_ready"])
+        self.assertEqual("pactl", status["backend"])
+        self.assertNotIn(("amixer", "sget", "Master"), runner.commands)
+
+    def test_audio_status_reports_missing_default_sink(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (0, "Default Sink: \nDefault Source: source", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("no_default_sink", status["state"])
+        self.assertTrue(status["server_available"])
+        self.assertFalse(status["default_sink_present"])
+        self.assertFalse(status["playback_ready"])
+
+    def test_audio_status_reports_muted_output_as_not_ready(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (0, "Default Sink: sink\nDefault Source: source", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 50%", ""),
+            ("pactl", "list", "short", "sources"): (0, "1\tsource\tmodule\tRUNNING", ""),
+            ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): (0, "Mute: no", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: yes", ""),
+            ("pactl", "list", "cards"): (
+                0, "Card #1\nName: alsa_card.pci\nActive Profile: output:analog-stereo\n", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("muted", status["state"])
+        self.assertTrue(status["default_sink_present"])
+        self.assertTrue(status["playback_profile_valid"])
+        self.assertFalse(status["playback_ready"])
+
+    def test_audio_status_reports_invalid_active_playback_profile(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (
+                0, "Default Sink: alsa_output.pci-0000_00_1f.3.analog-stereo\nDefault Source: source", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 50%", ""),
+            ("pactl", "list", "short", "sources"): (0, "1\tsource\tmodule\tRUNNING", ""),
+            ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): (0, "Mute: no", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
+            ("pactl", "list", "cards"): (
+                0, "Card #1\n\tName: alsa_card.pci-0000_00_1f.3\n\tActive Profile: off\n", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("invalid_profile", status["state"])
+        self.assertFalse(status["playback_profile_valid"])
+        self.assertFalse(status["playback_ready"])
+
+    def test_audio_status_exposes_selectable_playback_devices(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (
+                0, "Default Sink: bluez_output.00_11_22.a2dp-sink\nDefault Source: source", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 50%", ""),
+            ("pactl", "list", "short", "sinks"): (
+                0,
+                "0\talsa_output.pci-0000_00_1f.3.analog-stereo\tmodule-alsa-card.c\ts16le\tSUSPENDED\n"
+                "1\talsa_output.pci-0000_01_00.1.hdmi-stereo\tmodule-alsa-card.c\ts16le\tIDLE\n"
+                "2\tbluez_output.00_11_22.a2dp-sink\tmodule-bluez5-device.c\ts16le\tRUNNING\n"
+                "3\talsa_output.usb-Plantronics.analog-stereo\tmodule-alsa-card.c\ts16le\tIDLE",
+                "",
+            ),
+            ("pactl", "list", "short", "sources"): (0, "1\tsource\tmodule\tRUNNING", ""),
+            ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): (0, "Mute: no", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
+            ("pactl", "list", "cards"): (0, "Card #1\nName: bluez_card.00_11_22\nActive Profile: a2dp-sink\n", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        devices = controller.audio_status()["playback_devices"]
+
+        self.assertEqual(
+            ["internal", "hdmi", "bluetooth", "usb"], [item["kind"] for item in devices])
+        self.assertEqual("bluez_output.00_11_22.a2dp-sink", devices[2]["id"])
+        self.assertTrue(devices[2]["active"])
+        self.assertTrue(all(item["available"] for item in devices))
+
+    def test_audio_status_does_not_treat_an_unavailable_default_hdmi_sink_as_playback_ready(self):
+        runner = FakeRunner({
+            ("pactl", "info"): (
+                0, "Default Sink: alsa_output.pci-0000_01_00.1.hdmi-stereo\nDefault Source: source", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 50%", ""),
+            ("pactl", "list", "short", "sinks"): (
+                0, "0\talsa_output.pci-0000_01_00.1.hdmi-stereo\tmodule\ts16le\tUNAVAILABLE\n"
+                "1\talsa_output.pci-0000_00_1f.3.analog-stereo\tmodule\ts16le\tIDLE", ""),
+            ("pactl", "list", "short", "sources"): (0, "1\tsource\tmodule\tRUNNING", ""),
+            ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): (0, "Mute: no", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
+            ("pactl", "list", "cards"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertFalse(status["playback_ready"])
+        default = next(item for item in status["playback_devices"] if item["active"])
+        self.assertFalse(default["available"])
+
+    def test_audio_repair_playback_preserves_valid_user_selected_external_output(self):
+        runner = FakeRunner({})
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: {
+            "backend": "pactl", "server_available": True,
+            "playback_ready": True, "default_sink_present": True,
+            "default_sink": "bluez_output.00_11_22.a2dp-sink",
+            "playback_devices": [{
+                "id": "bluez_output.00_11_22.a2dp-sink", "kind": "bluetooth",
+                "available": True, "active": True,
+            }],
+        }
+
+        result = controller.audio_repair_playback()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["changed"])
+        self.assertEqual("preserved_selected_output", result["action"])
+        self.assertFalse(any(command[:2] == ("pactl", "set-default-sink") for command in runner.commands))
+
+    def test_audio_repair_playback_restores_an_invalid_profile_on_the_active_sink(self):
+        sink = "alsa_output.pci-0000_00_1f.3.analog-stereo"
+        card = "alsa_card.pci-0000_00_1f.3"
+        before = {
+            "backend": "pactl", "server_available": True,
+            "playback_ready": False, "default_sink_present": True,
+            "playback_profile_valid": False, "output_muted": False,
+            "default_sink": sink, "playback_devices": [{
+                "id": sink, "kind": "internal", "available": True, "active": True,
+            }],
+            "cards": [{
+                "name": card, "active_profile": "off",
+                "profiles": [{"name": "output:analog-stereo", "available": True}],
+            }],
+        }
+        after = dict(before, playback_ready=True, playback_profile_valid=True)
+        statuses = [before, after]
+        runner = FakeRunner({
+            ("pactl", "set-card-profile", card, "output:analog-stereo"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.audio_repair_playback()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual("repaired_active_profile", result["action"])
+        self.assertIn(
+            ("pactl", "set-card-profile", card, "output:analog-stereo"), runner.commands)
+
+    def test_selecting_an_active_output_repairs_its_invalid_profile(self):
+        sink = "alsa_output.pci-0000_00_1f.3.analog-stereo"
+        card = "alsa_card.pci-0000_00_1f.3"
+        before = {
+            "backend": "pactl", "server_available": True,
+            "playback_ready": False, "default_sink_present": True,
+            "playback_profile_valid": False, "output_muted": False,
+            "default_sink": sink, "playback_devices": [{
+                "id": sink, "kind": "internal", "available": True, "active": True,
+            }],
+            "cards": [{
+                "name": card, "active_profile": "off",
+                "profiles": [{"name": "output:analog-stereo", "available": True}],
+            }],
+        }
+        after = dict(before, playback_ready=True, playback_profile_valid=True)
+        statuses = [before, before, after]
+        runner = FakeRunner({
+            ("pactl", "set-card-profile", card, "output:analog-stereo"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.audio_select_output(sink)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual("repaired_active_output", result["action"])
+        self.assertIn(
+            ("pactl", "set-card-profile", card, "output:analog-stereo"), runner.commands)
+
+    def test_audio_repair_playback_selects_internal_analog_only_when_no_output_is_valid(self):
+        before = {
+            "backend": "pactl", "server_available": True,
+            "playback_ready": False, "default_sink_present": False,
+            "default_sink": "", "playback_devices": [
+                {"id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "kind": "hdmi", "available": True, "active": False},
+                {"id": "alsa_output.pci-0000_00_1f.3.analog-stereo", "kind": "internal", "available": True, "active": False},
+                {"id": "bluez_output.00_11_22.a2dp-sink", "kind": "bluetooth", "available": True, "active": False},
+            ],
+        }
+        after = dict(before, playback_ready=True, default_sink_present=True,
+                     default_sink="alsa_output.pci-0000_00_1f.3.analog-stereo")
+        statuses = [before, after]
+        runner = FakeRunner({
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_00_1f.3.analog-stereo"): (0, "", ""),
+            ("pactl", "set-sink-mute", "alsa_output.pci-0000_00_1f.3.analog-stereo", "0"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.audio_repair_playback()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual("selected_internal_output", result["action"])
+        self.assertIn(
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_00_1f.3.analog-stereo"),
+            runner.commands,
+        )
+        self.assertNotIn(
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_01_00.1.hdmi-stereo"),
+            runner.commands,
+        )
+
+    def test_audio_repair_playback_restores_valid_persisted_user_output_before_internal(self):
+        before = {
+            "backend": "pactl", "server_available": True,
+            "playback_ready": False, "default_sink_present": False,
+            "default_sink": "", "playback_devices": [
+                {"id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "kind": "hdmi", "available": True, "active": False},
+                {"id": "alsa_output.pci-0000_00_1f.3.analog-stereo", "kind": "internal", "available": True, "active": False},
+            ],
+        }
+        after = dict(before, playback_ready=True, default_sink_present=True,
+                     default_sink="alsa_output.pci-0000_01_00.1.hdmi-stereo")
+        statuses = [before, after]
+        runner = FakeRunner({
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_01_00.1.hdmi-stereo"): (0, "", ""),
+            ("pactl", "set-sink-mute", "alsa_output.pci-0000_01_00.1.hdmi-stereo", "0"): (0, "", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = pathlib.Path(directory, "settings.json")
+            settings_path.write_text(json.dumps({
+                "audio_output_selection": "alsa_output.pci-0000_01_00.1.hdmi-stereo"}),
+                encoding="utf-8")
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "pactl",
+                settings_path=settings_path)
+            controller.audio_status = lambda: statuses.pop(0)
+
+            result = controller.audio_repair_playback()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("restored_saved_output", result["action"])
+        self.assertIn(
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_01_00.1.hdmi-stereo"),
+            runner.commands,
+        )
+        self.assertNotIn(
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_00_1f.3.analog-stereo"),
+            runner.commands,
+        )
+
+    def test_audio_select_output_uses_a_reported_available_sink_and_reads_back(self):
+        before = {
+            "backend": "pactl", "server_available": True,
+            "default_sink": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+            "playback_devices": [
+                {"id": "alsa_output.pci-0000_00_1f.3.analog-stereo", "kind": "internal", "available": True, "active": True},
+                {"id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "kind": "hdmi", "available": True, "active": False},
+            ],
+        }
+        after = dict(before, default_sink="alsa_output.pci-0000_01_00.1.hdmi-stereo",
+                     playback_devices=[
+                         dict(before["playback_devices"][0], active=False),
+                         dict(before["playback_devices"][1], active=True),
+                     ])
+        statuses = [before, after]
+        runner = FakeRunner({
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_01_00.1.hdmi-stereo"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.audio_select_output("alsa_output.pci-0000_01_00.1.hdmi-stereo")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("alsa_output.pci-0000_01_00.1.hdmi-stereo", result["selected"])
+        self.assertIn(
+            ("pactl", "set-default-sink", "alsa_output.pci-0000_01_00.1.hdmi-stereo"),
+            runner.commands,
+        )
+
+    def test_audio_select_output_cli_uses_structured_device_identifier(self):
+        class Selector:
+            def __init__(self):
+                self.selected = ""
+
+            def audio_select_output(self, output_id):
+                self.selected = output_id
+                return {"ok": True, "selected": output_id}
+
+        selector = Selector()
+        output = io.StringIO()
+
+        rc = self.device.main(
+            ["audio-select-output", "--id", "alsa_output.pci.internal"],
+            controller=selector, stdout=output)
+
+        self.assertEqual(0, rc)
+        self.assertEqual("alsa_output.pci.internal", selector.selected)
+        self.assertEqual("alsa_output.pci.internal", json.loads(output.getvalue())["selected"])
 
     def test_call_audio_repair_selects_internal_duplex_only_when_input_is_missing(self):
         card_before = (
@@ -307,14 +686,13 @@ class DeviceControlTests(unittest.TestCase):
         record_command = (
             "timeout", "3", "parecord", "--raw", "--format=s16le", "--rate=16000",
             "--channels=1", "--device=@DEFAULT_SOURCE@")
-        runner = FakeRunner({
+        runner = BinaryRecordingRunner({
             ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): [(0, "Volume: 50%", "")] * 2,
             ("pactl", "info"): [(0, info, "")] * 2,
             ("pactl", "list", "short", "sources"): [(0, source, "")] * 2,
             ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): [(0, "Mute: no", "")] * 2,
             ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): [(0, "Mute: no", "")] * 2,
             ("pactl", "list", "cards"): [(0, cards, "")] * 2,
-            record_command: (124, "x" * 8192, ""),
         })
         controller = self.device.DeviceController(
             runner=runner, executable=lambda name: name in {"pactl", "amixer", "parecord"})
@@ -324,7 +702,9 @@ class DeviceControlTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(3, result["seconds"])
         self.assertGreaterEqual(result["bytes"], 4096)
-        self.assertIn(record_command, runner.commands)
+        record_commands = [command for command in runner.commands if "parecord" in command]
+        self.assertEqual(1, len(record_commands))
+        self.assertEqual(record_command, record_commands[0][:-1])
 
     def test_audio_status_cli_emits_json_for_settings(self):
         runner = FakeRunner({
@@ -386,6 +766,55 @@ class DeviceControlTests(unittest.TestCase):
             result = controller.set_brightness(72)
         self.assertTrue(result["ok"])
         self.assertEqual(72, result["value"])
+        self.assertTrue(result["available"])
+        self.assertEqual("ready", result["state"])
+        self.assertEqual("brightnessctl", result["backend"])
+        self.assertEqual(72, result["requested"])
+
+    def test_brightness_readback_is_bounded_and_result_shape_is_stable(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "72%"): (0, "", ""),
+            ("brightnessctl", "-m"): (
+                0, "intel_backlight,backlight,1200,1000,120%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(72)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(100, result["value"])
+        self.assertTrue(0 <= result["value"] <= 100)
+        self.assertTrue(result["available"])
+        self.assertEqual("ready", result["state"])
+        self.assertEqual("brightnessctl", result["backend"])
+        self.assertEqual(72, result["requested"])
+        self.assertEqual(
+            {"ok", "available", "state", "backend", "requested", "value", "error"},
+            set(result),
+        )
+
+    def test_brightness_without_hardware_is_explicitly_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self.device.DeviceController(
+                runner=FakeRunner({}),
+                executable=lambda _name: True,
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(50)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["available"])
+        self.assertEqual("unavailable", result["state"])
+        self.assertEqual("", result["backend"])
+        self.assertIsNone(result["value"])
+        self.assertEqual(50, result["requested"])
 
     def test_status_json_cli_has_stable_sections(self):
         output = io.StringIO()

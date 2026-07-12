@@ -232,6 +232,34 @@ def device_control_cli_command(*args):
     return [sys.executable, local] + list(args)
 
 
+def audio_session_cli_command(*args):
+    """Use the installed helper when available, with a source-tree fallback."""
+    installed = "/usr/local/bin/ming-audio-session"
+    if os.path.isfile(installed):
+        return [installed] + list(args)
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ming-audio-session.py")
+    return [sys.executable, local] + list(args)
+
+
+def audio_output_label(device):
+    """Return a stable user-facing name instead of a PulseAudio sink identifier."""
+    kind = str((device or {}).get("kind") or "").lower()
+    labels = {
+        "internal": "主板模拟输出（内置扬声器，例如 ALC887）",
+        "hdmi": "HDMI / 显卡音频",
+        "bluetooth": "蓝牙音频",
+        "usb": "USB 音频设备",
+    }
+    label = labels.get(kind, "其他音频输出")
+    identifier = str((device or {}).get("id") or "")
+    # Multiple HDMI or USB sinks are common.  Show a short non-technical suffix
+    # only when it helps distinguish them, never expose the full implementation id.
+    suffix = identifier.rsplit(".", 1)[-1].replace("-", " ").strip()
+    if suffix and suffix.lower() not in {"stereo", "analog stereo"}:
+        return "%s · %s" % (label, suffix[:24])
+    return label
+
+
 def wifi_connect_command(ssid, bssid, ifname, with_secret=False):
     command = device_control_cli_command(
         "wifi-connect", "--ssid", ssid, "--bssid", bssid, "--ifname", ifname)
@@ -472,6 +500,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.wifi_connect_state = GenerationState()
         self.bluetooth_probe_state = GenerationState()
         self.audio_probe_state = GenerationState()
+        self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
         self.connect("close-request", self.on_close_request)
         self.install_css()
@@ -721,6 +750,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.wifi_connect_state.invalidate()
         self.bluetooth_probe_state.invalidate()
         self.audio_probe_state.invalidate()
+        self.playback_audio_probe_state.invalidate()
         self.time_sync_probe_state.invalidate()
         return False
 
@@ -1458,24 +1488,33 @@ class MingSettings(Adw.ApplicationWindow):
             n /= 1024
         return "%.1f PB" % n
 
-    # ---- 4. OTA 更新（封装 ming-update） ----
+    # ---- 4. 统一更新流程（检查后按服务端类型自动执行） ----
     def build_update(self):
         sc, box = self.page_scroller()
         cur = "未知"
         try:
-            with open("/etc/os-release") as f:
-                for line in f:
+            with open("/etc/os-release", encoding="utf-8") as handle:
+                for line in handle:
                     if line.startswith("VERSION_ID="):
                         cur = line.split("=", 1)[1].strip().strip('"')
-        except Exception:
+        except OSError:
             pass
-        grp = Adw.PreferencesGroup(title="系统更新",
-                                   description="当前版本：Ming OS %s\n小修复（驱动/补丁）无需重启；大版本升级会保留用户文件。" % cur)
-        box.append(grp)
 
-        self.update_status = Gtk.Label(label="点击下方按钮检查更新。", xalign=0, wrap=True)
+        grp = Adw.PreferencesGroup(
+            title="系统更新", description="当前版本：Ming OS %s" % cur)
+        box.append(grp)
+        self.update_current_version = cur
+        self.update_action_state = "check"
+        self.update_manifest_path = ""
+        self.update_manifest_sha256 = ""
+
+        self.update_status = Gtk.Label(label="点击“检查更新”了解是否有新版本。", xalign=0, wrap=True)
         self.update_status.set_margin_top(6)
         grp.add(self.update_status)
+        self.update_detail = Gtk.Label(label="", xalign=0, wrap=True)
+        self.update_detail.set_margin_top(4)
+        self.update_detail.set_visible(False)
+        grp.add(self.update_detail)
 
         self.update_bar = Gtk.ProgressBar()
         self.update_bar.set_show_text(True)
@@ -1483,126 +1522,149 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_margin_top(10)
         grp.add(self.update_bar)
 
-        btn_box = Gtk.FlowBox()
-        btn_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        btn_box.set_min_children_per_line(1)
-        btn_box.set_max_children_per_line(2)
-        btn_box.set_column_spacing(10)
-        btn_box.set_row_spacing(8)
-        btn_box.set_homogeneous(True)
-        btn_box.set_margin_top(12)
-        check = Gtk.Button(label="检查更新")
-        check.add_css_class("suggested-action")
-        check.connect("clicked", self.on_update_check)
-        patch_btn = Gtk.Button(label="应用小修复")
-        patch_btn.set_tooltip_text("应用 patch 级更新（驱动/配置/安全补丁），通常无需重启。")
-        patch_btn.connect("clicked", self.on_patch_update)
-        oneclick = Gtk.Button(label="大版本升级")
-        oneclick.set_tooltip_text("下载安装 major ISO 大版本，/home 用户文件严格保留。")
-        oneclick.connect("clicked", self.on_update_oneclick)
-        shutdown_btn = Gtk.Button(label="更新并关机")
-        shutdown_btn.add_css_class("destructive-action")
-        shutdown_btn.set_tooltip_text("检查→下载→安装更新，完成后1分钟内关机。适合睡前操作。")
-        shutdown_btn.connect("clicked", self.on_update_and_shutdown)
-        for button in (check, patch_btn, oneclick, shutdown_btn):
-            btn_box.insert(button, -1)
-        grp.add(btn_box)
+        self.update_action_button = Gtk.Button(label="检查更新")
+        self.update_action_button.add_css_class("suggested-action")
+        self.update_action_button.set_margin_top(12)
+        self.update_action_button.connect("clicked", self.on_update_action)
+        grp.add(self.update_action_button)
+        GLib.idle_add(self.refresh_update_status)
         return sc
 
-    def on_update_check(self, _btn):
+    @staticmethod
+    def _update_status_payload(rc, output, error):
+        try:
+            payload = json.loads(output) if output else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if rc != 0 and not payload:
+            payload["error"] = error or output or "无法读取更新状态。"
+        return payload
+
+    def refresh_update_status(self):
+        if not hasattr(self, "update_action_button"):
+            return False
+
+        def done(rc, output, error):
+            self.apply_update_status(self._update_status_payload(rc, output, error))
+            return False
+
+        run_capture_async(["ming-update", "status", "--json"], timeout=8, on_done=done)
+        return False
+
+    def apply_update_status(self, status):
+        status = status or {}
+        action = str(status.get("action") or "check")
+        available = bool(status.get("available"))
+        ready = bool(status.get("ready"))
+        version = str(status.get("new_version") or "")
+        notes = str(status.get("release_notes") or "")
+        error = str(status.get("error") or "")
+        manifest_path = str(status.get("manifest_path") or "")
+        manifest_sha256 = str(status.get("manifest_sha256") or "")
+
+        # A privileged process must apply the exact update that this page
+        # presents.  Empty fields deliberately make the action unavailable:
+        # the user can check again instead of silently installing a stale
+        # system/background cache.
+        self.update_manifest_path = ""
+        self.update_manifest_sha256 = ""
+
+        self.update_detail.set_visible(False)
+        self.update_action_button.set_sensitive(True)
+        if action == "reboot":
+            self.update_action_state = "reboot"
+            self.update_action_button.set_label("已安排重启")
+            self.update_action_button.set_sensitive(False)
+            self.update_status.set_label("新版本 %s 已准备完成，将在下一次重启时继续安装。" % (version or ""))
+            return
+        if available and ready and action == "apply":
+            if not manifest_path or not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest_sha256):
+                self.update_action_state = "check"
+                self.update_action_button.set_label("检查更新")
+                self.update_status.set_label("更新清单已失效，请重新检查更新。")
+                return
+            self.update_manifest_path = manifest_path
+            self.update_manifest_sha256 = manifest_sha256.lower()
+            self.update_action_state = "apply"
+            self.update_action_button.set_label("立即更新")
+            self.update_status.set_label("发现新版本：Ming OS %s" % (version or "未知"))
+            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
+            self.update_detail.set_visible(True)
+            return
+
+        self.update_action_state = "check"
+        self.update_action_button.set_label("检查更新")
+        if available and not ready:
+            self.update_status.set_label("发现版本 %s，但更新包仍在准备中，请稍后再检查。" % (version or ""))
+            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
+            self.update_detail.set_visible(True)
+        elif error:
+            self.update_status.set_label("无法读取更新状态：%s" % error)
+        else:
+            self.update_status.set_label("当前已是最新版本。")
+
+    def on_update_action(self, _btn):
+        if getattr(self, "update_action_state", "check") == "apply":
+            self.on_update_apply()
+        else:
+            self.on_update_check()
+
+    def on_update_check(self):
+        self.update_action_button.set_sensitive(False)
+        self.update_bar.set_visible(True)
+        self.update_bar.set_fraction(0.15)
+        self.update_bar.set_text("正在检查…")
         self.update_status.set_label("正在检查更新…")
-        def line(l): self.update_status.set_label(l)
+
+        def line(message):
+            if message:
+                self.update_status.set_label(message)
+
         def done(rc):
-            self.update_status.set_label("检查完成。" if rc == 0 else "未发现可用更新或检查失败。")
+            self.update_bar.set_visible(False)
+            self.update_action_button.set_sensitive(True)
+            if rc != 0:
+                self.update_status.set_label("检查更新失败，请确认网络后重试。")
+                return
+            self.update_status.set_label("检查完成，正在读取结果…")
+            self.refresh_update_status()
+
         run_async(["ming-update", "check"], on_line=line, on_done=done)
 
-    def on_patch_update(self, _btn):
-        """应用 patch 级小修复（无需重启）。"""
-        self.update_status.set_label("正在应用 patch 小修复…")
+    def on_update_apply(self):
+        if not self.update_manifest_path or not self.update_manifest_sha256:
+            self.update_action_state = "check"
+            self.update_action_button.set_label("检查更新")
+            self.update_status.set_label("更新清单已过期，请先重新检查更新。")
+            return
+        self.update_action_button.set_sensitive(False)
         self.update_bar.set_visible(True)
         self.update_bar.set_fraction(0.1)
-        self.update_bar.set_text("patch 更新中…")
-        def line(l): self.update_status.set_label(l)
+        self.update_bar.set_text("正在更新…")
+        self.update_status.set_label("正在自动选择更新方式并执行…")
+
+        def line(message):
+            if message:
+                self.update_status.set_label(message)
+
         def done(rc):
             self.update_bar.set_fraction(1.0)
             if rc == 0:
                 self.update_bar.set_text("完成")
-                self.update_status.set_label("patch 更新完成，无需重启。")
+                self.update_status.set_label("更新操作已完成，正在刷新状态…")
+                self.refresh_update_status()
             else:
-                self.update_bar.set_text("失败或无更新")
-                self.update_status.set_label("没有可用 patch 更新，或当前已是最新。")
-                self.update_bar.set_visible(False)
-        run_async(["pkexec", "ming-update", "patch"], on_line=line, on_done=done)
+                self.update_bar.set_text("失败")
+                self.update_status.set_label("更新未完成，请查看系统更新日志后重试。")
+                self.update_action_button.set_sensitive(True)
 
-    def on_update_oneclick(self, _btn):
-        # 检查 -> 下载 -> 安装，进度条粗粒度推进
-        self.update_bar.set_visible(True)
-        self.update_bar.set_fraction(0.05)
-        self.update_bar.set_text("检查中…")
-
-        def after_check(rc):
-            if rc != 0:
-                self.update_status.set_label("没有可用更新。")
-                self.update_bar.set_visible(False)
-                return
-            self.update_bar.set_fraction(0.3)
-            self.update_bar.set_text("下载中…")
-            def dl_line(l): self.update_status.set_label(l)
-            def after_dl(rc2):
-                if rc2 != 0:
-                    self.update_status.set_label("下载失败。")
-                    self.update_bar.set_visible(False)
-                    return
-                self.update_bar.set_fraction(0.7)
-                self.update_bar.set_text("安装中…")
-                def after_install(rc3):
-                    self.update_bar.set_fraction(1.0)
-                    self.update_bar.set_text("完成" if rc3 == 0 else "安装失败")
-                    self.update_status.set_label(
-                        "更新已就绪，重启后生效。" if rc3 == 0 else "安装失败，请稍后重试。")
-                run_async(["pkexec", "ming-update", "install"], on_line=dl_line, on_done=after_install)
-            run_async(["ming-update", "download"], on_line=dl_line, on_done=after_dl)
-        run_async(["ming-update", "check"], on_line=lambda l: self.update_status.set_label(l),
-                  on_done=after_check)
-
-    def on_update_and_shutdown(self, _btn):
-        """更新并关机：先弹确认对话框，再后台运行 ming-update auto-shutdown。"""
-        dlg = Adw.MessageDialog(
-            transient_for=self,
-            heading="确认更新并关机？",
-            body="系统将自动完成「检查→下载→安装」全过程，完成后 1 分钟内关机。\n\n"
-                 "如果当前没有更新，系统不会关机。\n\n"
-                 "适合睡前操作，明天开机即可用上新版本。")
-        dlg.add_response("cancel", "取消")
-        dlg.add_response("ok", "确认，开始更新并关机")
-        dlg.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE)
-        dlg.set_default_response("cancel")
-
-        def on_resp(d, resp):
-            if resp != "ok":
-                return
-            self.update_status.set_label("正在执行更新并关机流程…")
-            self.update_bar.set_visible(True)
-            self.update_bar.set_fraction(0.1)
-            self.update_bar.set_text("自动更新中…")
-
-            def line(l):
-                self.update_status.set_label(l)
-
-            def done(rc):
-                self.update_bar.set_fraction(1.0)
-                if rc == 0:
-                    self.update_bar.set_text("完成，即将关机")
-                    self.update_status.set_label("更新流程完成，系统将在 1 分钟内关机。")
-                else:
-                    self.update_bar.set_text("失败")
-                    self.update_status.set_label("更新或关机流程失败，请查看日志。")
-                    self.update_bar.set_visible(False)
-
-            run_async(["pkexec", "ming-update", "auto-shutdown"], on_line=line, on_done=done)
-
-        dlg.connect("response", on_resp)
-        dlg.present()
+        run_async([
+            "pkexec", "ming-update", "apply",
+            "--manifest", self.update_manifest_path,
+            "--sha256", self.update_manifest_sha256,
+        ], on_line=line, on_done=done)
 
     # ---- 5. 显示与无障碍（真实 xrandr 模式 + 独立界面大小） ----
     def build_display(self):
@@ -1847,11 +1909,25 @@ class MingSettings(Adw.ApplicationWindow):
             ["nothing", "suspend", "hibernate"], default_index=1))
 
         audio_grp = Adw.PreferencesGroup(
-            title="声音设备", description="切换 PulseAudio 当前默认设备，不影响应用自己的音量。")
+            title="声音设备",
+            description="选择声音从主板模拟输出、HDMI、蓝牙或 USB 输出；手动选择不会被自动修复覆盖。")
         box.append(audio_grp)
-        audio_grp.add(self.backend_collection_row(
-            "音频输出", "选择扬声器、耳机或 HDMI 输出。",
-            ["audio", "list", "output"], ["audio", "set", "output"]))
+        self.audio_output_combo = self.audio_output_row()
+        audio_grp.add(self.audio_output_combo)
+        self.audio_playback_status_row = Adw.ActionRow(
+            title="声音播放状态", subtitle="正在读取当前音频输出...")
+        refresh_playback = Gtk.Button(label="刷新")
+        refresh_playback.set_valign(Gtk.Align.CENTER)
+        refresh_playback.connect("clicked", lambda _button: self.refresh_audio_output_devices())
+        self.audio_playback_status_row.add_suffix(refresh_playback)
+        audio_grp.add(self.audio_playback_status_row)
+        self.audio_playback_repair_button = Gtk.Button(label="修复声音播放")
+        self.audio_playback_repair_button.add_css_class("suggested-action")
+        self.audio_playback_repair_button.connect("clicked", self.on_audio_repair_playback)
+        audio_grp.add(self.button_row(
+            "修复声音播放",
+            "仅在默认输出缺失、静音或配置无效时恢复播放；有效的 HDMI、蓝牙和 USB 选择不会被改写。",
+            self.audio_playback_repair_button))
         audio_grp.add(self.backend_collection_row(
             "音频输入", "选择内置麦克风或外接录音设备。",
             ["audio", "list", "input"], ["audio", "set", "input"]))
@@ -1875,6 +1951,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.audio_test_button.connect("clicked", self.on_audio_test_input)
         call_audio_grp.add(self.button_row(
             "三秒麦克风测试", "录制 3 秒并仅报告是否检测到有效声音数据。", self.audio_test_button))
+        GLib.idle_add(self.refresh_audio_output_devices)
         GLib.idle_add(self.refresh_call_audio_status)
 
         defaults_grp = Adw.PreferencesGroup(
@@ -1965,6 +2042,187 @@ class MingSettings(Adw.ApplicationWindow):
             return False
 
         run_capture_async(["ming-window-control", "repair"], timeout=20, on_done=done)
+
+    # ---- 声音输出：始终通过共享 DeviceControl 读回和切换 ----
+    def audio_output_row(self):
+        row = Adw.ComboRow(
+            title="音频输出",
+            subtitle="选择内置扬声器、HDMI、蓝牙或 USB 输出。",
+            model=Gtk.StringList.new(["正在读取..."]))
+        row.choice_ids = []
+        row._ming_populating = False
+        row.set_sensitive(False)
+        row.connect("notify::selected", self.on_audio_output_selected)
+        return row
+
+    @staticmethod
+    def _audio_status_from_command(rc, output, error):
+        try:
+            status = json.loads(output) if output else {}
+        except (TypeError, ValueError):
+            status = {}
+        if not isinstance(status, dict):
+            status = {}
+        if not status:
+            status = {
+                "available": False, "server_available": False,
+                "playback_ready": False,
+                "error": error or output or "声音状态工具未返回可读数据。",
+            }
+        elif rc != 0 and not status.get("error"):
+            status["error"] = error or output or "声音状态工具未成功完成。"
+        return status
+
+    def refresh_audio_output_devices(self):
+        if not hasattr(self, "audio_output_combo"):
+            return False
+        generation = self.playback_audio_probe_state.begin()
+        row = self.audio_output_combo
+        row.set_sensitive(False)
+        row.set_subtitle("正在读取当前输出、静音和播放配置...")
+        self.audio_playback_repair_button.set_sensitive(False)
+
+        def done(rc, output, error):
+            if not self.playback_audio_probe_state.accept(generation):
+                return False
+            if self.advanced_page.get_root() is not self:
+                return False
+            status = self._audio_status_from_command(rc, output, error)
+            self.apply_audio_output_status(status)
+            return False
+
+        run_capture_async(
+            device_control_cli_command("audio-status", "--json"), timeout=10, on_done=done)
+        return False
+
+    def apply_audio_output_status(self, status):
+        status = status or {}
+        row = self.audio_output_combo
+        all_devices = status.get("playback_devices") or []
+        devices = [device for device in all_devices if isinstance(device, dict) and
+                   device.get("id") and device.get("available")]
+        default_sink = str(status.get("default_sink") or "")
+        current = next((device for device in all_devices
+                        if isinstance(device, dict) and device.get("id") == default_sink), None)
+        current_label = audio_output_label(current) if current else "未选择可用输出"
+        ready = bool(status.get("playback_ready"))
+        error = str(status.get("error") or "")
+
+        row._ming_populating = True
+        try:
+            if devices:
+                row.choice_ids = [str(device["id"]) for device in devices]
+                row.set_model(Gtk.StringList.new([audio_output_label(device) for device in devices]))
+                selected = next(
+                    (index for index, device in enumerate(devices)
+                     if device.get("id") == default_sink or device.get("active")), 0)
+                row.set_selected(selected)
+                row.set_sensitive(True)
+                row.set_subtitle("当前：%s%s" % (
+                    current_label, " · 可手动切换" if ready else " · 需要修复"))
+            else:
+                row.choice_ids = []
+                row.set_model(Gtk.StringList.new(["未检测到可用输出"])); row.set_selected(0)
+                row.set_sensitive(False)
+                row.set_subtitle(error or "请检查声卡、HDMI 显示器或蓝牙设备。")
+        finally:
+            row._ming_populating = False
+
+        if ready:
+            self.audio_playback_status_row.set_title("声音播放正常")
+            self.audio_playback_status_row.set_subtitle("当前输出：%s。" % current_label)
+        else:
+            self.audio_playback_status_row.set_title("声音播放需要修复")
+            self.audio_playback_status_row.set_subtitle(
+                "当前输出：%s。%s" % (current_label, error or "请选择可用输出或执行修复。"))
+        # The session helper can start PulseAudio, so an unavailable daemon is
+        # recoverable and must not leave users with a disabled repair button.
+        self.audio_playback_repair_button.set_sensitive(True)
+
+    def on_audio_output_selected(self, row, _property):
+        if getattr(row, "_ming_populating", False):
+            return
+        choice_ids = getattr(row, "choice_ids", [])
+        selected = row.get_selected()
+        if selected < 0 or selected >= len(choice_ids):
+            return
+        output_id = choice_ids[selected]
+        generation = self.playback_audio_probe_state.begin()
+        row.set_sensitive(False)
+        row.set_subtitle("正在切换音频输出并读回确认...")
+
+        def done(rc, output, error):
+            if not self.playback_audio_probe_state.accept(generation):
+                return False
+            if self.advanced_page.get_root() is not self:
+                return False
+            try:
+                result = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and isinstance(result, dict) and result.get("ok"):
+                status = result.get("status") or {}
+                self.apply_audio_output_status(status)
+                self.remember_audio_output(output_id)
+                self.toast("已切换到 %s。" % audio_output_label(next(
+                    (item for item in status.get("playback_devices", [])
+                     if item.get("id") == output_id), {"id": output_id})), "info")
+            else:
+                reason = (result.get("error") if isinstance(result, dict) else "") or error or output
+                self.toast("音频输出未切换：%s" % (reason or "请刷新后重试。"), "error")
+                self.refresh_audio_output_devices()
+            return False
+
+        run_capture_async(
+            device_control_cli_command("audio-select-output", "--id", output_id),
+            timeout=12, on_done=done)
+
+    def remember_audio_output(self, output_id):
+        """Persist only after DeviceControl has confirmed the selected sink."""
+        def done(rc, output, error):
+            try:
+                result = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                result = {}
+            if rc != 0 or not result.get("ok"):
+                self.toast("输出已切换，但无法保存为下次默认：%s" % (
+                    result.get("error") or error or "请稍后重试。"), "warning")
+            return False
+
+        run_capture_async(
+            [SETTINGS_BACKEND, "audio", "remember", "output", output_id],
+            timeout=8, on_done=done)
+
+    def on_audio_repair_playback(self, _button):
+        generation = self.playback_audio_probe_state.begin()
+        self.audio_playback_repair_button.set_sensitive(False)
+        self.audio_playback_repair_button.set_label("正在修复...")
+
+        def done(rc, output, error):
+            if not self.playback_audio_probe_state.accept(generation):
+                return False
+            if self.advanced_page.get_root() is not self:
+                return False
+            self.audio_playback_repair_button.set_label("修复声音播放")
+            try:
+                result = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                result = {}
+            status = result.get("status") if isinstance(result, dict) else None
+            if status:
+                self.apply_audio_output_status(status)
+            if rc == 0 and isinstance(result, dict) and result.get("ok"):
+                message = ("已恢复声音播放。" if result.get("changed")
+                           else "当前有效输出保持不变。")
+                self.toast(message, "info")
+            else:
+                reason = (result.get("error") if isinstance(result, dict) else "") or error or output
+                self.toast("声音播放未恢复：%s" % (reason or "请检查声卡和输出设备。"), "error")
+                self.refresh_audio_output_devices()
+            return False
+
+        run_capture_async(
+            audio_session_cli_command("ensure", "--json"), timeout=15, on_done=done)
 
     def refresh_call_audio_status(self):
         generation = self.audio_probe_state.begin()

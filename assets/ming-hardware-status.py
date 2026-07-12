@@ -23,6 +23,7 @@ def run_command(command, timeout=8):
 
 
 MING_LEGACY_INTEL_XORG_HEADER = "# Managed by Ming OS legacy Intel Xorg setup"
+KNOWN_DRM_DRIVERS = ("i915", "amdgpu", "radeon", "nouveau", "zx", "zhaoxin")
 
 
 class HardwareStatus:
@@ -109,6 +110,10 @@ class HardwareStatus:
             return "legacy-intel-ddx"
         if re.search(r'LoadModule:\s*"modesetting"|modesetting_drv\.so|\bmodeset(?:ting)?\(\d+\)', xorg_log, re.I):
             return "modesetting"
+        if re.search(r'LoadModule:\s*"(?:amdgpu|ati|radeon|nouveau|zx)"|'
+                     r'(?:amdgpu|radeon|nouveau|zx)(?:_drv)?\.so|'
+                     r'\b(?:amdgpu|radeon|nouveau|zx)\(\d+\)', xorg_log, re.I):
+            return "native-ddx"
         return "unknown"
 
     def graphics_status(self):
@@ -121,12 +126,15 @@ class HardwareStatus:
         block = self._gpu_block(lspci)
         model = self._gpu_model(block)
         driver_match = re.search(r"Kernel driver in use:\s*(\S+)", block, re.I)
-        driver = driver_match.group(1) if driver_match else (
-            "i915" if re.search(r"^i915\s", modules, re.M) else "未绑定")
+        driver = driver_match.group(1) if driver_match else next(
+            (name for name in KNOWN_DRM_DRIVERS if re.search(r"^%s\s" % re.escape(name), modules, re.M)),
+            "未绑定",
+        )
         renderer_match = re.search(r"OpenGL renderer string:\s*(.+)", glxinfo, re.I)
         renderer = renderer_match.group(1).strip() if renderer_match else "未检测到 Mesa 渲染器"
         virtual = virt_rc == 0
-        safe_graphics = bool(re.search(r"(?:^|\s)nomodeset(?:\s|$)|i915\.modeset=0", cmdline))
+        safe_graphics = bool(re.search(
+            r"(?:^|\s)nomodeset(?:\s|$)|(?:i915|amdgpu|radeon|nouveau)\.modeset=0", cmdline))
         software = bool(re.search(r"llvmpipe|softpipe|software rasterizer", renderer, re.I))
         render_paths = list(self.render_nodes())
         render_node = bool(render_paths)
@@ -145,18 +153,20 @@ class HardwareStatus:
             # HD 620/Gen9 lacks AV1 hardware decode; this is a capability, not a failure.
             "av1": self._codec_state(vainfo, [r"AV1"]),
         }
-        # Chromium hardware-video flags are safe only when the complete
-        # display path is verified: i915 owns the GPU, Xorg is using the
-        # modesetting DDX, the render node is accessible, and both codecs
-        # needed by the supported browser workload are exposed by VA-API.
-        va_ok = va_rc == 0 and (
-            codecs["h264"] == "available" and codecs["vp9"] == "available"
-        )
-        vaapi_error = "" if va_rc == 0 else (va_error or vainfo or "vainfo returned an error")
-        edge_hardware_video = bool(
-            driver == "i915" and xorg_backend == "modesetting" and render_node
-            and render_access is True and va_ok
+        # GPU compositing is a separate capability from hardware video.  A
+        # Radeon, AMDGPU or Zhaoxin device with working KMS/Mesa must not lose
+        # its desktop GPU merely because one browser codec is unavailable.
+        desktop_rendering = bool(
+            block and driver != "未绑定" and render_node and render_access is True
+            and xorg_backend in {"modesetting", "native-ddx"}
             and not virtual and not safe_graphics and not software)
+        # Browsers can use the codecs that a particular GPU actually exposes;
+        # requiring both H.264 and VP9 incorrectly disables supported AMD and
+        # older Intel paths.
+        va_ok = va_rc == 0 and any(
+            codecs[name] == "available" for name in ("h264", "vp9"))
+        vaapi_error = "" if va_rc == 0 else (va_error or vainfo or "vainfo returned an error")
+        edge_hardware_video = desktop_rendering and va_ok
 
         if virtual:
             state = "attention"
@@ -166,13 +176,19 @@ class HardwareStatus:
             recommendation = "当前处于安全显卡模式；重启到普通模式后可恢复硬件视频。"
         elif software:
             state = "attention"
-            recommendation = "Mesa 正在软件渲染；请检查 i915 驱动和 render 节点。"
+            recommendation = "Mesa 正在软件渲染；请检查内核显卡驱动和 render 节点。"
         elif not block:
             state = "failure"
             recommendation = "未检测到可用显卡，请导出诊断信息。"
+        elif driver == "未绑定":
+            state = "failure"
+            recommendation = "显卡未绑定主线 DRM 驱动；请检查内核日志、固件和显卡型号。"
         elif xorg_backend == "legacy-intel-ddx":
             state = "attention"
             recommendation = "内核 i915 已绑定，但桌面 Xorg 仍检测到旧的 Ming Intel DDX 配置；请运行兼容迁移后使用 modesetting。"
+        elif xorg_backend == "unknown":
+            state = "attention"
+            recommendation = "已检测到内核 %s，但未获得 Xorg 后端证据；请重新登录后查看诊断。" % driver
         elif render_node and render_access is False:
             state = "attention"
             recommendation = "内核 %s 与 Xorg %s 已检测到，但当前用户没有 render 节点访问权限；请确认账户属于 render 组后重新登录。" % (driver, xorg_backend)
@@ -181,10 +197,13 @@ class HardwareStatus:
             recommendation = "内核 %s 与 Xorg %s 已检测到，但 VA-API 检查失败：%s" % (driver, xorg_backend, vaapi_error)
         elif edge_hardware_video:
             state = "normal"
-            recommendation = "H.264/VP9 硬件视频可用；HD 620 不支持 AV1 硬解属于正常限制。"
+            recommendation = "桌面渲染和可用的视频硬解已通过验证；缺少的编解码能力属于硬件限制。"
+        elif desktop_rendering:
+            state = "normal"
+            recommendation = "桌面 GPU 渲染正常；浏览器将为不支持的编解码自动使用软件解码。"
         else:
             state = "attention"
-            recommendation = "硬件视频尚未通过验证，Edge 会自动使用稳定的回退配置。"
+            recommendation = "桌面图形路径尚未完整验证，Edge 会自动使用稳定的回退配置。"
 
         evidence = [value for value in (pci_error, modules_error, glx_error, va_error) if value]
         return {
@@ -199,6 +218,7 @@ class HardwareStatus:
             "renderer": renderer,
             "render_node": render_node,
             "render_access": render_access,
+            "desktop_rendering": desktop_rendering,
             "virtual_machine": virtual,
             "safe_graphics": safe_graphics,
             "vaapi": va_ok,

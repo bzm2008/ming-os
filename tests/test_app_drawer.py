@@ -71,6 +71,15 @@ class AppDrawerCoreTests(unittest.TestCase):
             self.assertEqual(0, transition["duration_ms"])
             self.assertEqual(1.0, transition["start_opacity"])
 
+    def test_drawer_animation_reverses_from_its_current_progress_without_stacking(self):
+        animation = self.drawer.DrawerAnimation(duration_ms=200)
+        animation.set_target(1.0, 0)
+        self.assertAlmostEqual(0.5, animation.advance(100))
+        animation.set_target(0.0, 100)
+        self.assertAlmostEqual(0.25, animation.advance(150))
+        self.assertAlmostEqual(0.0, animation.advance(200))
+        self.assertFalse(animation.active)
+
     def test_desktop_context_action_is_structured(self):
         app = FakeApp("Browser", path="/usr/share/applications/browser.desktop")
         self.assertEqual(
@@ -104,10 +113,51 @@ class AppDrawerCoreTests(unittest.TestCase):
             )
             self.assertEqual("User", self.drawer.discover_apps((user, system))[0].name)
 
+    def test_missing_desktop_executable_stays_visible_with_a_readable_diagnostic(self):
+        """A broken store launcher must be actionable instead of disappearing."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            applications = pathlib.Path(tempdir) / "applications"
+            applications.mkdir()
+            (applications / "broken-store-app.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Broken Store App\n"
+                "Exec=/opt/broken-store-app/bin/launch\n",
+                encoding="utf-8",
+            )
+            apps = self.drawer.discover_apps((applications,))
+            self.assertEqual(1, len(apps))
+            self.assertEqual("Broken Store App", apps[0].name)
+            self.assertEqual((), apps[0].argv)
+            self.assertIn("找不到启动程序", apps[0].diagnostic)
+
+    def test_shell_wrapper_desktop_entry_is_reported_without_becoming_executable(self):
+        """The catalog may explain unsafe launchers, but must never run sh -c."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            applications = pathlib.Path(tempdir) / "applications"
+            applications.mkdir()
+            (applications / "unsafe-store-app.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Unsafe Store App\n"
+                "Exec=sh -c 'touch /tmp/ming-unsafe'\n",
+                encoding="utf-8",
+            )
+            apps = self.drawer.discover_apps((applications,))
+            self.assertEqual(1, len(apps))
+            self.assertEqual("Unsafe Store App", apps[0].name)
+            self.assertEqual((), apps[0].argv)
+            self.assertIn("不支持", apps[0].diagnostic)
+
     def test_widget_source_rect_includes_no_window_widget_allocation(self):
         allocation = type("Allocation", (), {"x": 12, "y": 18, "width": 80, "height": 40})()
         rect = self.drawer.widget_source_rect((True, 100, 200), allocation)
         self.assertEqual({"x": 112.0, "y": 218.0, "width": 80.0, "height": 40.0}, rect)
+
+    def test_drawer_rescans_before_every_show_including_reduced_motion(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        show = source[source.index("    def show(self):"):source.index("    def hide(self):")]
+        self.assertIn("self.apps = discover_apps()", show)
+        self.assertLess(
+            show.index("self.apps = discover_apps()"),
+            show.index("transition = drawer_transition(reduced_motion_enabled())"),
+        )
 
 
 class LaunchBrokerCoreTests(unittest.TestCase):

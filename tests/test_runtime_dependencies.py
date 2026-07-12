@@ -40,6 +40,7 @@ REQUIRED_PACKAGES = [
     "lxpolkit",
     "libnotify-bin",
     "x11-utils",
+    "desktop-file-utils",
 ]
 
 
@@ -94,6 +95,24 @@ def run_backend_validator(root):
 
 
 class RequiredRuntimeDependencyContracts(unittest.TestCase):
+    def test_package_installer_is_deployed_and_final_thunar_menu_offers_deb_install(self):
+        self.assertIn("ming-package-installer.py", DESKTOP)
+        self.assertIn("/usr/local/sbin/ming-package-installer", DESKTOP)
+        self.assertIn("/usr/local/bin/ming-package-install-gui", DESKTOP)
+        self.assertIn("zenity --info", DESKTOP)
+        self.assertIn("zenity --error", DESKTOP)
+        self.assertIn("ming-phone-desktop --sync", DESKTOP)
+        self.assertIn("launcher_warnings", DESKTOP)
+        self.assertIn("启动器需要修复", DESKTOP)
+        final_menu = DESKTOP.split("configure_simplified_menus() {", 1)[1].split(
+            "\n# ========================", 1)[0]
+        self.assertIn("安装 DEB 软件包", final_menu)
+        self.assertIn("<patterns>*.deb</patterns>", final_menu)
+        self.assertIn("/usr/local/bin/ming-package-install-gui \"%f\"", final_menu)
+        self.assertIn("以管理员身份编辑", final_menu)
+        self.assertIn("以管理员身份打开", final_menu)
+        self.assertIn("询问 Garlic Claw", final_menu)
+
     def test_apps_module_has_a_dedicated_required_runtime_package_set(self):
         block = APPS.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0]
         for package in REQUIRED_PACKAGES:
@@ -158,6 +177,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "lxpolkit",
             "notify-send",
             "xprop",
+            "desktop-file-utils",
             "/usr/sbin/rfkill",
             "runpy.run_path('/usr/local/bin/ming-settings'",
             "/usr/local/bin/ming-files --check-runtime",

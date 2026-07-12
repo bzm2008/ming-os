@@ -166,7 +166,66 @@ class GraphicsStatusTests(unittest.TestCase):
         self.assertEqual("legacy-intel-ddx", status["xorg_backend"])
         self.assertFalse(status["edge_hardware_video"])
 
-    def test_edge_hardware_video_requires_both_h264_and_vp9(self):
+    def test_radeon_with_h264_only_keeps_desktop_gpu_and_enables_supported_video_path(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "01:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Cedar [Radeon HD 5000/6000/7350/8350 Series]\n"
+                "\tKernel driver in use: radeon",
+                "",
+            ),
+            ("lsmod",): (0, "radeon 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa DRI R600 (CEDAR)", ""),
+            ("vainfo", "--display", "drm"): (0, "VAProfileH264High", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner,
+                render_nodes=lambda: [render_node],
+                render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+            ).graphics_status()
+
+        self.assertEqual("radeon", status["driver"])
+        self.assertTrue(status["desktop_rendering"])
+        self.assertTrue(status["edge_hardware_video"])
+        self.assertEqual("available", status["codecs"]["h264"])
+        self.assertEqual("unsupported", status["codecs"]["vp9"])
+
+    def test_zhaoxin_cpu_graphics_binding_is_desktop_capable_without_intel_driver_name(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "01:00.0 VGA compatible controller: Zhaoxin C-960 Integrated Graphics\n"
+                "\tKernel driver in use: zx",
+                "",
+            ),
+            ("lsmod",): (0, "zx 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa Zhaoxin C-960", ""),
+            ("vainfo", "--display", "drm"): (1, "", "driver does not expose VA-API"),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner,
+                render_nodes=lambda: [render_node],
+                render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+            ).graphics_status()
+
+        self.assertEqual("zx", status["driver"])
+        self.assertTrue(status["desktop_rendering"])
+        self.assertFalse(status["edge_hardware_video"])
+        self.assertEqual("attention", status["state"])
+
+    def test_edge_hardware_video_accepts_one_supported_codec(self):
         runner = FakeRunner({
             ("lspci", "-nnk"): (
                 0,
@@ -191,7 +250,32 @@ class GraphicsStatusTests(unittest.TestCase):
             ).graphics_status()
         self.assertEqual("available", status["codecs"]["h264"])
         self.assertEqual("unsupported", status["codecs"]["vp9"])
-        self.assertFalse(status["edge_hardware_video"])
+        self.assertTrue(status["edge_hardware_video"])
+
+    def test_radeon_or_amdgpu_modeset_disable_flag_is_safe_graphics_mode(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "01:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI]\n"
+                "\tKernel driver in use: amdgpu",
+                "",
+            ),
+            ("lsmod",): (0, "amdgpu 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet amdgpu.modeset=0", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa AMD Radeon", ""),
+            ("vainfo", "--display", "drm"): (0, "VAProfileH264High", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner, render_nodes=lambda: [render_node], render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+            ).graphics_status()
+
+        self.assertTrue(status["safe_graphics"])
+        self.assertFalse(status["desktop_rendering"])
 
     def test_render_permission_and_vaapi_error_are_reported_without_claiming_edge_ready(self):
         runner = FakeRunner({

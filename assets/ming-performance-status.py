@@ -192,6 +192,22 @@ class PerformanceStatus:
         }
 
     def cpu_status(self) -> dict[str, Any]:
+        cpuinfo = self._read("/proc/cpuinfo") or ""
+        vendor_match = re.search(r"^vendor_id\s*:\s*(.+)$", cpuinfo, re.MULTILINE)
+        model_match = re.search(r"^model name\s*:\s*(.+)$", cpuinfo, re.MULTILINE)
+        microcode_match = re.search(r"^microcode\s*:\s*(.+)$", cpuinfo, re.MULTILINE)
+        vendor = vendor_match.group(1).strip() if vendor_match else "unknown"
+        model = model_match.group(1).strip() if model_match else "unknown"
+        microcode = microcode_match.group(1).strip() if microcode_match else "unknown"
+        cpu_identity = "%s %s" % (vendor, model)
+        if re.search(r"AuthenticAMD|AMD", cpu_identity, re.IGNORECASE):
+            compatibility_class = "amd"
+        elif re.search(r"Zhaoxin|兆芯|Shanghai|Centaur", cpu_identity, re.IGNORECASE):
+            compatibility_class = "zhaoxin"
+        elif re.search(r"GenuineIntel|Intel", cpu_identity, re.IGNORECASE):
+            compatibility_class = "intel"
+        else:
+            compatibility_class = "generic-x86"
         driver = (self._read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver") or "").strip()
         current_paths = self._paths("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor")
         governors = sorted(
@@ -210,6 +226,11 @@ class PerformanceStatus:
             self.diagnostics.append("cpufreq: unavailable")
         return {
             "state": "available" if available else "unavailable",
+            "vendor": vendor,
+            "model": model,
+            "microcode": microcode,
+            "compatibility_class": compatibility_class,
+            "thermal_strategy": "intel-thermald" if compatibility_class == "intel" else "kernel-tlp",
             "driver": driver or "unknown",
             "governors": governors,
             "available_governors": available_governors,

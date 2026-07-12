@@ -68,6 +68,9 @@ ensure_resume_runtime_packages() {
         pulseaudio \
         pulseaudio-utils \
         alsa-utils \
+        libasound2-plugins \
+        pulseaudio-module-bluetooth \
+        pavucontrol \
         bluez \
         upower \
         pkexec \
@@ -75,6 +78,7 @@ ensure_resume_runtime_packages() {
         lxpolkit \
         libnotify-bin \
         x11-utils \
+        desktop-file-utils \
         network-manager \
         wpasupplicant \
         iw \
@@ -88,8 +92,9 @@ ensure_resume_runtime_packages() {
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
-        pulseaudio pulseaudio-utils alsa-utils bluez upower pkexec polkitd \
-        lxpolkit libnotify-bin x11-utils; do
+        pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
+        pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
+        lxpolkit libnotify-bin x11-utils desktop-file-utils; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "resume required runtime package is not installed: ${package}"
             return 1

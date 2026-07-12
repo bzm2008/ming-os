@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -177,11 +178,14 @@ def classify_wifi(
 
 class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
-                 backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input):
+                 backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
+                 settings_path=None):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
         self.backlight_root = Path(backlight_root)
+        self.settings_path = Path(settings_path) if settings_path else (
+            Path.home() / ".config" / "ming-os" / "settings.json")
 
     def _run(self, command, timeout=8):
         return self.runner(command, timeout=timeout)
@@ -199,10 +203,32 @@ class DeviceController:
         if backend == "pactl":
             rc, output, error = self._run(
                 ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+            value = parse_percent(output)
         else:
             rc, output, error = self._run(["amixer", "sget", "Master"])
-        value = parse_percent(output)
+            value = parse_percent(output)
         return rc == 0 and value is not None, value, error or output
+
+    @staticmethod
+    def _control_result(ok, requested=None, value=None, error="", backend="",
+                        available=False, state=None):
+        if value is not None:
+            try:
+                value = max(0, min(100, int(round(float(value)))))
+            except (TypeError, ValueError):
+                value = None
+        if state is None:
+            state = "ready" if ok else (
+                "unavailable" if not available else "error")
+        return {
+            "ok": bool(ok),
+            "available": bool(available),
+            "state": state,
+            "backend": backend or "",
+            "requested": requested,
+            "value": value,
+            "error": error or "",
+        }
 
     @staticmethod
     def _pactl_info_defaults(output):
@@ -227,12 +253,55 @@ class DeviceController:
         return sources
 
     @staticmethod
+    def _audio_kind(name):
+        value = (name or "").lower()
+        if "bluez" in value or "bluetooth" in value:
+            return "bluetooth"
+        if "hdmi" in value or "displayport" in value or ".dp-" in value:
+            return "hdmi"
+        if re.search(r"(?:^|[._-])usb(?:[._-]|$)", value):
+            return "usb"
+        return "internal"
+
+    @classmethod
+    def _audio_device_display_name(cls, name):
+        kind = cls._audio_kind(name)
+        labels = {
+            "internal": "内置扬声器",
+            "hdmi": "HDMI / 显示器音频",
+            "bluetooth": "蓝牙音频",
+            "usb": "USB 音频",
+        }
+        return "%s（%s）" % (labels[kind], name)
+
+    @classmethod
+    def _pactl_sink_records(cls, output, default_sink=""):
+        records = []
+        for line in (output or "").splitlines():
+            fields = line.split("\t")
+            if len(fields) < 2:
+                continue
+            sink_id = fields[1].strip()
+            if not sink_id:
+                continue
+            state = fields[-1].strip().upper()
+            records.append({
+                "id": sink_id,
+                "display_name": cls._audio_device_display_name(sink_id),
+                "kind": cls._audio_kind(sink_id),
+                "available": state != "UNAVAILABLE",
+                "active": sink_id == default_sink,
+            })
+        return records
+
+    @staticmethod
     def _pactl_cards(output):
         cards = []
         current = None
         in_profiles = False
         for line in (output or "").splitlines():
-            if line.startswith("Card #"):
+            stripped = line.strip()
+            if stripped.startswith("Card #"):
                 if current:
                     cards.append(current)
                 current = {"name": "", "active_profile": "", "profiles": []}
@@ -240,23 +309,23 @@ class DeviceController:
                 continue
             if current is None:
                 continue
-            if line.startswith("Name:"):
-                current["name"] = line.partition(":")[2].strip()
+            if stripped.startswith("Name:"):
+                current["name"] = stripped.partition(":")[2].strip()
                 continue
-            if line.startswith("Profiles:"):
+            if stripped == "Profiles:":
                 in_profiles = True
                 continue
-            if line.startswith("Active Profile:"):
-                current["active_profile"] = line.partition(":")[2].strip()
+            if stripped.startswith("Active Profile:"):
+                current["active_profile"] = stripped.partition(":")[2].strip()
                 in_profiles = False
                 continue
-            if line and not line[0].isspace():
+            if stripped and not line[0].isspace():
                 in_profiles = False
                 continue
             if in_profiles:
                 match = re.match(
                     r"\s*(.+?):\s+.*\(.*available:\s*(yes|no|unknown)\s*\)",
-                    line, re.I)
+                    stripped, re.I)
                 if match:
                     current["profiles"].append({
                         "name": match.group(1).strip(),
@@ -271,8 +340,54 @@ class DeviceController:
         return "input:" in (profile or "") and "output:" in (profile or "")
 
     @staticmethod
+    def _is_playback_profile(profile):
+        value = (profile or "").strip().lower()
+        if not value or value == "off":
+            return False
+        return not value.startswith("input:")
+
+    @staticmethod
     def _is_external_audio_name(name):
         return bool(re.search(r"(?:^|[._-])(usb|bluez|hdmi)(?:[._-]|$)", name or "", re.I))
+
+    @staticmethod
+    def _card_for_sink(cards, sink_name):
+        for card in cards:
+            card_name = card.get("name", "")
+            output_prefix = card_name.replace("_card.", "_output.", 1)
+            if output_prefix and (sink_name == output_prefix or
+                                  sink_name.startswith(output_prefix + ".")):
+                return card
+        return None
+
+    @staticmethod
+    def _audio_status_result(
+            available=False, state="unavailable", backend="", value=None, error="",
+            server_available=False, playback_ready=False, default_sink="",
+            default_sink_present=False, playback_profile_valid=None,
+            playback_devices=None, call_ready=False, default_source="",
+            physical_input_present=False, input_muted=None, output_muted=None,
+            duplex_profile_active=False, cards=None):
+        return {
+            "available": bool(available),
+            "state": state,
+            "backend": backend,
+            "value": value,
+            "error": error or "",
+            "server_available": bool(server_available),
+            "playback_ready": bool(playback_ready),
+            "default_sink": default_sink or "",
+            "default_sink_present": bool(default_sink_present),
+            "playback_profile_valid": playback_profile_valid,
+            "playback_devices": list(playback_devices or []),
+            "call_ready": bool(call_ready),
+            "default_source": default_source or "",
+            "physical_input_present": bool(physical_input_present),
+            "input_muted": input_muted,
+            "output_muted": output_muted,
+            "duplex_profile_active": bool(duplex_profile_active),
+            "cards": list(cards or []),
+        }
 
     def _pactl_call_snapshot(self):
         _info_rc, info, info_error = self._run(["pactl", "info"])
@@ -297,67 +412,315 @@ class DeviceController:
         }
 
     def audio_status(self):
-        errors = []
-        for backend in ("pactl", "amixer"):
-            if not self._can_run(backend):
-                continue
-            ok, value, error = self._read_volume(backend)
-            if ok:
-                result = {
-                    "available": True,
-                    "backend": backend,
-                    "value": value,
-                    "error": "",
-                }
-                if backend != "pactl":
-                    result.update({
-                        "call_ready": False,
-                        "default_sink": "",
-                        "default_source": "",
-                        "physical_input_present": False,
-                        "input_muted": None,
-                        "output_muted": None,
-                        "duplex_profile_active": False,
-                        "cards": [],
-                    })
-                    return result
+        if self._can_run("pactl"):
+            info_rc, info, info_error = self._run(["pactl", "info"])
+            if info_rc != 0:
+                return self._audio_status_result(
+                    state="no_server", backend="pactl", error=(
+                        info_error or info or "PulseAudio 服务没有运行。"))
 
-                snapshot = self._pactl_call_snapshot()
-                active_profiles = [card["active_profile"] for card in snapshot["cards"]]
-                source_present = snapshot["defaults"]["source"] in snapshot["physical_sources"]
-                duplex_active = any(
-                    self._is_duplex_profile(profile) for profile in active_profiles)
-                call_ready = bool(
-                    snapshot["defaults"]["sink"] and source_present and duplex_active
-                    and not snapshot["input_muted"] and not snapshot["output_muted"])
-                result.update({
-                    "call_ready": call_ready,
-                    "default_sink": snapshot["defaults"]["sink"],
-                    "default_source": snapshot["defaults"]["source"],
-                    "physical_input_present": source_present,
-                    "input_muted": snapshot["input_muted"],
-                    "output_muted": snapshot["output_muted"],
-                    "duplex_profile_active": duplex_active,
-                    "cards": snapshot["cards"],
-                })
-                if snapshot["errors"]:
-                    result["error"] = "；".join(snapshot["errors"])
-                return result
-            if error:
-                errors.append(error)
+            defaults = self._pactl_info_defaults(info)
+            default_sink = defaults["sink"]
+            if not default_sink or default_sink.lower() == "auto_null":
+                return self._audio_status_result(
+                    state="no_default_sink", backend="pactl", server_available=True,
+                    default_source=defaults["source"],
+                    error="PulseAudio 没有可用的默认输出设备。")
+
+            volume_rc, volume_output, volume_error = self._run(
+                ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+            value = parse_percent(volume_output)
+            if volume_rc != 0 or value is None:
+                return self._audio_status_result(
+                    state="no_default_sink", backend="pactl", server_available=True,
+                    default_sink=default_sink, default_source=defaults["source"],
+                    error=volume_error or volume_output or "默认输出设备不可用。")
+
+            _sinks_rc, sinks_output, _sinks_error = self._run(
+                ["pactl", "list", "short", "sinks"])
+            playback_devices = self._pactl_sink_records(sinks_output, default_sink)
+            default_device = next(
+                (item for item in playback_devices if item["id"] == default_sink), None)
+            if default_device is None:
+                if _sinks_rc == 0:
+                    return self._audio_status_result(
+                        available=True, state="no_default_sink", backend="pactl",
+                        server_available=True, default_sink=default_sink,
+                        default_source=defaults["source"], playback_devices=playback_devices,
+                        error="默认输出设备未出现在 PulseAudio 可用设备列表中。")
+                default_device = {
+                    "id": default_sink,
+                    "display_name": self._audio_device_display_name(default_sink),
+                    "kind": self._audio_kind(default_sink),
+                    "available": True,
+                    "active": True,
+                }
+                playback_devices.append(default_device)
+            if not default_device.get("available"):
+                return self._audio_status_result(
+                    available=True, state="no_default_sink", backend="pactl", value=value,
+                    server_available=True, default_sink=default_sink,
+                    default_source=defaults["source"], playback_devices=playback_devices,
+                    error="当前默认音频输出不可用，请选择内置扬声器或其他可用设备。")
+
+            _sources_rc, sources, _sources_error = self._run(
+                ["pactl", "list", "short", "sources"])
+            source_mute_rc, source_mute, _source_mute_error = self._run(
+                ["pactl", "get-source-mute", "@DEFAULT_SOURCE@"])
+            sink_mute_rc, sink_mute, _sink_mute_error = self._run(
+                ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
+            _cards_rc, cards_output, _cards_error = self._run(["pactl", "list", "cards"])
+            cards = self._pactl_cards(cards_output)
+            source_names = self._pactl_source_names(sources)
+            source_present = defaults["source"] in source_names
+            input_muted = (
+                bool(re.search(r"Mute:\s*yes", source_mute or "", re.I))
+                if source_mute_rc == 0 else None)
+            output_muted = (
+                bool(re.search(r"Mute:\s*yes", sink_mute or "", re.I))
+                if sink_mute_rc == 0 else None)
+            active_profiles = [card["active_profile"] for card in cards]
+            duplex_active = any(
+                self._is_duplex_profile(profile) for profile in active_profiles)
+            matching_card = self._card_for_sink(cards, default_sink)
+            playback_profile_valid = (
+                self._is_playback_profile(matching_card.get("active_profile"))
+                if matching_card else True)
+            if output_muted:
+                state = "muted"
+            elif not playback_profile_valid:
+                state = "invalid_profile"
+            else:
+                state = "ready"
+            playback_ready = bool(
+                default_device and playback_profile_valid and output_muted is not True)
+            call_ready = bool(
+                playback_ready and source_present and duplex_active
+                and input_muted is False and output_muted is False)
+            return self._audio_status_result(
+                available=True, state=state, backend="pactl", value=value,
+                server_available=True, playback_ready=playback_ready,
+                default_sink=default_sink, default_sink_present=True,
+                playback_profile_valid=playback_profile_valid,
+                playback_devices=playback_devices, call_ready=call_ready,
+                default_source=defaults["source"],
+                physical_input_present=source_present, input_muted=input_muted,
+                output_muted=output_muted, duplex_profile_active=duplex_active,
+                cards=cards)
+
+        if self._can_run("amixer"):
+            ok, value, error = self._read_volume("amixer")
+            if ok:
+                return self._audio_status_result(
+                    available=True, state="ready", backend="amixer", value=value,
+                    playback_ready=True, playback_profile_valid=True)
+            return self._audio_status_result(error=error)
+        return self._audio_status_result(error="未检测到音频输出设备")
+
+    @staticmethod
+    def _active_playback_device(status):
+        default_sink = (status or {}).get("default_sink", "")
+        for device in (status or {}).get("playback_devices", []):
+            if (device.get("id") == default_sink and device.get("available") and
+                    device.get("active")):
+                return device
+        return None
+
+    @staticmethod
+    def _internal_analog_output(status):
+        devices = (status or {}).get("playback_devices", [])
+        internal = [
+            device for device in devices
+            if device.get("available") and device.get("kind") == "internal"
+        ]
+        for device in internal:
+            if "analog" in (device.get("id") or "").lower():
+                return device
+        return internal[0] if internal else None
+
+    @classmethod
+    def _playback_profile_candidate(cls, card):
+        """Choose an available playback profile on the currently selected card.
+
+        This repairs a card left in ``off`` or an input-only profile without
+        changing the user's HDMI, Bluetooth, USB or internal output choice.
+        Prefer output-only profiles before duplex profiles, because a playback
+        repair must not unexpectedly take ownership of a working microphone.
+        """
+        if not isinstance(card, dict):
+            return ""
+        candidates = [
+            str(profile.get("name") or "")
+            for profile in card.get("profiles", [])
+            if isinstance(profile, dict) and profile.get("available")
+            and cls._is_playback_profile(profile.get("name"))
+        ]
+        for profile in candidates:
+            if profile.startswith("output:") and not cls._is_duplex_profile(profile):
+                return profile
+        return candidates[0] if candidates else ""
+
+    def _saved_audio_output_selection(self):
+        """Read Settings' user choice without creating or changing its file."""
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return ""
+        selected = settings.get("audio_output_selection") if isinstance(settings, dict) else ""
+        return selected.strip() if isinstance(selected, str) else ""
+
+    def audio_select_output(self, output_id):
+        """Honor an explicit user choice from the current PulseAudio sink list."""
+        status = self.audio_status()
+        if status.get("backend") != "pactl" or not status.get("server_available"):
+            return {
+                "ok": False, "selected": "", "changed": False,
+                "action": "unavailable",
+                "error": "PulseAudio 会话不可用，无法切换音频输出。",
+                "status": status,
+            }
+        device = next(
+            (item for item in status.get("playback_devices", [])
+             if item.get("id") == output_id and item.get("available")),
+            None)
+        if not device:
+            return {
+                "ok": False, "selected": "", "changed": False,
+                "action": "invalid_output",
+                "error": "所选音频输出已不可用，请刷新设备列表后重试。",
+                "status": status,
+            }
+        if device.get("active"):
+            if not status.get("playback_ready"):
+                repaired = self.audio_repair_playback()
+                repaired_status = repaired.get("status") or status
+                selected = (
+                    repaired.get("ok") and repaired_status.get("default_sink") == output_id)
+                return {
+                    "ok": bool(selected), "selected": output_id if selected else "",
+                    "changed": bool(repaired.get("changed")),
+                    "action": "repaired_active_output" if selected else (
+                        repaired.get("action") or "active_output_repair_failed"),
+                    "error": "" if selected else (
+                        repaired.get("error") or "无法恢复当前音频输出。"),
+                    "status": repaired_status,
+                }
+            return {
+                "ok": True, "selected": output_id, "changed": False,
+                "action": "already_selected", "error": "", "status": status,
+            }
+        rc, output, error = self._run(["pactl", "set-default-sink", output_id])
+        if rc != 0:
+            return {
+                "ok": False, "selected": "", "changed": False,
+                "action": "select_failed",
+                "error": error or output or "无法切换音频输出。",
+                "status": status,
+            }
+        repaired = self.audio_status()
+        selected = repaired.get("default_sink") == output_id
         return {
-            "available": False,
-            "backend": "",
-            "value": None,
-            "error": "；".join(errors) or "未检测到音频输出设备",
-            "call_ready": False,
-            "default_sink": "",
-            "default_source": "",
-            "physical_input_present": False,
-            "input_muted": None,
-            "output_muted": None,
-            "duplex_profile_active": False,
-            "cards": [],
+            "ok": selected, "selected": output_id if selected else "", "changed": selected,
+            "action": "selected" if selected else "select_not_applied",
+            "error": "" if selected else "音频输出切换后未能确认当前默认设备。",
+            "status": repaired,
+        }
+
+    def audio_repair_playback(self):
+        """Repair a missing output without replacing a valid user selection."""
+        status = self.audio_status()
+        if status.get("backend") != "pactl" or not status.get("server_available"):
+            return {
+                "ok": False, "changed": False, "action": "unavailable",
+                "error": "PulseAudio 会话不可用，无法修复声音播放。",
+                "status": status,
+            }
+        active = self._active_playback_device(status)
+        if active:
+            if status.get("playback_profile_valid") is False:
+                card = self._card_for_sink(status.get("cards", []), active["id"])
+                profile = self._playback_profile_candidate(card)
+                if not card or not profile:
+                    return {
+                        "ok": False, "changed": False, "action": "profile_unavailable",
+                        "error": "当前音频输出的播放配置无效，且没有可用的播放 profile。",
+                        "status": status,
+                    }
+                rc, output, error = self._run(
+                    ["pactl", "set-card-profile", card["name"], profile])
+                if rc != 0:
+                    return {
+                        "ok": False, "changed": False, "action": "profile_failed",
+                        "error": error or output or "无法恢复当前音频输出的播放配置。",
+                        "status": status,
+                    }
+                repaired = self.audio_status()
+                ready = bool(
+                    repaired.get("playback_ready")
+                    and repaired.get("default_sink") == active["id"])
+                return {
+                    "ok": ready, "changed": True,
+                    "action": "repaired_active_profile",
+                    "error": "" if ready else (
+                        repaired.get("error") or "播放 profile 已切换，但输出仍未就绪。"),
+                    "status": repaired,
+                }
+            if status.get("output_muted") is True:
+                rc, output, error = self._run(
+                    ["pactl", "set-sink-mute", active["id"], "0"])
+                if rc != 0:
+                    return {
+                        "ok": False, "changed": False, "action": "unmute_failed",
+                        "error": error or output or "无法解除当前音频输出静音。",
+                        "status": status,
+                    }
+                repaired = self.audio_status()
+                return {
+                    "ok": repaired.get("output_muted") is False,
+                    "changed": True, "action": "unmuted_selected_output",
+                    "error": "" if repaired.get("output_muted") is False else "无法确认输出静音状态。",
+                    "status": repaired,
+                }
+            return {
+                "ok": True, "changed": False,
+                "action": "preserved_selected_output", "error": "", "status": status,
+            }
+
+        saved_output = self._saved_audio_output_selection()
+        candidate = next(
+            (device for device in status.get("playback_devices", [])
+             if device.get("id") == saved_output and device.get("available")),
+            None)
+        action = "restored_saved_output" if candidate else "selected_internal_output"
+        if candidate is None:
+            candidate = self._internal_analog_output(status)
+        if not candidate:
+            return {
+                "ok": False, "changed": False, "action": "no_internal_output",
+                "error": "未找到可安全恢复的内置模拟音频输出。",
+                "status": status,
+            }
+        output_id = candidate["id"]
+        rc, output, error = self._run(["pactl", "set-default-sink", output_id])
+        if rc != 0:
+            return {
+                "ok": False, "changed": False, "action": "select_failed",
+                "error": error or output or "无法恢复内置音频输出。",
+                "status": status,
+            }
+        rc, output, error = self._run(["pactl", "set-sink-mute", output_id, "0"])
+        if rc != 0:
+            return {
+                "ok": False, "changed": True, "action": "unmute_failed",
+                "error": error or output or "内置音频输出已选择，但无法解除静音。",
+                "status": self.audio_status(),
+            }
+        repaired = self.audio_status()
+        selected = repaired.get("default_sink") == output_id
+        return {
+            "ok": selected, "changed": True, "action": action,
+            "error": "" if selected else "未能确认内置音频输出已经恢复。",
+            "status": repaired,
         }
 
     @classmethod
@@ -498,11 +861,24 @@ class DeviceController:
                 "error": "缺少 PulseAudio 录音工具 parecord。",
                 "status": status,
             }
-        rc, output, error = self._run([
-            "timeout", "3", "parecord", "--raw", "--format=s16le", "--rate=16000",
-            "--channels=1", "--device=@DEFAULT_SOURCE@",
-        ], timeout=6)
-        captured = len(output.encode("utf-8", errors="replace"))
+        capture_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(prefix="ming-mic-", suffix=".pcm", delete=False) as capture:
+                capture_path = capture.name
+            rc, output, error = self._run([
+                "timeout", "3", "parecord", "--raw", "--format=s16le", "--rate=16000",
+                "--channels=1", "--device=@DEFAULT_SOURCE@", capture_path,
+            ], timeout=6)
+            try:
+                captured = Path(capture_path).stat().st_size
+            except OSError:
+                captured = 0
+        finally:
+            if capture_path:
+                try:
+                    Path(capture_path).unlink()
+                except OSError:
+                    pass
         # GNU timeout ends the otherwise continuous parecord stream with 124.
         ok = rc in {0, 124} and captured >= 4096
         return {
@@ -517,8 +893,15 @@ class DeviceController:
         try:
             value = clamp_percent(value)
         except (TypeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc), "value": None, "backend": ""}
+            try:
+                requested = int(value)
+            except (TypeError, ValueError):
+                requested = None
+            return self._control_result(
+                False, requested=requested, error=str(exc), state="invalid")
         errors = []
+        write_succeeded = False
+        last_backend = ""
         commands = (
             ("pactl", ["pactl", "set-sink-volume", "@DEFAULT_SINK@", "%d%%" % value]),
             ("amixer", ["amixer", "sset", "Master", "%d%%" % value]),
@@ -530,16 +913,22 @@ class DeviceController:
             if rc != 0:
                 errors.append(error or output or "%s 设置失败" % backend)
                 continue
+            write_succeeded = True
+            last_backend = backend
             ok, effective, read_error = self._read_volume(backend)
             if ok:
-                return {"ok": True, "error": "", "value": effective, "backend": backend}
+                return self._control_result(
+                    True, requested=value, value=effective, backend=backend,
+                    available=True)
             errors.append(read_error or "%s 读回失败" % backend)
-        return {
-            "ok": False,
-            "error": "；".join(errors) or "未检测到音频输出设备",
-            "value": None,
-            "backend": "",
-        }
+        return self._control_result(
+            False,
+            requested=value,
+            error="；".join(errors) or "未检测到音频输出设备",
+            backend=last_backend if write_succeeded else "",
+            available=write_succeeded,
+            state="error" if write_succeeded else "unavailable",
+        )
 
     def _has_backlight(self):
         try:
@@ -549,29 +938,61 @@ class DeviceController:
 
     def brightness_status(self):
         if not self._can_run("brightnessctl") or not self._has_backlight():
-            return {"available": False, "value": None, "error": "unavailable"}
+            return {
+                "available": False,
+                "value": None,
+                "error": "unavailable",
+                "backend": "",
+                "state": "unavailable",
+            }
         rc, output, error = self._run(["brightnessctl", "-m"])
         value = parse_percent(output)
         if rc == 0 and value is not None:
-            return {"available": True, "value": value, "error": ""}
-        return {"available": False, "value": None, "error": error or "读取亮度失败"}
+            return {
+                "available": True,
+                "value": value,
+                "error": "",
+                "backend": "brightnessctl",
+                "state": "ready",
+            }
+        return {
+            "available": False,
+            "value": None,
+            "error": error or "读取亮度失败",
+            "backend": "brightnessctl",
+            "state": "error",
+        }
 
     def set_brightness(self, value):
         try:
             value = clamp_percent(value, minimum=1)
         except (TypeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc), "value": None}
+            try:
+                requested = int(value)
+            except (TypeError, ValueError):
+                requested = None
+            return self._control_result(
+                False, requested=requested, error=str(exc), state="invalid")
         if not self._can_run("brightnessctl") or not self._has_backlight():
-            return {"ok": False, "error": "unavailable", "value": None}
+            return self._control_result(
+                False, requested=value, error="unavailable", state="unavailable")
         rc, output, error = self._run(["brightnessctl", "set", "%d%%" % value])
         if rc != 0:
-            return {"ok": False, "error": error or output or "设置亮度失败", "value": None}
+            return self._control_result(
+                False, requested=value,
+                error=error or output or "设置亮度失败",
+                backend="brightnessctl", available=True, state="error")
         status = self.brightness_status()
-        return {
-            "ok": status["available"],
-            "error": status["error"],
-            "value": status["value"],
-        }
+        return self._control_result(
+            bool(status["available"] and status["value"] is not None),
+            requested=value,
+            value=status["value"],
+            error=status["error"],
+            backend="brightnessctl",
+            available=bool(status["available"]),
+            state=("ready" if status["available"] and status["value"] is not None
+                   else "error"),
+        )
 
     @staticmethod
     def _wireless_pci(output):
@@ -996,7 +1417,10 @@ def build_parser():
     audio_status = subparsers.add_parser("audio-status")
     audio_status.add_argument("--json", action="store_true")
     subparsers.add_parser("audio-repair-call")
+    subparsers.add_parser("audio-repair-playback")
     subparsers.add_parser("audio-test-input")
+    audio_output = subparsers.add_parser("audio-select-output")
+    audio_output.add_argument("--id", dest="output_id", required=True)
     volume = subparsers.add_parser("set-volume")
     volume.add_argument("value", type=int)
     brightness = subparsers.add_parser("set-brightness")
@@ -1033,8 +1457,12 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.audio_status()
     elif args.action == "audio-repair-call":
         result = controller.audio_repair_call()
+    elif args.action == "audio-repair-playback":
+        result = controller.audio_repair_playback()
     elif args.action == "audio-test-input":
         result = controller.audio_test_input()
+    elif args.action == "audio-select-output":
+        result = controller.audio_select_output(args.output_id)
     elif args.action == "set-volume":
         result = controller.set_volume(args.value)
     else:

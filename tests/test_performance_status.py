@@ -100,6 +100,33 @@ class PerformanceStatusTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertIsInstance(json.loads(output.getvalue()), dict)
 
+    def test_cpu_status_classifies_amd_and_zhaoxin_without_intel_assumptions(self):
+        values = {
+            "/proc/cpuinfo": (
+                "vendor_id\t:  Shanghai\n"
+                "model name\t: Zhaoxin KaiXian KX-6000\n"
+                "microcode\t: 0x123\n"
+            ),
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver": "acpi-cpufreq\n",
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor": "schedutil\n",
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors": "schedutil powersave\n",
+        }
+        service = self.module.PerformanceStatus(
+            runner=RecordingRunner(self.module),
+            read_text=lambda path: values.get(str(path)),
+            globber=lambda pattern: ["/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"]
+            if "scaling_governor" in pattern else [],
+        )
+
+        status = service.cpu_status()
+
+        self.assertEqual("zhaoxin", status["compatibility_class"])
+        self.assertEqual("Shanghai", status["vendor"])
+        self.assertEqual("Zhaoxin KaiXian KX-6000", status["model"])
+        self.assertEqual("0x123", status["microcode"])
+        self.assertEqual("acpi-cpufreq", status["driver"])
+        self.assertEqual("kernel-tlp", status["thermal_strategy"])
+
 
 class PerformanceStatusDeploymentTests(unittest.TestCase):
     def test_base_module_deploys_the_bounded_performance_status_helper(self):
