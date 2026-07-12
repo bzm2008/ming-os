@@ -32,7 +32,8 @@ __pycache__/
 # Codex/desktop inspection artifacts and one-off local helpers
 /scratch/
 /.superpowers/
-/_tmp_*.sh
+/_tmp_*
+/rebrand_to_ming.py
 /Calamares
 
 # OS files
