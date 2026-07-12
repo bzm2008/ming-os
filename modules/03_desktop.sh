@@ -436,7 +436,7 @@ fi
 # 应用设置
 xfconf-query -c xsettings -p /Xft/DPI -s "${DPI}" 2>/dev/null || true
 xfconf-query -c xsettings -p /Gtk/CursorThemeSize -s "${CURSOR_SIZE}" 2>/dev/null || true
-xfconf-query -c xsettings -p /Gtk/FontName -s "WenQuanYi Micro Hei ${FONT_SIZE}" 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/FontName -s "Noto Sans CJK SC ${FONT_SIZE}" 2>/dev/null || true
 xfconf-query -c xfce4-panel -p /panels/panel-0/size -s "${PANEL_SIZE}" 2>/dev/null || true
 
 # Plank Dock 图标尺寸（写入 dconf；Plank 优先读 dconf 再回退 settings 文件）
@@ -1031,7 +1031,7 @@ MINGGTKCSS
 [Settings]
 gtk-theme-name=Ming-Glass
 gtk-icon-theme-name=Papirus
-gtk-font-name=WenQuanYi Micro Hei 11
+gtk-font-name=Noto Sans CJK SC 11
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-toolbar-style=GTK_TOOLBAR_ICONS
@@ -1047,7 +1047,7 @@ GTKSETTINGS
     cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
 gtk-theme-name="Ming-Glass"
 gtk-icon-theme-name="Papirus"
-gtk-font-name="WenQuanYi Micro Hei 11"
+gtk-font-name="Noto Sans CJK SC 11"
 gtk-cursor-theme-name="Adwaita"
 gtk-cursor-theme-size=24
 gtk-toolbar-style=GTK_TOOLBAR_ICONS
@@ -3686,7 +3686,7 @@ MINGHELPER
 
     cat > "/home/${MING_USER}/.config/xfce4/terminal/terminalrc" << 'TERMINALRC'
 [Configuration]
-FontName=DejaVu Sans Mono 11
+    FontName=Noto Sans Mono 11
 MiscAlwaysShowTabs=FALSE
 MiscBell=FALSE
 MiscBordersDefault=TRUE
@@ -3958,26 +3958,20 @@ ensure_wps_office() {
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.2 Picom 配置 - 液态玻璃效果 (mainline picom 10.x 兼容)
-# 说明：Debian 仓库的 picom 主线版不支持 jonaburg/FT-Labs
-#       分支的 animations 块；强行写入会导致配置解析失败、合成器拒绝启动，
-#       这正是历史版本“美化没生效”的元凶之一。这里只用主线支持的特性：
-#       dual_kawase 模糊 + 圆角 + 柔光阴影 + 渐入渐出，配合 Plank 的 dock
-#       缩放动画，实现 macOS 风格的丝滑观感。
+# Ming OS 26.3.2 Picom 配置 - 老显卡/虚拟机稳定路径
+# 普通应用窗口保持不透明；透明度只留给 Dock 与通知等独立界面。
 backend = "glx";
-vsync = true;
+vsync = false;
 unredir-if-possible = false;
 glx-no-stencil = true;
 glx-no-rebind-pixmap = true;
 use-damage = true;
 xrender-sync-fence = true;
 
-# ---- 液态玻璃模糊 (dual_kawase 为主线 picom 支持) ----
-blur-method = "dual_kawase";
-blur-strength = 7;
-blur-background = true;
-blur-background-frame = true;
-blur-background-fixed = true;
+# ---- 低成本合成：关闭模糊，避免老显卡与 VirtualBox 黑边/闪烁 ----
+blur-background = false;
+blur-background-frame = false;
+blur-background-fixed = false;
 blur-background-exclude = [
   "class_g = 'Microsoft-edge'",
   "class_g = 'Chromium'",
@@ -4027,13 +4021,13 @@ fade-delta = 5;
 # ---- wintypes ----
 wintypes:
 {
-  tooltip = { fade = true; shadow = true; opacity = 0.85; focus = true; blur = true; };
-  dock = { shadow = false; blur = true; };
+  tooltip = { fade = true; shadow = true; opacity = 0.90; focus = true; };
+  dock = { shadow = false; opacity = 0.92; };
   dnd = { shadow = false; };
-  dropdown_menu = { shadow = true; blur = true; };
-  popup_menu = { shadow = true; blur = true; };
-  utility = { shadow = true; blur = true; };
-  notification = { shadow = true; blur = true; };
+  dropdown_menu = { shadow = true; opacity = 1.0; };
+  popup_menu = { shadow = true; opacity = 1.0; };
+  utility = { shadow = true; opacity = 1.0; };
+  notification = { shadow = true; opacity = 0.94; };
 };
 
 detect-rounded-corners = true;
@@ -4049,9 +4043,9 @@ backend = "xrender";
 vsync = true;
 unredir-if-possible = false;
 use-damage = true;
-shadow = true;
-shadow-radius = 6;
-shadow-opacity = 0.20;
+shadow = false;
+shadow-radius = 0;
+shadow-opacity = 0;
 shadow-offset-x = -4;
 shadow-offset-y = -4;
 shadow-exclude = [
@@ -4065,6 +4059,11 @@ fade-out-step = 0.06;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
+wintypes:
+{
+  dock = { shadow = false; opacity = 0.92; };
+  notification = { shadow = false; opacity = 0.94; };
+};
 PICOMFALLBACK
 
     # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
@@ -5707,7 +5706,7 @@ configure_xfce_settings() {
 	    <property name="theme" type="string" value="Ming-Glass"/>
     <property name="tile_on_move" type="bool" value="true"/>
     <property name="title_alignment" type="string" value="center"/>
-    <property name="title_font" type="string" value="WenQuanYi Micro Hei Bold 11"/>
+    <property name="title_font" type="string" value="Noto Sans CJK SC Bold 11"/>
     <property name="title_horizontal_offset" type="int" value="0"/>
     <property name="titleless_maximize" type="bool" value="false"/>
     <property name="title_shadow_active" type="string" value="false"/>
@@ -5890,7 +5889,7 @@ DESKTOPCFG
   <property name="Gtk" type="empty">
     <property name="CanChangeAccels" type="bool" value="false"/>
     <property name="ColorPalette" type="string" value="black:white:gray50:red:purple:blue:light blue:green:yellow:orange:lavender:brown:gold1:gold2:gold3:gold4:gold5:gold6:gold7:gold8:gold9:gold10:gold11:gold12:gold13:gold14:gold15:gold16:gold17:gold18:gold19:gold20"/>
-    <property name="FontName" type="string" value="WenQuanYi Micro Hei 11"/>
+    <property name="FontName" type="string" value="Noto Sans CJK SC 11"/>
     <property name="IconSizes" type="string" value=""/>
     <property name="KeyThemeName" type="string" value=""/>
     <property name="ToolbarStyle" type="string" value="icons"/>

@@ -113,12 +113,12 @@ install_xfce_desktop() {
     mkdir -p /etc/xdg/picom
     cat > /etc/xdg/picom/picom.conf << PICOMDEFAULT
 backend = "glx";
-vsync = true;
-unredir-if-possible = true;
+vsync = false;
+unredir-if-possible = false;
 
 shadow = true;
 shadow-radius = 8;
-shadow-opacity = 0.5;
+shadow-opacity = 0.24;
 shadow-offset-x = -8;
 shadow-offset-y = -8;
 shadow-exclude = [
@@ -137,28 +137,27 @@ fade-in-step = 3.0e-2;
 fade-out-step = 3.0e-2;
 fade-delta = 4;
 
-inactive-opacity = 0.92;
-frame-opacity = 0.95;
+active-opacity = 1.0;
+inactive-opacity = 1.0;
+frame-opacity = 1.0;
 inactive-opacity-override = false;
 
-blur-background = true;
-blur-background-frame = true;
-blur-background-fixed = true;
+blur-background = false;
+blur-background-frame = false;
+blur-background-fixed = false;
 blur-background-exclude = [
     "window_type = 'dock'",
     "window_type = 'desktop'",
     "_GTK_FRAME_EXTENTS@:c"
 ];
-blur-method = "dual_kawase";
-blur-strength = 5;
-
 wintypes:
 {
     tooltip = { fade = true; shadow = true; opacity = 0.9; focus = true; };
-    dock = { shadow = false; };
+    dock = { shadow = false; opacity = 0.92; };
     dnd = { shadow = false; };
-    popup_menu = { opacity = 0.95; };
-    dropdown_menu = { opacity = 0.95; };
+    popup_menu = { opacity = 1.0; };
+    dropdown_menu = { opacity = 1.0; };
+    notification = { shadow = true; opacity = 0.94; };
 };
 
 detect-client-leader = true;
@@ -175,17 +174,24 @@ backend = "xrender";
 vsync = false;
 unredir-if-possible = false;
 shadow = false;
+blur-background = false;
 fading = true;
 fade-in-step = 5.0e-2;
 fade-out-step = 5.0e-2;
 fade-delta = 4;
-inactive-opacity = 0.95;
-frame-opacity = 0.98;
+active-opacity = 1.0;
+inactive-opacity = 1.0;
+frame-opacity = 1.0;
 inactive-opacity-override = false;
 use-damage = true;
 log-level = "warn";
 detect-client-leader = true;
 detect-transient = true;
+wintypes:
+{
+    dock = { shadow = false; opacity = 0.92; };
+    notification = { shadow = false; opacity = 0.94; };
+};
 PICOMFALLBACK
 
     # Picom 启动包装器（自动探测 GLX 可用性，低内存/老显卡回退）
@@ -382,7 +388,7 @@ AUTOLOGIN
 [greeter]
 theme-name = Ming-Glass
 icon-theme-name = Papirus
-font-name = WenQuanYi Micro Hei 11
+font-name = Noto Sans CJK SC 11
 background = /usr/share/backgrounds/ming-os/default.png
 user-background = false
 clock-format = %H:%M
@@ -571,12 +577,63 @@ install_vbox_guest_and_display() {
 
 install_fonts() {
     apt install -y --no-install-recommends \
+        fontconfig \
+        fonts-noto-core \
         fonts-wqy-microhei \
         fonts-wqy-zenhei \
         fonts-noto-cjk \
+        fonts-noto-mono \
         fonts-noto-cjk-extra || return 1
 
     apt install -y --no-install-recommends fonts-liberation fonts-croscore || true
+
+    # Keep one deterministic CJK family for GTK/Qt/Fcitx and leave WenQuanYi
+    # only as a last-resort fallback for legacy applications.  This also
+    # enables antialiasing and light hinting on old LCD panels.
+    mkdir -p /etc/fonts/conf.d
+    cat > /etc/fonts/conf.d/99-ming-os-fonts.conf << 'MINGFONTS'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <match target="pattern">
+    <test name="family" compare="eq" qual="any"><string>sans</string></test>
+    <edit name="family" mode="prepend" binding="strong">
+      <string>Noto Sans CJK SC</string>
+      <string>Noto Sans</string>
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+  <match target="pattern">
+    <test name="family" compare="eq" qual="any"><string>sans-serif</string></test>
+    <edit name="family" mode="prepend" binding="strong">
+      <string>Noto Sans CJK SC</string>
+      <string>Noto Sans</string>
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+  <match target="pattern">
+    <test name="family" compare="eq" qual="any"><string>system-ui</string></test>
+    <edit name="family" mode="prepend" binding="strong">
+      <string>Noto Sans CJK SC</string>
+      <string>Noto Sans</string>
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+  <match target="pattern">
+    <test name="family" compare="eq" qual="any"><string>monospace</string></test>
+    <edit name="family" mode="prepend" binding="strong">
+      <string>Noto Sans Mono</string>
+      <string>DejaVu Sans Mono</string>
+    </edit>
+  </match>
+  <match target="font">
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+    <edit name="rgba" mode="assign"><const>rgb</const></edit>
+  </match>
+</fontconfig>
+MINGFONTS
 
     fc-cache -f -v || return 1
 }
@@ -608,6 +665,7 @@ EDGEREPO
 set -e
 homepage=/usr/share/ming-os/homepage/index.html
 edge_args=()
+edge_hardware_video=false
 
 edge_gpu_is_unverified() {
     local probe_cache probe_tmp probe_json
@@ -628,12 +686,30 @@ edge_gpu_is_unverified() {
         fi
     fi
     probe_json="$(cat "${probe_cache}" 2>/dev/null || true)"
-    grep -Fq '"edge_hardware_video": true' <<< "${probe_json}" && return 1
+    if grep -Fq '"edge_hardware_video": true' <<< "${probe_json}" \
+        && grep -Fq '"driver": "i915"' <<< "${probe_json}" \
+        && grep -Fq '"xorg_backend": "modesetting"' <<< "${probe_json}" \
+        && grep -Fq '"render_access": true' <<< "${probe_json}" \
+        && grep -Fq '"h264": "available"' <<< "${probe_json}" \
+        && grep -Fq '"vp9": "available"' <<< "${probe_json}"; then
+        edge_hardware_video=true
+        return 1
+    fi
     return 0
 }
 
 if edge_gpu_is_unverified; then
-    edge_args+=(--ozone-platform=x11 --disable-gpu)
+    # VirtualBox, no render node, safe-graphics mode, or failed VA-API all
+    # use a deterministic software path to avoid black borders and hangs.
+    edge_args+=(--ozone-platform=x11 --disable-gpu --disable-gpu-compositing)
+else
+    # Only enable Chromium's VA-API path after ming-hardware-status has
+    # confirmed i915 + render access and H.264/VP9 support on a real host.
+    edge_args+=(
+        --enable-accelerated-video-decode
+        --enable-features=VaapiVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo
+        --use-gl=egl
+    )
 fi
 if [[ "$#" -eq 0 ]] && [[ -r "${homepage}" ]]; then
     set -- "file://${homepage}"
@@ -1853,9 +1929,8 @@ APPRECAUTOSTART
 
     cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'
 [Unit]
-Description=Ming OS App Store Readiness
-After=network-online.target NetworkManager.service
-Wants=network-online.target
+Description=Ming OS App Store Readiness (delayed, non-blocking)
+After=graphical.target
 
 [Service]
 Type=oneshot
@@ -1867,7 +1942,22 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 SVCUNIT
 
-    systemctl enable ming-appstore-ready.service 2>/dev/null || true
+    cat > /etc/systemd/system/ming-appstore-ready.timer << 'SPARKTIMER'
+[Unit]
+Description=Ming OS delayed Spark Store readiness
+After=graphical.target
+
+[Timer]
+OnBootSec=90s
+AccuracySec=30s
+Unit=ming-appstore-ready.service
+
+[Install]
+WantedBy=timers.target
+SPARKTIMER
+
+    systemctl disable --now ming-appstore-ready.service 2>/dev/null || true
+    systemctl enable ming-appstore-ready.timer 2>/dev/null || true
 }
 
 # ======================== 附加实用工具 ========================

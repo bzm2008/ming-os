@@ -50,8 +50,15 @@ class GraphicsStatusTests(unittest.TestCase):
                 "",
             ),
         })
-        status = self.hardware.HardwareStatus(
-            runner=runner, render_nodes=lambda: [pathlib.Path("/dev/dri/renderD128")]).graphics_status()
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner,
+                render_nodes=lambda: [render_node],
+                render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+            ).graphics_status()
 
         self.assertEqual("normal", status["state"])
         self.assertTrue(status["edge_hardware_video"])
@@ -108,6 +115,83 @@ class GraphicsStatusTests(unittest.TestCase):
         self.assertTrue(status["legacy_intel_config"])
         self.assertEqual("attention", status["state"])
         self.assertIn("Xorg", status["recommendation"])
+        self.assertFalse(status["edge_hardware_video"])
+
+    def test_edge_hardware_video_requires_known_render_access(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "00:02.0 VGA compatible controller: Intel Corporation HD Graphics 620\n"
+                "\tKernel driver in use: i915",
+                "",
+            ),
+            ("lsmod",): (0, "i915 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa Intel HD Graphics 620", ""),
+            ("vainfo", "--display", "drm"): (0, "VAProfileH264High\nVAProfileVP9Profile0", ""),
+        })
+        # A raced/disappeared render node has unknown access, not verified access.
+        status = self.hardware.HardwareStatus(
+            runner=runner,
+            render_nodes=lambda: [pathlib.Path("/tmp/ming-missing-render-node")],
+            xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+        ).graphics_status()
+        self.assertIsNone(status["render_access"])
+        self.assertFalse(status["edge_hardware_video"])
+
+    def test_edge_hardware_video_requires_modesetting_backend(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "00:02.0 VGA compatible controller: Intel Corporation HD Graphics 620\n"
+                "\tKernel driver in use: i915",
+                "",
+            ),
+            ("lsmod",): (0, "i915 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa Intel HD Graphics 620", ""),
+            ("vainfo", "--display", "drm"): (0, "VAProfileH264High\nVAProfileVP9Profile0", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner,
+                render_nodes=lambda: [render_node],
+                render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "intel"',
+            ).graphics_status()
+        self.assertEqual("legacy-intel-ddx", status["xorg_backend"])
+        self.assertFalse(status["edge_hardware_video"])
+
+    def test_edge_hardware_video_requires_both_h264_and_vp9(self):
+        runner = FakeRunner({
+            ("lspci", "-nnk"): (
+                0,
+                "00:02.0 VGA compatible controller: Intel Corporation HD Graphics 620\n"
+                "\tKernel driver in use: i915",
+                "",
+            ),
+            ("lsmod",): (0, "i915 123 1", ""),
+            ("systemd-detect-virt", "--quiet"): (1, "", ""),
+            ("cat", "/proc/cmdline"): (0, "quiet", ""),
+            ("glxinfo", "-B"): (0, "OpenGL renderer string: Mesa Intel HD Graphics 620", ""),
+            ("vainfo", "--display", "drm"): (0, "VAProfileH264High", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            render_node = pathlib.Path(directory) / "renderD128"
+            render_node.touch()
+            status = self.hardware.HardwareStatus(
+                runner=runner,
+                render_nodes=lambda: [render_node],
+                render_access=lambda _path: True,
+                xorg_log_reader=lambda: '(II) LoadModule: "modesetting"',
+            ).graphics_status()
+        self.assertEqual("available", status["codecs"]["h264"])
+        self.assertEqual("unsupported", status["codecs"]["vp9"])
+        self.assertFalse(status["edge_hardware_video"])
 
     def test_render_permission_and_vaapi_error_are_reported_without_claiming_edge_ready(self):
         runner = FakeRunner({

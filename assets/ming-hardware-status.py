@@ -145,10 +145,17 @@ class HardwareStatus:
             # HD 620/Gen9 lacks AV1 hardware decode; this is a capability, not a failure.
             "av1": self._codec_state(vainfo, [r"AV1"]),
         }
-        va_ok = va_rc == 0 and (codecs["h264"] == "available" or codecs["vp9"] == "available")
+        # Chromium hardware-video flags are safe only when the complete
+        # display path is verified: i915 owns the GPU, Xorg is using the
+        # modesetting DDX, the render node is accessible, and both codecs
+        # needed by the supported browser workload are exposed by VA-API.
+        va_ok = va_rc == 0 and (
+            codecs["h264"] == "available" and codecs["vp9"] == "available"
+        )
         vaapi_error = "" if va_rc == 0 else (va_error or vainfo or "vainfo returned an error")
         edge_hardware_video = bool(
-            driver == "i915" and render_node and render_access is not False and va_ok
+            driver == "i915" and xorg_backend == "modesetting" and render_node
+            and render_access is True and va_ok
             and not virtual and not safe_graphics and not software)
 
         if virtual:

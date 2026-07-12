@@ -688,9 +688,20 @@ validate_iso_grub_config() {
         log_error "ISO GRUB must use console input for old firmware keyboard compatibility"
         exit 1
     fi
-    for marker in 'Surface Pro' 'MacBook' 'i915.modeset=0' 'acpi_osi=Darwin'; do
+    for marker in 'Surface Pro' 'MacBook' 'acpi_osi=Darwin'; do
         if ! grep -Fq "${marker}" "${grub_cfg}"; then
             log_error "ISO GRUB missing priority hardware marker: ${marker}"
+            exit 1
+        fi
+    done
+    # The first installer entry is the default and must leave i915/KMS and
+    # PCI power management untouched.  Only the explicitly labelled Safe
+    # Graphics entry may carry nomodeset for emergency software rendering.
+    local default_entry
+    default_entry=$(awk '/^menuentry /{entry=$0; body=""; in_entry=1; next} in_entry{body=body $0 "\n"} in_entry && /^}/{if (entry !~ /Safe Graphics/ && entry !~ /安全显卡模式/ && body ~ /linux \/live\/vmlinuz/) {print body; exit}}' "${grub_cfg}")
+    for forbidden in nomodeset i915.modeset=0 pcie_aspm=off pci=nomsi acpi_osi=Linux; do
+        if grep -Eq "(^|[[:space:]])${forbidden}([[:space:]]|$)" <<< "${default_entry}"; then
+            log_error "default installer GRUB entry must not force ${forbidden}"
             exit 1
         fi
     done
@@ -739,12 +750,35 @@ validate_required_desktop_runtime() {
     fi
 
     local command package
-    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send xprop nm-online; do
+    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send xprop nm-online fc-match; do
         if ! chroot_exec /bin/sh -c "command -v '${command}' >/dev/null 2>&1"; then
             log_error "required desktop command is missing: ${command}"
             return 1
         fi
     done
+    if ! chroot_exec fc-match monospace 2>/dev/null \
+        | grep -Eq 'Noto Sans Mono|Noto Mono|DejaVu Sans Mono|Liberation Mono'; then
+        log_error "fontconfig monospace fallback does not resolve to a monospace family"
+        return 1
+    fi
+    local cjk_font_match candidate_font_match
+    cjk_font_match="$(chroot_exec fc-match 'sans:lang=zh' 2>/dev/null || true)"
+    if ! grep -Eiq 'Noto Sans CJK SC|NotoSansCJK' <<< "${cjk_font_match}"; then
+        log_error "fontconfig Chinese sans fallback does not resolve to Noto Sans CJK SC"
+        return 1
+    fi
+    candidate_font_match="$(chroot_exec fc-match 'Noto Sans CJK SC' 2>/dev/null || true)"
+    if ! grep -Eiq 'Noto Sans CJK SC|NotoSansCJK' <<< "${candidate_font_match}"; then
+        log_error "fontconfig cannot resolve the Fcitx candidate family Noto Sans CJK SC"
+        return 1
+    fi
+    if ! chroot_exec grep -Fxq "Font=Noto Sans CJK SC 15" \
+        "/home/${MING_USER}/.config/fcitx5/conf/classicui.conf" \
+        || ! chroot_exec grep -Fxq "MenuFont=Noto Sans CJK SC 16" \
+        "/home/${MING_USER}/.config/fcitx5/conf/classicui.conf"; then
+        log_error "Fcitx candidate UI is not configured with Noto Sans CJK SC"
+        return 1
+    fi
     if [[ ! -x "${CHROOT_DIR}/usr/sbin/rfkill" ]]; then
         log_error "required desktop command is missing: /usr/sbin/rfkill"
         return 1
@@ -754,7 +788,8 @@ validate_required_desktop_runtime() {
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
-        lxpolkit libnotify-bin x11-utils intel-media-va-driver xserver-xorg-video-modesetting \
+        lxpolkit libnotify-bin x11-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
+        i965-va-driver intel-media-va-driver vainfo xserver-xorg-video-modesetting \
         fcitx5-rime librime-data rime-data-luna-pinyin; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "required desktop runtime package is not installed: ${package}"
@@ -808,6 +843,16 @@ validate_required_desktop_runtime() {
     if ! chroot_exec /usr/local/sbin/ming-time-sync status --json \
         | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if value.get("state") in {"synchronized", "waiting", "error"} else 1)'; then
         log_error "Ming time-sync JSON runtime check failed"
+        return 1
+    fi
+    if ! chroot_exec /usr/local/sbin/ming-performance-status status --json \
+        | python3 -c 'import json,sys; value=json.load(sys.stdin); required={"schema_version","ok","boot","memory","cpu","storage","temperatures","services"}; raise SystemExit(0 if value.get("schema_version") == 1 and value.get("ok") is True and required <= set(value) else 1)'; then
+        log_error "Ming performance-status JSON runtime check failed"
+        return 1
+    fi
+    if ! chroot_exec /usr/local/sbin/ming-service-profile status --json \
+        | python3 -c 'import json,sys; value=json.load(sys.stdin); required={"schema_version","modem","serial_getty","optional_services"}; raise SystemExit(0 if value.get("schema_version") == 1 and required <= set(value) else 1)'; then
+        log_error "Ming service-profile JSON runtime check failed"
         return 1
     fi
     # No graphical session is expected while the rootfs gate runs.  The helper
@@ -983,6 +1028,12 @@ def validate_systemd_unit(relative_path):
     text = require_file(relative_path)
     if not text:
         return
+    if "[Timer]" in text:
+        if "[Unit]" not in text or "[Timer]" not in text:
+            errors.append(f"{relative_path} is not a complete systemd timer unit")
+        if not re.search(r"^(OnBootSec|OnCalendar|OnUnitActiveSec)=.+$", text, flags=re.MULTILINE):
+            errors.append(f"{relative_path} has no timer schedule directive")
+        return
     if "[Unit]" not in text or "[Service]" not in text:
         errors.append(f"{relative_path} is not a complete systemd service unit")
     if not re.search(r"^ExecStart=.+$", text, flags=re.MULTILINE):
@@ -1151,6 +1202,56 @@ for helper in [
 ]:
     require_file(helper)
 
+service_profile = require_file("usr/local/sbin/ming-service-profile", "status --json")
+for marker in [
+    "MING_KEEP_MODEMMANAGER", "/dev/cdc-wdm", "timeout --foreground 2s nmcli",
+    "timeout --foreground 2s lspci", "timeout --foreground 2s lsusb",
+    "systemctl enable --now ModemManager.service",
+    "systemctl disable --now ModemManager.service",
+    "systemctl enable cups.socket", "cups-browsed.service", "avahi-daemon.service",
+    "saned.service saned.socket", "serial-getty@ttyS0.service", "pgrep",
+]:
+    if marker not in service_profile:
+        errors.append(f"ming-service-profile missing service-policy marker {marker}")
+power_profile = require_file("usr/local/sbin/ming-power-profile", "has_battery")
+for marker in [
+    "has_battery", "chassis_type", "laptop-detect", "portable", "tlp.service", "thermald.service", "power-profiles-daemon.service",
+    "systemctl enable --now tlp.service", "systemctl disable --now tlp.service",
+]:
+    if marker not in power_profile:
+        errors.append(f"ming-power-profile missing power-policy marker {marker}")
+sysctl_helper = require_file("usr/local/sbin/ming-sysctl-apply", "/proc/sys/")
+for marker in ["unsupported sysctl", "sysctl -q"]:
+    if marker not in sysctl_helper:
+        errors.append(f"ming-sysctl-apply missing safe-key marker {marker}")
+for relative_path in [
+    "usr/local/sbin/ming-service-profile",
+    "usr/local/sbin/ming-power-profile",
+    "usr/local/sbin/ming-sysctl-apply",
+]:
+    validate_generated_executable(relative_path, "bash")
+for relative_path in [
+    "etc/systemd/system/ming-service-profile.service",
+    "etc/systemd/system/ming-power-profile.service",
+    "etc/systemd/system/ming-appstore-ready.timer",
+]:
+    validate_systemd_unit(relative_path)
+for relative_path, marker in [
+    ("etc/systemd/system/ming-rfkill.service", "After=NetworkManager.service"),
+    ("etc/systemd/system/ming-device-tune.service", "After=local-fs.target"),
+]:
+    unit = require_file(relative_path, marker)
+    if relative_path.endswith("ming-rfkill.service") and "After=multi-user.target" in unit:
+        errors.append("ming-rfkill.service must not order after multi-user.target")
+    if relative_path.endswith("ming-device-tune.service") and "systemd-udev-settle.service" in unit:
+        errors.append("ming-device-tune.service must not wait for udev settle")
+if "USB_BLACKLIST_BTUSB=1" in service_profile or "USB_BLACKLIST_BTUSB=1" in power_profile:
+    errors.append("TLP must not blacklist btusb")
+if "options iwlwifi power_save=0" in (root / "etc/modprobe.d/ming-old-hardware.conf").read_text(encoding="utf-8", errors="replace") if (root / "etc/modprobe.d/ming-old-hardware.conf").is_file() else False:
+    errors.append("iwlwifi power_save=0 must not be forced globally")
+if "kernel.sched_latency_ns" in (root / "etc/sysctl.d/99-ming-performance.conf").read_text(encoding="utf-8", errors="replace") if (root / "etc/sysctl.d/99-ming-performance.conf").is_file() else False:
+    errors.append("legacy kernel.sched_* sysctls must not be shipped")
+
 time_sync = require_file("usr/local/sbin/ming-time-sync", "status --json")
 for marker in [
     "flock", "nm-online -q -t 12", "timedatectl set-ntp true",
@@ -1164,6 +1265,14 @@ time_dispatcher = require_file(
 for marker in ["up|dhcp4-change|dhcp6-change|connectivity-change", "nohup", "&"]:
     if marker not in time_dispatcher:
         errors.append(f"time-sync dispatcher missing event marker {marker}")
+performance_status = require_file("usr/local/sbin/ming-performance-status", "status --json")
+for marker in [
+    "systemd-analyze", "/proc/meminfo", "scaling_governor",
+    "discard_max_bytes", "fstrim.timer", "sensors", "ModemManager",
+    "bluetooth.service", "pgrep", "vainfo", "probe_timeout_seconds",
+]:
+    if marker not in performance_status:
+        errors.append(f"ming-performance-status missing diagnostic marker {marker}")
 for relative_path in [
     "usr/local/sbin/ming-time-sync",
     "etc/NetworkManager/dispatcher.d/90-ming-time-sync",
@@ -1177,6 +1286,7 @@ for relative_path in [
 for relative_path in [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
+    "usr/local/sbin/ming-performance-status",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
 ]:
@@ -1500,7 +1610,7 @@ for marker in [
 require_file("etc/systemd/system/ming-hardware-preload.service", "Before=NetworkManager.service bluetooth.service display-manager.service")
 require_file("etc/modules-load.d/ming-hardware.conf", "loop")
 
-old_hw_modprobe = require_file("etc/modprobe.d/ming-old-hardware.conf", "iwlwifi power_save=0")
+old_hw_modprobe = require_file("etc/modprobe.d/ming-old-hardware.conf", "bt_coex_active=1")
 for marker in ["psmouse synaptics_intertouch=0", "snd_hda_intel power_save=0"]:
     if marker not in old_hw_modprobe:
         errors.append(f"old hardware modprobe policy missing {marker}")
@@ -1573,13 +1683,21 @@ for marker in [
         errors.append(f"grub defaults missing {marker}")
 
 hard_disk_grub = require_file("etc/grub.d/09_ming_os", "menuentry 'Ming OS'")
+official_grub = root / "etc/grub.d/10_linux"
+if not official_grub.is_file():
+    errors.append("Debian official /etc/grub.d/10_linux generator is missing")
+elif not (official_grub.stat().st_mode & 0o111):
+    errors.append("Debian official /etc/grub.d/10_linux generator must remain executable for kernel fallback")
 if "ming.installer=1" in hard_disk_grub or "boot=live" in hard_disk_grub or "安装 Ming OS" in hard_disk_grub:
     errors.append("installed hard-disk GRUB entry must not boot the Live installer")
 if " splash" in hard_disk_grub:
     errors.append("installed hard-disk GRUB entry must not use splash on old hardware")
-for marker in ["Ming OS (Safe Graphics)", "Ming OS (Old Intel / ThinkPad / MacBook)", "nomodeset", "i915.modeset=0"]:
+for marker in ["Ming OS (Safe Graphics)", "Ming OS (Old Intel / ThinkPad / MacBook)", "nomodeset"]:
     if marker not in hard_disk_grub:
         errors.append(f"installed hard-disk GRUB entry missing compatibility marker {marker}")
+normal_grub_match = re.search(r"menuentry 'Ming OS'.*?\n}\n", hard_disk_grub, re.S)
+if normal_grub_match and re.search(r"(?:^|\s)(?:nomodeset|i915\.modeset=0|pcie_aspm=off|pci=nomsi|acpi_osi=Linux)(?:\s|$)", normal_grub_match.group(0)):
+    errors.append("installed hard-disk default GRUB entry must use i915/KMS without forced safe-mode flags")
 
 lightdm_autologin = require_file("etc/lightdm/lightdm.conf.d/60-ming-autologin.conf", "autologin-session=ming-installer")
 for marker in ["user-session=ming-installer", "greeter-session=lightdm-gtk-greeter", "allow-guest=false"]:
@@ -1644,8 +1762,18 @@ for marker in ['"${target}/usr/lib/ming-os/sfdisk.real"', '"${target}/usr/sbin/s
 installer_session = require_file("usr/local/bin/ming-installer-session", "xfwm4 --replace")
 if "wmctrl -x -a calamares.calamares" not in installer_session:
     errors.append("installer session must focus Calamares through xfwm4/wmctrl")
-if not any((root / "usr/share/fonts").glob("**/NotoSansCJK*.ttc")) and not any((root / "usr/share/fonts").glob("**/wqy-*.ttc")):
-    errors.append("missing Chinese CJK fonts required by Qt and Calamares")
+for font_marker in [
+    "usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+]:
+    if not (root / font_marker).exists():
+        errors.append(f"missing required Noto font asset: {font_marker}")
+font_policy = require_file("etc/fonts/conf.d/99-ming-os-fonts.conf", "Noto Sans CJK SC")
+require_path("usr/bin/fc-match")
+for marker in ["antialias", "hinting", "hintslight", "WenQuanYi Micro Hei", "monospace", "Noto Sans Mono"]:
+    if marker not in font_policy:
+        errors.append(f"fontconfig policy missing {marker}")
 
 desktop_names = [
     "ming-network-repair.desktop",
@@ -1747,12 +1875,12 @@ menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphic
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} 老 AMD 显卡 / Radeon 兼容模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset radeon.modeset=0 amdgpu.modeset=0 pcie_aspm=off iommu=off
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
     initrd /live/initrd
 }
 
@@ -1941,7 +2069,7 @@ LABEL oldpc
   MENU LABEL Ming OS Old PC Compatibility
   KERNEL /live/vmlinuz
   INITRD /live/initrd
-  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
 ISOLINUXCFG
         log_info "isolinux direct Linux fallback written for Rufus BIOS mode"
     else

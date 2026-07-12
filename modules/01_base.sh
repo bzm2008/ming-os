@@ -264,8 +264,10 @@ BLACKLIST
 
     mkdir -p /etc/modprobe.d
     cat > /etc/modprobe.d/ming-old-hardware.conf << 'OLDHWMOD'
-# Make Broadcom/Intel/Realtek era laptops less fragile on first boot.
-options iwlwifi power_save=0 bt_coex_active=1 11n_disable=8
+# Make Broadcom/Intel/Realtek era laptops less fragile on first boot.  Wi-Fi
+# power saving remains under NetworkManager/TLP control so it cannot disable a
+# working radio or make suspend/resume unreliable.
+options iwlwifi bt_coex_active=1 11n_disable=8
 options iwlmvm power_scheme=1
 options psmouse synaptics_intertouch=0
 options snd_hda_intel power_save=0
@@ -697,8 +699,11 @@ install_hardware_support_packages() {
         apt install -y --no-install-recommends "${pkg}" || true
     done
 
+    # Printing is socket activated.  Discovery/scanning daemons remain
+    # installed for the Settings repair flow, but never join the boot path.
     systemctl enable cups.socket 2>/dev/null || true
-    systemctl enable avahi-daemon 2>/dev/null || true
+    systemctl disable --now cups.service cups-browsed.service \
+        avahi-daemon.service saned.service saned.socket 2>/dev/null || true
 }
 
 configure_installer_password_policy() {
@@ -871,7 +876,9 @@ wifi.scan-rand-mac-address=no
 NMCFG
 
     systemctl enable NetworkManager 2>/dev/null || true
-    systemctl enable ModemManager 2>/dev/null || true
+    # ModemManager is installed for WWAN/USB modem compatibility but is
+    # enabled by ming-service-profile only when hardware or explicit opt-in is
+    # detected.  Ordinary Wi-Fi/ethernet machines pay no modem startup cost.
 
     cat > /etc/systemd/system/ming-regdom.service << 'REGDOMSVC'
 [Unit]
@@ -902,7 +909,8 @@ RFKILLFIX
     cat > /etc/systemd/system/ming-rfkill.service << RFKILLSVC
 [Unit]
 Description=Ming OS RF Kill Unblock
-After=multi-user.target
+After=NetworkManager.service
+Before=graphical.target
 
 [Service]
 Type=oneshot
@@ -955,6 +963,153 @@ BTCFG
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 HOSTSCFG
+}
+
+deploy_service_profile() {
+    cat > /etc/default/ming-os << 'MINGOSDEFAULT'
+# Ming OS runtime profile switches.  Hardware-aware defaults keep optional
+# daemons out of the graphical boot path; set values to 1 for diagnostics.
+MING_KEEP_MODEMMANAGER=0
+MING_DEBUG_SERIAL=0
+MINGOSDEFAULT
+
+    cat > /usr/local/sbin/ming-service-profile << 'MINGSERVICEPROFILE'
+#!/usr/bin/env bash
+# Apply hardware-aware system service policy without waiting for the network.
+set -uo pipefail
+
+LOG=/var/log/ming-service-profile.log
+CONFIG=/etc/default/ming-os
+MODE=${1:-apply}
+
+log() {
+    mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${LOG}" 2>/dev/null || true
+}
+
+load_config() {
+    local explicit_keep="${MING_KEEP_MODEMMANAGER-}"
+    local explicit_debug="${MING_DEBUG_SERIAL-}"
+    MING_KEEP_MODEMMANAGER=0
+    MING_DEBUG_SERIAL=0
+    if [[ -r "${CONFIG}" ]]; then
+        # shellcheck disable=SC1091
+        . "${CONFIG}"
+    fi
+    [[ -n "${explicit_keep}" ]] && MING_KEEP_MODEMMANAGER="${explicit_keep}"
+    [[ -n "${explicit_debug}" ]] && MING_DEBUG_SERIAL="${explicit_debug}"
+}
+
+wwan_present() {
+    local path
+    shopt -s nullglob
+    for path in /dev/cdc-wdm* /sys/class/net/wwan* /sys/class/net/*/wwan /sys/class/net/*/device/wwan*; do
+        [[ -e "${path}" ]] && { shopt -u nullglob; return 0; }
+    done
+    shopt -u nullglob
+    if command -v nmcli >/dev/null 2>&1 \
+        && timeout --foreground 2s nmcli -t -f TYPE device status 2>/dev/null \
+            | grep -Eiq 'gsm|wwan'; then
+        return 0
+    fi
+    if command -v lspci >/dev/null 2>&1 \
+        && timeout --foreground 2s lspci -nn 2>/dev/null \
+            | grep -Eiq 'wwan|mobile broadband|cellular|modem'; then
+        return 0
+    fi
+    if command -v lsusb >/dev/null 2>&1 \
+        && timeout --foreground 2s lsusb 2>/dev/null \
+            | grep -Eiq 'wwan|mobile broadband|cellular|modem'; then
+        return 0
+    fi
+    return 1
+}
+
+bool_json() { [[ "$1" == true ]] && printf true || printf false; }
+
+apply_optional_services() {
+    local modem=false
+    if [[ "${MING_KEEP_MODEMMANAGER}" == 1 ]] || wwan_present; then
+        modem=true
+        systemctl enable --now ModemManager.service 2>/dev/null || log "ModemManager enable/start failed"
+    else
+        systemctl disable --now ModemManager.service 2>/dev/null || true
+    fi
+
+    # CUPS stays available through its socket; browsing, mDNS and scanner
+    # daemons are explicitly on-demand so they cannot slow graphical login.
+    systemctl enable cups.socket 2>/dev/null || true
+    systemctl disable --now cups.service cups-browsed.service \
+        avahi-daemon.service saned.service saned.socket 2>/dev/null || true
+
+    if [[ "${MING_DEBUG_SERIAL}" == 1 ]]; then
+        systemctl enable --now serial-getty@ttyS0.service 2>/dev/null || \
+            log "serial debug getty requested but unavailable"
+    else
+        systemctl disable --now serial-getty@ttyS0.service 2>/dev/null || true
+    fi
+
+    # Keep one owner for each graphical component.  Recovery is delegated to
+    # the existing watchdogs; this helper only records duplicate processes.
+    local user=${MING_SESSION_USER:-${SUDO_USER:-user}}
+    local process count
+    for process in xfce4-panel picom plank; do
+        count=$(pgrep -u "${user}" -x "${process}" 2>/dev/null | wc -l | tr -d ' ')
+        [[ "${count:-0}" -le 1 ]] || log "duplicate ${process} processes detected: ${count}"
+    done
+    printf '%s\n' "${modem}"
+}
+
+status_json() {
+    load_config
+    local modem_present=false modem_active=false serial_enabled=false
+    wwan_present && modem_present=true
+    systemctl is-active --quiet ModemManager.service 2>/dev/null && modem_active=true
+    systemctl is-enabled --quiet serial-getty@ttyS0.service 2>/dev/null && serial_enabled=true
+    jq -n \
+        --argjson modem_present "$(bool_json "${modem_present}")" \
+        --argjson modem_active "$(bool_json "${modem_active}")" \
+        --argjson keep_modem "$(bool_json "${MING_KEEP_MODEMMANAGER}")" \
+        --argjson serial_enabled "$(bool_json "${serial_enabled}")" \
+        '{schema_version:1, modem:{hardware_present:$modem_present,active:$modem_active,explicit_opt_in:$keep_modem}, serial_getty:{enabled:$serial_enabled}, optional_services:{cups_socket:true, cups:false, avahi:false, saned:false}}'
+}
+
+load_config
+case "${MODE}" in
+    apply)
+        apply_optional_services >/dev/null
+        ;;
+    status)
+        [[ "${2:-}" == --json ]] && status_json || status_json
+        ;;
+    *)
+        echo "Usage: ming-service-profile apply | status --json" >&2
+        exit 2
+        ;;
+esac
+MINGSERVICEPROFILE
+    chmod 0755 /usr/local/sbin/ming-service-profile
+
+    cat > /etc/systemd/system/ming-service-profile.service << 'MINGSERVICEPROFILESVC'
+[Unit]
+Description=Ming OS hardware-aware optional service profile
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-service-profile apply
+TimeoutStartSec=15s
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+MINGSERVICEPROFILESVC
+    systemctl disable --now ModemManager.service 2>/dev/null || true
+    systemctl enable ming-service-profile.service 2>/dev/null || true
+    # A chroot may not have a running systemd manager.  The best-effort apply
+    # still leaves the on-disk unit and is re-applied on the real first boot.
+    /usr/local/sbin/ming-service-profile apply >/dev/null 2>&1 || true
 }
 
 deploy_time_sync() {
@@ -1095,6 +1250,31 @@ esac
 exit 0
 MINGTIMEDISPATCH
     chmod 0755 /etc/NetworkManager/dispatcher.d/90-ming-time-sync
+}
+
+deploy_performance_status() {
+    # Keep the performance baseline helper in assets so the same implementation
+    # is used by the rootfs gate and by an installed system.  It is read-only and
+    # all external probes are bounded, so missing hardware never blocks boot.
+    local asset="/tmp/ming-build/assets/ming-performance-status.py"
+    local target="/usr/local/sbin/ming-performance-status"
+    if [[ ! -s "${asset}" ]]; then
+        echo "[ERROR] missing performance status asset: ${asset}" >&2
+        return 1
+    fi
+    install -m 0755 "${asset}" "${target}" || return 1
+    if ! python3 - "${target}" <<'PY'
+import ast
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+PY
+    then
+        echo "[ERROR] ming-performance-status failed Python syntax validation" >&2
+        return 1
+    fi
 }
 
 deploy_hardware_diagnostics() {
@@ -2051,7 +2231,7 @@ menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-li
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
     initrd /initrd.img
 }
 EOF
@@ -2073,7 +2253,13 @@ fi
 
 for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
     if [[ -f "${target}/etc/grub.d/${noisy_grub}" ]]; then
-        chmod 0644 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+        if [[ "${noisy_grub}" == "10_linux" ]]; then
+            # Keep Debian's official kernel generator executable so GRUB
+            # retains every installed kernel/initramfs as a real fallback.
+            chmod 0755 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+        else
+            chmod 0644 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+        fi
     fi
 done
 
@@ -2789,6 +2975,43 @@ optimize_system() {
     # 安装 zram 工具
     apt install -y --no-install-recommends zram-tools
 
+    # Apply sysctls defensively: kernels differ across Debian point releases
+    # and old tuning keys must never turn a missing knob into a boot failure.
+    cat > /usr/local/sbin/ming-sysctl-apply << 'MINGSYSCTLAPPLY'
+#!/usr/bin/env bash
+set -uo pipefail
+
+LOG=/var/log/ming-sysctl.log
+mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${LOG}" 2>/dev/null || true; }
+
+apply_file() {
+    local file="${1:-}" line key value proc_key
+    [[ -r "${file}" ]] || { log "missing sysctl file: ${file}"; return 0; }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%%#*}"
+        line="${line#${line%%[![:space:]]*}}"
+        line="${line%${line##*[![:space:]]}}"
+        [[ -n "${line}" && "${line}" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key//[[:space:]]/}"
+        proc_key="/proc/sys/${key//./\/}"
+        if [[ ! -e "${proc_key}" ]]; then
+            log "unsupported sysctl ${key}; skipped"
+            continue
+        fi
+        if ! sysctl -q "${key}=${value}" 2>>"${LOG}"; then
+            log "failed sysctl ${key}"
+        fi
+    done < "${file}"
+}
+
+for file in "$@"; do apply_file "${file}"; done
+MINGSYSCTLAPPLY
+    chmod 0755 /usr/local/sbin/ming-sysctl-apply
+
     # 配置 zram（内存压缩，提升低内存设备性能）
     cat > /etc/default/zramswap << ZRAMCFG
 # Ming OS zram 配置
@@ -2843,7 +3066,7 @@ vm.dirty_background_ratio=${dirty_background_ratio}
 vm.page-cluster=0
 SYSCONF
 
-sysctl -q -p /etc/sysctl.d/99-ming-memory-runtime.conf 2>/dev/null || true
+/usr/local/sbin/ming-sysctl-apply /etc/sysctl.d/99-ming-memory-runtime.conf
 
 mkdir -p /run/ming-os
 cat > /run/ming-os/memory-profile << PROFILE
@@ -2879,10 +3102,6 @@ MEMSVC
 # ---- 内存：老机器优先减少换页 ----
 vm.swappiness=10
 vm.vfs_cache_pressure=60
-vm.dirty_ratio=15
-vm.dirty_background_ratio=5
-vm.dirty_expire_centisecs=3000
-vm.dirty_writeback_centisecs=1500
 vm.page-cluster=0
 vm.watermark_boost_factor=0
 vm.watermark_scale_factor=125
@@ -2890,9 +3109,6 @@ vm.watermark_scale_factor=125
 vm.oom_kill_allocating_task=0
 vm.overcommit_memory=0
 vm.overcommit_ratio=50
-# 最小空闲内存保留（单位 kB），防止老机器频繁触发回收
-vm.min_free_kbytes=65536
-
 # ---- 网络：BBR + 快速建连（弱网友好）----
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -2917,12 +3133,6 @@ fs.nr_open=1048576
 fs.inotify.max_user_watches=524288
 fs.inotify.max_user_instances=512
 
-# ---- 内核调度：桌面响应优先（低延迟）----
-# 降低调度延迟让桌面交互更跟手，适合老 CPU
-kernel.sched_latency_ns=6000000
-kernel.sched_min_granularity_ns=750000
-kernel.sched_wakeup_granularity_ns=1500000
-kernel.sched_migration_cost_ns=500000
 # 禁用 NMI watchdog 减少 CPU 中断开销
 kernel.nmi_watchdog=0
 kernel.randomize_va_space=2
@@ -2949,14 +3159,17 @@ THPCONF
     # CPU 频率调节：老机器 ondemand，优先节能且响应快
     # cpufrequtils 不在 Live squashfs，走 udev 在启动时写 cpufreq governor
     cat > /etc/udev/rules.d/61-ming-cpufreq.rules << 'CPUFREQRULE'
-# Ming OS：CPU 频率调节策略。老机器（<= 4核 <= Sandy Bridge）用 ondemand，
-# 新机器用 schedutil（内核调度驱动）。两者均比 powersave 响应更快。
+# Ming OS：CPU 频率调节策略。由 ming-device-tune 读取
+# scaling_available_governors 后选择 schedutil/ondemand，绝不写入不存在的键。
 ACTION=="add", SUBSYSTEM=="cpu", KERNEL=="cpu[0-9]*", \
-  RUN+="/bin/sh -c 'echo schedutil > /sys/devices/system/cpu/cpu%n/cpufreq/scaling_governor 2>/dev/null || echo ondemand > /sys/devices/system/cpu/cpu%n/cpufreq/scaling_governor 2>/dev/null || true'"
+  RUN+="/usr/local/bin/ming-device-tune --governor-only"
 CPUFREQRULE
 
-    # 应用 sysctl 配置
-    sysctl --system
+    # 应用 sysctl 配置 only through the bounded, key-aware helper.  This
+    # avoids failing on Debian kernels that no longer expose legacy knobs.
+    /usr/local/sbin/ming-sysctl-apply \
+        /etc/sysctl.d/99-ming-performance.conf \
+        /etc/sysctl.d/99-ming-memory-runtime.conf || true
 
     # 限制日志大小，防止 /var/log 膨胀
     mkdir -p /etc/systemd/journald.conf.d
@@ -2975,8 +3188,14 @@ JOURNALCFG
         fi
     done
 
-    # 启用串行控制台（用于虚拟机调试）
-    systemctl enable serial-getty@ttyS0.service 2>/dev/null || true
+    # Serial getty is opt-in for hardware debugging; ordinary boots keep the
+    # ttyS0 service disabled and avoid an unnecessary login process.
+    if [[ "${MING_DEBUG_SERIAL:-0}" == 1 ]]; then
+        serial_unit="serial-getty@ttyS0.service"
+        systemctl enable --now "${serial_unit}" 2>/dev/null || true
+    else
+        systemctl disable --now serial-getty@ttyS0.service 2>/dev/null || true
+    fi
 
     # 启用 zram 与低内存保护
     systemctl enable ming-memory-profile.service 2>/dev/null || true
@@ -3001,6 +3220,29 @@ IOSCHEDRULE
     cat > /usr/local/bin/ming-device-tune << 'DEVICETUNE'
 #!/usr/bin/env bash
 set -uo pipefail
+
+set_governors() {
+    local gov_path available selected
+    for gov_path in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [[ -w "${gov_path}" ]] || continue
+        available="$(cat "$(dirname "${gov_path}")/scaling_available_governors" 2>/dev/null || true)"
+        selected=""
+        if grep -qw schedutil <<< "${available}"; then
+            selected=schedutil
+        elif grep -qw ondemand <<< "${available}"; then
+            selected=ondemand
+        elif grep -qw powersave <<< "${available}"; then
+            selected=powersave
+        fi
+        [[ -n "${selected}" ]] || continue
+        echo "${selected}" > "${gov_path}" 2>/dev/null || true
+    done
+}
+
+if [[ "${1:-}" == "--governor-only" ]]; then
+    set_governors
+    exit 0
+fi
 
 log_dir="/run/ming-os"
 mkdir -p "${log_dir}"
@@ -3055,21 +3297,16 @@ vm.dirty_background_ratio=2
 vm.dirty_expire_centisecs=1000
 vm.dirty_writeback_centisecs=300
 HDDSYSCTL
-    sysctl -q -p /etc/sysctl.d/98-ming-hdd-runtime.conf 2>/dev/null || true
+    /usr/local/sbin/ming-sysctl-apply /etc/sysctl.d/98-ming-hdd-runtime.conf || true
 else
     rm -f /etc/sysctl.d/98-ming-hdd-runtime.conf
 fi
 
-cpu_governor="schedutil"
-if grep -qi "hypervisor" /proc/cpuinfo 2>/dev/null; then
-    cpu_governor="ondemand"
+cpu_governor="managed-by-tlp"
+if ! systemctl is-active --quiet tlp.service 2>/dev/null; then
+    set_governors
+    cpu_governor="kernel-supported"
 fi
-for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    [[ -w "${gov}" ]] || continue
-    if grep -qw "${cpu_governor}" "$(dirname "${gov}")/scaling_available_governors" 2>/dev/null; then
-        echo "${cpu_governor}" > "${gov}" 2>/dev/null || true
-    fi
-done
 
 {
     echo "has_hdd=${has_hdd}"
@@ -3082,8 +3319,7 @@ DEVICETUNE
     cat > /etc/systemd/system/ming-device-tune.service << DEVICETUNESVC
 [Unit]
 Description=Ming OS disk, CPU, and memory runtime tuning
-After=local-fs.target systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+After=local-fs.target
 
 [Service]
 Type=oneshot
@@ -3115,8 +3351,85 @@ FSTRIMTIMER
     # 不默认启用 preload：它会用空闲内存预读程序，对 2GB + 微信场景得不偿失。
 
     # ======================== 笔记本优化 ========================
-    # 配置 TLP 电源管理
-    systemctl enable tlp 2>/dev/null || true
+    # TLP owns battery/AC policy, while thermald owns Intel temperature
+    # protection.  The runtime helper enables them only when the hardware
+    # warrants it, avoiding duplicate policy daemons on desktops/VMs.
+    cat > /usr/local/sbin/ming-power-profile << 'MINGPOWERPROFILE'
+#!/usr/bin/env bash
+set -uo pipefail
+
+LOG=/var/log/ming-power-profile.log
+mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${LOG}" 2>/dev/null || true; }
+
+has_battery=false
+for battery in /sys/class/power_supply/BAT*; do
+    [[ -e "${battery}" ]] && has_battery=true && break
+done
+is_laptop=false
+for chassis_file in /sys/class/dmi/id/chassis_type /sys/devices/virtual/dmi/id/chassis_type; do
+    if [[ -r "${chassis_file}" ]] && grep -Eq '^(8|9|10|11|14|30|31|32)$' "${chassis_file}"; then
+        is_laptop=true
+        break
+    fi
+done
+if [[ "${is_laptop}" != true ]] && command -v laptop-detect >/dev/null 2>&1 \
+    && timeout --foreground 2s laptop-detect >/dev/null 2>&1; then
+    is_laptop=true
+fi
+if [[ "${is_laptop}" != true ]] \
+    && grep -Eiq 'laptop|notebook|portable|tablet' \
+        /sys/class/dmi/id/product_name /sys/class/dmi/id/chassis_type 2>/dev/null; then
+    is_laptop=true
+fi
+portable=false
+if [[ "${has_battery}" == true || "${is_laptop}" == true ]]; then
+    portable=true
+fi
+is_intel=false
+grep -Eiq 'GenuineIntel|Intel' /proc/cpuinfo /sys/class/dmi/id/sys_vendor 2>/dev/null && is_intel=true
+
+if [[ "${portable}" == true ]]; then
+    systemctl enable --now tlp.service 2>/dev/null || log "TLP unavailable on portable system"
+else
+    systemctl disable --now tlp.service 2>/dev/null || true
+fi
+
+if [[ "${is_intel}" == true ]]; then
+    systemctl enable --now thermald.service 2>/dev/null || log "thermald unavailable on Intel system"
+else
+    systemctl disable --now thermald.service 2>/dev/null || true
+fi
+
+# Prevent another policy daemon from racing TLP/thermald when present.
+systemctl disable --now power-profiles-daemon.service tuned.service 2>/dev/null || true
+{
+    echo "battery=${has_battery}"
+    echo "laptop=${is_laptop}"
+    echo "portable=${portable}"
+    echo "intel=${is_intel}"
+    echo "tlp=$(systemctl is-active tlp.service 2>/dev/null || echo inactive)"
+    echo "thermald=$(systemctl is-active thermald.service 2>/dev/null || echo inactive)"
+} > /run/ming-os/power-profile 2>/dev/null || true
+MINGPOWERPROFILE
+    chmod 0755 /usr/local/sbin/ming-power-profile
+
+    cat > /etc/systemd/system/ming-power-profile.service << 'MINGPOWERPROFILESVC'
+[Unit]
+Description=Ming OS hardware-aware TLP and thermald ownership
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-power-profile
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+MINGPOWERPROFILESVC
+    systemctl disable --now tlp.service 2>/dev/null || true
+    systemctl enable ming-power-profile.service 2>/dev/null || true
+
     mkdir -p /etc/tlp.d
     cat > /etc/tlp.d/ming-laptop.conf << TLPCONF
 # Ming OS 笔记本电池优化
@@ -3132,7 +3445,6 @@ DISK_APM_LEVEL_ON_BAT="128"
 WIFI_PWR_ON_AC=off
 WIFI_PWR_ON_BAT=on
 USB_AUTOSUSPEND=1
-USB_BLACKLIST_BTUSB=1
 USB_BLACKLIST_PRINTER=1
 RUNTIME_PM_ON_AC=on
 RUNTIME_PM_ON_BAT=auto
@@ -3248,32 +3560,17 @@ configure_boot_speed() {
     # of the display stack; remove legacy delayed overrides on resumed builds.
     rm -f /etc/systemd/system/bluetooth.service.d/delay.conf
 
-    # 打印：改为 socket 按需激活，开机不自启
-    systemctl disable cups 2>/dev/null || true
-    systemctl disable cups-browsed 2>/dev/null || true
-
-    # Avahi mDNS：延迟到桌面就绪后
-    mkdir -p /etc/systemd/system/avahi-daemon.service.d
-    cat > /etc/systemd/system/avahi-daemon.service.d/delay.conf << 'EOF'
-[Unit]
-After=graphical.target
-EOF
+    # Printing/discovery/scanning stay socket/on-demand only.  The profile is
+    # idempotent and is also applied on the first real boot.
+    systemctl enable cups.socket 2>/dev/null || true
+    systemctl disable --now cups.service cups-browsed.service \
+        avahi-daemon.service saned.service saned.socket 2>/dev/null || true
 
     # Tracker 索引：全部屏蔽，用户搜索时不需要实时索引
     for svc in tracker-miner-fs-3.service tracker-extract-3.service tracker-writeback-3.service \
                tracker-miner-fs.service tracker-extract.service; do
         systemctl mask "${svc}" 2>/dev/null || true
     done
-
-    # ModemManager：保留启用以兼容 4G 模块/随身 Wi-Fi，但延迟启动避免拖慢普通机器。
-    mkdir -p /etc/systemd/system/ModemManager.service.d
-    cat > /etc/systemd/system/ModemManager.service.d/delay.conf << 'EOF'
-[Unit]
-After=graphical.target NetworkManager.service
-[Service]
-ExecStartPre=/bin/sleep 10
-EOF
-    systemctl enable ModemManager 2>/dev/null || true
 
     # 应用商店后台刷新：延迟 90s，不阻塞第一屏
     for svc in spark-store-refresh.service; do
@@ -3300,6 +3597,9 @@ EOF
     # ming-time-sync helper retries after actual network events instead.
     systemctl disable --now NetworkManager-wait-online.service 2>/dev/null || true
     rm -rf /etc/systemd/system/NetworkManager-wait-online.service.d
+
+    systemctl enable ming-service-profile.service 2>/dev/null || true
+    /usr/local/sbin/ming-service-profile apply >/dev/null 2>&1 || true
 
     echo "开机加速配置完成"
 }
@@ -3489,7 +3789,7 @@ menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu -
 }
 menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset i915.modeset=0 nouveau.modeset=0 radeon.modeset=0 pcie_aspm=off acpi_osi=Linux pci=nomsi
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
     initrd /initrd.img
 }
 EOF
@@ -3521,8 +3821,10 @@ main() {
     configure_keyboard
     configure_users
     configure_network
-    deploy_time_sync
-    deploy_hardware_diagnostics
+    deploy_service_profile || return 1
+    deploy_time_sync || return 1
+    deploy_performance_status || return 1
+    deploy_hardware_diagnostics || return 1
     configure_os_identity
     configure_installer_identity
     configure_installed_system_static_defaults
