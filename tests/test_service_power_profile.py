@@ -33,6 +33,23 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertIn("Before=display-manager.service", unit)
         self.assertNotIn("network-online.target", unit)
 
+    def test_bluetooth_enablement_happens_after_verified_bluez_runtime(self):
+        desktop = BASE  # base must keep its own post-package BlueZ guard
+        apps = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+        xfce = apps.split("install_xfce_desktop() {", 1)[1].split(
+            "\n# ======================== VirtualBox", 1
+        )[0]
+        main = apps.split("main() {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("systemctl enable bluetooth", xfce)
+        self.assertIn("enable_bluetooth_after_runtime", apps)
+        self.assertIn("dpkg-query -W -f='${db:Status-Abbrev}' bluez", apps)
+        self.assertLess(
+            main.index("run_required_step install_required_desktop_runtime"),
+            main.index("run_required_step enable_bluetooth_after_runtime"),
+        )
+        self.assertIn("systemctl enable bluetooth.service", apps)
+        self.assertIn("bluez", desktop)
+
     def test_optional_daemons_are_on_demand_and_not_a_graphical_boot_gate(self):
         for marker in (
             "systemctl disable --now cups.service cups-browsed.service",
@@ -122,6 +139,35 @@ class PowerProfileContracts(unittest.TestCase):
         ):
             self.assertIn(marker, BASE)
 
+    def test_tlp_autosuspend_excludes_active_radio_audio_and_input_devices(self):
+        tlp = BASE.split("cat > /etc/tlp.d/ming-laptop.conf << TLPCONF", 1)[1].split(
+            "TLPCONF", 1
+        )[0]
+        for marker in (
+            "USB_AUTOSUSPEND=0",
+            "USB_EXCLUDE_BTUSB=1",
+            "USB_EXCLUDE_AUDIO=1",
+            "USB_EXCLUDE_WWAN=1",
+        ):
+            self.assertIn(marker, tlp)
+        self.assertNotIn("USB_EXCLUDE_WLAN", tlp)
+        self.assertNotIn("USB_EXCLUDE_HID", tlp)
+        self.assertNotIn("USB_BLACKLIST_BTUSB", tlp)
+
+    def test_seamless_storage_is_not_a_default_boot_or_udev_mutator(self):
+        storage = BASE.split("configure_seamless_storage() {", 1)[1].split(
+            "# ======================== Live / 已安装系统共同兜底", 1
+        )[0]
+        self.assertIn("EUID", storage)
+        self.assertNotIn("systemctl enable ming-storage.service", storage)
+        self.assertIn("systemctl disable --now ming-storage.service", storage)
+        self.assertIn("multi-user.target.wants/ming-storage.service", storage)
+        self.assertIn("udev/rules.d/99-ming-storage.rules", storage)
+        self.assertNotIn("cat > /etc/udev/rules.d/99-ming-storage.rules", storage)
+        self.assertNotIn("ACTION==\"add\", SUBSYSTEM==\"block\"", storage)
+        self.assertNotIn("Before=lightdm.service display-manager.service", storage)
+        self.assertIn("explicit authorization", storage)
+
     def test_sysctl_application_ignores_unsupported_keys_and_avoids_legacy_tuning(self):
         for marker in (
             "ming-sysctl-apply",
@@ -152,6 +198,9 @@ class PowerProfileContracts(unittest.TestCase):
             "ming-device-tune.service",
             "ming-rfkill.service",
             "After=NetworkManager.service",
+            "USB_EXCLUDE_BTUSB=1",
+            "ming-storage.service",
+            "99-ming-storage.rules",
             "USB_BLACKLIST_BTUSB=1",
             "kernel.sched_latency_ns",
         ):

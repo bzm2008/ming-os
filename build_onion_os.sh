@@ -1245,12 +1245,30 @@ for relative_path, marker in [
         errors.append("ming-rfkill.service must not order after multi-user.target")
     if relative_path.endswith("ming-device-tune.service") and "systemd-udev-settle.service" in unit:
         errors.append("ming-device-tune.service must not wait for udev settle")
-if "USB_BLACKLIST_BTUSB=1" in service_profile or "USB_BLACKLIST_BTUSB=1" in power_profile:
-    errors.append("TLP must not blacklist btusb")
 if "options iwlwifi power_save=0" in (root / "etc/modprobe.d/ming-old-hardware.conf").read_text(encoding="utf-8", errors="replace") if (root / "etc/modprobe.d/ming-old-hardware.conf").is_file() else False:
     errors.append("iwlwifi power_save=0 must not be forced globally")
 if "kernel.sched_latency_ns" in (root / "etc/sysctl.d/99-ming-performance.conf").read_text(encoding="utf-8", errors="replace") if (root / "etc/sysctl.d/99-ming-performance.conf").is_file() else False:
     errors.append("legacy kernel.sched_* sysctls must not be shipped")
+tlp_conf = require_file("etc/tlp.d/ming-laptop.conf", "USB_AUTOSUSPEND=0")
+if "USB_BLACKLIST_BTUSB=1" in tlp_conf:
+    errors.append("TLP must not blacklist btusb")
+for marker in [
+    "USB_EXCLUDE_BTUSB=1", "USB_EXCLUDE_AUDIO=1", "USB_EXCLUDE_WWAN=1",
+    "USB_AUTOSUSPEND=0",
+]:
+    if marker not in tlp_conf:
+        errors.append(f"TLP USB safety exclusion missing {marker}")
+storage_unit_path = root / "etc/systemd/system/ming-storage.service"
+if storage_unit_path.is_file():
+    storage_unit = storage_unit_path.read_text(encoding="utf-8", errors="replace")
+    if "Before=lightdm.service display-manager.service" in storage_unit:
+        errors.append("ming-storage.service must not gate graphical boot")
+    if "WantedBy=multi-user.target" in storage_unit:
+        errors.append("ming-storage.service must remain on-demand")
+if (root / "etc/systemd/system/multi-user.target.wants/ming-storage.service").exists():
+    errors.append("ming-storage.service must not be enabled by default")
+if (root / "etc/udev/rules.d/99-ming-storage.rules").exists():
+    errors.append("automatic storage udev trigger must not be shipped")
 
 time_sync = require_file("usr/local/sbin/ming-time-sync", "status --json")
 for marker in [

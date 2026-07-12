@@ -3444,8 +3444,14 @@ DISK_APM_LEVEL_ON_AC="254"
 DISK_APM_LEVEL_ON_BAT="128"
 WIFI_PWR_ON_AC=off
 WIFI_PWR_ON_BAT=on
-USB_AUTOSUSPEND=1
-USB_BLACKLIST_PRINTER=1
+USB_AUTOSUSPEND=0
+# Old laptops often expose Wi-Fi/HID/audio through USB bridges whose autosuspend
+# support is incomplete.  Keep autosuspend disabled globally and retain the
+# supported exclusions as documentation/defense if a user enables it later.
+USB_EXCLUDE_BTUSB=1
+USB_EXCLUDE_AUDIO=1
+USB_EXCLUDE_WWAN=1
+USB_EXCLUDE_PRINTER=1
 RUNTIME_PM_ON_AC=on
 RUNTIME_PM_ON_BAT=auto
 TLPCONF
@@ -3606,18 +3612,29 @@ EOF
 
 # ======================== 多盘合一 · 无感知存储 ========================
 # 设计意图：
-#   "数字难民" 用户不理解多分区/多硬盘概念。本功能在开机及插入新盘时自动把
-#   检测到的额外数据盘（非系统盘、非可移动 U 盘）通过 fstab(UUID) 持久挂载，
-#   再用 mount --bind 把其空间无缝映射到 /home/user 下的高频目录（Downloads
-#   等），用户感知不到"第二块盘"。只读取/挂载已格式化分区，绝不自动格式化或
-#   删除数据；首次绑定时用 rsync 把原目录内容迁移到数据盘，保证文件不丢。
+#   保留一个需要明确授权的手动存储管理器，供用户在确认数据盘后运行。它不会
+#   参与启动链、udev 热插拔或登录前挂载，也不会在没有用户确认时修改 fstab。
+#   只读取/挂载已格式化分区，绝不自动格式化或删除数据；首次绑定时用 rsync
+#   把原目录内容迁移到数据盘，保证文件不丢。
 configure_seamless_storage() {
     echo "配置无感知存储（多盘合一）..."
+
+    # Upgrades from 26.3.1 may leave the old boot-enabled service and udev
+    # trigger behind.  Retire both before installing the authorized on-demand
+    # helper so a resumed build cannot silently mutate disks during boot.
+    systemctl disable --now ming-storage.service 2>/dev/null || true
+    rm -f /etc/systemd/system/multi-user.target.wants/ming-storage.service \
+        /etc/udev/rules.d/99-ming-storage.rules
 
     cat > /usr/local/sbin/ming-storage-manager << 'STORAGEMGR'
 #!/usr/bin/env bash
 # Ming OS 无感知存储管理器：自动挂载额外数据盘并绑定到 Home 高频目录。
 set -uo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "explicit authorization required: run via pkexec /usr/local/sbin/ming-storage-manager" >&2
+    exit 3
+fi
 
 MING_USER_NAME="user"
 [[ -d /home/user ]] || MING_USER_NAME="$(awk -F: '$3>=1000 && $3<60000 && $1!="nobody"{print $1; exit}' /etc/passwd)"
@@ -3721,28 +3738,18 @@ exit 0
 STORAGEMGR2
     chmod 0755 /usr/local/sbin/ming-storage-manager
 
-    # systemd 服务：开机后、用户登录前完成绑定
+    # 保留手动 systemd 单元，只有显式执行 start 时才会运行。
     cat > /etc/systemd/system/ming-storage.service << 'STORAGESVC'
 [Unit]
-Description=Ming OS seamless multi-disk storage (auto-mount + bind to Home)
+Description=Ming OS authorized seamless storage action (on demand only)
 After=local-fs.target
-Before=lightdm.service display-manager.service
 ConditionPathExists=/usr/local/sbin/ming-storage-manager
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/ming-storage-manager
 RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
 STORAGESVC
-    systemctl enable ming-storage.service 2>/dev/null || true
-
-    # udev 热插拔：插入新盘后触发一次
-    cat > /etc/udev/rules.d/99-ming-storage.rules << 'STORAGEUDEV'
-ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]|nvme[0-9]n[0-9]p[0-9]|mmcblk[0-9]p[0-9]", ENV{ID_FS_TYPE}!="", RUN+="/bin/systemctl start --no-block ming-storage.service"
-STORAGEUDEV
 
     echo "无感知存储配置完成"
 }

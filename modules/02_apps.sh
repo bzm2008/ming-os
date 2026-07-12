@@ -549,8 +549,6 @@ PAMAUTOLOGIN
         sed -i '/pam_gnome_keyring\.so/d' "${pamfile}" 2>/dev/null || true
     done
 
-    # 蓝牙：安装 bluez/blueman 后启用守护进程（延迟启动已在 01_base 配好）
-    systemctl enable bluetooth 2>/dev/null || true
 }
 
 # ======================== VirtualBox / 虚拟机显示 ========================
@@ -1978,6 +1976,18 @@ install_required_desktop_runtime() {
     done
 }
 
+enable_bluetooth_after_runtime() {
+    # Do not ask systemd to enable bluetooth until the mandatory runtime
+    # validation has confirmed that BlueZ is actually installed.  `systemctl
+    # enable` is idempotent and may be unavailable inside the build chroot.
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' bluez 2>/dev/null \
+        | grep -qx 'ii '; then
+        echo "[ERROR] BlueZ runtime is missing; refusing to enable bluetooth.service" >&2
+        return 1
+    fi
+    systemctl enable bluetooth.service 2>/dev/null || true
+}
+
 install_utilities() {
     apt install -y -o Dpkg::Options::=--force-confold --no-install-recommends \
         pavucontrol \
@@ -2056,6 +2066,7 @@ main() {
     run_required_step install_xfce_desktop || return 1
     run_required_step install_fonts || return 1
     run_required_step install_required_desktop_runtime || return 1
+    run_required_step enable_bluetooth_after_runtime || return 1
     run_required_step install_fcitx5 || return 1
     run_required_step deploy_eyecare || return 1
 
