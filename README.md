@@ -105,9 +105,9 @@ Expected public OTA response:
   "ready": true,
   "status": "ready",
   "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download",
-  "checksum": "<sha256 after build>",
+  "checksum": "09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c",
   "checksum_type": "sha256",
-  "size": "<bytes after build>"
+  "size": 1984790528
 }
 ```
 
@@ -130,7 +130,7 @@ Get-FileHash ming-os-26.3.2-home-amd64.iso -Algorithm SHA256
 The merged file must match the SHA256 generated after the final build.
 
 ```text
-<sha256 after build>
+09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c
 ```
 
 ## Verification Status

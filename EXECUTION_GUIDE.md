@@ -9,8 +9,8 @@ output/ming-os-26.3.2-home-amd64.iso
 ```
 
 ```text
-Size:   TBD after final build
-SHA256: TBD after final build
+Size:   1984790528 bytes
+SHA256: 09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c
 Label:  MING_OS_2632
 Kernel: 6.12.94+deb13-amd64
 ```
@@ -83,9 +83,9 @@ Expected public response:
   "ready": true,
   "status": "ready",
   "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download",
-  "checksum": "<sha256 after build>",
+  "checksum": "09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c",
   "checksum_type": "sha256",
-  "size": "<bytes after build>"
+  "size": 1984790528
 }
 ```
 
