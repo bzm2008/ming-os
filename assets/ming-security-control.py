@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -138,22 +139,59 @@ def _probe(runner, command, expected=None):
 
 
 def runtime_probes(runner=run_command):
+    nft_rc, nft_output, _nft_error = runner(
+        ["nft", "list", "table", "inet", "ming_filter"])
+    policy_match = re.search(r"\bpolicy\s+(drop|accept)\s*;", nft_output)
     return {
         "ssh_installed": _probe(runner, ["systemctl", "list-unit-files", "ssh.service"]),
         "ssh_enabled": _probe(runner, ["systemctl", "is-enabled", "ssh.service"], "enabled"),
         "ssh_active": _probe(runner, ["systemctl", "is-active", "ssh.service"], "active"),
-        "ssh_firewall_allowed": False,
+        "ssh_firewall_allowed": nft_rc == 0 and "tcp dport 22 accept" in nft_output,
+        "nftables_enabled": _probe(
+            runner, ["systemctl", "is-enabled", "nftables.service"], "enabled"),
+        "nftables_active": _probe(
+            runner, ["systemctl", "is-active", "nftables.service"], "active"),
+        "nft_rules_loaded": nft_rc == 0,
+        "nft_policy": policy_match.group(1) if policy_match else "unknown",
+        "effective_profile": (
+            "home" if nft_rc == 0 and "udp dport 5353" in nft_output
+            else "public" if nft_rc == 0 else "unknown"),
+        "updates_enabled": _probe(
+            runner, ["systemctl", "is-enabled", "unattended-upgrades.service"], "enabled"),
+        "updates_active": _probe(
+            runner, ["systemctl", "is-active", "unattended-upgrades.service"], "active"),
     }
 
 
 def build_status(state=None, probes=None):
     state = dict(DEFAULT_STATE if state is None else state)
     probes = probes or {}
+    firewall_configured = bool(state["firewall"])
+    nft_policy = probes.get("nft_policy", "unknown")
+    firewall_effective = bool(
+        firewall_configured and probes.get("nftables_active")
+        and probes.get("nft_rules_loaded") and nft_policy == "drop")
+    updates_effective = bool(probes.get("updates_enabled") and probes.get("updates_active"))
     return {
         "ok": True,
-        "firewall": bool(state["firewall"]),
-        "profile": state["profile"],
-        "security_updates": bool(state["security_updates"]),
+        "firewall": {
+            "configured": firewall_configured,
+            "service_enabled": bool(probes.get("nftables_enabled")),
+            "service_active": bool(probes.get("nftables_active")),
+            "rules_loaded": bool(probes.get("nft_rules_loaded")),
+            "policy": nft_policy,
+            "effective": firewall_effective,
+        },
+        "profile": {
+            "configured": state["profile"],
+            "effective": probes.get("effective_profile", "unknown"),
+        },
+        "security_updates": {
+            "configured": bool(state["security_updates"]),
+            "enabled": bool(probes.get("updates_enabled")),
+            "active": bool(probes.get("updates_active")),
+            "effective": updates_effective,
+        },
         "ssh": {
             "installed": bool(probes.get("ssh_installed")),
             "enabled": bool(probes.get("ssh_enabled")),
@@ -166,7 +204,6 @@ def build_status(state=None, probes=None):
 def status(path=STATE_PATH, runner=run_command):
     state = load_state(path)
     probes = runtime_probes(runner)
-    probes["ssh_firewall_allowed"] = state["firewall"] and state["ssh"]
     return build_status(state, probes)
 
 
@@ -190,6 +227,31 @@ def configure_updates(enabled, runner=run_command):
     return rc == 0, error
 
 
+def rollback_configuration(old, kind, rules_path, runner, persist_rules=False):
+    errors = []
+    if kind == "ssh":
+        service_ok, service_error = configure_sshd(old["ssh"], runner=runner)
+        if not service_ok:
+            errors.append("ssh service: %s" % (service_error or "restore failed"))
+    elif kind == "security-updates":
+        service_ok, service_error = configure_updates(
+            old["security_updates"], runner=runner)
+        if not service_ok:
+            errors.append("security updates: %s" % (service_error or "restore failed"))
+
+    firewall_result = apply_firewall_atomic(firewall_rules(old), runner=runner)
+    if not firewall_result.get("ok"):
+        errors.append("firewall: %s" % (
+            firewall_result.get("error") or "restore failed"))
+
+    if persist_rules:
+        try:
+            save_rules_atomic(firewall_rules(old), rules_path)
+        except OSError as exc:
+            errors.append("rules file: %s" % exc)
+    return {"ok": not errors, "error": "; ".join(errors)}
+
+
 def mutate(kind, value, path=STATE_PATH, rules_path=RULES_PATH, runner=run_command):
     state = load_state(path)
     if kind == "profile" and value not in {"home", "public"}:
@@ -210,27 +272,23 @@ def mutate(kind, value, path=STATE_PATH, rules_path=RULES_PATH, runner=run_comma
     else:
         ok, error = True, ""
     if not ok:
-        if kind == "ssh":
-            configure_sshd(old["ssh"], runner=runner)
-        elif kind == "security-updates":
-            configure_updates(old["security_updates"], runner=runner)
-        apply_firewall_atomic(firewall_rules(old), runner=runner)
-        return {"ok": False, "error": error or "service update failed", "rolled_back": True}
+        rollback = rollback_configuration(old, kind, rules_path, runner)
+        message = error or "service update failed"
+        if not rollback["ok"]:
+            message += "; rollback failed: " + rollback["error"]
+        return {"ok": False, "error": message, "rolled_back": rollback["ok"],
+                "rollback_error": rollback["error"]}
     try:
         save_rules_atomic(candidate, rules_path)
         save_state(state, path)
     except OSError as exc:
-        if kind == "ssh":
-            configure_sshd(old["ssh"], runner=runner)
-        elif kind == "security-updates":
-            configure_updates(old["security_updates"], runner=runner)
-        apply_firewall_atomic(firewall_rules(old), runner=runner)
-        try:
-            save_rules_atomic(firewall_rules(old), rules_path)
-        except OSError:
-            pass
-        return {"ok": False, "error": "unable to persist firewall: %s" % exc,
-                "rolled_back": True}
+        rollback = rollback_configuration(
+            old, kind, rules_path, runner, persist_rules=True)
+        message = "unable to persist firewall: %s" % exc
+        if not rollback["ok"]:
+            message += "; rollback failed: " + rollback["error"]
+        return {"ok": False, "error": message, "rolled_back": rollback["ok"],
+                "rollback_error": rollback["error"]}
     return status(path, runner=runner)
 
 
@@ -245,12 +303,12 @@ def quick_check(path=STATE_PATH, runner=run_command):
     root_rc, root_output, _root_error = runner(["passwd", "-S", "root"])
     root_fields = root_output.split()
     checks = {
-        "firewall_enabled": current["firewall"],
-        "public_default": current["profile"] in {"home", "public"},
+        "firewall_enabled": current["firewall"]["effective"],
+        "public_default": current["profile"]["configured"] == "public",
         "root_login_disabled": sshd_values.get("permitrootlogin") == "no",
         "empty_passwords_disabled": sshd_values.get("permitemptypasswords") == "no",
         "root_account_locked": root_rc == 0 and len(root_fields) > 1 and root_fields[1] in {"L", "LK"},
-        "security_updates_enabled": current["security_updates"],
+        "security_updates_enabled": current["security_updates"]["effective"],
     }
     return {"ok": all(checks.values()), "checks": checks}
 

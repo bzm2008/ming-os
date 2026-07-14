@@ -1097,24 +1097,27 @@ class MingSettings(Adw.ApplicationWindow):
                 self.security_summary_row.set_title("安全状态暂不可用")
                 self.security_summary_row.set_subtitle(error or "无法读取系统保护状态。")
                 return False
+            firewall = status.get("firewall") or {}
+            profile = status.get("profile") or {}
+            updates = status.get("security_updates") or {}
             ssh = status.get("ssh") or {}
             self.loading_security_state = True
-            self.firewall_switch.set_active(bool(status.get("firewall")))
+            self.firewall_switch.set_active(bool(firewall.get("configured")))
             self.ssh_switch.set_active(bool(ssh.get("active") and ssh.get("firewall_allowed")))
-            self.security_updates_switch.set_active(bool(status.get("security_updates")))
-            self.home_profile_switch.set_active(status.get("profile") == "home")
+            self.security_updates_switch.set_active(bool(updates.get("configured")))
+            self.home_profile_switch.set_active(profile.get("configured") == "home")
             self.loading_security_state = False
             for control in (self.firewall_switch, self.ssh_switch,
                             self.security_updates_switch, self.home_profile_switch):
                 control.set_sensitive(True)
-            enabled = sum((bool(status.get("firewall")), bool(status.get("security_updates")),
+            enabled = sum((bool(firewall.get("effective")), bool(updates.get("effective")),
                            not bool(ssh.get("active"))))
             self.security_summary_row.set_title("核心保护 %d/3 已就绪" % enabled)
             self.security_summary_row.set_subtitle(
                 "防火墙%s · 远程终端%s · 安全更新%s" % (
-                    "已开启" if status.get("firewall") else "已关闭",
+                    "已开启" if firewall.get("effective") else "未生效",
                     "已开启" if ssh.get("active") else "已关闭",
-                    "已开启" if status.get("security_updates") else "已关闭"))
+                    "已开启" if updates.get("effective") else "未生效"))
             return False
 
         run_capture_async(

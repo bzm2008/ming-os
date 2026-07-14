@@ -72,11 +72,10 @@ def monitor(command, parser, cache):
 
 
 def parse_network(line):
-    lower = line.lower()
-    if "connected" in lower and "disconnected" not in lower:
-        return {"kind": "network", "state": "connected", "label": "有线或无线网络"}
-    if "disconnected" in lower:
-        return {"kind": "network", "state": "disconnected", "label": "有线或无线网络"}
+    match = re.match(r"^\s*[A-Za-z0-9_.:-]{1,32}:\s*(connected|disconnected)\s*$", line, re.I)
+    if match:
+        return {"kind": "network", "state": match.group(1).lower(),
+                "label": "有线或无线网络"}
     return None
 
 

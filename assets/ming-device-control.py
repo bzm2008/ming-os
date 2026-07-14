@@ -1463,10 +1463,13 @@ class DeviceController:
                 errors.append(error or output or "%s 连接失败" % item["device"])
         after = self.ethernet_status()
         connected = any(item["state"] == "connected" for item in after.get("devices", []))
+        readback_error = after.get("error") if not connected else ""
         return {
             "ok": connected, "changed": changed,
             "action": "reconnected" if connected else "repair_failed",
-            "error": "；".join(errors), "status": after,
+            "error": "；".join(errors) or readback_error or (
+                "NetworkManager 重新连接后未确认有线网络已连接。" if not connected else ""),
+            "status": after,
         }
 
     def status(self):

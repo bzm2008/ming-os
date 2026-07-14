@@ -1968,13 +1968,22 @@ deploy_passwordless_oobe_migration() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-for marker in /home/*/.config/ming-os/oobe-account-done; do
+HOME_ROOT="${MING_HOME_ROOT:-/home}"
+ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"
+PASSWD_BIN="${MING_PASSWD_BIN:-passwd}"
+
+for marker in "${HOME_ROOT}"/*/.config/ming-os/oobe-account-done; do
     [[ -f "${marker}" ]] || continue
     [[ "$(cat "${marker}" 2>/dev/null)" == "skipped" ]] || continue
     user_name="$(stat -c '%U' "${marker}")"
     [[ -n "${user_name}" && "${user_name}" != "UNKNOWN" ]] || continue
-    /usr/local/sbin/ming-account-control clear-password --user "${user_name}" >/dev/null
-    passwd -S "${user_name}" | awk 'NR == 1 { exit !($2 == "NP") }'
+    "${ACCOUNT_CONTROL}" clear-password --user "${user_name}" >/dev/null
+    "${PASSWD_BIN}" -S "${user_name}" | awk 'NR == 1 { exit !($2 == "NP") }'
+    temporary="${marker}.migration.$$"
+    printf '%s\n' migrated-passwordless > "${temporary}"
+    chmod --reference="${marker}" "${temporary}" 2>/dev/null || chmod 0600 "${temporary}"
+    chown --reference="${marker}" "${temporary}" 2>/dev/null || true
+    mv -f "${temporary}" "${marker}"
 done
 PASSWORDMIGRATION
     chmod 0755 /usr/local/sbin/ming-account-password-migration

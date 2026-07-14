@@ -1,6 +1,11 @@
 import importlib.util
+import json
+import os
 import pathlib
 import re
+import shlex
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -88,8 +93,70 @@ class SecurityBuildContracts(unittest.TestCase):
         self.assertIn("ming-account-control clear-password", self.desktop)
         self.assertIn("passwd -S", self.desktop)
         self.assertIn('== "skipped"', self.ota)
-        self.assertIn("ming-account-control clear-password", self.ota)
+        self.assertIn('ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"', self.ota)
+        self.assertIn('clear-password --user "${user_name}"', self.ota)
         self.assertNotIn("pkexec /bin/bash", self.desktop)
+
+    def test_skipped_password_migration_is_strictly_one_shot(self):
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("Git Bash is unavailable")
+        script = self.ota.split(
+            "cat > /usr/local/sbin/ming-account-password-migration << 'PASSWORDMIGRATION'", 1
+        )[1].split("PASSWORDMIGRATION", 1)[0]
+        script = script.replace("\r\n", "\n")
+        def shell_path(value):
+            value = str(value)
+            if os.name == "nt" and len(value) > 2 and value[1] == ":":
+                return "/mnt/%s%s" % (value[0].lower(), value[2:].replace(os.sep, "/"))
+            return value
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            marker = root / "home" / "alice" / ".config" / "ming-os" / "oobe-account-done"
+            marker.parent.mkdir(parents=True)
+            with marker.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write("skipped\n")
+            calls = root / "calls"
+            account = root / "account-control"
+            with account.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> %s\n" % (
+                    "%s", shlex.quote(shell_path(calls))))
+            passwd = root / "passwd-status"
+            with passwd.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(
+                    "#!/usr/bin/env bash\nprintf '%s NP 2026-07-14 0 99999 7 -1\\n' \"$2\"\n")
+            account.chmod(0o755); passwd.chmod(0o755)
+            script = script.replace(
+                'HOME_ROOT="${MING_HOME_ROOT:-/home}"',
+                "HOME_ROOT=%s" % shlex.quote(shell_path(root / "home")))
+            script = script.replace(
+                'ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"',
+                "ACCOUNT_CONTROL=%s" % shlex.quote(shell_path(account)))
+            script = script.replace(
+                'PASSWD_BIN="${MING_PASSWD_BIN:-passwd}"',
+                "PASSWD_BIN=%s" % shlex.quote(shell_path(passwd)))
+            migration = root / "migration.sh"
+            with migration.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(script)
+            for _attempt in range(2):
+                result = subprocess.run(
+                    [bash, shell_path(migration)], capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(calls.is_file(), result.stderr)
+            self.assertEqual(1, len(calls.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual("migrated-passwordless", marker.read_text(encoding="utf-8").strip())
+
+    def test_preseed_never_contains_factory_password_and_clears_target_user(self):
+        preseed = (ROOT / "config" / "preseed.cfg").read_text(encoding="utf-8")
+        for forbidden in (
+                "passwd/root-password password root", "passwd/root-password-again password root",
+                "passwd/user-password password user", "passwd/user-password-again password user"):
+            self.assertNotIn(forbidden, preseed)
+        late = preseed.split("d-i preseed/late_command string", 1)[1]
+        self.assertIn("d-i passwd/user-password-crypted password !", preseed)
+        self.assertIn("d-i user-setup/allow-password-weak boolean false", preseed)
+        self.assertIn("in-target passwd -l root", late)
+        self.assertIn("in-target passwd -d user", late)
 
     def test_passwordless_lock_bypasses_authentication(self):
         lock = self.desktop.split("cat > /usr/local/bin/ming-lock", 1)[1].split(
@@ -159,12 +226,46 @@ class SecurityControlTests(unittest.TestCase):
             state={"firewall": True, "profile": "public", "ssh": False,
                    "security_updates": True},
             probes={"ssh_installed": True, "ssh_enabled": False,
-                    "ssh_active": False, "ssh_firewall_allowed": False},
+                    "ssh_active": False, "ssh_firewall_allowed": False,
+                    "nftables_enabled": True, "nftables_active": True,
+                    "nft_rules_loaded": True, "nft_policy": "drop",
+                    "effective_profile": "public", "updates_enabled": True,
+                    "updates_active": True},
         )
         self.assertEqual(
             {"installed": True, "enabled": False, "active": False,
              "firewall_allowed": False}, status["ssh"])
-        self.assertEqual("public", status["profile"])
+        self.assertEqual(
+            {"configured": True, "service_enabled": True, "service_active": True,
+             "rules_loaded": True, "policy": "drop", "effective": True},
+            status["firewall"])
+        self.assertEqual({"configured": "public", "effective": "public"}, status["profile"])
+        self.assertEqual(
+            {"configured": True, "enabled": True, "active": True, "effective": True},
+            status["security_updates"])
+
+    def test_status_probes_actual_nftables_rules_and_update_service(self):
+        commands = []
+        outputs = {
+            ("systemctl", "is-enabled", "nftables.service"): (0, "enabled", ""),
+            ("systemctl", "is-active", "nftables.service"): (0, "active", ""),
+            ("nft", "list", "table", "inet", "ming_filter"):
+                (0, "chain input { type filter hook input priority filter; policy drop; }", ""),
+            ("systemctl", "is-enabled", "unattended-upgrades.service"): (0, "enabled", ""),
+            ("systemctl", "is-active", "unattended-upgrades.service"): (0, "active", ""),
+        }
+
+        def runner(command, input_text=None):
+            commands.append(tuple(command))
+            return outputs.get(tuple(command), (1, "", "missing"))
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = pathlib.Path(tempdir) / "state.json"
+            path.write_text(json.dumps(self.api.DEFAULT_STATE), encoding="utf-8")
+            status = self.api.status(path, runner=runner)
+        self.assertTrue(status["firewall"]["effective"])
+        self.assertTrue(status["security_updates"]["effective"])
+        self.assertIn(("nft", "list", "table", "inet", "ming_filter"), commands)
 
     def test_firewall_mutation_persists_validated_rules_for_reboot(self):
         def runner(command, input_text=None):
@@ -206,6 +307,43 @@ class SecurityControlTests(unittest.TestCase):
         self.assertFalse(result["checks"]["empty_passwords_disabled"])
         self.assertFalse(result["checks"]["root_account_locked"])
 
+    def test_public_default_is_false_for_home_profile(self):
+        def runner(command, input_text=None):
+            if command == ["sshd", "-T"]:
+                return 0, "permitrootlogin no\npermitemptypasswords no", ""
+            if command == ["passwd", "-S", "root"]:
+                return 0, "root L 2026-07-14 0 99999 7 -1", ""
+            return 1, "", ""
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = pathlib.Path(tempdir) / "state.json"
+            path.write_text(json.dumps(dict(self.api.DEFAULT_STATE, profile="home")), encoding="utf-8")
+            result = self.api.quick_check(path, runner=runner)
+        self.assertFalse(result["checks"]["public_default"])
+
+    def test_failed_service_and_firewall_restore_reports_not_rolled_back(self):
+        enable_failed = False
+
+        def runner(command, input_text=None):
+            nonlocal enable_failed
+            if command[:3] == ["nft", "list", "ruleset"]:
+                return 0, "table inet old {}", ""
+            if command == ["systemctl", "enable", "--now", "ssh.service"]:
+                enable_failed = True
+                return 1, "", "start failed"
+            if enable_failed and command == ["systemctl", "disable", "--now", "ssh.service"]:
+                return 1, "", "disable failed"
+            if enable_failed and command[:3] == ["nft", "-c", "-f"]:
+                return 1, "", "restore check failed"
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            result = self.api.mutate(
+                "ssh", "on", path=pathlib.Path(tempdir) / "state.json",
+                rules_path=pathlib.Path(tempdir) / "nftables.conf", runner=runner)
+        self.assertFalse(result["rolled_back"])
+        self.assertIn("rollback failed", result["error"])
+        self.assertIn("disable failed", result["rollback_error"])
+
 
 class AccountControlTests(unittest.TestCase):
     @classmethod
@@ -227,6 +365,27 @@ class AccountControlTests(unittest.TestCase):
         self.assertEqual("user:secret\n", calls[0][1])
         self.assertNotIn("secret", " ".join(calls[0][0]))
         self.assertEqual(("passwd", "-S", "user"), calls[-1][0])
+
+    def test_set_password_retires_skipped_oobe_marker(self):
+        def runner(command, input_text=None):
+            if command[:2] == ["passwd", "-S"]:
+                return 0, "user P 2026-07-14 0 99999 7 -1", ""
+            return 0, "", ""
+        with tempfile.TemporaryDirectory() as tempdir:
+            marker = pathlib.Path(tempdir) / "oobe-account-done"
+            marker.write_text("skipped\n", encoding="utf-8")
+            result = self.api.set_password(
+                "user", "secret\n", runner=runner, marker_path=marker)
+            self.assertTrue(result["ok"])
+            self.assertEqual("configured", marker.read_text(encoding="utf-8").strip())
+
+    def test_skipped_marker_update_reports_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            marker = root / "marker"
+            marker.write_text("skipped\n", encoding="utf-8")
+            self.assertTrue(self.api.retire_skipped_marker("user", marker_path=marker))
+            self.assertFalse(self.api.retire_skipped_marker("user", marker_path=root))
 
     def test_clear_password_verifies_passwordless_status(self):
         calls = []
@@ -291,6 +450,58 @@ class EthernetAndNotificationTests(unittest.TestCase):
         self.assertIsNotNone(third)
         self.assertNotIn("password", first["body"].lower())
         self.assertNotIn("secret", first["body"].lower())
+
+    def test_ethernet_repair_success_requires_connected_readback(self):
+        states = iter(["disconnected", "connected"])
+
+        class Controller:
+            def __init__(self): self.commands = []
+            def ethernet_status(self):
+                state = next(states)
+                return {"devices": [{"device": "enp2s0", "state": state}], "error": ""}
+            def _run(self, command, timeout=8):
+                self.commands.append(command)
+                return 0, "connected", ""
+
+        controller = Controller()
+        result = self.devices.DeviceController.ethernet_repair(controller)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual("connected", result["status"]["devices"][0]["state"])
+
+    def test_ethernet_repair_failure_preserves_command_error(self):
+        class Controller:
+            def ethernet_status(self):
+                return {"devices": [{"device": "enp2s0", "state": "disconnected"}], "error": ""}
+            def _run(self, command, timeout=8): return 1, "", "carrier missing"
+
+        result = self.devices.DeviceController.ethernet_repair(Controller())
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["changed"])
+        self.assertIn("carrier missing", result["error"])
+
+    def test_ethernet_repair_write_success_but_failed_readback_is_not_ok(self):
+        statuses = iter([
+            {"devices": [{"device": "enp2s0", "state": "disconnected"}], "error": ""},
+            {"devices": [], "state": "diagnostic_unavailable", "error": "readback failed"},
+        ])
+        class Controller:
+            def ethernet_status(self): return next(statuses)
+            def _run(self, command, timeout=8): return 0, "", ""
+        result = self.devices.DeviceController.ethernet_repair(Controller())
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertIn("readback failed", result["error"])
+
+    def test_monitor_output_parsers_accept_only_connection_state_events(self):
+        self.assertEqual("connected", self.bridge.parse_network("enp2s0: connected")["state"])
+        self.assertEqual("disconnected", self.bridge.parse_network("wlan0: disconnected")["state"])
+        self.assertIsNone(self.bridge.parse_network("NetworkManager connectivity is now full"))
+        self.assertIsNone(self.bridge.parse_network("vpn helper connected successfully"))
+        self.assertEqual(
+            "connected",
+            self.bridge.parse_bluetooth("[CHG] Device AA:BB:CC:DD:EE:FF Connected: yes")["state"])
+        self.assertIsNone(self.bridge.parse_bluetooth("[NEW] Device AA:BB:CC:DD:EE:FF Headset"))
 
     def test_notification_bridge_deployment_is_user_session_only(self):
         desktop = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")

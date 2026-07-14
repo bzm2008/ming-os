@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -62,7 +63,43 @@ def password_status(user, runner=run_command):
     }
 
 
-def set_password(user, password, runner=run_command):
+def oobe_marker_for_user(user):
+    if pwd is None:
+        return None
+    try:
+        return pathlib.Path(pwd.getpwnam(user).pw_dir) / ".config" / "ming-os" / "oobe-account-done"
+    except KeyError:
+        return None
+
+
+def retire_skipped_marker(user, marker_path=None):
+    marker = pathlib.Path(marker_path) if marker_path is not None else oobe_marker_for_user(user)
+    if marker is None:
+        return True
+    try:
+        if marker.read_text(encoding="utf-8").strip() != "skipped":
+            return True
+        stat_result = marker.stat()
+        temporary = marker.with_name(marker.name + ".configured")
+        temporary.write_text("configured\n", encoding="utf-8")
+        try:
+            os.chmod(temporary, stat_result.st_mode & 0o777)
+            os.chown(temporary, stat_result.st_uid, stat_result.st_gid)
+        except (AttributeError, OSError):
+            pass
+        os.replace(temporary, marker)
+        return marker.read_text(encoding="utf-8").strip() == "configured"
+    except FileNotFoundError:
+        return True
+    except OSError:
+        try:
+            marker.unlink()
+            return not marker.exists()
+        except OSError:
+            return False
+
+
+def set_password(user, password, runner=run_command, marker_path=None):
     validate_user(user)
     password = (password or "").rstrip("\r\n")
     if not password or "\n" in password or "\r" in password or len(password) > 1024:
@@ -75,6 +112,9 @@ def set_password(user, password, runner=run_command):
     status["ok"] = status["ok"] and status["password_set"]
     if not status["ok"] and not status["error"]:
         status["error"] = "password readback did not confirm the update"
+    if status["ok"] and not retire_skipped_marker(user, marker_path=marker_path):
+        status["ok"] = False
+        status["error"] = "password updated but skipped OOBE marker could not be retired"
     return status
 
 
