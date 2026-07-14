@@ -318,7 +318,7 @@ validate_staging_inputs() {
     authoritative_type="$(printf '%s' "${authoritative}" | jq -r '.update_type // "major"')"
     authoritative_version="$(printf '%s' "${authoritative}" | jq -r '.version // .latest_version // ""')"
     authoritative_checksum="$(printf '%s' "${authoritative}" | jq -r '.checksum // .sha256 // ""')"
-    authoritative_filename="$(printf '%s' "${authoritative}" | jq -r '.filename // .iso_name // empty')"
+    authoritative_filename="$(printf '%s' "${authoritative}" | jq -r '.filename // .iso_name // .iso_filename // empty')"
     authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
     if [[ "${authoritative_available}" != "true" || "${authoritative_ready}" != "true" ||
           "${authoritative_type}" != "major" || "${authoritative_version}" != "${version}" ||
@@ -642,7 +642,7 @@ download_update() {
     version=$(printf '%s' "${info}" | jq -r '.version // "unknown"')
     checksum=$(printf '%s' "${info}" | jq -r '.checksum // .sha256 // ""')
     expected_size=$(printf '%s' "${info}" | jq -r '.size // 0')
-    iso_name=$(printf '%s' "${info}" | jq -r '.filename // .iso_name // empty')
+    iso_name=$(printf '%s' "${info}" | jq -r '.filename // .iso_name // .iso_filename // empty')
     iso_name=${iso_name:-ming-os-${version}.iso}
     safe_iso_name="$(basename -- "${iso_name}")"
     if [[ "${iso_name}" != "${safe_iso_name}" || "${safe_iso_name}" == "." || "${safe_iso_name}" == ".." ]]; then
@@ -847,7 +847,7 @@ manifest_apply_identity() {
           apt_packages: ((.apt_packages // []) |
             if type == "array" then map(select(type == "string")) | sort else [] end),
           checksum: (.checksum // .sha256 // ""),
-          filename: (.filename // .iso_name // ""),
+          filename: (.filename // .iso_name // .iso_filename // ""),
           download_url: (.download_url // .url // "")
         }' "${manifest}" 2>/dev/null
 }
