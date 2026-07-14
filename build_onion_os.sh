@@ -39,6 +39,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
 readonly CHROOT_DIR="${LINUX_WORKDIR}/chroot"
 readonly OUTPUT_DIR="${LINUX_WORKDIR}/output"
+readonly CHROOT_BUILD_DIR="/var/lib/ming-os-build"
 readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
@@ -232,20 +233,27 @@ settle_chroot_dpkg() {
 # 将模块脚本和配置文件复制到 chroot 中
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
-    mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
-    mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
-    cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
-    cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/config/"
-    chmod +x "${CHROOT_DIR}/tmp/ming-build/modules/"*.sh
+    # Debian package maintainer scripts may clean /tmp while modules are
+    # running. Keep the actual build inputs under /var/lib and recreate the
+    # historical /tmp path as a symlink before each module.
+    rm -rf "${CHROOT_DIR}${CHROOT_BUILD_DIR}"
+    mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/modules"
+    mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/config"
+    cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}${CHROOT_BUILD_DIR}/modules/"
+    cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}${CHROOT_BUILD_DIR}/config/"
+    chmod +x "${CHROOT_DIR}${CHROOT_BUILD_DIR}/modules/"*.sh
+    mkdir -p "${CHROOT_DIR}/tmp"
+    rm -rf "${CHROOT_DIR}/tmp/ming-build"
+    ln -s "${CHROOT_BUILD_DIR}" "${CHROOT_DIR}/tmp/ming-build"
     if [[ -d "${SCRIPT_DIR}/assets" ]]; then
-        mkdir -p "${CHROOT_DIR}/tmp/ming-build/assets"
-        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || {
+        mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets"
+        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/" 2>/dev/null || {
             log_error "复制构建资源到 chroot 失败"
             return 1
         }
         local required_asset
         for required_asset in ming-installer-verify.py wallpaper-ming-2633-abstract.png; do
-            if [[ ! -s "${CHROOT_DIR}/tmp/ming-build/assets/${required_asset}" ]]; then
+            if [[ ! -s "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${required_asset}" ]]; then
                 log_error "构建资源缺失或未复制: assets/${required_asset}"
                 return 1
             fi
@@ -276,6 +284,17 @@ APT_BUILD_WRAPPER
     chmod 0755 "${CHROOT_DIR}/usr/local/sbin/apt-build"
 }
 # ======================== 模块脚本执行 ========================
+ensure_chroot_build_link() {
+    # A package cleanup may remove /tmp entirely. Restore the compatibility
+    # link without copying the build inputs again.
+    if ! chroot_exec test -L /tmp/ming-build || \
+       ! chroot_exec test -d /var/lib/ming-os-build/modules; then
+        chroot_exec mkdir -p /tmp
+        chroot_exec rm -rf /tmp/ming-build
+        chroot_exec ln -s /var/lib/ming-os-build /tmp/ming-build
+    fi
+}
+
 run_modules() {
     log_step "在 chroot 中执行模块脚本"
     prepare_chroot_scripts
@@ -291,6 +310,7 @@ run_modules() {
     )
     for mod in "${modules[@]}"; do
         local mod_path="/tmp/ming-build/modules/${mod}"
+        ensure_chroot_build_link
         if [[ -f "${CHROOT_DIR}${mod_path}" ]]; then
             log_step "执行模块: ${mod}"
             chroot_exec bash "${mod_path}"
@@ -308,7 +328,7 @@ clean_chroot() {
     log_step "清理 chroot 环境"
     chroot_exec bash -c "apt clean"
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
-    chroot_exec bash -c "rm -rf /tmp/ming-build"
+    chroot_exec bash -c "rm -rf /tmp/ming-build /var/lib/ming-os-build"
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
     chroot_exec bash -c "rm -f /var/cache/debconf/*-old"
     chroot_exec bash -c "> /etc/machine-id"

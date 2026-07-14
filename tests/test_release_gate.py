@@ -128,6 +128,14 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("cat > /etc/calamares/modules/ming-installed-desktop-gate.conf", fallback)
         self.assertIn('/usr/local/sbin/ming-installer-verify installed /target', fallback)
 
+    def test_build_inputs_survive_debian_tmp_cleanup(self):
+        """Module sources live outside /tmp and the legacy path is recreated per module."""
+        self.assertIn('readonly CHROOT_BUILD_DIR="/var/lib/ming-os-build"', self.build)
+        self.assertIn('ln -s "${CHROOT_BUILD_DIR}" "${CHROOT_DIR}/tmp/ming-build"', self.build)
+        self.assertIn('ensure_chroot_build_link', self.build)
+        resume = RESUME.read_text(encoding="utf-8")
+        self.assertIn('ensure_chroot_build_link', resume)
+
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
         for marker in [

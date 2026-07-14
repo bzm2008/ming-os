@@ -148,6 +148,7 @@ resume_main() {
     )
     for mod in "${modules[@]}"; do
         local mod_path="/tmp/ming-build/modules/${mod}"
+        ensure_chroot_build_link
         log_step "执行模块: ${mod}"
         chroot_exec bash "${mod_path}"
         settle_chroot_dpkg "${mod}"
