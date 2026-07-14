@@ -1669,15 +1669,22 @@ class ControlRequestState:
         self.generation = 0
         self.pending = False
         self.optimistic_value = None
+        self.target = None
 
-    def begin(self, value):
+    def begin(self, value, target=None):
         self.generation += 1
         self.pending = True
         self.optimistic_value = value
+        self.target = dict(target) if isinstance(target, dict) else target
         return self.generation
 
     def accepts(self, generation):
         return generation == self.generation
+
+    def target_for(self, generation):
+        if not self.accepts(generation):
+            return None
+        return dict(self.target) if isinstance(self.target, dict) else self.target
 
     def settle(self, generation, value):
         if not self.accepts(generation):
@@ -1982,7 +1989,9 @@ class StatusWidget(Gtk.Box):
             pass
         return False
 
-    def schedule_control(self, kind, value, generation):
+    def schedule_control(self, kind, value, generation, target_snapshot=None):
+        target_snapshot = (dict(target_snapshot)
+                           if isinstance(target_snapshot, dict) else target_snapshot)
         attr = "%s_timer" % kind
         timer = getattr(self, attr)
         if timer:
@@ -1995,7 +2004,7 @@ class StatusWidget(Gtk.Box):
                 return False
             threading.Thread(
                 target=self.set_control_value,
-                args=(kind, value, generation),
+                args=(kind, value, generation, target_snapshot),
                 daemon=True,
             ).start()
             return False
@@ -2005,9 +2014,16 @@ class StatusWidget(Gtk.Box):
     def on_volume_changed(self, control):
         if not self.updating_controls:
             value = max(0, min(100, int(round(control.get_value()))))
-            generation = self.control_states["volume"].begin(value)
-            self.volume_label.set_text("音量 %d%%" % value)
-            self.schedule_control("volume", value, generation)
+            target_snapshot = {
+                "sink_id": self.volume_sink_id,
+                "sink_name": self.volume_sink_name or "音量",
+            }
+            generation = self.control_states["volume"].begin(
+                value, target=target_snapshot)
+            self.volume_label.set_text("%s %d%%" % (
+                target_snapshot["sink_name"], value))
+            self.schedule_control(
+                "volume", value, generation, target_snapshot=target_snapshot)
             self.volume_scale.queue_draw()
 
     def on_brightness_changed(self, control):
@@ -2018,30 +2034,35 @@ class StatusWidget(Gtk.Box):
             self.schedule_control("brightness", value, generation)
             self.brightness_scale.queue_draw()
 
-    def set_control_value(self, kind, value, generation):
+    def set_control_value(self, kind, value, generation, target_snapshot=None):
+        target_snapshot = target_snapshot or {}
         try:
             if not self.device_controller:
                 result = {"ok": False, "error": "设备控制服务不可用", "value": None}
             elif kind == "volume":
-                result = (self.device_controller.set_volume(value, sink_id=self.volume_sink_id)
-                          if self.volume_sink_id else self.device_controller.set_volume(value))
+                sink_id = target_snapshot.get("sink_id")
+                result = (self.device_controller.set_volume(value, sink_id=sink_id)
+                          if sink_id else self.device_controller.set_volume(value))
             else:
                 result = self.device_controller.set_brightness(value)
-            GLib.idle_add(self.apply_control_result, kind, generation, result)
+            GLib.idle_add(
+                self.apply_control_result, kind, generation, target_snapshot, result)
         except Exception as exc:
             log(f"{kind} control failed: {exc}")
             GLib.idle_add(
                 self.apply_control_result,
                 kind,
                 generation,
+                target_snapshot,
                 {"ok": False, "error": str(exc), "value": None},
             )
 
-    def apply_control_result(self, kind, generation, result):
+    def apply_control_result(self, kind, generation, target_snapshot, result):
         state = self.control_states[kind]
         if not state.accepts(generation):
             log("ignored stale %s control response generation=%s" % (kind, generation))
             return False
+        target_snapshot = target_snapshot or {}
         self.updating_controls = True
         value = result.get("value")
         if result.get("ok") and value is not None:
@@ -2049,7 +2070,7 @@ class StatusWidget(Gtk.Box):
             if kind == "volume":
                 self.volume_scale.set_value(value)
                 self.volume_label.set_text("%s %d%%" % (
-                    self.volume_sink_name or "音量", value))
+                    target_snapshot.get("sink_name") or "音量", value))
                 self.volume_scale.queue_draw()
             else:
                 self.brightness_scale.set_value(value)
@@ -2060,7 +2081,8 @@ class StatusWidget(Gtk.Box):
             message = result.get("error") or "控制失败"
             log("%s control rejected: %s" % (kind, message))
             if kind == "volume":
-                self.volume_label.set_text("音量设置失败，点击重试")
+                self.volume_label.set_text("%s 设置失败，点击重试" % (
+                    target_snapshot.get("sink_name") or "音量"))
             else:
                 self.brightness_label.set_text("亮度设置失败，点击重试")
         self.updating_controls = False
@@ -2334,7 +2356,10 @@ class StatusWidget(Gtk.Box):
                 if audio_available else "未检测到输出设备")
         elif volume_state.optimistic_value is not None:
             self.volume_scale.set_value(volume_state.optimistic_value)
-            self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)
+            pending_target = volume_state.target_for(volume_state.generation) or {}
+            self.volume_label.set_text("%s %d%%" % (
+                pending_target.get("sink_name") or "音量",
+                volume_state.optimistic_value))
         brightness_available = bool(brightness.get("available"))
         brightness_value = brightness.get("value") if brightness_available else 1
         self.brightness_scale.set_sensitive(brightness_available)

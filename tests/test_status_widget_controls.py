@@ -53,6 +53,20 @@ class ControlRequestStateTests(unittest.TestCase):
         self.assertEqual(68, state.optimistic_value)
         self.assertFalse(state.should_hold_status())
 
+    def test_volume_request_keeps_sink_snapshot_across_status_refresh(self):
+        state = self.state_type()
+        current_sink = {"sink_id": "sink-a", "sink_name": "A"}
+        first = state.begin(35, target=current_sink)
+        current_sink.update({"sink_id": "sink-b", "sink_name": "B"})
+
+        self.assertEqual("sink-a", state.target_for(first)["sink_id"])
+        self.assertEqual("A", state.target_for(first)["sink_name"])
+        self.assertEqual("sink-b", current_sink["sink_id"])
+
+        second = state.begin(45, target=current_sink)
+        self.assertIsNone(state.target_for(first))
+        self.assertEqual("sink-b", state.target_for(second)["sink_id"])
+
     def test_stale_response_cannot_clear_pending_or_change_value(self):
         if self.state_type is None:
             self.skipTest("ControlRequestState is not implemented yet")
@@ -79,7 +93,14 @@ class ControlRequestStateTests(unittest.TestCase):
     def test_volume_control_targets_current_sink_and_displays_its_name(self):
         self.assertIn("self.volume_sink_id = default_sink", self.source)
         self.assertIn('selected_output.get("display_name")', self.source)
-        self.assertIn("sink_id=self.volume_sink_id", self.source)
+        self.assertIn('"sink_id": self.volume_sink_id', self.source)
+
+    def test_volume_worker_and_result_use_request_sink_snapshot(self):
+        status = self.source[self.source.index("class StatusWidget"):
+                             self.source.index("class WallpaperCanvas")]
+        self.assertIn("target_snapshot", status)
+        self.assertIn("sink_id = target_snapshot.get(\"sink_id\")", status)
+        self.assertIn("target_snapshot.get(\"sink_name\")", status)
 
     def test_scale_styles_include_visible_trough_slider_and_highlight(self):
         source = self.source
