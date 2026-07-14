@@ -128,6 +128,17 @@ resume_main() {
     [[ "${EUID}" -ne 0 ]] && { echo "[ERROR] 需要 root 权限"; exit 1; }
 
     echo "[INFO] 从 03_desktop.sh 恢复构建..."
+
+    # An interrupted run may already have completed the rootfs and initramfs
+    # but failed in a release validator. Reuse that verified chroot without
+    # replaying every package module; this is intentionally opt-in so normal
+    # recovery remains a full deterministic replay.
+    if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]; then
+        log_step "复用现有 chroot，跳过模块重放"
+        build_iso
+        return 0
+    fi
+
     mount_chroot
     trap 'umount_chroot' EXIT
 

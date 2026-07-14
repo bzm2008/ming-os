@@ -142,6 +142,12 @@ class ReleaseGateContracts(unittest.TestCase):
         validator = validator.split("PY\n    then", 1)[0]
         self.assertIn('import configparser', validator)
 
+    def test_resume_can_reuse_a_completed_rootfs_for_release_validation(self):
+        resume = RESUME.read_text(encoding="utf-8")
+        self.assertIn('MING_RESUME_SKIP_MODULES', resume)
+        self.assertIn('复用现有 chroot，跳过模块重放', resume)
+        self.assertLess(resume.index('MING_RESUME_SKIP_MODULES'), resume.index('mount_chroot'))
+
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
         for marker in [
