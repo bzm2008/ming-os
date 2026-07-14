@@ -136,6 +136,12 @@ class ReleaseGateContracts(unittest.TestCase):
         resume = RESUME.read_text(encoding="utf-8")
         self.assertIn('ensure_chroot_build_link', resume)
 
+    def test_rootfs_autostart_validator_imports_configparser(self):
+        """The second rootfs validator parses desktop entry files independently."""
+        validator = self.build.split('validate_r4_compatibility() {', 1)[1]
+        validator = validator.split("PY\n    then", 1)[0]
+        self.assertIn('import configparser', validator)
+
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
         for marker in [

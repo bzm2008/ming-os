@@ -1033,6 +1033,7 @@ validate_r4_compatibility() {
     validate_required_desktop_runtime || return 1
     python3 - "${CHROOT_DIR}" <<'PY'
 from pathlib import Path
+import configparser
 import os
 import re
 import subprocess
