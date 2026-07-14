@@ -46,7 +46,7 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_dock_runtime_dependencies_are_required(self):
         self.assertIn("bamfdaemon", APPS)
-        self.assertIn("libbamf3-2", APPS)
+        self.assertIn("libbamf3-2t64", APPS)
 
     def test_watchdog_validates_window_type_stacking_and_geometry(self):
         for marker in (

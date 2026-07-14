@@ -1186,9 +1186,10 @@ for marker in (
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
 dpkg_status = require_file("var/lib/dpkg/status", "Package: bamfdaemon")
-for package in ["bamfdaemon", "libbamf3-2"]:
-    if f"Package: {package}\n" not in dpkg_status:
-        errors.append(f"Dock runtime dependency is not installed: {package}")
+if "Package: bamfdaemon\n" not in dpkg_status:
+    errors.append("Dock runtime dependency is not installed: bamfdaemon")
+if not any(f"Package: {package}\n" in dpkg_status for package in ("libbamf3-2t64", "libbamf3-2")):
+    errors.append("Dock runtime dependency is not installed: libbamf3-2t64 (Trixie) or libbamf3-2")
 for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")

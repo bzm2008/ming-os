@@ -55,7 +55,10 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     im-config
     blueman
     bamfdaemon
-    libbamf3-2
+    # Debian 13/Trixie renamed the BAMF library for the 64-bit time_t ABI.
+    # Keep the concrete package in the required list so dpkg-query cannot
+    # silently accept a missing Dock window-mapping backend.
+    libbamf3-2t64
     ffmpeg
 )
 
