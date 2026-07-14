@@ -373,7 +373,15 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("Hidden=true", scale_entry)
         self.assertIn("X-GNOME-Autostart-enabled=false", scale_entry)
         main = desktop[desktop.index("main() {"):]
-        self.assertNotIn("configure_hidpi_autoscale", main)
+        self.assertIn("configure_hidpi_autoscale", main)
+        self.assertNotIn("configure_legacy_hidpi_scaler_reference", main)
+        scaler = desktop[desktop.index("configure_hidpi_autoscale() {"):
+                         desktop.index("# ======================== Ming OS 品牌图标生成", desktop.index("configure_hidpi_autoscale() {"))]
+        self.assertIn("未更改现有外观设置", scaler)
+        for forbidden in ("xfconf-query", "dconf write", "IconSize=", "sed -i"):
+            self.assertNotIn(forbidden, scaler)
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("retired ming-scale must not mutate appearance settings", build)
 
     def test_compact_status_widget_shows_only_time_and_date(self):
         phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")

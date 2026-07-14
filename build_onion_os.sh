@@ -1319,6 +1319,11 @@ for helper in [
 ]:
     require_file(helper)
 
+legacy_scale = require_file("usr/local/bin/ming-scale", "未更改现有外观设置")
+for forbidden_scale_write in ["xfconf-query", "dconf write", "IconSize=", "sed -i"]:
+    if forbidden_scale_write in legacy_scale:
+        errors.append(f"retired ming-scale must not mutate appearance settings: {forbidden_scale_write}")
+
 service_profile = require_file("usr/local/sbin/ming-service-profile", "status --json")
 for marker in [
     "MING_KEEP_MODEMMANAGER", "/dev/cdc-wdm", "timeout --foreground 2s nmcli",

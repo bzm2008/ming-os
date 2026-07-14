@@ -455,7 +455,7 @@ MINGMIMEAPPS
 
 # ======================== HiDPI 自动缩放 ========================
 
-configure_hidpi_autoscale() {
+configure_legacy_hidpi_scaler_reference() {
     cat > /usr/local/bin/ming-scale << 'MINGSCALE'
 #!/usr/bin/env bash
 # Ming OS 自动缩放 - 覆盖所有屏幕比例与分辨率
@@ -603,6 +603,19 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-appearance-control
 SCALEAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-scale.desktop"
+}
+
+# 26.3.3 retires the old resolution-driven scaler.  Retain a harmless command
+# at the historic path so an upgrade hook or user shortcut cannot overwrite
+# appearance.json preferences, while directing users to the supported controls.
+configure_hidpi_autoscale() {
+    cat > /usr/local/bin/ming-scale << 'MINGSCALECOMPAT'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' '显示缩放由 Ming 设置的“外观与桌面”页面管理；未更改现有外观设置。' >&2
+exit 0
+MINGSCALECOMPAT
+    chmod 0755 /usr/local/bin/ming-scale
 }
 
 # ======================== Ming OS 品牌图标生成 (SVG) ========================
@@ -7545,6 +7558,7 @@ main() {
     echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
 
     generate_ming_icons
+    configure_hidpi_autoscale   # Retire legacy automatic scaler without touching preferences.
     install_themes
     setup_wallpaper || return 1
     configure_ming_shell
