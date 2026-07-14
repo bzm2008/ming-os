@@ -1763,7 +1763,14 @@ _plank_launcher() {
             ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
             ming-update) wm_class="${wm_class:-Zenity}" ;;
         esac
-        exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
+        # The running-window helper deliberately has NoDisplay=true so it
+        # stays out of the application drawer.  ming-launch correctly rejects
+        # hidden entries, therefore its Dock proxy must invoke the helper
+        # directly while ordinary application proxies stay brokered.
+        case "${name}" in
+            ming-running-apps) exec_line="/usr/local/bin/ming-running-apps menu" ;;
+            *) exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock" ;;
+        esac
         cat > "${proxy_path}" << DOCKPROXY
 [Desktop Entry]
 Type=Application
@@ -2245,14 +2252,23 @@ x11_id_is_valid() {
     [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
 }
 
+window_is_manageable() {
+    local properties="$1"
+    ! grep -Eq '_NET_WM_WINDOW_TYPE_(DESKTOP|DOCK|NOTIFICATION|TOOLTIP|MENU|DROPDOWN_MENU|POPUP_MENU|SPLASH|DND)' <<< "${properties}"
+}
+
 require_window() {
-    local window_id="$1"
+    local window_id="$1" properties=""
     x11_id_is_valid "${window_id}" || {
         printf '窗口 ID 必须是十六进制 X11 ID（例如 0x01200007）。\n' >&2
         return 22
     }
-    x11_call xprop -id "${window_id}" >/dev/null 2>&1 || {
+    properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || {
         printf '未找到指定窗口：%s\n' "${window_id}" >&2
+        return 3
+    }
+    window_is_manageable "${properties}" || {
+        printf '指定窗口不是可管理的应用窗口：%s\n' "${window_id}" >&2
         return 3
     }
 }
@@ -2374,6 +2390,9 @@ window_control_bin="${MING_WINDOW_CONTROL_BIN:-/usr/local/bin/ming-window-contro
 desktop_dirs_value="${MING_RUNNING_APPS_DESKTOP_DIRS:-/usr/share/applications:/usr/local/share/applications}"
 known_launcher_map="${MING_RUNNING_APPS_MAPPING_FILE:-/usr/share/ming-os/ming-running-apps-known-launchers.conf}"
 desktop_entry_path="${MING_RUNNING_APPS_DESKTOP_FILE:-/usr/share/applications/ming-running-apps.desktop}"
+plank_settings_path="${MING_PLANK_SETTINGS_FILE:-${HOME}/.config/plank/dock1/settings}"
+plank_launchers_dir="${MING_PLANK_LAUNCHERS_DIR:-${HOME}/.config/plank/dock1/launchers}"
+running_apps_dock_proxy_path="${MING_RUNNING_APPS_DOCK_PROXY_FILE:-/usr/share/applications/ming-dock-ming-running-apps.desktop}"
 IFS=':' read -r -a desktop_dirs <<< "${desktop_dirs_value}"
 
 x11_call() {
@@ -2486,7 +2505,9 @@ resolve_launcher_mapping() {
     else
         desktop_file="$(known_launcher_for_class "${wm_class}" 2>/dev/null || true)"
         if [[ -n "${desktop_file}" ]]; then
-            mapping_kind="launcher"
+            # A filename/class heuristic helps the running-window menu, but
+            # it is not evidence that Plank/BAMF owns this client window.
+            mapping_kind="candidate"
             mapping_file="${desktop_file}"
             mapping_source="known-class"
         fi
@@ -2557,8 +2578,27 @@ collect_windows() {
     done <<< "${listing}"
 }
 
+dock_settings_include_running_apps_item() {
+    local dock_items=""
+    [[ -r "${plank_settings_path}" ]] || return 1
+    dock_items="$(awk 'index($0, "DockItems=") == 1 { print substr($0, 11); exit }' "${plank_settings_path}" 2>/dev/null)"
+    [[ -n "${dock_items}" ]] || return 1
+    [[ ";;${dock_items};;" == *";;ming-running-apps.dockitem;;"* ]]
+}
+
 running_apps_dock_item_present() {
-    [[ -f "${HOME}/.config/plank/dock1/launchers/ming-running-apps.dockitem" ]]
+    local dock_item="${plank_launchers_dir}/ming-running-apps.dockitem"
+    dock_settings_include_running_apps_item || return 1
+    [[ -s "${dock_item}" && -s "${running_apps_dock_proxy_path}" ]] || return 1
+    grep -qxF "Launcher=file://${running_apps_dock_proxy_path}" "${dock_item}" && \
+        grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${running_apps_dock_proxy_path}"
+}
+
+running_apps_entry_available() {
+    window_control_available || return 1
+    command -v zenity >/dev/null 2>&1 || return 1
+    [[ -s "${desktop_entry_path}" ]] || return 1
+    grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${desktop_entry_path}"
 }
 
 list_json() {
@@ -2567,7 +2607,7 @@ list_json() {
         || records_file="$(mktemp /tmp/ming-running-apps.XXXXXX)" \
         || return 1
     collect_windows > "${records_file}"
-    window_control_available && entry_available=true
+    running_apps_entry_available && entry_available=true
     running_apps_dock_item_present && dock_item=true
     MING_RUNNING_ENTRY_AVAILABLE="${entry_available}" MING_RUNNING_DOCK_ITEM="${dock_item}" \
     MING_RUNNING_DESKTOP_FILE="${desktop_entry_path}" python3 - "${records_file}" <<'PY'
@@ -2601,7 +2641,7 @@ for start in range(0, len(fields), 9):
 
 unmapped_minimized = [
     window for window in windows
-    if window["minimized"] and window["mapping"]["kind"] == "unmapped"
+    if window["minimized"] and window["mapping"]["kind"] != "launcher"
 ]
 print(json.dumps({
     "windows": windows,
@@ -2648,6 +2688,8 @@ for window in payload.get("windows", []):
         state.append("跳过任务栏")
     if window.get("mapping", {}).get("kind") == "unmapped":
         state.append("运行中入口")
+    elif window.get("mapping", {}).get("kind") == "candidate":
+        state.append("候选启动器")
     print("%s\t%s\t%s" % (
         window.get("id", ""),
         str(window.get("title", "")).replace("\t", " ").replace("\n", " "),
@@ -2782,7 +2824,7 @@ if not isinstance(unmapped, list):
 entry = value.get("entry") if isinstance(value.get("entry"), dict) else {}
 mapped = sum(1 for window in windows if isinstance(window, dict)
              and isinstance(window.get("mapping"), dict)
-             and window["mapping"].get("kind") != "unmapped")
+             and window["mapping"].get("kind") == "launcher")
 print("%s %s %s %s" % (
     str(bool(entry.get("available"))).lower(),
     str(bool(entry.get("dock_item"))).lower(),
@@ -3024,12 +3066,15 @@ if ! ${dock_pin_only_valid}; then
 elif ! ${bamfdaemon_running}; then
     dock_degraded=true
     dock_degradation="bamfdaemon-not-running"
-elif (( unmapped_minimized_count > 0 )); then
-    dock_degraded=true
-    dock_degradation="unmapped-minimized"
 elif ! ${running_apps_entry_available}; then
     dock_degraded=true
     dock_degradation="running-apps-entry-unavailable"
+elif ! ${running_apps_dock_item}; then
+    dock_degraded=true
+    dock_degradation="running-apps-dock-item-unavailable"
+elif (( unmapped_minimized_count > 0 )); then
+    dock_degraded=true
+    dock_degradation="unmapped-minimized"
 fi
 
 if ${json}; then
@@ -3292,6 +3337,8 @@ log_dir="${HOME}/.cache/ming-os"
 mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 log_file="${log_dir}/plank.log"
 stacking_promotion_attempted_for=""
+PLANK_STARTUP_TIMEOUT=8
+PLANK_PROBE_TIMEOUT=2
 
 log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
@@ -3326,11 +3373,31 @@ FadeOpacity=1.0
 PLANKRUNTIMESETTINGS
 }
 
+plank_settings_include_running_apps_item() {
+    local settings="$1" dock_items=""
+    [[ -r "${settings}" ]] || return 1
+    dock_items="$(awk 'index($0, "DockItems=") == 1 { print substr($0, 11); exit }' "${settings}" 2>/dev/null)"
+    [[ -n "${dock_items}" ]] || return 1
+    [[ ";;${dock_items};;" == *";;ming-running-apps.dockitem;;"* ]]
+}
+
+running_apps_dock_item_healthy() {
+    local settings="$1" launchers_dir="$2"
+    local dock_item="${launchers_dir}/ming-running-apps.dockitem"
+    local proxy_path="${MING_RUNNING_APPS_DOCK_PROXY_FILE:-/usr/share/applications/ming-dock-ming-running-apps.desktop}"
+    plank_settings_include_running_apps_item "${settings}" || return 1
+    [[ -s "${dock_item}" && -s "${proxy_path}" ]] || return 1
+    grep -qxF "Launcher=file://${proxy_path}" "${dock_item}" && \
+        grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${proxy_path}"
+}
+
 ensure_plank_settings() {
-    local settings="${HOME}/.config/plank/dock1/settings"
+    local plank_dir="${HOME}/.config/plank/dock1"
+    local settings="${MING_PLANK_SETTINGS_FILE:-${plank_dir}/settings}"
+    local launchers_dir="${MING_PLANK_LAUNCHERS_DIR:-${plank_dir}/launchers}"
     local skel_settings="/etc/skel/.config/plank/dock1/settings"
-    local restored=false running_item_added=false
-    mkdir -p "$(dirname "${settings}")" 2>/dev/null || true
+    local restored=false running_item_added=false running_item_repaired=false
+    mkdir -p "$(dirname "${settings}")" "${launchers_dir}" 2>/dev/null || true
     if [[ ! -f "${settings}" ]]; then
         if [[ -s "${skel_settings}" ]]; then
             cp "${skel_settings}" "${settings}" 2>/dev/null || write_default_plank_settings "${settings}"
@@ -3350,7 +3417,7 @@ ensure_plank_settings() {
     else
         printf 'PinOnly=false\n' >>"${settings}"
     fi
-    if grep -q '^DockItems=.*ming-running-apps\.dockitem' "${settings}"; then
+    if plank_settings_include_running_apps_item "${settings}"; then
         :
     elif grep -q '^DockItems=' "${settings}"; then
         sed -i 's|^DockItems=.*|&;;ming-running-apps.dockitem|' "${settings}" 2>/dev/null || true
@@ -3359,7 +3426,10 @@ ensure_plank_settings() {
         printf 'DockItems=ming-running-apps.dockitem\n' >>"${settings}"
         running_item_added=true
     fi
-    if { ${restored} || ${running_item_added}; } && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+    if ! running_apps_dock_item_healthy "${settings}" "${launchers_dir}"; then
+        running_item_repaired=true
+    fi
+    if { ${restored} || ${running_item_added} || ${running_item_repaired}; } && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
         /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >>"${log_file}" 2>&1 || \
             log "Dock launcher refresh after settings restore failed"
     fi
@@ -3391,7 +3461,7 @@ valid_window_id() {
 
 plank_window_id() {
     command -v wmctrl >/dev/null 2>&1 || return 1
-    local fallback_id="" candidate_id candidate_geometry screen=""
+    local fallback_id="" candidate_id candidate_geometry screen="" candidate_count=0
     local xprop_available=false
     command -v xprop >/dev/null 2>&1 && xprop_available=true
     ${xprop_available} || screen="$(screen_geometry)"
@@ -3399,6 +3469,8 @@ plank_window_id() {
     dock_candidates="$(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }' || true)"
     while read -r candidate_id; do
         [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
+        candidate_count=$((candidate_count + 1))
+        (( candidate_count <= 3 )) || break
         [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
         if ${xprop_available} && x11_call xprop -id "${candidate_id}" 2>/dev/null | grep -q '_NET_WM_WINDOW_TYPE_DOCK'; then
             printf '%s\n' "${candidate_id}"
@@ -3470,6 +3542,24 @@ plank_health_reason() {
     printf 'healthy\n'
 }
 
+plank_health_reason_bounded() {
+    local budget="${1:-${PLANK_PROBE_TIMEOUT}}"
+    [[ "${budget}" =~ ^[1-9][0-9]*$ ]] || budget="${PLANK_PROBE_TIMEOUT}"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${budget}s" "$0" --reason 2>/dev/null || true
+    else
+        plank_health_reason
+    fi
+}
+
+start_plank_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${PLANK_STARTUP_TIMEOUT}s" "$0" --start-internal
+    else
+        start_plank
+    fi
+}
+
 plank_window_visible() {
     [[ "$(plank_health_reason)" == "healthy" ]]
 }
@@ -3508,7 +3598,8 @@ start_plank() {
     ensure_plank_settings
     ensure_bamfdaemon || true
     local reason
-    reason="$(plank_health_reason)"
+    reason="$(plank_health_reason_bounded)"
+    reason="${reason:-probe-timeout}"
     if [[ "${reason}" == "healthy" ]]; then
         diagnose_and_promote_stacking
         return 0
@@ -3523,10 +3614,11 @@ start_plank() {
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
     log "starting Plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
     (nohup plank >>"${log_file}" 2>&1 &) || return 1
-    # Keep the one-shot repair within the coordinator's fixed eight-second
-    # Plank startup budget (32 x 250ms).
+    # Each health probe is separately capped; start_plank_bounded wraps this
+    # complete recovery path in the coordinator's fixed eight-second budget.
     for _ready_try in $(seq 1 32); do
-        reason="$(plank_health_reason)"
+        reason="$(plank_health_reason_bounded)"
+        reason="${reason:-probe-timeout}"
         if [[ "${reason}" == "healthy" ]]; then
             diagnose_and_promote_stacking
             log "Plank recovery succeeded"
@@ -3534,7 +3626,7 @@ start_plank() {
         fi
         sleep 0.25
     done
-    log "Plank recovery failed: $(plank_health_reason)"
+    log "Plank recovery failed: $(plank_health_reason_bounded)"
     stop_plank
     return 1
 }
@@ -3546,10 +3638,19 @@ run_one_shot() {
         log "Plank one-shot repair already owns ${lock_file}"
         exit 0
     fi
-    start_plank
+    start_plank_bounded
 }
 
 case "${1:-start}" in
+    --check)
+        [[ "$(plank_health_reason)" == "healthy" ]]
+        ;;
+    --reason)
+        plank_health_reason
+        ;;
+    --start-internal)
+        start_plank
+        ;;
     --session)
         lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
         exec 9>"${lock_file}" || exit 1
@@ -3558,7 +3659,7 @@ case "${1:-start}" in
         fi
         sleep 3
         while true; do
-            start_plank || log "Plank recovery attempt failed"
+            start_plank_bounded || log "Plank recovery attempt failed"
             sleep 5
         done
         ;;
@@ -3767,7 +3868,8 @@ plank_running() {
 plank_window_visible() {
     plank_running || return 1
     command -v wmctrl >/dev/null 2>&1 || return 0
-    x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ {found=1} END {exit !found}'
+    command -v ming-plank-watchdog >/dev/null 2>&1 || return 1
+    run_bounded "${PROBE_TIMEOUT}" /usr/local/bin/ming-plank-watchdog --check >/dev/null 2>&1
 }
 
 picom_running() {
