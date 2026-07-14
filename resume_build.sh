@@ -37,13 +37,9 @@ ensure_resume_runtime_packages() {
     if ! chroot_exec /usr/local/sbin/apt-build install \
         xserver-xorg \
         xserver-xorg-input-libinput \
-        xfce4 \
-        xfce4-panel \
         xfce4-session \
         xfce4-settings \
         xfce4-terminal \
-        xfce4-appfinder \
-        xfce4-whiskermenu-plugin \
         xfce4-notifyd \
         xfdesktop4 \
         thunar \
@@ -90,6 +86,13 @@ ensure_resume_runtime_packages() {
     fi
     settle_chroot_dpkg "resume runtime packages"
 
+    # The resume helper used to install the full xfce4 meta-package, which
+    # pulled the retired panel/appfinder/Whisker shell back into the image.
+    # Remove those packages before the desktop gate scans the final rootfs.
+    chroot_exec apt-get purge -y --no-install-recommends \
+        xfce4 xfce4-panel xfce4-appfinder xfce4-whiskermenu-plugin \
+        xfce4-pulseaudio-plugin >/dev/null 2>&1 || true
+
     local package
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
@@ -105,7 +108,7 @@ ensure_resume_runtime_packages() {
 
     chroot_exec systemctl enable lightdm.service >/dev/null 2>&1 || true
 
-    for bin in lightdm startxfce4 xfce4-session xfce4-panel xfdesktop xfce4-screensaver xfce4-screensaver-command wmctrl mkfs.ext4; do
+    for bin in lightdm startxfce4 xfce4-session xfdesktop xfce4-screensaver xfce4-screensaver-command wmctrl mkfs.ext4; do
         if ! chroot_exec /bin/sh -c "command -v '${bin}'" >/dev/null 2>&1; then
             log_error "resume 构建缺少必要命令: ${bin}"
             exit 1

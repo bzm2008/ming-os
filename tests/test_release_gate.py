@@ -121,6 +121,13 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
+    def test_static_calamares_fallback_contains_installed_desktop_gate(self):
+        """The build-time Calamares fallback must be complete before Live preflight runs."""
+        fallback = self.desktop.split("cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'", 1)[1]
+        fallback = fallback.split("cat > /etc/calamares/modules/partition.conf", 1)[0]
+        self.assertIn("cat > /etc/calamares/modules/ming-installed-desktop-gate.conf", fallback)
+        self.assertIn('/usr/local/sbin/ming-installer-verify installed /target', fallback)
+
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
         for marker in [

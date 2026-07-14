@@ -6725,6 +6725,17 @@ sequence:
   - finished
 STATICCALASETTINGS
 
+    # The Live preflight rewrites this file at runtime, but the built rootfs
+    # must already contain the gate so the release validator can verify the
+    # installer contract before an ISO is assembled.
+    cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'STATICDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed /target"
+STATICDESKTOPGATECONF
+
     cat > /etc/calamares/modules/partition.conf << 'STATICPARTCONF'
 ---
 efiSystemPartition: "/boot/efi"
@@ -7578,7 +7589,7 @@ main() {
     configure_simplified_menus   # 只动 Thunar 右键菜单，不再覆盖桌面/xfwm 配置
     deploy_release_readme
     configure_autostart
-    deploy_live_installer
+    deploy_live_installer || return 1
     setup_account_oobe
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用

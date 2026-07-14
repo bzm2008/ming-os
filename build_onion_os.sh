@@ -239,7 +239,17 @@ prepare_chroot_scripts() {
     chmod +x "${CHROOT_DIR}/tmp/ming-build/modules/"*.sh
     if [[ -d "${SCRIPT_DIR}/assets" ]]; then
         mkdir -p "${CHROOT_DIR}/tmp/ming-build/assets"
-        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || true
+        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || {
+            log_error "复制构建资源到 chroot 失败"
+            return 1
+        }
+        local required_asset
+        for required_asset in ming-installer-verify.py wallpaper-ming-2633-abstract.png; do
+            if [[ ! -s "${CHROOT_DIR}/tmp/ming-build/assets/${required_asset}" ]]; then
+                log_error "构建资源缺失或未复制: assets/${required_asset}"
+                return 1
+            fi
+        done
     fi
 
     # 部署可执行的 apt-build wrapper，供模块脚本里 timeout 直接调用。
