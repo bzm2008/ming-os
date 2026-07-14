@@ -11,9 +11,9 @@ Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, fami
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
 | ISO | `ming-os-26.3.3-home-amd64.iso` |
-| Size | Build output TBD |
-| SHA256 | Build output TBD |
-| Release state | Candidate under review; not built or published yet |
+| Size | 1,992,589,312 bytes (1.86 GiB) |
+| SHA256 | `1d71a3d71441ca938fc46551d9d6c3cdfc9b5e9a9f2fb7b4eb4fb611360e5e11` |
+| Release state | Built and ready for website/OTA publication |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
@@ -107,9 +107,9 @@ Expected public OTA response:
   "status": "ready",
   "update_type": "major",
   "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.3-home-amd64.download",
-  "checksum": "<SHA256 after the final ISO build>",
+  "checksum": "1d71a3d71441ca938fc46551d9d6c3cdfc9b5e9a9f2fb7b4eb4fb611360e5e11",
   "checksum_type": "sha256",
-  "size": 0
+  "size": 1992589312
 }
 ```
 
@@ -164,4 +164,4 @@ Recommended remaining field tests:
 - Ming OS can run on low-memory machines, but optional WeChat/WPS installs may become the largest memory consumers.
 - The normal user path should be buttons, Settings, update UI, app folders, and graphical repair tools.
 - Command-line usage is for advanced support, not daily operation.
-- Ming OS 26.3.3 is pending review. Do not treat it as a published download or OTA target until the ISO, checksum, GitHub release, and server manifest have all been verified.
+- Ming OS 26.3.3 is published only after the ISO, checksum, GitHub tag, and server manifest are all verified.
