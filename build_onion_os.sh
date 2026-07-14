@@ -1950,11 +1950,16 @@ for desktop_runtime in [
     "usr/bin/xfdesktop",
     "usr/bin/thunar",
     "usr/bin/xinput",
-    "usr/bin/xfce4-notifyd",
     "usr/sbin/mkfs.ext4",
     "lib/systemd/system/lightdm.service",
 ]:
     require_path(desktop_runtime)
+notifyd_candidates = [
+    root / "usr/bin/xfce4-notifyd",
+    root / "usr/lib/x86_64-linux-gnu/xfce4/notifyd/xfce4-notifyd",
+]
+if not any(path.is_file() and os.access(path, os.X_OK) for path in notifyd_candidates):
+    errors.append("missing executable xfce4-notifyd runtime")
 for retired_runtime in [
     "usr/bin/xfce4-panel",
     "usr/bin/xfce4-appfinder",
