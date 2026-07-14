@@ -476,6 +476,7 @@ def hardware_probe_snapshot():
 
 PAGE_ALIASES = {
     "account": "账户",
+    "security": "安全",
     "network": "网络与蓝牙",
     "storage": "存储",
     "update": "系统更新",
@@ -545,6 +546,7 @@ class MingSettings(Adw.ApplicationWindow):
         # 注册分类页（图标, 标题, 构建函数）
         self.pages = [
             ("avatar-default-symbolic", "账户", self.build_account),
+            ("security-high-symbolic", "安全", self.build_security),
             ("network-wireless-symbolic", "网络与蓝牙", self.build_network),
             ("drive-harddisk-symbolic", "存储", self.build_storage),
             ("software-update-available-symbolic", "系统更新", self.build_update),
@@ -1029,28 +1031,134 @@ class MingSettings(Adw.ApplicationWindow):
             self.toast("两次密码不一致。")
             return
         if not p1:
-            # 清空密码 = 保持免密
-            run(["pkexec", "passwd", "-d", USER])
-            self.toast("已设为免密登录。")
+            command = ["pkexec", "/usr/local/sbin/ming-account-control",
+                       "clear-password", "--user", USER]
+            run_capture_async(command, timeout=30, on_done=self.on_password_saved)
             return
-        # 通过 pkexec chpasswd 设置
-        try:
-            proc = subprocess.run(
-                ["pkexec", "bash", "-c", "chpasswd"],
-                input="%s:%s\n" % (USER, p1), text=True,
-                capture_output=True, timeout=20)
-            if proc.returncode == 0:
-                self.toast("密码已更新。开机仍自动进入桌面。")
-                self.pw1.set_text(""); self.pw2.set_text("")
-            else:
-                self.toast("设置失败：%s" % (proc.stderr or "权限被拒绝"))
-        except Exception as e:
-            self.toast("设置失败：%s" % e)
+        command = ["pkexec", "/usr/local/sbin/ming-account-control",
+                   "set-password", "--user", USER]
+        run_capture_stdin_async(command, p1 + "\n", timeout=30,
+                                on_done=self.on_password_saved)
 
-    # ---- 2. 网络与蓝牙 ----
+    def on_password_saved(self, rc, output, error):
+        try:
+            result = json.loads(output or "{}")
+        except ValueError:
+            result = {}
+        if rc == 0 and result.get("ok"):
+            self.pw1.set_text(""); self.pw2.set_text("")
+            self.toast("账户密码状态已更新并确认。")
+        else:
+            self.toast("设置失败：%s" % (result.get("error") or error or "授权被取消"))
+
+    # ---- 2. 安全中心 ----
+    def build_security(self):
+        sc, box = self.page_scroller()
+        self.security_page = sc
+        self.loading_security_state = True
+
+        summary = Adw.PreferencesGroup(
+            title="安全状态", description="这里只显示可理解的状态，不展示底层防火墙规则。")
+        self.security_summary_row = Adw.ActionRow(
+            title="正在检查", subtitle="正在读取防火墙、远程访问与安全更新状态...")
+        summary.add(self.security_summary_row)
+        box.append(summary)
+
+        controls = Adw.PreferencesGroup(
+            title="保护设置", description="更改后会由系统专用授权组件应用并再次读取确认。")
+        self.firewall_switch = Adw.SwitchRow(
+            title="防火墙", subtitle="阻止未经请求的外部连接")
+        self.ssh_switch = Adw.SwitchRow(
+            title="远程终端", subtitle="关闭时不会启动远程登录；开启后也仅允许局域网访问")
+        self.security_updates_switch = Adw.SwitchRow(
+            title="自动安全更新", subtitle="自动安装 Debian 安全修复")
+        self.home_profile_switch = Adw.SwitchRow(
+            title="家庭网络模式", subtitle="关闭时按公共网络的更严格规则保护")
+        for name, control in (
+                ("firewall", self.firewall_switch), ("ssh", self.ssh_switch),
+                ("security-updates", self.security_updates_switch),
+                ("profile", self.home_profile_switch)):
+            control.set_sensitive(False)
+            control.connect("notify::active", self.on_security_toggle, name)
+            controls.add(control)
+        box.append(controls)
+        GLib.idle_add(self.refresh_security_status)
+        return sc
+
+    def refresh_security_status(self):
+        def done(rc, output, error):
+            if self.security_page.get_root() is not self:
+                return False
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except ValueError:
+                status = {}
+            if not status.get("ok"):
+                self.security_summary_row.set_title("安全状态暂不可用")
+                self.security_summary_row.set_subtitle(error or "无法读取系统保护状态。")
+                return False
+            ssh = status.get("ssh") or {}
+            self.loading_security_state = True
+            self.firewall_switch.set_active(bool(status.get("firewall")))
+            self.ssh_switch.set_active(bool(ssh.get("active") and ssh.get("firewall_allowed")))
+            self.security_updates_switch.set_active(bool(status.get("security_updates")))
+            self.home_profile_switch.set_active(status.get("profile") == "home")
+            self.loading_security_state = False
+            for control in (self.firewall_switch, self.ssh_switch,
+                            self.security_updates_switch, self.home_profile_switch):
+                control.set_sensitive(True)
+            enabled = sum((bool(status.get("firewall")), bool(status.get("security_updates")),
+                           not bool(ssh.get("active"))))
+            self.security_summary_row.set_title("核心保护 %d/3 已就绪" % enabled)
+            self.security_summary_row.set_subtitle(
+                "防火墙%s · 远程终端%s · 安全更新%s" % (
+                    "已开启" if status.get("firewall") else "已关闭",
+                    "已开启" if ssh.get("active") else "已关闭",
+                    "已开启" if status.get("security_updates") else "已关闭"))
+            return False
+
+        run_capture_async(
+            ["/usr/local/sbin/ming-security-control", "status", "--json"],
+            timeout=10, on_done=done)
+
+    def on_security_toggle(self, control, _prop, name):
+        if self.loading_security_state:
+            return
+        value = ("home" if control.get_active() else "public") if name == "profile" else (
+            "on" if control.get_active() else "off")
+        for item in (self.firewall_switch, self.ssh_switch,
+                     self.security_updates_switch, self.home_profile_switch):
+            item.set_sensitive(False)
+
+        def done(rc, _output, error):
+            if rc != 0:
+                self.toast("安全设置未能应用：%s" % (error or "授权被取消"))
+            self.refresh_security_status()
+            return False
+
+        run_capture_async(
+            ["pkexec", "/usr/local/sbin/ming-security-control", name, value],
+            timeout=40, on_done=done)
+
+    # ---- 3. 网络与蓝牙 ----
     def build_network(self):
         sc, box = self.page_scroller()
         self.network_page = sc
+
+        wired_grp = Adw.PreferencesGroup(
+            title="有线网络", description="显示网卡、驱动、网线、地址、网关和 DNS 状态。")
+        self.ethernet_status_row = Adw.ActionRow(
+            title="正在检测有线网络", subtitle="正在读取 NetworkManager 状态...")
+        wired_refresh = Gtk.Button(label="刷新")
+        wired_refresh.set_valign(Gtk.Align.CENTER)
+        wired_refresh.connect("clicked", lambda _button: self.refresh_ethernet_status())
+        self.ethernet_status_row.add_suffix(wired_refresh)
+        wired_grp.add(self.ethernet_status_row)
+        wired_repair = Gtk.Button(label="修复连接")
+        wired_repair.connect("clicked", self.on_ethernet_repair)
+        wired_grp.add(self.button_row(
+            "有线连接修复", "仅请求 NetworkManager 重新连接，不更改驱动或保存的密码。", wired_repair))
+        box.append(wired_grp)
 
         time_grp = Adw.PreferencesGroup(
             title="时间同步", description="联网后会自动校时；不会改动您选择的时区。")
@@ -1132,6 +1240,7 @@ class MingSettings(Adw.ApplicationWindow):
         GLib.idle_add(self.on_wifi_status_refresh, None)
         GLib.idle_add(self.refresh_bluetooth_status)
         GLib.idle_add(self.refresh_time_sync_status)
+        GLib.idle_add(self.refresh_ethernet_status)
 
         def wifi_radio_done(rc, output, _error):
             if rc == 0:
@@ -1140,6 +1249,41 @@ class MingSettings(Adw.ApplicationWindow):
 
         run_capture_async(["nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
         return sc
+
+    def refresh_ethernet_status(self):
+        def done(rc, output, error):
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except ValueError:
+                status = {}
+            devices = status.get("devices") or []
+            if not devices:
+                self.ethernet_status_row.set_title("未检测到有线网卡")
+                self.ethernet_status_row.set_subtitle(status.get("error") or error or "可继续使用无线网络。")
+                return False
+            device = devices[0]
+            self.ethernet_status_row.set_title(
+                "有线网络已连接" if device.get("state") == "connected" else "有线网络未连接")
+            self.ethernet_status_row.set_subtitle(
+                "%s · 驱动 %s · 网线%s · IP %s · 网关 %s · DNS %s" % (
+                    device.get("device") or "网卡", device.get("driver") or "未知",
+                    "已接入" if device.get("carrier") else "未接入", device.get("ip") or "未获取",
+                    device.get("route") or "未获取", ", ".join(device.get("dns") or []) or "未获取"))
+            return False
+
+        run_capture_async(
+            ["/usr/local/bin/ming-device-control", "ethernet-status", "--json"],
+            timeout=10, on_done=done)
+
+    def on_ethernet_repair(self, _button):
+        def done(rc, _output, error):
+            self.toast("有线连接已重新检查。" if rc == 0 else
+                       "有线连接修复失败：%s" % (error or "NetworkManager 未能连接"))
+            self.refresh_ethernet_status()
+            return False
+        run_capture_async(
+            ["/usr/local/bin/ming-device-control", "ethernet-repair"],
+            timeout=35, on_done=done)
 
     def apply_time_sync_status(self, status):
         state = (status or {}).get("state", "error")

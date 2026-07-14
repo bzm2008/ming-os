@@ -11,8 +11,6 @@ CHROOT_DIR="$SCRIPT_DIR/chroot"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 ISO_FILENAME="onion-os-${ONION_OS_VERSION}-home-amd64.iso"
 ONION_USER="onion"
-ONION_USER_PASS="onion"
-ROOT_PASS="root"
 
 echo "=====> 继续 Onion OS 构建 <====="
 
@@ -32,8 +30,6 @@ chroot_exec() {
     TERM=linux \
     ONION_OS_VERSION="${ONION_OS_VERSION}" \
     ONION_USER="${ONION_USER}" \
-    ONION_USER_PASS="${ONION_USER_PASS}" \
-    ROOT_PASS="${ROOT_PASS}" \
     chroot "$CHROOT_DIR" "$@"
 }
 

@@ -1963,6 +1963,39 @@ RELEASEFILE
     chmod 644 /etc/ming-release
 }
 
+deploy_passwordless_oobe_migration() {
+    cat > /usr/local/sbin/ming-account-password-migration << 'PASSWORDMIGRATION'
+#!/usr/bin/env bash
+set -euo pipefail
+
+for marker in /home/*/.config/ming-os/oobe-account-done; do
+    [[ -f "${marker}" ]] || continue
+    [[ "$(cat "${marker}" 2>/dev/null)" == "skipped" ]] || continue
+    user_name="$(stat -c '%U' "${marker}")"
+    [[ -n "${user_name}" && "${user_name}" != "UNKNOWN" ]] || continue
+    /usr/local/sbin/ming-account-control clear-password --user "${user_name}" >/dev/null
+    passwd -S "${user_name}" | awk 'NR == 1 { exit !($2 == "NP") }'
+done
+PASSWORDMIGRATION
+    chmod 0755 /usr/local/sbin/ming-account-password-migration
+
+    cat > /etc/systemd/system/ming-account-password-migration.service << 'PASSWORDMIGRATIONSERVICE'
+[Unit]
+Description=Ming OS passwordless OOBE compatibility migration
+After=local-fs.target
+ConditionPathExists=/usr/local/sbin/ming-account-control
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-account-password-migration
+
+[Install]
+WantedBy=multi-user.target
+PASSWORDMIGRATIONSERVICE
+    systemctl enable ming-account-password-migration.service
+    /usr/local/sbin/ming-account-password-migration
+}
+
 main() {
     echo "=====> [06_ota_update] Deploying OTA update system <====="
     install_ota_dependencies
@@ -1970,6 +2003,7 @@ main() {
     deploy_ota_cli
     deploy_systemd_services
     deploy_gui_tool
+    deploy_passwordless_oobe_migration
     create_version_file
     echo "=====> [06_ota_update] OTA update system deployed <====="
 }

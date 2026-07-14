@@ -1390,12 +1390,92 @@ class DeviceController:
             "text": "%d%%" % value if value is not None else "--",
         }
 
+    def ethernet_status(self):
+        """Return NetworkManager-owned wired state without connection secrets."""
+        result = {
+            "ok": True, "available": False, "state": "no_hardware",
+            "devices": [], "error": "",
+        }
+        if not self._can_run("nmcli"):
+            result.update(ok=False, state="unavailable", error="NetworkManager 不可用。")
+            return result
+        rc, output, error = self._run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status"])
+        if rc != 0:
+            result.update(ok=False, state="diagnostic_unavailable", error=error or output)
+            return result
+        for line in output.splitlines():
+            fields = split_nmcli_terse(line)
+            if len(fields) < 3 or fields[1] != "ethernet":
+                continue
+            device, connection_state = fields[0], fields[2]
+            if not IFNAME_PATTERN.fullmatch(device):
+                continue
+            detail_rc, detail, detail_error = self._run([
+                "nmcli", "-t", "-f",
+                "GENERAL.DRIVER,WIRED-PROPERTIES.CARRIER,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP4.DHCP4.OPTION",
+                "device", "show", device,
+            ])
+            properties = {}
+            if detail_rc == 0:
+                for property_line in detail.splitlines():
+                    property_fields = split_nmcli_terse(property_line)
+                    if len(property_fields) < 2:
+                        continue
+                    key = re.sub(r"\[\d+\]$", "", property_fields[0])
+                    properties.setdefault(key, []).append(":".join(property_fields[1:]))
+            address = (properties.get("IP4.ADDRESS") or [""])[0]
+            item = {
+                "device": device,
+                "driver": (properties.get("GENERAL.DRIVER") or [""])[0],
+                "carrier": (properties.get("WIRED-PROPERTIES.CARRIER") or [""])[0].strip().lower() in {"yes", "true", "on"},
+                "dhcp": "bound" if properties.get("IP4.DHCP4.OPTION") else "none",
+                "ip": address,
+                "route": (properties.get("IP4.GATEWAY") or [""])[0],
+                "dns": [value for value in properties.get("IP4.DNS", []) if value],
+                "state": connection_state,
+                "error": "" if detail_rc == 0 else detail_error,
+            }
+            result["devices"].append(item)
+        if result["devices"]:
+            result["available"] = True
+            result["state"] = (
+                "connected" if any(item["state"] == "connected" for item in result["devices"])
+                else "disconnected")
+        return result
+
+    def ethernet_repair(self):
+        """Ask NetworkManager to reconnect wired devices, then read state back."""
+        before = self.ethernet_status()
+        if not before.get("devices"):
+            return {"ok": False, "changed": False, "action": "no_hardware",
+                    "error": before.get("error") or "未检测到有线网卡。", "status": before}
+        errors = []
+        changed = False
+        for item in before["devices"]:
+            if item["state"] == "connected":
+                continue
+            rc, output, error = self._run(
+                ["nmcli", "device", "connect", item["device"]], timeout=20)
+            if rc == 0:
+                changed = True
+            else:
+                errors.append(error or output or "%s 连接失败" % item["device"])
+        after = self.ethernet_status()
+        connected = any(item["state"] == "connected" for item in after.get("devices", []))
+        return {
+            "ok": connected, "changed": changed,
+            "action": "reconnected" if connected else "repair_failed",
+            "error": "；".join(errors), "status": after,
+        }
+
     def status(self):
         return {
             "audio": self.audio_status(),
             "brightness": self.brightness_status(),
             "wifi": self.wifi_status(),
             "bluetooth": self.bluetooth_status(),
+            "ethernet": self.ethernet_status(),
             "battery": self.battery_status(),
         }
 
@@ -1414,6 +1494,9 @@ def build_parser():
     wifi_connect.add_argument("--password-stdin", action="store_true")
     bluetooth_status = subparsers.add_parser("bluetooth-status")
     bluetooth_status.add_argument("--json", action="store_true")
+    ethernet_status = subparsers.add_parser("ethernet-status")
+    ethernet_status.add_argument("--json", action="store_true")
+    subparsers.add_parser("ethernet-repair")
     audio_status = subparsers.add_parser("audio-status")
     audio_status.add_argument("--json", action="store_true")
     subparsers.add_parser("audio-repair-call")
@@ -1453,6 +1536,10 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.wifi_connect(args.ssid, args.bssid, args.ifname, password=password)
     elif args.action == "bluetooth-status":
         result = controller.bluetooth_status()
+    elif args.action == "ethernet-status":
+        result = controller.ethernet_status()
+    elif args.action == "ethernet-repair":
+        result = controller.ethernet_repair()
     elif args.action == "audio-status":
         result = controller.audio_status()
     elif args.action == "audio-repair-call":
@@ -1468,7 +1555,7 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
-    return 0 if args.action in {"status", "bluetooth-status", "audio-status"} or result.get("ok") else 2
+    return 0 if args.action in {"status", "bluetooth-status", "ethernet-status", "audio-status"} or result.get("ok") else 2
 
 
 if __name__ == "__main__":

@@ -43,8 +43,6 @@ readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly MING_USER="user"
-readonly MING_USER_PASS="user"
-readonly ROOT_PASS="root"
 # 日志颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -202,8 +200,6 @@ chroot_exec() {
         TERM="linux" \
         MING_OS_VERSION="${MING_OS_VERSION}" \
         MING_USER="${MING_USER}" \
-        MING_USER_PASS="${MING_USER_PASS}" \
-        ROOT_PASS="${ROOT_PASS}" \
         "$@" </dev/null
 }
 
@@ -278,6 +274,7 @@ run_modules() {
         "02_apps.sh"
         "03_desktop.sh"
         "04_garlic_claw.sh"
+        "05_security_tools.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"
         "07_finalize.sh"
@@ -1075,6 +1072,23 @@ for marker in [
     if marker not in settings:
         errors.append(f"ming-settings does not expose {marker}")
 
+security_control = require_file("usr/local/sbin/ming-security-control", "apply_firewall_atomic")
+for marker in ["status", "quick-check", "firewall", "profile", "security-updates"]:
+    if marker not in security_control:
+        errors.append(f"ming-security-control missing interface marker {marker}")
+account_control = require_file("usr/local/sbin/ming-account-control", "set-password")
+for marker in ["status", "clear-password", "passwd", "chpasswd"]:
+    if marker not in account_control:
+        errors.append(f"ming-account-control missing interface marker {marker}")
+require_file("etc/nftables.conf", "table inet ming_filter")
+require_file("usr/share/polkit-1/actions/org.ming.security.control.policy", "/usr/local/sbin/ming-security-control")
+require_file("usr/share/polkit-1/actions/org.ming.account.control.policy", "/usr/local/sbin/ming-account-control")
+require_file("usr/local/bin/ming-connection-notify", "NotificationDeduplicator")
+require_file("home/user/.config/autostart/ming-connection-notify.desktop", "X-GNOME-Autostart-enabled=true")
+for helper in ["usr/local/sbin/ming-security-control", "usr/local/sbin/ming-account-control",
+               "usr/local/bin/ming-connection-notify"]:
+    validate_generated_executable(helper, "python")
+
 settings_desktop = require_file("usr/share/applications/ming-settings.desktop", "Exec=/usr/local/bin/ming-control-center")
 if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
     errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
@@ -1639,7 +1653,7 @@ if not os.access(root / "usr/local/sbin/ming-radio-repair", os.X_OK):
 
 hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "iwlwifi")
 for marker in [
-    "r8169", "btusb", "btintel", "btrtl", "btbcm", "ath3k",
+    "btusb", "btintel", "btrtl", "btbcm", "ath3k",
     "hid_multitouch", "bcm5974", "hid_apple", "applespi",
     "spi_pxa2xx_platform", "spi_pxa2xx_pci", "thinkpad_acpi", "ideapad_laptop",
     "huawei_wmi", "surface_aggregator", "surface_hid_core",
@@ -1648,6 +1662,15 @@ for marker in [
         errors.append(f"hardware modules preload missing {marker}")
 require_file("etc/systemd/system/ming-hardware-preload.service", "Before=NetworkManager.service bluetooth.service display-manager.service")
 require_file("etc/modules-load.d/ming-hardware.conf", "loop")
+network_modules = require_file("etc/modules-load.d/ming-network.conf", "iwlwifi")
+for forbidden_module in ["r8168", "r8169"]:
+    if re.search(rf"(?m)^\s*{forbidden_module}\s*$", network_modules):
+        errors.append(f"Ethernet module must be selected by modalias, not preloaded: {forbidden_module}")
+if not (root / "etc/systemd/system/multi-user.target.wants/NetworkManager.service").is_symlink():
+    errors.append("NetworkManager.service must be enabled as the sole network owner")
+for owner in ["networking.service", "systemd-networkd.service"]:
+    if (root / "etc/systemd/system/multi-user.target.wants" / owner).exists():
+        errors.append(f"competing network owner must be disabled: {owner}")
 
 old_hw_modprobe = require_file("etc/modprobe.d/ming-old-hardware.conf", "bt_coex_active=1")
 for marker in ["psmouse synaptics_intertouch=0", "snd_hda_intel power_save=0"]:

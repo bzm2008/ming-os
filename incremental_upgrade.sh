@@ -15,8 +15,6 @@ OUTPUT_DIR="$SCRIPT_DIR/output"
 MODULES_DIR="$SCRIPT_DIR/modules"
 CONFIG_DIR="$SCRIPT_DIR/config"
 ONION_USER="onion"
-ONION_USER_PASS="onion"
-ROOT_PASS="root"
 
 echo "=====> Onion OS 增量升级开始 <====="
 
@@ -57,8 +55,6 @@ chroot_exec() {
         TERM="linux" \
         ONION_OS_VERSION="${ONION_OS_VERSION}" \
         ONION_USER="${ONION_USER}" \
-        ONION_USER_PASS="${ONION_USER_PASS}" \
-        ROOT_PASS="${ROOT_PASS}" \
         "$@"
 }
 

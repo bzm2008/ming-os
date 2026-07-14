@@ -221,7 +221,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
+    for asset in ming-shell-common.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -230,10 +230,12 @@ install_ming_shell_components() {
 
     install -m 0644 "${asset_dir}/ming-shell-common.py" "${lib_dir}/ming-shell-common.py"
     install -m 0644 "${asset_dir}/ming-notifications.py" "${lib_dir}/ming-notifications.py"
+    install -m 0644 "${asset_dir}/ming-connection-notify.py" "${lib_dir}/ming-connection-notify.py"
     install -m 0644 "${asset_dir}/ming-device-control.py" "${lib_dir}/ming-device-control.py"
     # Drawer and broker load the common module beside their executable.
     install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
     install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
+    install -m 0755 "${asset_dir}/ming-connection-notify.py" /usr/local/bin/ming-connection-notify
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
@@ -3638,6 +3640,14 @@ MINGTERM
 #!/usr/bin/env bash
 set -uo pipefail
 
+account_status="$(/usr/local/sbin/ming-account-control status --json --user "$(id -un)" 2>/dev/null || true)"
+if grep -Fq '"password_set": false' <<< "${account_status}"; then
+    # A passwordless account has nothing to authenticate. Activate the saver
+    # without locking so pointer/key input resumes the current session directly.
+    xfce4-screensaver-command --activate >/tmp/ming-lock.log 2>&1 || true
+    exit 0
+fi
+
 if command -v xfce4-screensaver-command >/dev/null 2>&1; then
     xfce4-screensaver-command --lock >/tmp/ming-lock.log 2>&1 && exit 0
 fi
@@ -5162,6 +5172,18 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 POLKITAUTO
 
+    cat > "${autostart_dir}/ming-connection-notify.desktop" << 'CONNECTIONNOTIFYAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Connection Notifications
+Comment=Network and Bluetooth connection notifications
+Exec=/usr/local/bin/ming-connection-notify
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+CONNECTIONNOTIFYAUTO
+
     # 首次启动配置向导
     cat > "${autostart_dir}/ming-first-run.desktop" << FIRSTRUN
 [Desktop Entry]
@@ -5487,24 +5509,14 @@ repair_desktop_session() {
 
 # 始终先确保免密自动登录已就位（双保险，独立于用户选择）
 ensure_autologin() {
-    # 入 autologin / nopasswdlogin 组
-    pkexec /bin/bash -c "
-        for g in autologin nopasswdlogin; do
-            getent group \$g >/dev/null 2>&1 || groupadd -r \$g 2>/dev/null || true
-            usermod -aG \$g '${CUR_USER}' 2>/dev/null || true
-        done
-        mkdir -p /etc/lightdm/lightdm.conf.d
-        cat > /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf <<EOF
-[Seat:*]
-autologin-user=${CUR_USER}
-autologin-user-timeout=0
-autologin-session=xfce
-user-session=xfce
-greeter-session=lightdm-gtk-greeter
-allow-guest=false
-EOF
-        chmod 0644 /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf
-    " 2>/dev/null || true
+    # Groups and LightDM autologin are installed statically by module 01.
+    return 0
+}
+
+clear_password_and_verify() {
+    pkexec /usr/local/sbin/ming-account-control clear-password --user "${CUR_USER}" \
+        >/dev/null 2>&1 || return 1
+    passwd -S "${CUR_USER}" 2>/dev/null | awk 'NR == 1 { exit !($2 == "NP") }'
 }
 
 # 欢迎 + 选择：设置账户 / 跳过
@@ -5518,6 +5530,7 @@ RC=$?
 if [[ "${RC}" != "0" ]]; then
     # 跳过：保证免密自动登录，写标记，结束
     ensure_autologin
+    clear_password_and_verify || exit 1
     mkdir -p "$(dirname "${MARKER}")"
     echo "skipped" > "${MARKER}"
     dialog --title="已跳过" --text="已为您启用免密自动登录。\n开机将直接进入桌面。" \
@@ -5539,6 +5552,7 @@ FRC=$?
 if [[ "${FRC}" != "0" ]]; then
     # 关闭表单也视为跳过，仍保证免密
     ensure_autologin
+    clear_password_and_verify || exit 1
     mkdir -p "$(dirname "${MARKER}")"
     echo "skipped" > "${MARKER}"
     repair_desktop_session
@@ -5551,20 +5565,17 @@ PW2=$(echo "${FORM}" | cut -d'|' -f3)
 
 ensure_autologin
 
-# 设置显示名
-if [[ -n "${FULLNAME}" ]]; then
-    pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
-fi
-
 # 设置密码（用于 sudo/解锁；登录仍自动免密）
 if [[ -n "${PW1}" ]]; then
     if [[ "${PW1}" != "${PW2}" ]]; then
         dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
             --width=380 --button="好的:0" 2>/dev/null || true
     else
-        echo -e "${PW1}\n${PW1}" | pkexec passwd "${CUR_USER}" 2>/dev/null \
-            || pkexec /bin/bash -c "echo '${CUR_USER}:${PW1}' | chpasswd" 2>/dev/null || true
+        printf '%s\n' "${PW1}" | pkexec /usr/local/sbin/ming-account-control \
+            set-password --user "${CUR_USER}" >/dev/null 2>&1 || exit 1
     fi
+else
+    clear_password_and_verify || exit 1
 fi
 
 mkdir -p "$(dirname "${MARKER}")"

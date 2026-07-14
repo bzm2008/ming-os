@@ -822,7 +822,9 @@ class DeviceControlTests(unittest.TestCase):
         rc = self.device.main(["status", "--json"], controller=controller, stdout=output)
         payload = json.loads(output.getvalue())
         self.assertEqual(0, rc)
-        self.assertEqual({"audio", "brightness", "wifi", "bluetooth", "battery"}, set(payload))
+        self.assertEqual(
+            {"audio", "brightness", "wifi", "bluetooth", "ethernet", "battery"},
+            set(payload))
 
     def test_battery_prefers_display_device_over_bluetooth_peripheral(self):
         devices = (

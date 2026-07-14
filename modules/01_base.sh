@@ -7,7 +7,7 @@
 #   设置语言/时区/用户/网络等基础环境，为后续模块提供可运行的基础系统。
 #
 # 输入：
-#   环境变量: MING_OS_VERSION, MING_USER, MING_USER_PASS, ROOT_PASS
+#   环境变量: MING_OS_VERSION, MING_USER
 #   （由主构建脚本通过 chroot_exec 注入）
 #
 # 输出：
@@ -202,7 +202,6 @@ iwlmvm
 iwlwifi
 ath9k
 ath10k_pci
-r8169
 btusb
 btintel
 btrtl
@@ -784,12 +783,12 @@ KBCFG
 # ======================== 用户与权限 ========================
 
 configure_users() {
-    # 设置 root 密码
-    echo "root:${ROOT_PASS}" | chpasswd
+    # Fresh systems have no reusable factory credential. Root stays locked.
+    passwd -l root
 
     # 创建默认用户 ming
     useradd -m -s /bin/bash -c "Ming OS User" "${MING_USER}"
-    echo "${MING_USER}:${MING_USER_PASS}" | chpasswd
+    passwd -d "${MING_USER}"
 
     # 创建必要的组（如果不存在）
     for grp in lpadmin plugdev nopasswdlogin autologin render; do
@@ -801,9 +800,8 @@ configure_users() {
         getent group "${grp}" >/dev/null 2>&1 && usermod -aG "${grp}" "${MING_USER}" || true
     done
 
-    # 配置 sudo 免密（方便初学者，避免频繁输入密码）
-    echo "${MING_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"${MING_USER}"
-    chmod 440 /etc/sudoers.d/"${MING_USER}"
+    # Privileged desktop actions use narrowly scoped polkit helpers.
+    rm -f /etc/sudoers.d/"${MING_USER}"
 
     # 创建用户桌面等 XDG 目录
     sudo -u "${MING_USER}" mkdir -p \
@@ -882,7 +880,9 @@ managed=true
 wifi.scan-rand-mac-address=no
 NMCFG
 
-    systemctl enable NetworkManager 2>/dev/null || true
+    systemctl disable --now networking.service 2>/dev/null || true
+    systemctl disable --now systemd-networkd.service 2>/dev/null || true
+    systemctl enable NetworkManager.service
     # ModemManager is installed for WWAN/USB modem compatibility but is
     # enabled by ming-service-profile only when hardware or explicit opt-in is
     # detected.  Ordinary Wi-Fi/ethernet machines pay no modem startup cost.
@@ -1995,8 +1995,10 @@ ensure_ming_user() {
         chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     else
         chroot "${target}" useradd -m -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
-        printf '%s:%s\n' "${user_name}" "${user_name}" | chroot "${target}" chpasswd >/dev/null 2>&1 || true
     fi
+
+    chroot "${target}" passwd -d "${user_name}" >/dev/null 2>&1 || return 1
+    chroot "${target}" passwd -l root >/dev/null 2>&1 || return 1
 
     for grp in "${groups[@]}"; do
         chroot "${target}" getent group "${grp}" >/dev/null 2>&1 \
@@ -2353,8 +2355,7 @@ else
     ln -sfn /lib/systemd/system/graphical.target "${target}/etc/systemd/system/default.target" 2>/dev/null || true
 fi
 
-echo "user ALL=(ALL) NOPASSWD: ALL" > "${target}/etc/sudoers.d/user" 2>/dev/null || true
-chmod 440 "${target}/etc/sudoers.d/user" 2>/dev/null || true
+rm -f "${target}/etc/sudoers.d/user"
 
 # The installed system is produced by unpacking the Live filesystem. Restore
 # the real util-linux binary before removing Live-only installer components.
@@ -2392,21 +2393,14 @@ elif [[ -x "${target}/usr/sbin/grub-mkconfig" ]]; then
     chroot "${target}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/tmp/ming-update-grub.log 2>&1 || true
 fi
 
-# 确保 NetworkManager 已启用，并强制加载常见老网卡驱动模块（Bug2: 安装后无网卡）
-# i5-2430M 等 Sandy Bridge 机器常用 iwlwifi / Realtek r8169 / r8168
-for svc in NetworkManager networking systemd-networkd; do
-    if [ -f "${target}/usr/lib/systemd/system/${svc}.service" ] || \
-       [ -f "${target}/lib/systemd/system/${svc}.service" ]; then
-        chroot "${target}" systemctl enable "${svc}" 2>/dev/null || true
-    fi
-done
-# 写 /etc/modules-load.d 确保常见非 Broadcom 网卡模块在下次开机自动加载。
-# Broadcom 驱动彼此冲突，必须交给 modalias/udev 或 Ming 驱动管理器选择。
+# NetworkManager is the sole network owner in a newly installed target.
+chroot "${target}" systemctl disable networking.service systemd-networkd.service 2>/dev/null || true
+chroot "${target}" systemctl enable NetworkManager.service 2>/dev/null || return 1
+# Let modalias/udev select Ethernet drivers; preloading both Realtek variants
+# can bind the wrong module and hide carrier state.
 mkdir -p "${target}/etc/modules-load.d"
 cat > "${target}/etc/modules-load.d/ming-network.conf" << 'NETMOD'
-# Ming OS：确保常见老网卡驱动在开机时加载
-r8169
-r8168
+# Ming OS: Wi-Fi compatibility modules; Ethernet is selected by modalias/udev.
 iwlwifi
 ath9k
 ath10k_pci
@@ -3797,10 +3791,7 @@ configure_installed_system_static_defaults() {
     install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
 
     cat > /etc/modules-load.d/ming-network.conf << 'STATICNETMOD'
-# Ming OS: keep common non-Broadcom legacy network modules available at boot.
-# Broadcom selection is delegated to udev/modalias or ming-broadcom-driver.
-r8169
-r8168
+# Ming OS: Wi-Fi modules only; Ethernet is selected by modalias/udev.
 iwlwifi
 ath9k
 ath10k_pci
