@@ -1685,7 +1685,7 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1786,6 +1786,7 @@ cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
 Launcher=file:///usr/share/applications/ming-app-library.desktop
 DRAWERDOCKITEM
 for launcher in \
+    "ming-running-apps:ming-running-apps.desktop" \
     "ming-edge:ming-edge.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
@@ -1802,6 +1803,36 @@ fi
 exit "${missing}"
 MINGREFRESHDOCK
     chmod 0755 /usr/local/sbin/ming-refresh-dock-launchers
+
+    # Optional third-party applications frequently publish incomplete or
+    # changing desktop metadata.  Keep a system-owned class-to-launcher map
+    # for the running-window entry instead of rewriting package or user
+    # desktop files.  StartupWMClass still wins when a package provides it.
+    mkdir -p /usr/share/ming-os
+    cat > /usr/share/ming-os/ming-running-apps-known-launchers.conf << 'RUNNINGAPPSMAP'
+# wm_class fragment|candidate desktop file names (first installed candidate wins)
+wps|wps-office-wps.desktop,wps-office.desktop,wps.desktop
+wechat|wechat.desktop,wechat-universal.desktop,com.tencent.wechat.desktop
+weixin|weixin.desktop,wechat.desktop,com.tencent.wechat.desktop
+wine|wine.desktop,winecfg.desktop
+electron|electron.desktop
+RUNNINGAPPSMAP
+
+    cat > /usr/share/applications/ming-running-apps.desktop << 'RUNNINGAPPSDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=正在运行
+Name[zh_CN]=正在运行
+Comment=Show and manage currently running X11 applications
+Comment[zh_CN]=显示并管理正在运行的 X11 应用窗口
+Exec=/usr/local/bin/ming-running-apps menu
+Icon=window-list
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=ming-running-apps
+RUNNINGAPPSDESKTOP
+
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
@@ -2332,6 +2363,347 @@ esac
 MINGWINDOWCONTROL
     chmod 0755 /usr/local/bin/ming-window-control
 
+cat > /usr/local/bin/ming-running-apps << 'MINGRUNNINGAPPS'
+#!/usr/bin/env bash
+# Safe fallback for windows that Plank/BAMF cannot associate with a launcher.
+# It only sends EWMH requests through ming-window-control; it never kills a
+# process, clears a window, or touches application data.
+set -u
+
+window_control_bin="${MING_WINDOW_CONTROL_BIN:-/usr/local/bin/ming-window-control}"
+desktop_dirs_value="${MING_RUNNING_APPS_DESKTOP_DIRS:-/usr/share/applications:/usr/local/share/applications}"
+known_launcher_map="${MING_RUNNING_APPS_MAPPING_FILE:-/usr/share/ming-os/ming-running-apps-known-launchers.conf}"
+desktop_entry_path="${MING_RUNNING_APPS_DESKTOP_FILE:-/usr/share/applications/ming-running-apps.desktop}"
+IFS=':' read -r -a desktop_dirs <<< "${desktop_dirs_value}"
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+x11_id_is_valid() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+window_control_available() {
+    [[ -x "${window_control_bin}" ]] || command -v "${window_control_bin}" >/dev/null 2>&1
+}
+
+desktop_field() {
+    local desktop_file="$1" field="$2"
+    awk -v key="${field}" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' \
+        "${desktop_file}" 2>/dev/null
+}
+
+class_matches() {
+    local observed="${1,,}" expected="${2,,}"
+    observed="${observed//./,}"
+    expected="${expected//./,}"
+    [[ -n "${expected}" ]] || return 1
+    [[ ",${observed}," == *",${expected},"* ]]
+}
+
+launcher_for_startup_wm_class() {
+    local wm_class="$1" desktop_file startup_class
+    for desktop_dir in "${desktop_dirs[@]}"; do
+        [[ -d "${desktop_dir}" ]] || continue
+        for desktop_file in "${desktop_dir}"/*.desktop; do
+            [[ -f "${desktop_file}" ]] || continue
+            startup_class="$(desktop_field "${desktop_file}" StartupWMClass)"
+            if class_matches "${wm_class}" "${startup_class}"; then
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+first_installed_launcher() {
+    local candidates="$1" candidate desktop_dir desktop_file
+    local -a names=()
+    IFS=',' read -r -a names <<< "${candidates}"
+    for candidate in "${names[@]}"; do
+        for desktop_dir in "${desktop_dirs[@]}"; do
+            desktop_file="${desktop_dir}/${candidate}"
+            if [[ -f "${desktop_file}" ]]; then
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+known_launcher_for_class() {
+    local wm_class="${1,,}" fragment candidates desktop_file
+    if [[ -r "${known_launcher_map}" ]]; then
+        while IFS='|' read -r fragment candidates; do
+            [[ -n "${fragment}" && "${fragment:0:1}" != "#" ]] || continue
+            if [[ "${wm_class}" == *"${fragment,,}"* ]]; then
+                desktop_file="$(first_installed_launcher "${candidates}")" || continue
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done < "${known_launcher_map}"
+    fi
+
+    # The built-in fallback keeps the entry useful on upgrades where the
+    # system-owned mapping file has not been deployed yet.
+    case "${wm_class}" in
+        *wps*) candidates="wps-office-wps.desktop,wps-office.desktop,wps.desktop" ;;
+        *wechat*|*weixin*) candidates="wechat.desktop,weixin.desktop,com.tencent.wechat.desktop" ;;
+        *wine*) candidates="wine.desktop,winecfg.desktop" ;;
+        *electron*) candidates="electron.desktop" ;;
+        *) return 1 ;;
+    esac
+    first_installed_launcher "${candidates}"
+}
+
+declare -A mapping_cache=()
+mapping_kind="unmapped"
+mapping_file=""
+mapping_source="unmapped"
+
+resolve_launcher_mapping() {
+    local wm_class="$1" key="" cached="" desktop_file=""
+    key="$(LC_ALL=C tr -cd '[:alnum:].,_-' <<< "${1,,}")"
+    key="${key:-unknown}"
+    if [[ -n "${mapping_cache["${key}"]+present}" ]]; then
+        cached="${mapping_cache["${key}"]}"
+        IFS='|' read -r mapping_kind mapping_file mapping_source <<< "${cached}"
+        return 0
+    fi
+
+    mapping_kind="unmapped"
+    mapping_file=""
+    mapping_source="unmapped"
+    desktop_file="$(launcher_for_startup_wm_class "${wm_class}" 2>/dev/null || true)"
+    if [[ -n "${desktop_file}" ]]; then
+        mapping_kind="launcher"
+        mapping_file="${desktop_file}"
+        mapping_source="startup-wm-class"
+    else
+        desktop_file="$(known_launcher_for_class "${wm_class}" 2>/dev/null || true)"
+        if [[ -n "${desktop_file}" ]]; then
+            mapping_kind="launcher"
+            mapping_file="${desktop_file}"
+            mapping_source="known-class"
+        fi
+    fi
+    mapping_cache["${key}"]="${mapping_kind}|${mapping_file}|${mapping_source}"
+}
+
+window_wm_class() {
+    local properties="$1" fallback="$2" value
+    value="$(sed -n 's/^WM_CLASS([^)]*) = //p' <<< "${properties}" | head -n1)"
+    value="${value//\"/}"
+    value="${value//, /,}"
+    value="${value//$'\r'/}"
+    printf '%s\n' "${value:-${fallback}}"
+}
+
+window_is_manageable() {
+    local properties="$1"
+    ! grep -Eq '_NET_WM_WINDOW_TYPE_(DESKTOP|DOCK|NOTIFICATION|TOOLTIP|MENU|DROPDOWN_MENU|POPUP_MENU|SPLASH|DND)' <<< "${properties}"
+}
+
+require_manageable_window() {
+    local window_id="$1" properties=""
+    x11_id_is_valid "${window_id}" || {
+        printf 'window ID must be a hexadecimal X11 ID.\n' >&2
+        return 22
+    }
+    properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || {
+        printf 'window ID is not an existing X11 window: %s\n' "${window_id}" >&2
+        return 3
+    }
+    window_is_manageable "${properties}" || {
+        printf 'window ID is not a manageable application window: %s\n' "${window_id}" >&2
+        return 3
+    }
+    window_control_available || {
+        printf 'ming-window-control is unavailable.\n' >&2
+        return 127
+    }
+}
+
+collect_windows() {
+    local listing="" window_line="" window_id workspace host wmctrl_class title
+    local properties="" wm_class="" minimized skip_taskbar actionable
+    declare -A seen_window_ids=()
+
+    listing="$(x11_call wmctrl -lx 2>/dev/null || true)"
+    while IFS= read -r window_line; do
+        [[ -n "${window_line}" ]] || continue
+        read -r window_id workspace host wmctrl_class title <<< "${window_line}"
+        x11_id_is_valid "${window_id}" || continue
+        [[ -z "${seen_window_ids[${window_id}]+present}" ]] || continue
+        seen_window_ids[${window_id}]=true
+        properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || continue
+        window_is_manageable "${properties}" || continue
+
+        wm_class="$(window_wm_class "${properties}" "${wmctrl_class}")"
+        minimized=false
+        skip_taskbar=false
+        grep -q '_NET_WM_STATE_HIDDEN' <<< "${properties}" && minimized=true
+        grep -q '_NET_WM_STATE_SKIP_TASKBAR' <<< "${properties}" && skip_taskbar=true
+        actionable=false
+        window_control_available && actionable=true
+        resolve_launcher_mapping "${wm_class}"
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
+            "${window_id}" "${title:-${wm_class}}" "${wm_class}" "${minimized}" \
+            "${skip_taskbar}" "${mapping_kind}" "${mapping_file}" "${mapping_source}" "${actionable}"
+    done <<< "${listing}"
+}
+
+running_apps_dock_item_present() {
+    [[ -f "${HOME}/.config/plank/dock1/launchers/ming-running-apps.dockitem" ]]
+}
+
+list_json() {
+    local records_file entry_available=false dock_item=false rc=0
+    records_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-running-apps.XXXXXX" 2>/dev/null)" \
+        || records_file="$(mktemp /tmp/ming-running-apps.XXXXXX)" \
+        || return 1
+    collect_windows > "${records_file}"
+    window_control_available && entry_available=true
+    running_apps_dock_item_present && dock_item=true
+    MING_RUNNING_ENTRY_AVAILABLE="${entry_available}" MING_RUNNING_DOCK_ITEM="${dock_item}" \
+    MING_RUNNING_DESKTOP_FILE="${desktop_entry_path}" python3 - "${records_file}" <<'PY'
+import json
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+if fields and not fields[-1]:
+    fields.pop()
+windows = []
+for start in range(0, len(fields), 9):
+    record = fields[start:start + 9]
+    if len(record) != 9:
+        continue
+    value = [part.decode("utf-8", "replace") for part in record]
+    window = {
+        "id": value[0],
+        "title": value[1],
+        "wm_class": value[2],
+        "minimized": value[3] == "true",
+        "skip_taskbar": value[4] == "true",
+        "mapping": {
+            "kind": value[5],
+            "desktop_file": value[6] or None,
+            "source": value[7],
+        },
+        "actionable": value[8] == "true",
+    }
+    windows.append(window)
+
+unmapped_minimized = [
+    window for window in windows
+    if window["minimized"] and window["mapping"]["kind"] == "unmapped"
+]
+print(json.dumps({
+    "windows": windows,
+    "unmapped_minimized": unmapped_minimized,
+    "entry": {
+        "available": os.environ.get("MING_RUNNING_ENTRY_AVAILABLE") == "true",
+        "dock_item": os.environ.get("MING_RUNNING_DOCK_ITEM") == "true",
+        "desktop_file": os.environ["MING_RUNNING_DESKTOP_FILE"],
+    },
+}, ensure_ascii=False))
+PY
+    rc=$?
+    rm -f "${records_file}"
+    return "${rc}"
+}
+
+run_action() {
+    local action="$1" window_id="$2"
+    require_manageable_window "${window_id}" || return $?
+    "${window_control_bin}" "${action}" --window-id "${window_id}"
+}
+
+show_menu() {
+    local payload="" rows="" selected="" action="" window_id title state
+    local -a dialog=()
+    command -v zenity >/dev/null 2>&1 || {
+        printf 'ming-running-apps list --json\n' >&2
+        return 1
+    }
+    payload="$(list_json)" || return $?
+    rows="$(MING_RUNNING_APPS_JSON="${payload}" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ["MING_RUNNING_APPS_JSON"])
+except (KeyError, json.JSONDecodeError):
+    payload = {"windows": []}
+for window in payload.get("windows", []):
+    state = []
+    if window.get("minimized"):
+        state.append("已最小化")
+    if window.get("skip_taskbar"):
+        state.append("跳过任务栏")
+    if window.get("mapping", {}).get("kind") == "unmapped":
+        state.append("运行中入口")
+    print("%s\t%s\t%s" % (
+        window.get("id", ""),
+        str(window.get("title", "")).replace("\t", " ").replace("\n", " "),
+        "，".join(state) or "可管理",
+    ))
+PY
+)"
+    [[ -n "${rows}" ]] || {
+        zenity --info --title="正在运行" --text="没有可管理的 X11 应用窗口。" 2>/dev/null || true
+        return 0
+    }
+    dialog=(--list --title="正在运行" --text="选择要恢复、聚焦或关闭的窗口。" \
+        --column="窗口 ID" --column="应用" --column="状态" --hide-column=1 --print-column=1)
+    while IFS=$'\t' read -r window_id title state; do
+        [[ -n "${window_id}" ]] || continue
+        dialog+=("${window_id}" "${title}" "${state}")
+    done <<< "${rows}"
+    selected="$(zenity "${dialog[@]}" 2>/dev/null)" || return 0
+    [[ -n "${selected}" ]] || return 0
+    action="$(zenity --list --radiolist --title="正在运行" --text="选择对该窗口执行的操作。" \
+        --column="" --column="操作" true "恢复并聚焦" false "仅聚焦" false "关闭窗口" 2>/dev/null)" || return 0
+    case "${action}" in
+        恢复并聚焦) run_action restore "${selected}" ;;
+        仅聚焦) run_action focus "${selected}" ;;
+        关闭窗口) run_action close "${selected}" ;;
+        *) return 0 ;;
+    esac
+}
+
+case "${1:-menu}" in
+    list)
+        [[ "${2:-}" == "--json" && "$#" -eq 2 ]] || {
+            printf 'Usage: %s list --json\n' "$0" >&2
+            exit 2
+        }
+        list_json
+        ;;
+    restore|focus|close)
+        [[ "${2:-}" == "--window-id" && -n "${3:-}" && "$#" -eq 3 ]] || {
+            printf 'Usage: %s %s --window-id 0x01200007\n' "$0" "$1" >&2
+            exit 2
+        }
+        run_action "$1" "$3"
+        ;;
+    menu)
+        [[ "$#" -eq 1 ]] || { printf 'Usage: %s menu\n' "$0" >&2; exit 2; }
+        show_menu
+        ;;
+    *)
+        printf 'Usage: %s {menu|list --json|restore|focus|close --window-id HEX}\n' "$0" >&2
+        exit 2
+        ;;
+esac
+MINGRUNNINGAPPS
+    chmod 0755 /usr/local/bin/ming-running-apps
+
 cat > /usr/local/bin/ming-desktop-healthcheck << 'MINGDESKHEALTH'
 #!/usr/bin/env bash
 set -u
@@ -2360,6 +2732,69 @@ x11_call() {
     timeout --foreground 2s "$@"
 }
 
+window_control_bin="${MING_WINDOW_CONTROL_BIN:-/usr/local/bin/ming-window-control}"
+running_apps_bin="${MING_RUNNING_APPS_BIN:-/usr/local/bin/ming-running-apps}"
+
+plank_mapping_snapshot() {
+    dock_pin_only=false
+    dock_pin_only_valid=false
+    dock_settings="${MING_PLANK_SETTINGS_FILE:-${HOME}/.config/plank/dock1/settings}"
+    if [[ ! -r "${dock_settings}" ]]; then
+        dock_settings="/etc/skel/.config/plank/dock1/settings"
+    fi
+    if grep -qx 'PinOnly=false' "${dock_settings}" 2>/dev/null; then
+        dock_pin_only=false
+        dock_pin_only_valid=true
+    elif grep -qx 'PinOnly=true' "${dock_settings}" 2>/dev/null; then
+        dock_pin_only=true
+    fi
+
+    bamfdaemon_available=false
+    bamfdaemon_running=false
+    command -v bamfdaemon >/dev/null 2>&1 && bamfdaemon_available=true
+    pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && bamfdaemon_running=true
+}
+
+running_apps_snapshot() {
+    running_apps_available=false
+    running_apps_entry_available=false
+    running_apps_dock_item=false
+    running_apps_mapped_count=0
+    unmapped_minimized_count=0
+    running_apps_json='{"windows":[],"unmapped_minimized":[],"entry":{"available":false,"dock_item":false}}'
+    if [[ -x "${running_apps_bin}" ]]; then
+        running_apps_available=true
+        running_apps_json="$("${running_apps_bin}" list --json 2>>"${log_file}" || true)"
+    fi
+    local summary=""
+    summary="$(MING_RUNNING_APPS_JSON="${running_apps_json}" python3 - <<'PY'
+import json
+import os
+
+try:
+    value = json.loads(os.environ.get("MING_RUNNING_APPS_JSON", "{}"))
+except json.JSONDecodeError:
+    value = {}
+windows = value.get("windows") if isinstance(value.get("windows"), list) else []
+unmapped = value.get("unmapped_minimized")
+if not isinstance(unmapped, list):
+    unmapped = []
+entry = value.get("entry") if isinstance(value.get("entry"), dict) else {}
+mapped = sum(1 for window in windows if isinstance(window, dict)
+             and isinstance(window.get("mapping"), dict)
+             and window["mapping"].get("kind") != "unmapped")
+print("%s %s %s %s" % (
+    str(bool(entry.get("available"))).lower(),
+    str(bool(entry.get("dock_item"))).lower(),
+    mapped,
+    len(unmapped),
+))
+PY
+)"
+    read -r running_apps_entry_available running_apps_dock_item \
+        running_apps_mapped_count unmapped_minimized_count <<< "${summary}"
+}
+
 window_manager_snapshot() {
     window_manager_running=false
     window_manager_ewmh=false
@@ -2369,22 +2804,39 @@ window_manager_snapshot() {
     window_manager_geometry="n/a"
     window_manager_log="${HOME}/.cache/ming-os/window-manager.log"
     local status=""
-    if [[ ! -x /usr/local/bin/ming-window-control ]]; then
+    if [[ ! -x "${window_control_bin}" ]]; then
         log "window manager helper is missing"
         return 0
     fi
-    status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
-    if grep -Fq '"xfwm":{"running":true' <<<"${status}"; then
+    status="$("${window_control_bin}" status --json 2>>"${log_file}" || true)"
+    local flags=""
+    flags="$(MING_WINDOW_MANAGER_STATUS="${status}" python3 - <<'PY'
+import json
+import os
+
+try:
+    value = json.loads(os.environ.get("MING_WINDOW_MANAGER_STATUS", "{}"))
+except json.JSONDecodeError:
+    value = {}
+xfwm = value.get("xfwm") if isinstance(value.get("xfwm"), dict) else {}
+print("%s %s %s" % (
+    str(bool(xfwm.get("running"))).lower(),
+    str(bool(value.get("ewmh"))).lower(),
+    str(bool(value.get("healthy"))).lower(),
+))
+PY
+)"
+    local parsed_running=false parsed_ewmh=false parsed_healthy=false
+    read -r parsed_running parsed_ewmh parsed_healthy <<< "${flags}"
+    if ${parsed_running}; then
         window_manager_running=true
         window_manager_visible=true
     fi
-    if grep -Fq '"ewmh":true' <<<"${status}"; then
+    if ${parsed_ewmh}; then
         window_manager_ewmh=true
         window_manager_stacking="ewmh"
     fi
-    if grep -Fq '"healthy":true' <<<"${status}"; then
-        window_manager_healthy=true
-    fi
+    ${parsed_healthy} && window_manager_healthy=true
 }
 
 x11_id_is_valid() {
@@ -2492,8 +2944,8 @@ window_stacking() {
 
 repair_components() {
     log "repair requested"
-    if command -v ming-window-control >/dev/null 2>&1; then
-        /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+    if [[ -x "${window_control_bin}" ]]; then
+        "${window_control_bin}" repair >>"${log_file}" 2>&1 \
             || log "window-manager repair did not recover Xfwm/EWMH"
     fi
     if command -v ming-phone-desktop-watchdog >/dev/null 2>&1; then
@@ -2558,6 +3010,28 @@ fi
 broker_running=false
 has_proc 'ming-launch[[:space:]]+--server' && broker_running=true
 
+plank_mapping_snapshot
+running_apps_snapshot
+
+# A missing launcher association is observable degradation, not a reason to
+# restart a healthy Dock.  The running-window entry remains usable for every
+# validated X11 client, including minimized SKIP_TASKBAR clients.
+dock_degraded=false
+dock_degradation="none"
+if ! ${dock_pin_only_valid}; then
+    dock_degraded=true
+    dock_degradation="pin-only-enabled"
+elif ! ${bamfdaemon_running}; then
+    dock_degraded=true
+    dock_degradation="bamfdaemon-not-running"
+elif (( unmapped_minimized_count > 0 )); then
+    dock_degraded=true
+    dock_degradation="unmapped-minimized"
+elif ! ${running_apps_entry_available}; then
+    dock_degraded=true
+    dock_degradation="running-apps-entry-unavailable"
+fi
+
 if ${json}; then
     MING_DESKTOP_RUNNING="${desktop_running}" MING_DESKTOP_VISIBLE="${desktop_visible}" \
     MING_DESKTOP_STACKING="${desktop_stacking}" MING_DESKTOP_GEOMETRY="${desktop_geometry}" \
@@ -2566,7 +3040,16 @@ if ${json}; then
     MING_BROKER_RUNNING="${broker_running}" MING_WM_RUNNING="${window_manager_running}" \
     MING_WM_VISIBLE="${window_manager_visible}" MING_WM_STACKING="${window_manager_stacking}" \
     MING_WM_GEOMETRY="${window_manager_geometry}" MING_WM_EWMH="${window_manager_ewmh}" \
-    MING_WM_HEALTHY="${window_manager_healthy}" MING_WM_LOG="${window_manager_log}" python3 - <<'PY'
+    MING_WM_HEALTHY="${window_manager_healthy}" MING_WM_LOG="${window_manager_log}" \
+    MING_DOCK_PIN_ONLY="${dock_pin_only}" MING_DOCK_PIN_ONLY_VALID="${dock_pin_only_valid}" \
+    MING_BAMF_AVAILABLE="${bamfdaemon_available}" MING_BAMF_RUNNING="${bamfdaemon_running}" \
+    MING_DOCK_DEGRADED="${dock_degraded}" MING_DOCK_DEGRADATION="${dock_degradation}" \
+    MING_RUNNING_APPS_AVAILABLE="${running_apps_available}" \
+    MING_RUNNING_APPS_ENTRY_AVAILABLE="${running_apps_entry_available}" \
+    MING_RUNNING_APPS_DOCK_ITEM="${running_apps_dock_item}" \
+    MING_RUNNING_APPS_MAPPED_COUNT="${running_apps_mapped_count}" \
+    MING_UNMAPPED_MINIMIZED_COUNT="${unmapped_minimized_count}" \
+    MING_RUNNING_APPS_JSON="${running_apps_json}" python3 - <<'PY'
 import json
 import os
 
@@ -2575,9 +3058,26 @@ component = lambda prefix: {"running": boolean(prefix + "_RUNNING"),
                             "visible": boolean(prefix + "_VISIBLE"),
                             "stacking": os.environ[prefix + "_STACKING"],
                             "geometry": os.environ[prefix + "_GEOMETRY"]}
+try:
+    running_apps_payload = json.loads(os.environ.get("MING_RUNNING_APPS_JSON", "{}"))
+except json.JSONDecodeError:
+    running_apps_payload = {}
+windows = running_apps_payload.get("windows")
+if not isinstance(windows, list):
+    windows = []
+unmapped_minimized = running_apps_payload.get("unmapped_minimized")
+if not isinstance(unmapped_minimized, list):
+    unmapped_minimized = []
 payload = {
     "desktop": component("MING_DESKTOP"),
-    "dock": component("MING_DOCK"),
+    "dock": {**component("MING_DOCK"),
+             "pin_only": boolean("MING_DOCK_PIN_ONLY"),
+             "pin_only_valid": boolean("MING_DOCK_PIN_ONLY_VALID"),
+             "bamfdaemon": {"available": boolean("MING_BAMF_AVAILABLE"),
+                            "running": boolean("MING_BAMF_RUNNING")},
+             "mapped_windows": int(os.environ["MING_RUNNING_APPS_MAPPED_COUNT"]),
+             "degraded": boolean("MING_DOCK_DEGRADED"),
+             "degradation": os.environ["MING_DOCK_DEGRADATION"]},
     "launch_broker": {"running": boolean("MING_BROKER_RUNNING"), "visible": False,
                       "stacking": "n/a", "geometry": "n/a"},
     "window_manager": {"running": boolean("MING_WM_RUNNING"),
@@ -2587,15 +3087,27 @@ payload = {
                        "ewmh": boolean("MING_WM_EWMH"),
                        "healthy": boolean("MING_WM_HEALTHY"),
                        "log": os.environ["MING_WM_LOG"]},
+    "windows": windows,
+    "unmapped_minimized": unmapped_minimized,
+    "running_apps": {"available": boolean("MING_RUNNING_APPS_AVAILABLE"),
+                     "entry_available": boolean("MING_RUNNING_APPS_ENTRY_AVAILABLE"),
+                     "dock_item": boolean("MING_RUNNING_APPS_DOCK_ITEM"),
+                     "mapped_windows": int(os.environ["MING_RUNNING_APPS_MAPPED_COUNT"]),
+                     "unmapped_minimized": int(os.environ["MING_UNMAPPED_MINIMIZED_COUNT"])},
 }
 print(json.dumps(payload, ensure_ascii=False))
 PY
 else
     printf 'desktop: running=%s visible=%s stacking=%s geometry=%s\n' "${desktop_running}" "${desktop_visible}" "${desktop_stacking}" "${desktop_geometry}"
-    printf 'dock: running=%s visible=%s stacking=%s geometry=%s\n' "${dock_running}" "${dock_visible}" "${dock_stacking}" "${dock_geometry}"
+    printf 'dock: running=%s visible=%s stacking=%s geometry=%s pin_only=%s bamfdaemon=%s degraded=%s degradation=%s\n' \
+        "${dock_running}" "${dock_visible}" "${dock_stacking}" "${dock_geometry}" \
+        "${dock_pin_only}" "${bamfdaemon_running}" "${dock_degraded}" "${dock_degradation}"
     printf 'launch_broker: running=%s visible=false stacking=n/a geometry=n/a\n' "${broker_running}"
     printf 'window_manager: running=%s ewmh=%s healthy=%s log=%s\n' \
         "${window_manager_running}" "${window_manager_ewmh}" "${window_manager_healthy}" "${window_manager_log}"
+    printf 'running_apps: available=%s entry=%s mapped=%s unmapped_minimized=%s\n' \
+        "${running_apps_available}" "${running_apps_entry_available}" \
+        "${running_apps_mapped_count}" "${unmapped_minimized_count}"
 fi
 
 ${desktop_running} && ${desktop_visible} && ${dock_running} && ${dock_healthy} && ${broker_running} && ${window_manager_healthy}
@@ -2793,13 +3305,15 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=40
 ZoomEnabled=true
 ZoomPercent=148
 HideMode=0
+PinOnly=false
+CurrentWorkspaceOnly=false
 UnhideDelay=0
 HideDelay=0
 Theme=Ming
@@ -2815,7 +3329,7 @@ PLANKRUNTIMESETTINGS
 ensure_plank_settings() {
     local settings="${HOME}/.config/plank/dock1/settings"
     local skel_settings="/etc/skel/.config/plank/dock1/settings"
-    local restored=false
+    local restored=false running_item_added=false
     mkdir -p "$(dirname "${settings}")" 2>/dev/null || true
     if [[ ! -f "${settings}" ]]; then
         if [[ -s "${skel_settings}" ]]; then
@@ -2831,10 +3345,39 @@ ensure_plank_settings() {
     else
         printf 'HideMode=0\n' >>"${settings}"
     fi
-    if ${restored} && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+    if grep -q '^PinOnly=' "${settings}"; then
+        sed -i 's/^PinOnly=.*/PinOnly=false/' "${settings}" 2>/dev/null || true
+    else
+        printf 'PinOnly=false\n' >>"${settings}"
+    fi
+    if grep -q '^DockItems=.*ming-running-apps\.dockitem' "${settings}"; then
+        :
+    elif grep -q '^DockItems=' "${settings}"; then
+        sed -i 's|^DockItems=.*|&;;ming-running-apps.dockitem|' "${settings}" 2>/dev/null || true
+        running_item_added=true
+    else
+        printf 'DockItems=ming-running-apps.dockitem\n' >>"${settings}"
+        running_item_added=true
+    fi
+    if { ${restored} || ${running_item_added}; } && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
         /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >>"${log_file}" 2>&1 || \
             log "Dock launcher refresh after settings restore failed"
     fi
+}
+
+ensure_bamfdaemon() {
+    pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && return 0
+    command -v bamfdaemon >/dev/null 2>&1 || {
+        log "bamfdaemon is unavailable; running-window fallback remains available"
+        return 1
+    }
+    (nohup bamfdaemon >>"${log_file}" 2>&1 &) || return 1
+    for _bamf_try in $(seq 1 8); do
+        pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && return 0
+        sleep 0.25
+    done
+    log "bamfdaemon did not become ready; retaining Plank and running-window fallback"
+    return 1
 }
 
 x11_call() {
@@ -2963,6 +3506,7 @@ start_plank() {
     command -v plank >/dev/null 2>&1 || return 1
     stop_legacy_dock
     ensure_plank_settings
+    ensure_bamfdaemon || true
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then

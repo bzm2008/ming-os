@@ -41,7 +41,11 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertNotIn("xfce4-settings-manager'", self.desktop)
 
     def test_drawer_is_dock_only(self):
-        self.assertIn('DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem', self.desktop)
+        self.assertIn(
+            'DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem',
+            self.desktop,
+        )
+        self.assertIn('Exec=/usr/local/bin/ming-running-apps menu', self.desktop)
         self.assertIn('rm -f "${desktop}/Ming 应用库.desktop"', self.desktop)
         self.assertNotIn('"ming-app-library.desktop",\n    "ming-files.desktop"', self.phone)
 
