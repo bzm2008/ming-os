@@ -1471,6 +1471,25 @@ edge_graphics = require_file("usr/local/bin/ming-edge-graphics", "active_render_
 for marker in ["renderD*", "ffmpeg", "test-video", "set-mode", "auto", "compat"]:
     if marker not in edge_graphics:
         errors.append(f"ming-edge-graphics missing marker {marker}")
+require_path("usr/bin/ffmpeg")
+require_path("usr/bin/ffprobe")
+for sample, codec in [("h264.mp4", "h264"), ("vp9.webm", "vp9")]:
+    relative = f"usr/share/ming-os/media-tests/{sample}"
+    require_path(relative)
+    sample_path = root / relative
+    if sample_path.exists() and sample_path.stat().st_size == 0:
+        errors.append(f"Edge media test sample is empty: {relative}")
+    if sample_path.exists() and (root / "usr/bin/ffprobe").exists():
+        try:
+            probe = subprocess.run(
+                ["chroot", str(root), "/usr/bin/ffprobe", "-v", "error",
+                 "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+                 "-of", "default=nw=1:nk=1", f"/usr/share/ming-os/media-tests/{sample}"],
+                capture_output=True, text=True, timeout=15)
+            if probe.returncode != 0 or probe.stdout.strip() != codec:
+                errors.append(f"Edge media test sample failed ffprobe: {relative}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"Edge media test sample probe could not run: {relative}: {exc}")
 require_file("usr/share/ming-os/homepage/index.html", "Ming OS")
 edge_policy = require_file("etc/opt/edge/policies/managed/ming-os.json", "HomepageLocation")
 if "RestoreOnStartupURLs" not in edge_policy:

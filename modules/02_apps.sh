@@ -56,6 +56,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     blueman
     bamfdaemon
     libbamf3-2
+    ffmpeg
 )
 
 run_required_step() {
@@ -464,6 +465,22 @@ MINGFONTS
 
 # ======================== Microsoft Edge ========================
 
+generate_edge_video_samples() {
+    local sample_dir="${MING_EDGE_SAMPLE_DIR:-/usr/share/ming-os/media-tests}"
+    mkdir -p "${sample_dir}" || return 1
+    ffmpeg -hide_banner -loglevel error -y -f lavfi \
+        -i 'testsrc2=size=64x64:rate=12' -t 0.5 -pix_fmt yuv420p \
+        -c:v libx264 -movflags +faststart "${sample_dir}/h264.mp4" || return 1
+    ffmpeg -hide_banner -loglevel error -y -f lavfi \
+        -i 'testsrc2=size=64x64:rate=12' -t 0.5 -pix_fmt yuv420p \
+        -c:v libvpx-vp9 -deadline good -cpu-used 8 "${sample_dir}/vp9.webm" || return 1
+    test -s "${sample_dir}/h264.mp4" && test -s "${sample_dir}/vp9.webm" || return 1
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+        -of default=nw=1:nk=1 "${sample_dir}/h264.mp4" | grep -qx h264 || return 1
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+        -of default=nw=1:nk=1 "${sample_dir}/vp9.webm" | grep -qx vp9 || return 1
+}
+
 install_edge_graphics_helper() {
     cat > /usr/local/bin/ming-edge-graphics << 'MINGEDGEGRAPHICS'
 #!/usr/bin/env bash
@@ -491,14 +508,17 @@ active_render_node() {
 }
 
 decode_samples() {
-    local node="$1" sample
+    local node="$1" sample successful_codecs=0
     command -v ffmpeg >/dev/null 2>&1 || return 1
     for sample in "${samples}/h264.mp4" "${samples}/vp9.webm"; do
-        [[ -s "${sample}" ]] || return 1
-        timeout 12 ffmpeg -v error -hwaccel vaapi -hwaccel_device "${node}" \
+        [[ -s "${sample}" ]] || continue
+        if timeout 12 ffmpeg -v error -hwaccel vaapi -hwaccel_device "${node}" \
             -hwaccel_output_format vaapi -i "${sample}" -frames:v 12 -f null - \
-            >/dev/null 2>&1 || return 1
+            >/dev/null 2>&1; then
+            successful_codecs=$((successful_codecs + 1))
+        fi
     done
+    (( successful_codecs >= 1 ))
 }
 
 mode="$(cat "${mode_file}" 2>/dev/null || printf auto)"
@@ -2076,6 +2096,7 @@ main() {
     run_required_step install_xfce_desktop || return 1
     run_required_step install_fonts || return 1
     run_required_step install_required_desktop_runtime || return 1
+    run_required_step generate_edge_video_samples || return 1
     run_required_step enable_bluetooth_after_runtime || return 1
     run_required_step install_fcitx5 || return 1
     run_required_step deploy_eyecare || return 1

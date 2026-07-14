@@ -3230,10 +3230,15 @@ picom_running() {
     probe_timeout pgrep -u "$(id -u)" -x picom >/dev/null 2>&1
 }
 
-compositor_enabled() {
+compositor_profile() {
     local settings="${HOME}/.config/ming-os/settings.json"
-    [[ -r "${settings}" ]] || return 0
-    ! grep -Eq '"compositor_profile"[[:space:]]*:[[:space:]]*"off"' "${settings}"
+    local profile=""
+    profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" 2>/dev/null | head -n1)"
+    case "${profile}" in auto|software|off) printf '%s\n' "${profile}" ;; *) printf 'auto\n' ;; esac
+}
+
+compositor_enabled() {
+    [[ "$(compositor_profile)" != off ]]
 }
 
 wait_for_process() {
@@ -3343,7 +3348,11 @@ start_xrender_picom() {
 }
 
 start_picom() {
-    compositor_enabled || { picom_recovered=true; return 0; }
+    if ! compositor_enabled; then
+        pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
+        picom_recovered=true
+        return 0
+    fi
     local started_at finished_at deadline_at
     if picom_running; then
         picom_recovered=true
@@ -4624,6 +4633,7 @@ wintypes:
   dock = { shadow = false; opacity = 0.92; };
   notification = { shadow = false; opacity = 0.94; };
 };
+detect-client-opacity = false;
 PICOMFALLBACK
 
     # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
@@ -4676,11 +4686,22 @@ PICOMLOWMEM
 set -u
 
 log="/tmp/ming-picom.log"
-main_conf="${HOME}/.config/picom/picom.conf"
-fallback_conf="/etc/xdg/picom/picom-fallback.conf"
-lowmem_conf="/etc/xdg/picom/picom-lowmem.conf"
+picom_bin="${MING_PICOM_BIN:-picom}"
+settings_file="${MING_COMPOSITOR_SETTINGS:-${HOME}/.config/ming-os/settings.json}"
+main_conf="${MING_PICOM_MAIN_CONF:-${HOME}/.config/picom/picom.conf}"
+fallback_conf="${MING_PICOM_FALLBACK_CONF:-/etc/xdg/picom/picom-fallback.conf}"
+lowmem_conf="${MING_PICOM_LOWMEM_CONF:-/etc/xdg/picom/picom-lowmem.conf}"
 config="${main_conf}"
 reason="modern-gpu"
+compositor_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings_file}" 2>/dev/null | head -n1)"
+compositor_profile="${compositor_profile:-auto}"
+
+if [[ "${compositor_profile}" == off ]]; then
+    exit 0
+elif [[ "${compositor_profile}" == software ]]; then
+    config="${fallback_conf}"
+    reason="persisted-software-profile"
+fi
 
 mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
@@ -4690,25 +4711,25 @@ if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
 fi
 
-if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
+if [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
     config="${fallback_conf}"
     reason="low-memory-${mem_mb}mb"
-elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ]]; then
+elif [[ "${compositor_profile}" == auto && ( "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ) ]]; then
     config="${fallback_conf}"
     reason="safe-graphics-cmdline"
-elif [[ ! -d /dev/dri ]]; then
+elif [[ "${compositor_profile}" == auto && ! -d /dev/dri ]]; then
     config="${fallback_conf}"
     reason="no-dri"
-elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
+elif [[ "${compositor_profile}" == auto && ( "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ) ]]; then
     config="${fallback_conf}"
     reason="software-renderer"
-elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; then
+elif [[ "${compositor_profile}" == auto && "${renderer}" == *svga3d* ]] || { [[ "${compositor_profile}" == auto ]] && echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; }; then
     config="${fallback_conf}"
     reason="virtual-machine-gpu"
-elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
+elif [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
     config="${lowmem_conf}"
     reason="balanced-low-memory-${mem_mb}mb"
-elif echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
+elif [[ "${compositor_profile}" == auto ]] && echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
     config="${fallback_conf}"
     reason="old-intel-gpu"
 fi
@@ -4723,13 +4744,13 @@ fi
         "$(date '+%F %T')" "${config}" "${reason}" "${mem_mb}" "${renderer:-unknown}" "${gpu:-unknown}"
 } >> "${log}" 2>/dev/null || true
 
-if ! command -v picom >/dev/null 2>&1; then
+if ! command -v "${picom_bin}" >/dev/null 2>&1; then
     printf '[%s] picom command missing\n' "$(date '+%F %T')" >> "${log}" 2>/dev/null || true
     exit 0
 fi
 
 pgrep -u "$(id -u)" -x picom >/dev/null 2>&1 && exit 0
-exec picom --config "${config}" --log-level=warn
+exec "${picom_bin}" --config "${config}" --log-level=warn
 MINGPICOM
     chmod 0755 /usr/local/bin/ming-picom
 

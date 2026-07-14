@@ -62,6 +62,16 @@ class PicomPerformanceContracts(unittest.TestCase):
             self.assertNotIn('blur-method = "dual_kawase";', source)
             self.assertNotIn("blur-background = true;", source)
 
+    def test_every_generated_picom_profile_disables_client_opacity(self):
+        profiles = (
+            ("PICOMCFG", "cat > /home/${MING_USER}/.config/picom/picom.conf"),
+            ("PICOMFALLBACK", "cat > /etc/xdg/picom/picom-fallback.conf"),
+            ("PICOMLOWMEM", "cat > /etc/xdg/picom/picom-lowmem.conf"),
+        )
+        for delimiter, marker in profiles:
+            profile = DESKTOP.split(marker, 1)[1].split("\n" + delimiter, 1)[0]
+            self.assertIn("detect-client-opacity = false;", profile)
+
     def test_fallback_profile_has_no_heavy_shadow_and_only_dock_notification_transparency(self):
         fallback = re.search(r"cat > /etc/xdg/picom/picom-fallback\.conf << 'PICOMFALLBACK'.*?PICOMFALLBACK", DESKTOP, re.S)
         self.assertIsNotNone(fallback)

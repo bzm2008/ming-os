@@ -239,6 +239,52 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.session_healthcheck)
 
+    def test_compositor_profile_controls_wrapper_and_crash_recovery(self):
+        self.assertIn("compositor_profile", self.session_healthcheck)
+        self.assertIn("picom-fallback.conf", self.session_healthcheck)
+        self.assertIn("compositor_profile", self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("MINGPICOM", 1)[0])
+
+    def test_picom_wrapper_executes_persisted_software_config(self):
+        wrapper = self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
+        harness = r'''work="$(mktemp -d)"
+printf '{"compositor_profile":"software"}' >"${work}/settings.json"
+for name in main fallback lowmem; do printf 'backend = "xrender";\n' >"${work}/${name}.conf"; done
+cat >"${work}/fake-picom" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*"
+EOF
+chmod +x "${work}/fake-picom"
+export MING_COMPOSITOR_SETTINGS="${work}/settings.json"
+export MING_PICOM_MAIN_CONF="${work}/main.conf"
+export MING_PICOM_FALLBACK_CONF="${work}/fallback.conf"
+export MING_PICOM_LOWMEM_CONF="${work}/lowmem.conf"
+export MING_PICOM_BIN="${work}/fake-picom"
+'''
+        result = subprocess.run(["bash"], input=(harness + wrapper).encode(), capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        output = result.stdout.decode(errors="replace")
+        self.assertIn("--config ", output)
+        self.assertIn("fallback.conf", output)
+
+    def test_picom_wrapper_does_not_start_when_persisted_off(self):
+        wrapper = self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
+        harness = r'''work="$(mktemp -d)"
+printf '{"compositor_profile":"off"}' >"${work}/settings.json"
+cat >"${work}/fake-picom" <<'EOF'
+#!/usr/bin/env bash
+printf 'unexpected-start\n'
+EOF
+chmod +x "${work}/fake-picom"
+export MING_COMPOSITOR_SETTINGS="${work}/settings.json"
+export MING_PICOM_BIN="${work}/fake-picom"
+'''
+        result = subprocess.run(["bash"], input=(harness + wrapper).encode(), capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        self.assertNotIn("unexpected-start", result.stdout.decode(errors="replace"))
+
     def test_session_metrics_include_recovery_and_duplicate_counters(self):
         for marker in (
             '"pid_count"',

@@ -1,4 +1,5 @@
 import pathlib
+import subprocess
 import unittest
 
 
@@ -7,6 +8,41 @@ APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 
 
 class EdgeVideoContracts(unittest.TestCase):
+    def test_media_sample_generator_executes_both_codecs_and_probes_outputs(self):
+        start = APPS.index("generate_edge_video_samples() {")
+        end = APPS.index("\n}", start) + 2
+        function = APPS[start:end]
+        harness = r'''sample_root="$(mktemp -d)"
+export MING_EDGE_SAMPLE_DIR="${sample_root}"
+ffmpeg() {
+  printf 'FFMPEG %s\n' "$*"
+  out="${@: -1}"
+  mkdir -p "$(dirname "$out")"
+  printf sample >"$out"
+}
+ffprobe() {
+  case "${@: -1}" in *h264.mp4) printf 'h264\n' ;; *vp9.webm) printf 'vp9\n' ;; esac
+}
+'''
+        script = (harness + function + "\ngenerate_edge_video_samples\n" +
+                  'wc -c "${sample_root}/h264.mp4" "${sample_root}/vp9.webm"\n')
+        result = subprocess.run(["bash"], input=script.encode(), capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        output = result.stdout.decode(errors="replace")
+        self.assertIn("libx264", output)
+        self.assertIn("libvpx-vp9", output)
+        self.assertRegex(output, r"[1-9][0-9]* .*h264\.mp4")
+        self.assertRegex(output, r"[1-9][0-9]* .*vp9\.webm")
+
+    def test_media_sample_generator_blocks_when_encoding_fails(self):
+        start = APPS.index("generate_edge_video_samples() {")
+        end = APPS.index("\n}", start) + 2
+        function = APPS[start:end]
+        harness = 'MING_EDGE_SAMPLE_DIR="$(mktemp -d)"\nffmpeg() { return 1; }\nffprobe() { return 0; }\n'
+        result = subprocess.run(
+            ["bash"], input=(harness + function + "\ngenerate_edge_video_samples\n").encode())
+        self.assertNotEqual(0, result.returncode)
+
     def test_edge_always_uses_x11_and_avoids_unstable_forced_features(self):
         self.assertIn("edge_args=(--ozone-platform=x11)", APPS)
         self.assertNotIn("--use-gl=egl", APPS)
@@ -22,6 +58,7 @@ class EdgeVideoContracts(unittest.TestCase):
         self.assertIn("test-video", helper)
         self.assertIn("set-mode", helper)
         self.assertIn("compat", helper)
+        self.assertIn("successful_codecs", helper)
 
     def test_edge_enables_gpu_only_after_structured_hardware_validation(self):
         start = APPS.index("cat > /usr/local/bin/ming-edge << 'MINGEDGE'")
