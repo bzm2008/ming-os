@@ -16,6 +16,8 @@ import subprocess
 
 MAX_DESKTOP_BYTES = 256 * 1024
 MAX_JSON_LINE_BYTES = 64 * 1024
+MAX_ICON_BYTES = 8 * 1024 * 1024
+ICON_EXTENSIONS = {".png", ".svg"}
 _FIELD_CODE = re.compile(r"%[fFuUdDnNickvm]")
 _SHELL_NAME = {"sh", "bash", "dash", "zsh", "ksh"}
 
@@ -76,6 +78,68 @@ class CommandResult:
 
 class InstanceAlreadyRunning(RuntimeError):
     pass
+
+
+def resolve_icon(icon, fallback="application-x-executable", pixmap_dirs=None, max_bytes=MAX_ICON_BYTES):
+    """Return a safe icon file or theme name; malformed input always falls back."""
+    value = str(icon or "").strip()
+    fallback = str(fallback or "application-x-executable").strip() or "application-x-executable"
+    if not value or "\x00" in value or len(value) > 4096:
+        return fallback
+    suffix = pathlib.Path(value).suffix.lower()
+    directories = tuple(pathlib.Path(item) for item in (pixmap_dirs or ("/usr/share/pixmaps",)))
+
+    def safe_file(candidate):
+        try:
+            candidate = pathlib.Path(candidate).expanduser()
+            if candidate.suffix.lower() not in ICON_EXTENSIONS or not candidate.is_file():
+                return None
+            size = candidate.stat().st_size
+            if size <= 0 or size > int(max_bytes):
+                return None
+            with candidate.open("rb") as stream:
+                head = stream.read(256).lstrip()
+            if candidate.suffix.lower() == ".png" and not head.startswith(b"\x89PNG\r\n\x1a\n"):
+                return None
+            if candidate.suffix.lower() == ".svg" and b"<svg" not in head.lower():
+                return None
+            return str(candidate.resolve())
+        except (OSError, TypeError, ValueError, OverflowError):
+            return None
+
+    candidate = pathlib.Path(value).expanduser()
+    if candidate.is_absolute():
+        return safe_file(candidate) or fallback
+    if suffix:
+        if suffix not in ICON_EXTENSIONS or candidate.name != value:
+            return fallback
+        for directory in directories:
+            resolved = safe_file(directory / candidate.name)
+            if resolved:
+                return resolved
+        # Theme APIs expect extension-free names.
+        return fallback
+    if "/" in value or "\\" in value or not re.fullmatch(r"[A-Za-z0-9_.+-]+", value):
+        return fallback
+    return value
+
+
+def load_icon_pixbuf(icon_theme, icon, size, fallback="application-x-executable"):
+    """Load an icon through GdkPixbuf/Gtk while containing all decoder errors."""
+    resolved = resolve_icon(icon, fallback=fallback)
+    size = max(16, min(512, int(size)))
+    try:
+        if pathlib.Path(resolved).is_absolute():
+            from gi.repository import GdkPixbuf
+            return GdkPixbuf.Pixbuf.new_from_file_at_scale(resolved, size, size, True)
+        return icon_theme.load_icon(resolved, size, 0)
+    except Exception:
+        if resolved != fallback:
+            try:
+                return icon_theme.load_icon(fallback, size, 0)
+            except Exception:
+                pass
+        return None
 
 
 class RuntimeSocket:

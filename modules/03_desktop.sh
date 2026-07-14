@@ -221,7 +221,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -241,6 +241,7 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
+    install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
@@ -2780,7 +2781,7 @@ phone_desktop_ready() {
 wait_phone_desktop_ready() {
     local log_file="$1"
     local attempt
-    # The session coordinator owns the fixed eight-second desktop startup
+    # The session coordinator owns the fixed 8-second desktop startup
     # budget.  Keep this one-shot helper bounded to the same deadline so a
     # repair cannot outlive the supervisor's startup window.
     for attempt in $(seq 1 16); do
@@ -5113,29 +5114,9 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-session-healthcheck
 PICOMAUTOSTART
 
-    # NetworkManager 小程序
-    cat > "${autostart_dir}/nm-applet.desktop" << NMAUTOSTART
-[Desktop Entry]
-Type=Application
-Name=Network Manager
-Comment=网络管理
-Exec=nm-applet
-Hidden=true
-NoDisplay=true
-X-GNOME-Autostart-enabled=false
-NMAUTOSTART
-
-    # 音量控制
-    cat > "${autostart_dir}/volumeicon.desktop" << VOLAUTOSTART
-[Desktop Entry]
-Type=Application
-Name=Volume Control
-Comment=音量控制
-Exec=volumeicon
-Hidden=true
-NoDisplay=true
-X-GNOME-Autostart-enabled=false
-VOLAUTOSTART
+    # Ming 状态小组件直接读取 NetworkManager/PulseAudio/UPower。清除旧镜像
+    # 遗留入口，避免恢复默认值时产生第二套托盘。
+    rm -f "${autostart_dir}/nm-applet.desktop" "${autostart_dir}/volumeicon.desktop"
 
     # 电源管理器（笔记本电池图标）
     cat > "${autostart_dir}/xfce4-power-manager.desktop" << POWERAUTOSTART

@@ -137,7 +137,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
     def test_every_required_install_function_propagates_mandatory_command_failures(self):
         expected_guards = {
             "install_xfce_desktop": (
-                "xfce4-power-manager-plugins || return 1",
+                "xfce4-power-manager || return 1",
                 "imagemagick || return 1",
                 "plymouth-themes || return 1",
             ),

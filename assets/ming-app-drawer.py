@@ -56,6 +56,16 @@ def _load_common():
 COMMON = _load_common()
 
 
+def resolved_icon_image(Gtk, icon, pixel_size):
+    resolved = COMMON.resolve_icon(icon)
+    if pathlib.Path(resolved).is_absolute():
+        image = Gtk.Image.new_from_file(resolved)
+    else:
+        image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
+    image.set_pixel_size(pixel_size)
+    return image
+
+
 def gtk_loaded():
     return "gi" in sys.modules
 
@@ -368,8 +378,7 @@ class DrawerController:
             button.set_size_request(116, 100)
             button.get_style_context().add_class("drawer-tile")
             content = self.Gtk.Box(orientation=self.Gtk.Orientation.VERTICAL, spacing=7)
-            image = self.Gtk.Image.new_from_icon_name(app.icon or "application-x-executable", self.Gtk.IconSize.DIALOG)
-            image.set_pixel_size(42)
+            image = resolved_icon_image(self.Gtk, app.icon, 42)
             label = self.Gtk.Label(label=app.name)
             label.set_justify(self.Gtk.Justification.CENTER)
             label.set_line_wrap(True)

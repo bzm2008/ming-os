@@ -92,6 +92,51 @@ def run(cmd, timeout=20):
         return 1, "", str(e)
 
 
+LIBINPUT_PROPERTIES = {
+    "left_handed": ("libinput Left Handed Enabled",),
+    "speed": ("libinput Accel Speed",),
+    "acceleration": ("libinput Accel Profile Enabled", "libinput Accel Profiles Available"),
+    "natural_scroll": ("libinput Natural Scrolling Enabled",),
+    "tap": ("libinput Tapping Enabled",),
+    "two_finger_scroll": ("libinput Scroll Method Enabled",),
+    "disable_while_typing": ("libinput Disable While Typing Enabled",),
+}
+
+
+def pointer_device_snapshot():
+    """Return libinput properties verbatim so unsupported hardware is diagnosable."""
+    rc, output, error = run(["xinput", "list", "--short"], timeout=5)
+    if rc != 0:
+        return {"ok": False, "devices": [], "error": error or output or "xinput 不可用"}
+    devices = []
+    for line in output.splitlines():
+        match = re.search(r"↳?\s*(.*?)\s+id=(\d+)", line)
+        if not match or "Virtual core" in match.group(1):
+            continue
+        device_id = match.group(2)
+        prop_rc, props, prop_error = run(["xinput", "list-props", device_id], timeout=5)
+        if prop_rc == 0 and "libinput" in props:
+            devices.append({"id": device_id, "name": match.group(1).strip(), "properties": props})
+        elif prop_error:
+            error = prop_error
+    return {"ok": bool(devices), "devices": devices, "error": "" if devices else (error or "未检测到 libinput 指针设备")}
+
+
+def set_pointer_property(device_id, setting, value):
+    """Set an available libinput property and read it back for diagnostics."""
+    snapshot = pointer_device_snapshot()
+    device = next((item for item in snapshot["devices"] if item["id"] == str(device_id)), None)
+    if not device or setting not in LIBINPUT_PROPERTIES:
+        return {"ok": False, "error": "设备或设置不可用"}
+    name = next((candidate for candidate in LIBINPUT_PROPERTIES[setting] if candidate in device["properties"]), None)
+    if not name:
+        return {"ok": False, "error": "设备不支持 %s" % setting, "properties": device["properties"]}
+    rc, output, error = run(["xinput", "set-prop", str(device_id), name, str(value)], timeout=5)
+    verify_rc, verify, verify_error = run(["xinput", "list-props", str(device_id)], timeout=5)
+    return {"ok": rc == 0 and verify_rc == 0, "property": name, "readback": verify,
+            "error": error or verify_error or output}
+
+
 def run_async(cmd, on_line=None, on_done=None):
     """后台运行命令，按行回调（GLib 主线程），结束回调 rc。"""
     def worker():
@@ -481,6 +526,8 @@ PAGE_ALIASES = {
     "storage": "存储",
     "update": "系统更新",
     "display": "显示与无障碍",
+    "appearance": "外观与桌面",
+    "pointer": "鼠标与触控板",
     "advanced": "高级设置",
     "hardware": "硬件与诊断",
     "restore": "系统还原",
@@ -551,6 +598,8 @@ class MingSettings(Adw.ApplicationWindow):
             ("drive-harddisk-symbolic", "存储", self.build_storage),
             ("software-update-available-symbolic", "系统更新", self.build_update),
             ("preferences-desktop-display-symbolic", "显示与无障碍", self.build_display),
+            ("preferences-desktop-theme-symbolic", "外观与桌面", self.build_appearance),
+            ("input-mouse-symbolic", "鼠标与触控板", self.build_pointer),
             ("preferences-other-symbolic", "高级设置", self.build_advanced),
             ("applications-system-symbolic", "硬件与诊断", self.build_hardware),
             ("view-refresh-symbolic", "系统还原", self.build_restore),
@@ -2019,7 +2068,84 @@ class MingSettings(Adw.ApplicationWindow):
         except OSError as exc:
             self.toast("界面大小已应用，但无法保存偏好：%s" % exc, "warning")
 
-    # ---- 6. 高级设置：只展示 Ming 桌面仍然支持的有效选项 ----
+    def build_appearance(self):
+        sc, box = self.page_scroller()
+        group = Adw.PreferencesGroup(
+            title="外观与桌面", description="主题、Noto 字体、图标和壁纸会立即保存并由 Ming 桌面重载。")
+        box.append(group)
+
+        def choice(title, values, labels, argument):
+            row = Adw.ActionRow(title=title)
+            dropdown = Gtk.DropDown.new_from_strings(labels)
+            dropdown.set_valign(Gtk.Align.CENTER)
+            dropdown.connect(
+                "notify::selected",
+                lambda widget, _param: run_async([
+                    "/usr/local/bin/ming-appearance-control", "apply", argument,
+                    str(values[min(widget.get_selected(), len(values) - 1)]), "--json"]),
+            )
+            row.add_suffix(dropdown)
+            group.add(row)
+
+        choice("主题", ["system", "light", "dark"], ["跟随系统", "浅色", "深色"], "--theme")
+        choice("Noto 字体", ["Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono"],
+               ["Noto Sans", "Noto Serif", "Noto 中文", "Noto 等宽"], "--font-family")
+        choice("字体大小", [10, 11, 12, 14, 16], ["10", "11", "12", "14", "16"], "--font-size")
+        choice("桌面图标", [0.75, 1.0, 1.25, 1.5], ["小", "标准", "大", "特大"], "--desktop-icon-scale")
+        choice("Dock 图标", [36, 44, 48, 56, 64], ["36", "44", "48", "56", "64"], "--dock-icon-size")
+        wallpaper = Gtk.Button(label="选择自定义壁纸")
+        wallpaper.connect("clicked", self.on_choose_wallpaper)
+        group.add(self.button_row("壁纸", "可使用 Ming 默认壁纸或选择本地图像。", wallpaper))
+        return sc
+
+    def on_choose_wallpaper(self, _button):
+        dialog = Gtk.FileDialog(title="选择壁纸")
+        dialog.open(self, None, self.on_wallpaper_chosen)
+
+    def on_wallpaper_chosen(self, dialog, result):
+        try:
+            path = dialog.open_finish(result).get_path()
+        except GLib.Error:
+            return
+        run_async(["/usr/local/bin/ming-appearance-control", "apply", "--wallpaper", path, "--json"])
+
+    def build_pointer(self):
+        sc, box = self.page_scroller()
+        group = Adw.PreferencesGroup(
+            title="鼠标与触控板", description="直接使用 libinput 属性；不支持的属性会在诊断中明确显示。")
+        box.append(group)
+        self.pointer_status = Adw.ActionRow(title="指针设备", subtitle="正在读取 libinput 属性...")
+        group.add(self.pointer_status)
+        for title, setting in (
+            ("左手主键", "left_handed"), ("自然滚动", "natural_scroll"),
+            ("轻触点击", "tap"), ("双指滚动", "two_finger_scroll"),
+            ("打字时禁用触控板", "disable_while_typing"),
+        ):
+            switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            switch.connect("notify::active", self.on_pointer_toggle, setting)
+            row = Adw.ActionRow(title=title)
+            row.add_suffix(switch)
+            group.add(row)
+        group.add(self.backend_scale_row("指针速度", "libinput Accel Speed（-1 到 1）。", "pointer_speed", -1, 1, 0.1, 0))
+        group.add(self.backend_combo_row("加速度", "读取并应用设备支持的加速度配置。", "pointer_acceleration",
+                                         ["自适应", "平直"], ["adaptive", "flat"]))
+        GLib.idle_add(self.refresh_pointer_status)
+        return sc
+
+    def refresh_pointer_status(self):
+        snapshot = pointer_device_snapshot()
+        names = " · ".join(item["name"] for item in snapshot["devices"])
+        self.pointer_status.set_subtitle(names or snapshot["error"])
+        self.pointer_snapshot = snapshot
+        return False
+
+    def on_pointer_toggle(self, switch, _param, setting):
+        for device in getattr(self, "pointer_snapshot", {}).get("devices", []):
+            result = set_pointer_property(device["id"], setting, int(switch.get_active()))
+            if not result["ok"]:
+                self.pointer_status.set_subtitle(result["error"])
+
+    # ---- 高级设置：只展示受控的 Xfce 兼容入口 ----
     def build_advanced(self):
         sc, box = self.page_scroller()
         self.advanced_page = sc
@@ -2031,6 +2157,16 @@ class MingSettings(Adw.ApplicationWindow):
         intro.add(Adw.ActionRow(
             title="兼容模式说明",
             subtitle="原生 Xfce 面板、桌面图标和工作区设置已由 Ming 桌面接管，因此不再显示无效的 Xfce 设置入口。"))
+
+        compatibility = Adw.PreferencesGroup(title="Xfce 兼容工具")
+        box.append(compatibility)
+        for title, command in (
+            ("鼠标", "xfce4-mouse-settings"), ("键盘", "xfce4-keyboard-settings"),
+            ("辅助功能", "xfce4-accessibility-settings"), ("可移动设备", "thunar-volman-settings"),
+        ):
+            button = Gtk.Button(label="打开")
+            button.connect("clicked", lambda _button, executable=command: run_async([executable]))
+            compatibility.add(self.button_row(title, "打开受控的兼容设置工具。", button))
 
         window_grp = Adw.PreferencesGroup(title="窗口行为")
         box.append(window_grp)

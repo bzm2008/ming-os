@@ -819,7 +819,6 @@ configure_users() {
 configure_network() {
     apt install -y --no-install-recommends \
         network-manager \
-        network-manager-gnome \
         wpasupplicant \
         bluez \
         ifupdown

@@ -82,13 +82,12 @@ install_xfce_desktop() {
         xserver-xorg-video-ati \
         xserver-xorg-video-nouveau \
         xserver-xorg-input-libinput \
-        xfce4 \
-        xfce4-panel \
+        xfwm4 \
+        xfconf \
         xfce4-session \
         xfce4-settings \
+        xfdesktop4 \
         xfce4-terminal \
-        xfce4-appfinder \
-        xfce4-whiskermenu-plugin \
         xfce4-taskmanager \
         xfce4-notifyd \
         python3-gi \
@@ -103,8 +102,7 @@ install_xfce_desktop() {
         xdg-user-dirs \
         xdg-utils \
         desktop-base \
-        xfce4-power-manager \
-        xfce4-power-manager-plugins || return 1
+        xfce4-power-manager || return 1
 
     apt install -y --no-install-recommends \
         picom \
@@ -2125,7 +2123,6 @@ install_utilities() {
         network-manager-openvpn-gnome \
         mobile-broadband-provider-info \
         modemmanager \
-        volumeicon-alsa \
         gnome-calculator \
         gnome-screenshot \
         evince \

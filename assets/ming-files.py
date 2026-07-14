@@ -969,3 +969,14 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# File and folder icons share the shell's safety rules when launchers provide
+# absolute icons. Regular MIME theme names continue through GTK unchanged.
+def resolve_icon(icon):
+    try:
+        common_path = Path(__file__).with_name("ming-shell-common.py")
+        spec = importlib.util.spec_from_file_location("ming_shell_common_for_files", common_path)
+        common = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(common)
+        return common.resolve_icon(icon)
+    except Exception:
+        return "application-x-executable"

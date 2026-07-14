@@ -345,7 +345,11 @@ def animate_launch(request, origin):
         entry = COMMON.parse_desktop_file(request.desktop_file)
         if entry and entry.icon:
             icon_name = entry.icon
-    image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DIALOG)
+    icon_name = COMMON.resolve_icon(icon_name)
+    if pathlib.Path(icon_name).is_absolute():
+        image = Gtk.Image.new_from_file(icon_name)
+    else:
+        image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DIALOG)
     image.set_halign(Gtk.Align.CENTER)
     image.set_valign(Gtk.Align.CENTER)
     overlay.add(image)

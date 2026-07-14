@@ -1797,13 +1797,31 @@ for desktop_runtime in [
     "usr/sbin/lightdm",
     "usr/bin/startxfce4",
     "usr/bin/xfce4-session",
-    "usr/bin/xfce4-panel",
     "usr/bin/xfdesktop",
     "usr/bin/thunar",
+    "usr/bin/xfce4-notifyd",
     "usr/sbin/mkfs.ext4",
     "lib/systemd/system/lightdm.service",
 ]:
     require_path(desktop_runtime)
+for retired_runtime in [
+    "usr/bin/xfce4-panel",
+    "usr/bin/xfce4-appfinder",
+    "usr/lib/x86_64-linux-gnu/xfce4/panel/plugins/libwhiskermenu.so",
+    "usr/bin/volumeicon",
+    "usr/bin/nm-applet",
+]:
+    if (root / retired_runtime).exists():
+        errors.append(f"retired duplicate shell runtime must not be installed: {retired_runtime}")
+autostart_roots = [root / "etc/xdg/autostart", root / "home/ming/.config/autostart"]
+for autostart_root in autostart_roots:
+    if not autostart_root.exists():
+        continue
+    for desktop_entry in autostart_root.glob("*.desktop"):
+        content = desktop_entry.read_text(encoding="utf-8", errors="replace")
+        for duplicate in ["xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"]:
+            if re.search(rf"^Exec=.*\b{re.escape(duplicate)}\b", content, re.M):
+                errors.append(f"normal session starts duplicate shell process {duplicate}: {desktop_entry}")
 display_manager = root / "etc/systemd/system/display-manager.service"
 if not (display_manager.exists() or display_manager.is_symlink()):
     errors.append("LightDM is installed but display-manager.service is not enabled")

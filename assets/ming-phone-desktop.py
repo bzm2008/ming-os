@@ -75,6 +75,16 @@ def load_shell_common():
 
 COMMON = load_shell_common()
 
+
+def resolved_icon_image(icon, pixel_size):
+    resolved = COMMON.resolve_icon(icon)
+    if Path(resolved).is_absolute():
+        image = Gtk.Image.new_from_file(resolved)
+    else:
+        image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
+    image.set_pixel_size(pixel_size)
+    return image
+
 HOME = Path.home()
 STATE_DIR = HOME / ".config" / "ming-os"
 LAYOUT_PATH = STATE_DIR / "desktop-layout.json"
@@ -151,6 +161,69 @@ WALLPAPER_PATHS = [
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
     Path("/usr/share/backgrounds/ming-os/default.svg"),
 ]
+APPEARANCE_PATH = STATE_DIR / "appearance.json"
+
+
+def load_appearance(path=None):
+    defaults = {"theme": "system", "font_family": "Noto Sans", "font_size": 11,
+                "desktop_icon_scale": 1.0, "dock_icon_size": 48, "wallpaper": "default"}
+    try:
+        data = json.loads(Path(path or APPEARANCE_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return defaults
+    if isinstance(data, dict):
+        defaults.update({key: data[key] for key in defaults if key in data})
+    return defaults
+
+
+def appearance_wallpaper_paths(appearance, fallbacks=None):
+    """Prefer a validated copied wallpaper and retain built-in fallbacks."""
+    fallbacks = list(fallbacks or WALLPAPER_PATHS)
+    wallpaper = str((appearance or {}).get("wallpaper", ""))
+    named = {
+        "default": Path("/usr/share/backgrounds/ming-os/default.png"),
+        "light": Path("/usr/share/backgrounds/ming-os/light.png"),
+        "dark": Path("/usr/share/backgrounds/ming-os/dark.png"),
+    }
+    if wallpaper in named:
+        return [named[wallpaper]] + [path for path in fallbacks if path != named[wallpaper]]
+    candidate = Path(wallpaper).expanduser()
+    try:
+        if candidate.is_absolute() and candidate.is_file() and 0 < candidate.stat().st_size <= 32 * 1024 * 1024:
+            with candidate.open("rb") as stream:
+                head = stream.read(12)
+            if head.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")) \
+                    or (head.startswith(b"RIFF") and head[8:12] == b"WEBP"):
+                return [candidate] + fallbacks
+    except OSError:
+        pass
+    return fallbacks
+
+
+def reflow_layout_for_icon_scale(layout, old_scale, new_scale, width, height):
+    """Re-grid positions by normalized coordinates without changing item order/content."""
+    result = json.loads(json.dumps(layout))
+    old_scale = max(0.5, float(old_scale or 1.0))
+    new_scale = max(0.5, float(new_scale or 1.0))
+    pad_x, pad_y = 34, 92
+    old_w, old_h = 92 * old_scale, 108 * old_scale
+    new_w, new_h = 92 * new_scale, 108 * new_scale
+    max_x = max(pad_x, float(width) - 82 * new_scale - pad_x)
+    max_y = max(pad_y, float(height) - 96 * new_scale - pad_x)
+    for item in result.get("items", []):
+        column = max(0, round((float(item.get("x", pad_x)) - pad_x) / old_w))
+        row = max(0, round((float(item.get("y", pad_y)) - pad_y) / old_h))
+        item["x"] = int(min(max_x, pad_x + column * new_w))
+        item["y"] = int(min(max_y, pad_y + row * new_h))
+    result["desktop_icon_scale"] = new_scale
+    return result
+
+
+def appearance_icon_size(appearance):
+    try:
+        return max(24, min(64, int(round(34 * float(appearance.get("desktop_icon_scale", 1.0))))))
+    except (AttributeError, TypeError, ValueError):
+        return 34
 
 CSS = b"""
 window.ming-desktop {
@@ -2255,7 +2328,7 @@ class WallpaperCanvas(Gtk.DrawingArea):
         self.connect("draw", self.on_draw)
 
     def load_wallpaper(self):
-        for path in WALLPAPER_PATHS:
+        for path in appearance_wallpaper_paths(load_appearance()):
             if path.exists():
                 try:
                     return GdkPixbuf.Pixbuf.new_from_file(str(path))
@@ -2369,7 +2442,14 @@ class PhoneDesktop(Gtk.Window):
         self.connect("map-event", lambda *_args: self.enforce_desktop_layer())
         self.connect("size-allocate", lambda *_args: self.place_overlays())
         self.layout = sync_layout(screen_w)
+        self.appearance = load_appearance()
+        old_scale = self.layout.get("desktop_icon_scale", self.appearance["desktop_icon_scale"])
+        if old_scale != self.appearance["desktop_icon_scale"]:
+            self.layout = reflow_layout_for_icon_scale(
+                self.layout, old_scale, self.appearance["desktop_icon_scale"], screen_w, screen_h)
+            save_layout(self.layout)
         self.layout_stamp = self.current_layout_stamp()
+        self.appearance_stamp = self.current_appearance_stamp()
         self.catalog_stamp = app_catalog_fingerprint()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
@@ -2503,11 +2583,12 @@ class PhoneDesktop(Gtk.Window):
             cr.stroke()
             icon_name = "folder" if is_folder else (item.get("icon") or "application-x-executable")
             try:
-                pixbuf = icon_theme.load_icon(icon_name, ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+                icon_size = appearance_icon_size(self.appearance)
+                pixbuf = COMMON.load_icon_pixbuf(icon_theme, icon_name, icon_size)
             except Exception:
                 pixbuf = None
             if pixbuf:
-                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((TILE_W - ICON_SIZE) / 2), y + 7)
+                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((TILE_W - icon_size) / 2), y + 7)
                 cr.paint()
             layout = PangoCairo.create_layout(cr)
             layout.set_text(item.get("name", "应用"), -1)
@@ -2809,13 +2890,36 @@ class PhoneDesktop(Gtk.Window):
         except OSError:
             return 0
 
+    @staticmethod
+    def current_appearance_stamp():
+        try:
+            return APPEARANCE_PATH.stat().st_mtime_ns
+        except OSError:
+            return 0
+
     def refresh_if_apps_changed(self):
         stamp = self.current_layout_stamp()
         catalog_stamp = app_catalog_fingerprint()
+        appearance_stamp = self.current_appearance_stamp()
+        appearance_changed = appearance_stamp != self.appearance_stamp
         layout_changed = stamp != self.layout_stamp
         catalog_changed = catalog_stamp != self.catalog_stamp
-        if not layout_changed and not catalog_changed:
+        if not layout_changed and not catalog_changed and not appearance_changed:
             return True
+        if appearance_changed:
+            updated_appearance = load_appearance()
+            old_scale = self.appearance.get("desktop_icon_scale", 1.0)
+            new_scale = updated_appearance.get("desktop_icon_scale", 1.0)
+            if old_scale != new_scale:
+                screen = self.get_screen()
+                self.layout = reflow_layout_for_icon_scale(
+                    self.layout, old_scale, new_scale, screen.get_width(), screen.get_height())
+                save_layout(self.layout)
+            self.appearance = updated_appearance
+            self.appearance_stamp = appearance_stamp
+            self.wallpaper.pixbuf = self.wallpaper.load_wallpaper()
+            self.wallpaper.queue_draw()
+            self.render()
         if catalog_changed:
             updated = sync_layout(self.get_screen().get_width())
         else:
@@ -2936,8 +3040,7 @@ class PhoneDesktop(Gtk.Window):
             button = Gtk.Button()
             button.set_size_request(104, 94)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            child_image = Gtk.Image.new_from_icon_name(child.get("icon"), Gtk.IconSize.DIALOG)
-            child_image.set_pixel_size(ICON_SIZE)
+            child_image = resolved_icon_image(child.get("icon"), appearance_icon_size(self.appearance))
             box.pack_start(child_image, True, True, 0)
             label = Gtk.Label(label=child.get("name"))
             label.set_line_wrap(True)
