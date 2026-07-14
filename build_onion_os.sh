@@ -890,6 +890,7 @@ validate_required_desktop_runtime() {
 # MING_DESKTOP_BACKEND_VALIDATOR_BEGIN
 from pathlib import Path
 import configparser
+import io
 import os
 import shlex
 import shutil
@@ -1853,15 +1854,48 @@ def autostart_processes(value, current_desktop="XFCE"):
             while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
                 offset += 1
         executable = Path(argv[offset]).name if offset < len(argv) else ""
+        programs = []
         if executable in {"sh", "bash", "dash", "zsh", "ksh"} and "-c" in argv[offset + 1:]:
             script_index = argv.index("-c", offset + 1) + 1
-            script = shlex.split(argv[script_index], posix=True) if script_index < len(argv) else []
-            if script and script[0] == "exec":
-                script = script[1:]
-            executable = Path(script[0]).name if script else ""
-        return (executable,)
+            lexer = shlex.shlex(io.StringIO(argv[script_index]), posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            segment = []
+            for token in list(lexer) + [";"]:
+                if token and all(char in ";&|" for char in token):
+                    executable = unwrapped_program(segment)
+                    if executable:
+                        programs.append(executable)
+                    segment = []
+                else:
+                    segment.append(token)
+        else:
+            programs.append(unwrapped_program(argv[offset:]))
+        return tuple(dict.fromkeys(programs))
     except (KeyError, ValueError, configparser.Error):
         return ()
+
+def unwrapped_program(tokens):
+    tokens = list(tokens)
+    while tokens:
+        executable = Path(tokens[0]).name
+        if tokens[0] == "exec" or executable == "nohup" or ("=" in tokens[0] and not tokens[0].startswith("-")):
+            tokens.pop(0)
+            continue
+        if executable == "env":
+            tokens.pop(0)
+            while tokens and (tokens[0].startswith("-") or "=" in tokens[0]):
+                tokens.pop(0)
+            continue
+        if executable == "timeout":
+            tokens.pop(0)
+            while tokens and tokens[0].startswith("-"):
+                tokens.pop(0)
+            if tokens:
+                tokens.pop(0)
+            continue
+        return executable
+    return ""
 
 for autostart_root in autostart_roots:
     if not autostart_root.exists():

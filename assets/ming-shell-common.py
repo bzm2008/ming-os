@@ -3,6 +3,7 @@
 
 import configparser
 import json
+import io
 import math
 import os
 import pathlib
@@ -200,15 +201,49 @@ def autostart_processes(content, current_desktop="XFCE"):
             while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
                 offset += 1
         program = pathlib.PurePath(argv[offset]).name if offset < len(argv) else ""
+        programs = []
         if program in _SHELL_NAME and "-c" in argv[offset + 1:]:
             script_index = argv.index("-c", offset + 1) + 1
-            script_argv = shlex.split(argv[script_index], posix=True) if script_index < len(argv) else []
-            if script_argv and script_argv[0] == "exec":
-                script_argv = script_argv[1:]
-            program = pathlib.PurePath(script_argv[0]).name if script_argv else ""
-        return (program,) if program in duplicate_shell else ()
+            lexer = shlex.shlex(io.StringIO(argv[script_index]), posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            segment = []
+            for token in list(lexer) + [";"]:
+                if token and all(char in ";&|" for char in token):
+                    candidate = _unwrapped_program(segment)
+                    if candidate:
+                        programs.append(candidate)
+                    segment = []
+                else:
+                    segment.append(token)
+        else:
+            programs.append(_unwrapped_program(argv[offset:]))
+        return tuple(dict.fromkeys(item for item in programs if item in duplicate_shell))
     except (KeyError, ValueError, configparser.Error):
         return ()
+
+
+def _unwrapped_program(tokens):
+    tokens = list(tokens)
+    while tokens:
+        token = pathlib.PurePath(tokens[0]).name
+        if tokens[0] == "exec" or token == "nohup" or "=" in tokens[0] and not tokens[0].startswith("-"):
+            tokens.pop(0)
+            continue
+        if token == "env":
+            tokens.pop(0)
+            while tokens and (tokens[0].startswith("-") or "=" in tokens[0]):
+                tokens.pop(0)
+            continue
+        if token == "timeout":
+            tokens.pop(0)
+            while tokens and tokens[0].startswith("-"):
+                tokens.pop(0)
+            if tokens:
+                tokens.pop(0)
+            continue
+        return token
+    return ""
 
 
 def load_icon_pixbuf(icon_theme, icon, size, fallback="application-x-executable"):

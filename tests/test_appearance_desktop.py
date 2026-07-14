@@ -178,6 +178,12 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(("xfdesktop",), common.autostart_processes(direct, "XFCE"))
         self.assertEqual(("xfdesktop",), common.autostart_processes(shell, "XFCE"))
         self.assertEqual(("xfdesktop",), common.autostart_processes(shell_exec, "XFCE"))
+        later = "[Desktop Entry]\nType=Application\nExec=sh -c 'sleep 1; exec xfdesktop --replace'\n"
+        chained = "[Desktop Entry]\nType=Application\nExec=sh -c 'echo ready && xfce4-panel'\n"
+        wrapped = "[Desktop Entry]\nType=Application\nExec=env X=1 timeout 2 xfdesktop\n"
+        self.assertEqual(("xfdesktop",), common.autostart_processes(later, "XFCE"))
+        self.assertEqual(("xfce4-panel",), common.autostart_processes(chained, "XFCE"))
+        self.assertEqual(("xfdesktop",), common.autostart_processes(wrapped, "XFCE"))
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         self.assertIn("autostart_processes", build)
 
@@ -318,16 +324,37 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), settings, "exec"), namespace)
         serial = namespace["PointerMutationSerial"]()
         writes = []
-        old = serial.begin()
-        new = serial.begin()
+        key = ("mouse-1", "left_handed")
+        old = serial.begin(key)
+        new = serial.begin(key)
         threads = [
-            threading.Thread(target=lambda: serial.apply(old, lambda: writes.append("old"))),
-            threading.Thread(target=lambda: serial.apply(new, lambda: writes.append("new"))),
+            threading.Thread(target=lambda: serial.apply(key, old, lambda: writes.append("old"))),
+            threading.Thread(target=lambda: serial.apply(key, new, lambda: writes.append("new"))),
         ]
         threads[0].start(); time.sleep(0.02); threads[1].start()
         for thread in threads:
             thread.join()
         self.assertEqual(["new"], writes)
+
+    def test_pointer_mutations_do_not_cancel_different_settings(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        tree = ast.parse(settings)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PointerMutationSerial")
+        namespace = {"threading": threading}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), settings, "exec"), namespace)
+        serial = namespace["PointerMutationSerial"]()
+        writes = []
+        left = ("touchpad-1", "left_handed")
+        natural = ("touchpad-1", "natural_scroll")
+        left_generation = serial.begin(left)
+        natural_generation = serial.begin(natural)
+        threads = [
+            threading.Thread(target=lambda: serial.apply(left, left_generation, lambda: writes.append("left"))),
+            threading.Thread(target=lambda: serial.apply(natural, natural_generation, lambda: writes.append("natural"))),
+        ]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertCountEqual(["left", "natural"], writes)
 
 
 class MingFilesIconBehaviorTests(unittest.TestCase):

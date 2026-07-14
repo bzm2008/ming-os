@@ -516,18 +516,22 @@ class PointerMutationSerial:
     """Serialize libinput writes and discard generations superseded while waiting."""
     def __init__(self):
         self._state_lock = threading.Lock()
-        self._mutation_lock = threading.Lock()
-        self._generation = 0
+        self._states = {}
 
-    def begin(self):
+    def begin(self, key):
         with self._state_lock:
-            self._generation += 1
-            return self._generation
+            generation, mutation_lock = self._states.get(key, (0, threading.Lock()))
+            generation += 1
+            self._states[key] = (generation, mutation_lock)
+            return generation
 
-    def apply(self, generation, operation):
-        with self._mutation_lock:
+    def apply(self, key, generation, operation):
+        with self._state_lock:
+            _current, mutation_lock = self._states.setdefault(key, (0, threading.Lock()))
+        with mutation_lock:
             with self._state_lock:
-                if generation != self._generation:
+                current, _lock = self._states.get(key, (0, mutation_lock))
+                if generation != current:
                     return None
             return operation()
 
@@ -2250,15 +2254,24 @@ class MingSettings(Adw.ApplicationWindow):
 
     def on_pointer_toggle(self, switch, _param, setting):
         generation = self.pointer_probe_state.begin()
-        mutation_generation = self.pointer_mutations.begin()
         devices = list(getattr(self, "pointer_snapshot", {}).get("devices", []))
         value = int(switch.get_active())
+        mutation_generations = {
+            (device["id"], setting): self.pointer_mutations.begin((device["id"], setting))
+            for device in devices
+        }
 
         def apply_all():
-            return self.pointer_mutations.apply(
-                mutation_generation,
-                lambda: [set_pointer_property(device["id"], setting, value) for device in devices],
-            )
+            results = []
+            for device in devices:
+                key = (device["id"], setting)
+                result = self.pointer_mutations.apply(
+                    key, mutation_generations[key],
+                    lambda target=device: set_pointer_property(target["id"], setting, value),
+                )
+                if result is not None:
+                    results.append(result)
+            return results
 
         def done(results, error):
             if not self.pointer_probe_state.accept(generation):
