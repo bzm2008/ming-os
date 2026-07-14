@@ -1829,33 +1829,48 @@ home_root = root / "home"
 if home_root.is_dir():
     autostart_roots.extend(path / ".config/autostart" for path in home_root.iterdir() if path.is_dir())
 
-def autostart_exec(value, current_desktop="XFCE"):
+def autostart_processes(value, current_desktop="XFCE"):
     try:
         parser = configparser.ConfigParser(interpolation=None, strict=False)
         parser.optionxform = str
         parser.read_string(value)
         entry = parser["Desktop Entry"]
         if entry.getboolean("Hidden", fallback=False):
-            return ""
+            return ()
         if not entry.getboolean("X-GNOME-Autostart-enabled", fallback=True):
-            return ""
+            return ()
         only = {item.casefold() for item in entry.get("OnlyShowIn", "").split(";") if item}
         excluded = {item.casefold() for item in entry.get("NotShowIn", "").split(";") if item}
         desktop = current_desktop.casefold()
         if (only and desktop not in only) or desktop in excluded:
-            return ""
-        return entry.get("Exec", "")
+            return ()
+        argv = shlex.split(entry.get("Exec", ""), posix=True)
+        if not argv:
+            return ()
+        offset = 0
+        if Path(argv[0]).name == "env":
+            offset = 1
+            while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
+                offset += 1
+        executable = Path(argv[offset]).name if offset < len(argv) else ""
+        if executable in {"sh", "bash", "dash", "zsh", "ksh"} and "-c" in argv[offset + 1:]:
+            script_index = argv.index("-c", offset + 1) + 1
+            script = shlex.split(argv[script_index], posix=True) if script_index < len(argv) else []
+            if script and script[0] == "exec":
+                script = script[1:]
+            executable = Path(script[0]).name if script else ""
+        return (executable,)
     except (KeyError, ValueError, configparser.Error):
-        return ""
+        return ()
 
 for autostart_root in autostart_roots:
     if not autostart_root.exists():
         continue
     for desktop_entry in autostart_root.glob("*.desktop"):
         content = desktop_entry.read_text(encoding="utf-8", errors="replace")
-        command = autostart_exec(content)
+        processes = autostart_processes(content)
         for duplicate in ["xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"]:
-            if re.search(rf"\b{re.escape(duplicate)}\b", command):
+            if duplicate in processes:
                 errors.append(f"normal session starts duplicate shell process {duplicate}: {desktop_entry}")
 display_manager = root / "etc/systemd/system/display-manager.service"
 if not (display_manager.exists() or display_manager.is_symlink()):

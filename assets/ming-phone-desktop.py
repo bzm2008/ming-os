@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import struct
 import threading
 import time
 from pathlib import Path
@@ -193,14 +194,28 @@ def appearance_wallpaper_paths(appearance, fallbacks=None):
     candidate = Path(wallpaper).expanduser()
     try:
         if candidate.is_absolute() and candidate.is_file() and 0 < candidate.stat().st_size <= 32 * 1024 * 1024:
-            with candidate.open("rb") as stream:
-                head = stream.read(12)
-            if head.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")) \
-                    or (head.startswith(b"RIFF") and head[8:12] == b"WEBP"):
+            if safe_wallpaper_dimensions(candidate):
                 return [candidate] + fallbacks
     except OSError:
         pass
     return fallbacks
+
+
+def safe_wallpaper_dimensions(path):
+    path = Path(path)
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(24)
+        if path.suffix.lower() == ".png" and head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR":
+            width, height = struct.unpack(">II", head[16:24])
+            return 0 < width <= 8192 and 0 < height <= 8192 and width * height <= 16 * 1024 * 1024
+        if path.suffix.lower() in {".jpg", ".jpeg"} and head.startswith(b"\xff\xd8"):
+            # The control validates JPEG dimensions before copying; bounded
+            # scaled decoding below contains later file replacement risk.
+            return True
+    except (OSError, struct.error):
+        pass
+    return False
 
 
 def reflow_layout_for_icon_scale(layout, old_scale, new_scale, width, height):
@@ -2338,10 +2353,13 @@ class WallpaperCanvas(Gtk.DrawingArea):
         self.connect("draw", self.on_draw)
 
     def load_wallpaper(self):
+        screen = Gdk.Screen.get_default()
+        width = max(320, screen.get_width()) if screen else 1920
+        height = max(240, screen.get_height()) if screen else 1080
         for path in appearance_wallpaper_paths(load_appearance()):
             if path.exists():
                 try:
-                    return GdkPixbuf.Pixbuf.new_from_file(str(path))
+                    return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
                 except Exception:
                     pass
         return None

@@ -175,6 +175,42 @@ def autostart_exec(content, current_desktop="XFCE"):
         return None
 
 
+def autostart_processes(content, current_desktop="XFCE"):
+    """Return duplicate-shell executables actually launched by an active entry."""
+    duplicate_shell = {"xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"}
+    try:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        parser.read_string(content)
+        section = parser["Desktop Entry"]
+        if section.getboolean("Hidden", fallback=False) or not section.getboolean(
+                "X-GNOME-Autostart-enabled", fallback=True):
+            return ()
+        desktop = str(current_desktop or "").casefold()
+        only = {item.casefold() for item in section.get("OnlyShowIn", "").split(";") if item}
+        excluded = {item.casefold() for item in section.get("NotShowIn", "").split(";") if item}
+        if (only and desktop not in only) or desktop in excluded:
+            return ()
+        argv = shlex.split(section.get("Exec", ""), posix=True)
+        if not argv:
+            return ()
+        offset = 0
+        if pathlib.PurePath(argv[0]).name == "env":
+            offset = 1
+            while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
+                offset += 1
+        program = pathlib.PurePath(argv[offset]).name if offset < len(argv) else ""
+        if program in _SHELL_NAME and "-c" in argv[offset + 1:]:
+            script_index = argv.index("-c", offset + 1) + 1
+            script_argv = shlex.split(argv[script_index], posix=True) if script_index < len(argv) else []
+            if script_argv and script_argv[0] == "exec":
+                script_argv = script_argv[1:]
+            program = pathlib.PurePath(script_argv[0]).name if script_argv else ""
+        return (program,) if program in duplicate_shell else ()
+    except (KeyError, ValueError, configparser.Error):
+        return ()
+
+
 def load_icon_pixbuf(icon_theme, icon, size, fallback="application-x-executable"):
     """Load an icon through GdkPixbuf/Gtk while containing all decoder errors."""
     resolved = resolve_icon(icon, fallback=fallback)

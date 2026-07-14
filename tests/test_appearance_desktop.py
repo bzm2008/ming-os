@@ -8,6 +8,8 @@ import unittest
 import ast
 import base64
 import struct
+import threading
+import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -106,6 +108,33 @@ class AppearanceControlTests(unittest.TestCase):
         self.assertIn("finally:", plank)
         self.assertIn("os.unlink(temporary)", plank)
 
+    def test_wallpaper_rejects_animation_and_oversized_png_metadata(self):
+        spec = importlib.util.spec_from_file_location("appearance_wallpaper", CONTROL)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        real_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            good = root / "good.png"
+            good.write_bytes(real_png)
+            huge = root / "huge.png"
+            data = bytearray(real_png)
+            data[16:24] = struct.pack(">II", 100000, 100000)
+            huge.write_bytes(data)
+            gif = root / "animated.gif"
+            gif.write_bytes(b"GIF89a" + b"x" * 32)
+            self.assertEqual((1, 1), module.safe_wallpaper_dimensions(good))
+            with self.assertRaises(ValueError):
+                module.safe_wallpaper_dimensions(huge)
+            with self.assertRaises(ValueError):
+                module.safe_wallpaper_dimensions(gif)
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        loader = phone[phone.index("    def load_wallpaper"):
+                       phone.index("    def on_draw", phone.index("    def load_wallpaper"))]
+        self.assertIn("new_from_file_at_scale", loader)
+        self.assertNotIn("new_from_file(", loader)
+
 
 class DeploymentContractTests(unittest.TestCase):
     def test_shell_consumers_use_shared_icon_resolver(self):
@@ -137,7 +166,20 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIsNone(common.autostart_exec(disabled, "XFCE"))
         self.assertIsNone(common.autostart_exec(other, "XFCE"))
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
-        self.assertIn("autostart_exec", build)
+        self.assertIn("autostart_processes", build)
+
+    def test_autostart_gate_matches_executable_not_arguments(self):
+        common = load_common()
+        echo = "[Desktop Entry]\nType=Application\nExec=echo xfdesktop\n"
+        direct = "[Desktop Entry]\nType=Application\nExec=/usr/bin/xfdesktop --replace\n"
+        shell = "[Desktop Entry]\nType=Application\nExec=sh -c 'xfdesktop --replace'\n"
+        shell_exec = "[Desktop Entry]\nType=Application\nExec=sh -c 'exec xfdesktop --replace'\n"
+        self.assertEqual((), common.autostart_processes(echo, "XFCE"))
+        self.assertEqual(("xfdesktop",), common.autostart_processes(direct, "XFCE"))
+        self.assertEqual(("xfdesktop",), common.autostart_processes(shell, "XFCE"))
+        self.assertEqual(("xfdesktop",), common.autostart_processes(shell_exec, "XFCE"))
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("autostart_processes", build)
 
     def test_builtin_wallpapers_use_deployed_names_everywhere(self):
         paths = (
@@ -231,11 +273,11 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
             self.assertEqual(["a", "b"], result["items"][1]["children"])
 
     def test_custom_wallpaper_is_selected_only_while_valid(self):
-        ns = self.phone_functions({"appearance_wallpaper_paths"})
+        ns = self.phone_functions({"appearance_wallpaper_paths", "safe_wallpaper_dimensions"})
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
             image = root / "wall.png"
-            image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+            image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
             self.assertEqual(image, ns["appearance_wallpaper_paths"]({"wallpaper": str(image)}, [root / "fallback"])[0])
             image.unlink()
             self.assertEqual(root / "fallback", ns["appearance_wallpaper_paths"]({"wallpaper": str(image)}, [root / "fallback"])[0])
@@ -267,6 +309,25 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         self.assertIn("pointer_probe_state", refresh)
         self.assertNotIn("snapshot = pointer_device_snapshot()", refresh)
         self.assertIn("run_task_async", toggle)
+
+    def test_pointer_mutations_serialize_and_latest_generation_wins(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        tree = ast.parse(settings)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PointerMutationSerial")
+        namespace = {"threading": threading}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), settings, "exec"), namespace)
+        serial = namespace["PointerMutationSerial"]()
+        writes = []
+        old = serial.begin()
+        new = serial.begin()
+        threads = [
+            threading.Thread(target=lambda: serial.apply(old, lambda: writes.append("old"))),
+            threading.Thread(target=lambda: serial.apply(new, lambda: writes.append("new"))),
+        ]
+        threads[0].start(); time.sleep(0.02); threads[1].start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(["new"], writes)
 
 
 class MingFilesIconBehaviorTests(unittest.TestCase):

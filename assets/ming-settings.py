@@ -512,6 +512,26 @@ class GenerationState:
         self.generation += 1
 
 
+class PointerMutationSerial:
+    """Serialize libinput writes and discard generations superseded while waiting."""
+    def __init__(self):
+        self._state_lock = threading.Lock()
+        self._mutation_lock = threading.Lock()
+        self._generation = 0
+
+    def begin(self):
+        with self._state_lock:
+            self._generation += 1
+            return self._generation
+
+    def apply(self, generation, operation):
+        with self._mutation_lock:
+            with self._state_lock:
+                if generation != self._generation:
+                    return None
+            return operation()
+
+
 def read_broadcom_status_snapshot():
     manager = "/usr/local/sbin/ming-broadcom-driver"
     rc, output, error = run([manager, "status", "--json"], timeout=8)
@@ -581,6 +601,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
         self.pointer_probe_state = GenerationState()
+        self.pointer_mutations = PointerMutationSerial()
         self.connect("close-request", self.on_close_request)
         self.install_css()
 
@@ -2229,11 +2250,15 @@ class MingSettings(Adw.ApplicationWindow):
 
     def on_pointer_toggle(self, switch, _param, setting):
         generation = self.pointer_probe_state.begin()
+        mutation_generation = self.pointer_mutations.begin()
         devices = list(getattr(self, "pointer_snapshot", {}).get("devices", []))
         value = int(switch.get_active())
 
         def apply_all():
-            return [set_pointer_property(device["id"], setting, value) for device in devices]
+            return self.pointer_mutations.apply(
+                mutation_generation,
+                lambda: [set_pointer_property(device["id"], setting, value) for device in devices],
+            )
 
         def done(results, error):
             if not self.pointer_probe_state.accept(generation):
