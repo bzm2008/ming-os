@@ -580,6 +580,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.audio_probe_state = GenerationState()
         self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
+        self.pointer_probe_state = GenerationState()
         self.connect("close-request", self.on_close_request)
         self.install_css()
 
@@ -833,6 +834,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.audio_probe_state.invalidate()
         self.playback_audio_probe_state.invalidate()
         self.time_sync_probe_state.invalidate()
+        self.pointer_probe_state.invalidate()
         return False
 
     # ---- 通用 UI 助手 ----
@@ -2186,6 +2188,7 @@ class MingSettings(Adw.ApplicationWindow):
 
     def build_pointer(self):
         sc, box = self.page_scroller()
+        self.pointer_page = sc
         group = Adw.PreferencesGroup(
             title="鼠标与触控板", description="直接使用 libinput 属性；不支持的属性会在诊断中明确显示。")
         box.append(group)
@@ -2208,17 +2211,43 @@ class MingSettings(Adw.ApplicationWindow):
         return sc
 
     def refresh_pointer_status(self):
-        snapshot = pointer_device_snapshot()
-        names = " · ".join(item["name"] for item in snapshot["devices"])
-        self.pointer_status.set_subtitle(names or snapshot["error"])
-        self.pointer_snapshot = snapshot
+        generation = self.pointer_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.pointer_probe_state.accept(generation):
+                return False
+            if self.pointer_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {"devices": [], "error": error or "指针设备读取失败"}
+            names = " · ".join(item["name"] for item in snapshot["devices"])
+            self.pointer_status.set_subtitle(names or snapshot["error"])
+            self.pointer_snapshot = snapshot
+            return False
+
+        run_task_async(pointer_device_snapshot, done)
         return False
 
     def on_pointer_toggle(self, switch, _param, setting):
-        for device in getattr(self, "pointer_snapshot", {}).get("devices", []):
-            result = set_pointer_property(device["id"], setting, int(switch.get_active()))
-            if not result["ok"]:
-                self.pointer_status.set_subtitle(result["error"])
+        generation = self.pointer_probe_state.begin()
+        devices = list(getattr(self, "pointer_snapshot", {}).get("devices", []))
+        value = int(switch.get_active())
+
+        def apply_all():
+            return [set_pointer_property(device["id"], setting, value) for device in devices]
+
+        def done(results, error):
+            if not self.pointer_probe_state.accept(generation):
+                return False
+            if self.pointer_page.get_root() is not self:
+                return False
+            failure = next((result for result in (results or []) if not result["ok"]), None)
+            if failure or error:
+                self.pointer_status.set_subtitle((failure or {}).get("error") or error)
+            else:
+                self.refresh_pointer_status()
+            return False
+
+        run_task_async(apply_all, done)
 
     # ---- 高级设置：只展示受控的 Xfce 兼容入口 ----
     def build_advanced(self):

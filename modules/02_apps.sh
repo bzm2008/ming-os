@@ -35,6 +35,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     gvfs-backends
     brightnessctl
     xdotool
+    xinput
     wmctrl
     rfkill
     pulseaudio

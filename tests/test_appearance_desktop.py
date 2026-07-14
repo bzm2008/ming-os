@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 import ast
+import base64
+import struct
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -26,9 +28,9 @@ class IconResolverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
             png = root / "wechat.png"
-            png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+            png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
             svg = root / "wechat.svg"
-            svg.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8")
+            svg.write_text("<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'/>", encoding="utf-8")
             huge = root / "huge.png"
             huge.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 1024)
             self.assertEqual(str(png), common.resolve_icon(str(png), max_bytes=128))
@@ -40,10 +42,28 @@ class IconResolverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             pixmaps = pathlib.Path(temp)
             icon = pixmaps / "wechat.png"
-            icon.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 8)
+            icon.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
             self.assertEqual("utilities-terminal", common.resolve_icon("utilities-terminal"))
             self.assertEqual(str(icon), common.resolve_icon("wechat.png", pixmap_dirs=[pixmaps]))
             self.assertEqual("fallback", common.resolve_icon("missing.png", fallback="fallback", pixmap_dirs=[pixmaps]))
+
+    def test_real_png_dimensions_and_malicious_svg_are_bounded(self):
+        common = load_common()
+        real_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            good = root / "good.png"
+            good.write_bytes(real_png)
+            huge = root / "huge.png"
+            data = bytearray(real_png)
+            data[16:24] = struct.pack(">II", 100000, 100000)
+            huge.write_bytes(data)
+            svg = root / "bad.svg"
+            svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="999999" height="999999"/>', encoding="utf-8")
+            self.assertEqual(str(good), common.resolve_icon(str(good)))
+            self.assertEqual("fallback", common.resolve_icon(str(huge), fallback="fallback"))
+            self.assertEqual("fallback", common.resolve_icon(str(svg), fallback="fallback"))
 
 
 class AppearanceControlTests(unittest.TestCase):
@@ -77,6 +97,15 @@ class AppearanceControlTests(unittest.TestCase):
             status = json.loads(self.run_control(home, "status").stdout)
             self.assertEqual("default", status["wallpaper"])
 
+    def test_atomic_writes_cleanup_and_fsync_parent_directory(self):
+        source = CONTROL.read_text(encoding="utf-8")
+        self.assertIn("def fsync_directory", source)
+        self.assertIn('getattr(os, "O_DIRECTORY"', source)
+        self.assertGreaterEqual(source.count("fsync_directory("), 3)
+        plank = source[source.index('plank = pathlib.Path.home()'):source.index("def parser")]
+        self.assertIn("finally:", plank)
+        self.assertIn("os.unlink(temporary)", plank)
+
 
 class DeploymentContractTests(unittest.TestCase):
     def test_shell_consumers_use_shared_icon_resolver(self):
@@ -90,6 +119,25 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('root / "home/user/.config/autostart"', build)
         self.assertIn('root / "etc/skel/.config/autostart"', build)
         self.assertNotIn('root / "home/ming/.config/autostart"', build)
+
+    def test_xinput_is_required_and_rootfs_gated(self):
+        apps = (ROOT / "modules/02_apps.sh").read_text(encoding="utf-8")
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("xinput", apps.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0])
+        self.assertIn('"usr/bin/xinput"', build)
+
+    def test_autostart_gate_uses_structured_desktop_semantics(self):
+        common = load_common()
+        active = "[Desktop Entry]\nType=Application\nExec=nm-applet\n"
+        hidden = active + "Hidden=true\n"
+        disabled = active + "X-GNOME-Autostart-enabled=false\n"
+        other = active + "OnlyShowIn=GNOME;\n"
+        self.assertEqual("nm-applet", common.autostart_exec(active, "XFCE"))
+        self.assertIsNone(common.autostart_exec(hidden, "XFCE"))
+        self.assertIsNone(common.autostart_exec(disabled, "XFCE"))
+        self.assertIsNone(common.autostart_exec(other, "XFCE"))
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("autostart_exec", build)
 
     def test_builtin_wallpapers_use_deployed_names_everywhere(self):
         paths = (
@@ -156,7 +204,7 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         return namespace
 
     def test_icon_scale_reflows_grid_preserving_order_folders_and_relative_position(self):
-        ns = self.phone_functions({"reflow_layout_for_icon_scale"})
+        ns = self.phone_functions({"reflow_layout_for_icon_scale", "scaled_tile_metrics"})
         layout = {"items": [
             {"id": "a", "type": "app", "x": 34, "y": 92},
             {"id": "folder", "type": "folder", "children": ["a.desktop", "b.desktop"], "x": 126, "y": 200},
@@ -165,6 +213,22 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         self.assertEqual(["a", "folder"], [item["id"] for item in result["items"]])
         self.assertEqual(["a.desktop", "b.desktop"], result["items"][1]["children"])
         self.assertLess(result["items"][0]["x"], result["items"][1]["x"])
+
+    def test_reflow_keeps_all_scaled_tiles_inside_each_edge(self):
+        ns = self.phone_functions({"reflow_layout_for_icon_scale", "scaled_tile_metrics"})
+        for scale in (0.75, 1.4):
+            layout = {"items": [
+                {"id": "tl", "type": "app", "x": -500, "y": -500},
+                {"id": "br", "type": "folder", "children": ["a", "b"], "x": 99999, "y": 99999},
+            ]}
+            result = ns["reflow_layout_for_icon_scale"](layout, 1.0, scale, 800, 600)
+            tile_w, tile_h = ns["scaled_tile_metrics"](scale)
+            for item in result["items"]:
+                self.assertGreaterEqual(item["x"], 34)
+                self.assertGreaterEqual(item["y"], 92)
+                self.assertLessEqual(item["x"] + tile_w, 800 - 34)
+                self.assertLessEqual(item["y"] + tile_h, 600 - 92)
+            self.assertEqual(["a", "b"], result["items"][1]["children"])
 
     def test_custom_wallpaper_is_selected_only_while_valid(self):
         ns = self.phone_functions({"appearance_wallpaper_paths"})
@@ -193,6 +257,17 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         self.assertIn('"status", "--json"', settings)
         self.assertIn("恢复默认壁纸", settings)
 
+    def test_pointer_probes_never_run_blocking_runner_on_gtk_callback(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        refresh = settings[settings.index("    def refresh_pointer_status"):
+                           settings.index("    def on_pointer_toggle", settings.index("    def refresh_pointer_status"))]
+        toggle = settings[settings.index("    def on_pointer_toggle"):
+                          settings.index("    # ---- 高级设置", settings.index("    def on_pointer_toggle"))]
+        self.assertIn("run_task_async(pointer_device_snapshot", refresh)
+        self.assertIn("pointer_probe_state", refresh)
+        self.assertNotIn("snapshot = pointer_device_snapshot()", refresh)
+        self.assertIn("run_task_async", toggle)
+
 
 class MingFilesIconBehaviorTests(unittest.TestCase):
     def load_module(self):
@@ -209,21 +284,31 @@ class MingFilesIconBehaviorTests(unittest.TestCase):
                 self.file = None
                 self.name = None
                 self.size = None
+                self.pixbuf = None
             def set_from_file(self, value): self.file = value
             def set_from_icon_name(self, value): self.name = value
             def set_pixel_size(self, value): self.size = value
+            def set_from_pixbuf(self, value): self.pixbuf = value
         with tempfile.TemporaryDirectory() as temp:
             icon = pathlib.Path(temp) / "file.png"
-            icon.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+            icon.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+            module.COMMON.load_icon_pixbuf = lambda _theme, _icon, _size: "scaled-pixbuf"
             absolute = Image()
             module.set_resolved_icon(absolute, str(icon), 32)
-            self.assertEqual(str(icon), absolute.file)
+            self.assertEqual("scaled-pixbuf", absolute.pixbuf)
             themed = Image()
             module.set_resolved_icon(themed, "folder-symbolic", 24)
             self.assertEqual("folder-symbolic", themed.name)
             missing = Image()
             module.set_resolved_icon(missing, str(icon.with_name("missing.png")), 24)
             self.assertEqual("application-x-executable", missing.name)
+
+    def test_absolute_icons_are_scaled_before_gtk_image_consumes_them(self):
+        source = (ROOT / "assets/ming-files.py").read_text(encoding="utf-8")
+        setter = source[source.index("def set_resolved_icon"):source.index("try:\n    import gi")]
+        self.assertIn("load_icon_pixbuf", setter)
+        self.assertIn("set_from_pixbuf", setter)
+        self.assertNotIn("set_from_file", setter)
 
 
 if __name__ == "__main__":

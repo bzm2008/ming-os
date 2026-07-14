@@ -32,6 +32,19 @@ def config_path():
     return pathlib.Path.home() / ".config/ming-os/appearance.json"
 
 
+def fsync_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        # Directory handles are not fsync-able on every supported platform.
+        pass
+
+
 def load_config(path=None):
     path = pathlib.Path(path or config_path())
     try:
@@ -55,6 +68,7 @@ def atomic_write(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        fsync_directory(path.parent)
     finally:
         try:
             os.unlink(temporary)
@@ -87,6 +101,7 @@ def copy_wallpaper(source):
     try:
         shutil.copyfile(source, temporary)
         os.replace(temporary, target)
+        fsync_directory(target_dir)
     finally:
         try:
             os.unlink(temporary)
@@ -117,6 +132,7 @@ def apply_runtime(config):
         except (OSError, subprocess.TimeoutExpired):
             pass
     plank = pathlib.Path.home() / ".config/plank/dock1/settings"
+    temporary = None
     try:
         lines = plank.read_text(encoding="utf-8").splitlines() if plank.is_file() else []
         lines = [line for line in lines if not line.startswith("IconSize=")]
@@ -129,8 +145,15 @@ def apply_runtime(config):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, plank)
+        fsync_directory(plank.parent)
     except OSError:
         pass
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def parser():

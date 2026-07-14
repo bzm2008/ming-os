@@ -79,7 +79,10 @@ COMMON = load_shell_common()
 def resolved_icon_image(icon, pixel_size):
     resolved = COMMON.resolve_icon(icon)
     if Path(resolved).is_absolute():
-        image = Gtk.Image.new_from_file(resolved)
+        image = Gtk.Image()
+        pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), resolved, pixel_size)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
     else:
         image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
     image.set_pixel_size(pixel_size)
@@ -208,8 +211,9 @@ def reflow_layout_for_icon_scale(layout, old_scale, new_scale, width, height):
     pad_x, pad_y = 34, 92
     old_w, old_h = 92 * old_scale, 108 * old_scale
     new_w, new_h = 92 * new_scale, 108 * new_scale
-    max_x = max(pad_x, float(width) - 82 * new_scale - pad_x)
-    max_y = max(pad_y, float(height) - 96 * new_scale - pad_x)
+    tile_w, tile_h = scaled_tile_metrics(new_scale)
+    max_x = max(pad_x, float(width) - tile_w - pad_x)
+    max_y = max(pad_y, float(height) - tile_h - pad_y)
     for item in result.get("items", []):
         column = max(0, round((float(item.get("x", pad_x)) - pad_x) / old_w))
         row = max(0, round((float(item.get("y", pad_y)) - pad_y) / old_h))
@@ -217,6 +221,11 @@ def reflow_layout_for_icon_scale(layout, old_scale, new_scale, width, height):
         item["y"] = int(min(max_y, pad_y + row * new_h))
     result["desktop_icon_scale"] = new_scale
     return result
+
+
+def scaled_tile_metrics(scale):
+    scale = max(0.5, min(2.0, float(scale or 1.0)))
+    return int(round(82 * scale)), int(round(96 * scale))
 
 
 def appearance_icon_size(appearance):
@@ -1221,7 +1230,8 @@ class DesktopTile(Gtk.EventBox):
         self.dragging = False
         self.interaction = InteractionState()
         self.offset = (0, 0)
-        self.set_size_request(TILE_W, TILE_H)
+        tile_w, tile_h = scaled_tile_metrics(desktop.appearance.get("desktop_icon_scale", 1.0))
+        self.set_size_request(tile_w, tile_h)
         self.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
@@ -1233,7 +1243,7 @@ class DesktopTile(Gtk.EventBox):
         self.connect("button-release-event", self.on_release)
         self.connect("touch-event", self.on_touch)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        box.set_size_request(78, 92)
+        box.set_size_request(max(1, tile_w - 4), max(1, tile_h - 4))
         box.get_style_context().add_class("tile")
         if item.get("type") == "folder":
             box.get_style_context().add_class("folder")
@@ -2572,7 +2582,8 @@ class PhoneDesktop(Gtk.Window):
             if not is_folder and item.get("type") != "app":
                 continue
             x, y = self.item_position(item)
-            self.rounded_rect(cr, x, y, TILE_W - 4, TILE_H - 4, 12)
+            tile_w, tile_h = scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))
+            self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 12)
             if is_folder:
                 cr.set_source_rgba(0.91, 0.97, 0.95, 0.68)
             else:
@@ -2588,7 +2599,7 @@ class PhoneDesktop(Gtk.Window):
             except Exception:
                 pixbuf = None
             if pixbuf:
-                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((TILE_W - icon_size) / 2), y + 7)
+                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((tile_w - icon_size) / 2), y + 7)
                 cr.paint()
             layout = PangoCairo.create_layout(cr)
             layout.set_text(item.get("name", "应用"), -1)
@@ -2599,13 +2610,14 @@ class PhoneDesktop(Gtk.Window):
             layout.set_ellipsize(Pango.EllipsizeMode.END)
             layout.set_font_description(Pango.FontDescription("Sans Bold 10"))
             cr.set_source_rgba(0.11, 0.15, 0.13, 0.96)
-            cr.move_to(x + int((TILE_W - LABEL_W) / 2), y + 49)
+            cr.move_to(x + int((tile_w - LABEL_W) / 2), y + 49)
             PangoCairo.show_layout(cr, layout)
 
     def item_at(self, x, y):
+        tile_w, tile_h = scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))
         for item in reversed(self.layout.get("items", [])):
             ix, iy = self.item_position(item)
-            if ix <= x <= ix + TILE_W and iy <= y <= iy + TILE_H:
+            if ix <= x <= ix + tile_w and iy <= y <= iy + tile_h:
                 return item
         return None
 
@@ -2991,8 +3003,8 @@ class PhoneDesktop(Gtk.Window):
         source_rect = {
             "x": origin_x + int(item.get("x", PAD_X)),
             "y": origin_y + int(item.get("y", PAD_Y)),
-            "width": TILE_W,
-            "height": TILE_H,
+            "width": scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))[0],
+            "height": scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))[1],
         }
         if not launch_item(item, source_rect):
             self.launch_feedback.finish()

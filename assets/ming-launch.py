@@ -347,7 +347,10 @@ def animate_launch(request, origin):
             icon_name = entry.icon
     icon_name = COMMON.resolve_icon(icon_name)
     if pathlib.Path(icon_name).is_absolute():
-        image = Gtk.Image.new_from_file(icon_name)
+        image = Gtk.Image()
+        pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), icon_name, 48)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
     else:
         image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DIALOG)
     image.set_halign(Gtk.Align.CENTER)

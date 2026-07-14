@@ -59,7 +59,10 @@ COMMON = _load_common()
 def resolved_icon_image(Gtk, icon, pixel_size):
     resolved = COMMON.resolve_icon(icon)
     if pathlib.Path(resolved).is_absolute():
-        image = Gtk.Image.new_from_file(resolved)
+        image = Gtk.Image()
+        pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), resolved, pixel_size)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
     else:
         image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
     image.set_pixel_size(pixel_size)

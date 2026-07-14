@@ -56,7 +56,11 @@ def set_resolved_icon(image, icon, pixel_size=None):
     """Set a validated absolute image or a safe GTK theme name."""
     resolved = resolve_icon(icon)
     if Path(resolved).is_absolute():
-        image.set_from_file(resolved)
+        pixbuf = COMMON.load_icon_pixbuf(None, resolved, pixel_size or 48)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
+        else:
+            image.set_from_icon_name("application-x-executable")
     else:
         image.set_from_icon_name(resolved)
     if pixel_size is not None:

@@ -889,6 +889,7 @@ validate_required_desktop_runtime() {
     if ! python3 - "${CHROOT_DIR}" <<'PY'
 # MING_DESKTOP_BACKEND_VALIDATOR_BEGIN
 from pathlib import Path
+import configparser
 import os
 import shlex
 import shutil
@@ -1801,6 +1802,7 @@ for desktop_runtime in [
     "usr/bin/xfce4-session",
     "usr/bin/xfdesktop",
     "usr/bin/thunar",
+    "usr/bin/xinput",
     "usr/bin/xfce4-notifyd",
     "usr/sbin/mkfs.ext4",
     "lib/systemd/system/lightdm.service",
@@ -1826,13 +1828,34 @@ if configured_user and "/" not in configured_user:
 home_root = root / "home"
 if home_root.is_dir():
     autostart_roots.extend(path / ".config/autostart" for path in home_root.iterdir() if path.is_dir())
+
+def autostart_exec(value, current_desktop="XFCE"):
+    try:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        parser.read_string(value)
+        entry = parser["Desktop Entry"]
+        if entry.getboolean("Hidden", fallback=False):
+            return ""
+        if not entry.getboolean("X-GNOME-Autostart-enabled", fallback=True):
+            return ""
+        only = {item.casefold() for item in entry.get("OnlyShowIn", "").split(";") if item}
+        excluded = {item.casefold() for item in entry.get("NotShowIn", "").split(";") if item}
+        desktop = current_desktop.casefold()
+        if (only and desktop not in only) or desktop in excluded:
+            return ""
+        return entry.get("Exec", "")
+    except (KeyError, ValueError, configparser.Error):
+        return ""
+
 for autostart_root in autostart_roots:
     if not autostart_root.exists():
         continue
     for desktop_entry in autostart_root.glob("*.desktop"):
         content = desktop_entry.read_text(encoding="utf-8", errors="replace")
+        command = autostart_exec(content)
         for duplicate in ["xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"]:
-            if re.search(rf"^Exec=.*\b{re.escape(duplicate)}\b", content, re.M):
+            if re.search(rf"\b{re.escape(duplicate)}\b", command):
                 errors.append(f"normal session starts duplicate shell process {duplicate}: {desktop_entry}")
 display_manager = root / "etc/systemd/system/display-manager.service"
 if not (display_manager.exists() or display_manager.is_symlink()):

@@ -11,6 +11,7 @@ import shlex
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 
 
@@ -80,6 +81,35 @@ class InstanceAlreadyRunning(RuntimeError):
     pass
 
 
+def _safe_icon_dimensions(path, head, max_dimension=4096, max_pixels=16 * 1024 * 1024):
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        if len(head) < 24 or not head.startswith(b"\x89PNG\r\n\x1a\n") or head[12:16] != b"IHDR":
+            return False
+        width, height = struct.unpack(">II", head[16:24])
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")[:65536]
+        except (OSError, UnicodeError):
+            return False
+        root = re.search(r"<svg\b([^>]*)>", text, re.I | re.S)
+        if not root:
+            return False
+        attrs = root.group(1)
+        width_match = re.search(r"\bwidth\s*=\s*['\"]\s*([0-9]+(?:\.[0-9]+)?)", attrs, re.I)
+        height_match = re.search(r"\bheight\s*=\s*['\"]\s*([0-9]+(?:\.[0-9]+)?)", attrs, re.I)
+        viewbox = re.search(
+            r"\bviewBox\s*=\s*['\"]\s*[-+0-9.eE]+[ ,]+[-+0-9.eE]+[ ,]+([0-9.eE+]+)[ ,]+([0-9.eE+]+)",
+            attrs, re.I,
+        )
+        try:
+            width = float(width_match.group(1)) if width_match else float(viewbox.group(1))
+            height = float(height_match.group(1)) if height_match else float(viewbox.group(2))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+    return 0 < width <= max_dimension and 0 < height <= max_dimension and width * height <= max_pixels
+
+
 def resolve_icon(icon, fallback="application-x-executable", pixmap_dirs=None, max_bytes=MAX_ICON_BYTES):
     """Return a safe icon file or theme name; malformed input always falls back."""
     value = str(icon or "").strip()
@@ -99,9 +129,7 @@ def resolve_icon(icon, fallback="application-x-executable", pixmap_dirs=None, ma
                 return None
             with candidate.open("rb") as stream:
                 head = stream.read(256).lstrip()
-            if candidate.suffix.lower() == ".png" and not head.startswith(b"\x89PNG\r\n\x1a\n"):
-                return None
-            if candidate.suffix.lower() == ".svg" and b"<svg" not in head.lower():
+            if not _safe_icon_dimensions(candidate, head):
                 return None
             return str(candidate.resolve())
         except (OSError, TypeError, ValueError, OverflowError):
@@ -122,6 +150,29 @@ def resolve_icon(icon, fallback="application-x-executable", pixmap_dirs=None, ma
     if "/" in value or "\\" in value or not re.fullmatch(r"[A-Za-z0-9_.+-]+", value):
         return fallback
     return value
+
+
+def autostart_exec(content, current_desktop="XFCE"):
+    """Return an applicable autostart Exec, ignoring disabled desktop entries."""
+    try:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        parser.read_string(content)
+        section = parser["Desktop Entry"]
+        if section.get("Type", "Application") != "Application":
+            return None
+        if section.getboolean("Hidden", fallback=False):
+            return None
+        if not section.getboolean("X-GNOME-Autostart-enabled", fallback=True):
+            return None
+        desktop = str(current_desktop or "").casefold()
+        only = {item.casefold() for item in section.get("OnlyShowIn", "").split(";") if item}
+        excluded = {item.casefold() for item in section.get("NotShowIn", "").split(";") if item}
+        if (only and desktop not in only) or desktop in excluded:
+            return None
+        return desktop_exec_program(desktop_exec_argv(section.get("Exec", "")))
+    except (KeyError, ValueError, configparser.Error):
+        return None
 
 
 def load_icon_pixbuf(icon_theme, icon, size, fallback="application-x-executable"):
