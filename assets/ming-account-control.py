@@ -6,8 +6,10 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 
 try:
     import pwd
@@ -72,31 +74,68 @@ def oobe_marker_for_user(user):
         return None
 
 
-def retire_skipped_marker(user, marker_path=None):
+def retire_skipped_marker(user, marker_path=None, expected_uid=None):
     marker = pathlib.Path(marker_path) if marker_path is not None else oobe_marker_for_user(user)
     if marker is None:
         return True
+    temporary = None
     try:
-        if marker.read_text(encoding="utf-8").strip() != "skipped":
-            return True
-        stat_result = marker.stat()
-        temporary = marker.with_name(marker.name + ".configured")
-        temporary.write_text("configured\n", encoding="utf-8")
         try:
-            os.chmod(temporary, stat_result.st_mode & 0o777)
-            os.chown(temporary, stat_result.st_uid, stat_result.st_gid)
-        except (AttributeError, OSError):
-            pass
+            identity = pwd.getpwnam(user) if pwd is not None else None
+        except KeyError:
+            identity = None
+        if expected_uid is None:
+            expected_uid = identity.pw_uid if identity is not None else marker.parent.stat().st_uid
+        parent_info = marker.parent.lstat()
+        if (stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode)
+                or parent_info.st_uid != expected_uid
+                or (os.name != "nt" and parent_info.st_mode & 0o022)):
+            return False
+        marker_info = marker.lstat()
+        if (stat.S_ISLNK(marker_info.st_mode) or not stat.S_ISREG(marker_info.st_mode)
+                or marker_info.st_uid != expected_uid
+                or (os.name != "nt" and marker_info.st_mode & 0o022)):
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            opened_info = os.fstat(handle.fileno())
+            if (opened_info.st_ino != marker_info.st_ino
+                    or opened_info.st_dev != marker_info.st_dev):
+                return False
+            marker_value = handle.read(128).strip()
+        if marker_value != "skipped":
+            return True
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".oobe-account-done.", dir=str(marker.parent))
+        temporary = pathlib.Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("configured\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), marker_info.st_mode & 0o777)
+            if hasattr(os, "fchown"):
+                os.fchown(handle.fileno(), marker_info.st_uid, marker_info.st_gid)
         os.replace(temporary, marker)
+        temporary = None
+        if os.name != "nt":
+            directory_flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            directory_fd = os.open(marker.parent, os.O_RDONLY | directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         return marker.read_text(encoding="utf-8").strip() == "configured"
     except FileNotFoundError:
         return True
     except OSError:
-        try:
-            marker.unlink()
-            return not marker.exists()
-        except OSError:
-            return False
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def set_password(user, password, runner=run_command, marker_path=None):

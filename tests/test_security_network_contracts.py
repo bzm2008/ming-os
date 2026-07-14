@@ -5,6 +5,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -29,6 +30,8 @@ class SecurityBuildContracts(unittest.TestCase):
         cls.build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         cls.resume = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
         cls.security_module = (ROOT / "modules" / "05_security_tools.sh").read_text(
+            encoding="utf-8")
+        cls.nft_config = (ROOT / "config" / "security" / "nftables.conf").read_text(
             encoding="utf-8")
         cls.base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
         cls.desktop = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
@@ -55,6 +58,12 @@ class SecurityBuildContracts(unittest.TestCase):
         self.assertNotIn("ming-firewall.service", self.security_module)
         self.assertNotIn("rkhunter", self.security_module.lower())
         self.assertNotIn("lynis", self.security_module.lower())
+        self.assertNotIn("flush ruleset", self.nft_config)
+        self.assertIn("table inet ming_filter", self.nft_config)
+        self.assertIn("20auto-upgrades", self.security_module)
+        self.assertIn("apt-daily-upgrade.timer", self.security_module)
+        self.assertNotIn("systemctl enable unattended-upgrades.service", self.security_module)
+        self.assertFalse((ROOT / "config" / "security" / "ming-firewall.service").exists())
 
     def test_security_helpers_and_polkit_policy_are_deployed(self):
         for marker in [
@@ -88,6 +97,17 @@ class SecurityBuildContracts(unittest.TestCase):
             source = (ROOT / build_entry).read_text(encoding="utf-8")
             self.assertNotIn('ROOT_PASS="root"', source)
             self.assertNotIn('MING_USER_PASS="user"', source)
+
+    def test_default_and_installed_users_never_receive_sudo_group(self):
+        apps = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+        preseed = (ROOT / "config" / "preseed.cfg").read_text(encoding="utf-8")
+        self.assertNotRegex(self.base, r"(?m)^\s*for grp in sudo\b")
+        installed_groups = self.base.split("local groups=(", 1)[1].split(")", 1)[0]
+        self.assertNotRegex(installed_groups, r"\bsudo\b")
+        live_groups = apps.split('LIVE_USER_DEFAULT_GROUPS="', 1)[1].split('"', 1)[0]
+        self.assertNotRegex(live_groups, r"\bsudo\b")
+        self.assertNotIn("usermod -aG sudo user", preseed)
+        self.assertNotIn("NOPASSWD", self.base + apps + preseed)
 
     def test_oobe_and_ota_clear_only_skipped_passwords_with_readback(self):
         self.assertIn("ming-account-control clear-password", self.desktop)
@@ -190,7 +210,7 @@ class SecurityControlTests(unittest.TestCase):
 
         def runner(command, input_text=None):
             commands.append((tuple(command), input_text))
-            if command[:3] == ["nft", "list", "ruleset"]:
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
                 return 0, "table inet old {}", ""
             if command[:3] == ["nft", "-c", "-f"]:
                 return 0, "", ""
@@ -201,14 +221,23 @@ class SecurityControlTests(unittest.TestCase):
         result = self.api.apply_firewall_atomic("table inet ming {}", runner=runner)
         self.assertFalse(result["ok"])
         self.assertTrue(result["rolled_back"])
-        self.assertEqual("flush ruleset\ntable inet old {}", commands[-1][1])
+        self.assertEqual("destroy table inet ming_filter\ntable inet old {}", commands[-1][1])
+        self.assertNotIn("flush ruleset", "\n".join(value or "" for _cmd, value in commands))
+
+    def test_firewall_rules_only_replace_ming_owned_table(self):
+        rules = self.api.firewall_rules(self.api.DEFAULT_STATE)
+        self.assertIn("destroy table inet ming_filter", rules)
+        self.assertIn("table inet ming_filter", rules)
+        self.assertNotIn("flush ruleset", rules)
+        self.assertNotIn("docker", rules.lower())
+        self.assertNotIn("libvirt", rules.lower())
 
     def test_failed_ssh_service_change_restores_previous_service_state(self):
         commands = []
 
         def runner(command, input_text=None):
             commands.append(tuple(command))
-            if command[:3] == ["nft", "list", "ruleset"]:
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
                 return 0, "table inet old {}", ""
             if command == ["systemctl", "enable", "--now", "ssh.service"]:
                 return 1, "", "start failed"
@@ -220,6 +249,31 @@ class SecurityControlTests(unittest.TestCase):
                 rules_path=pathlib.Path(tempdir) / "nftables.conf", runner=runner)
         self.assertFalse(result["ok"])
         self.assertIn(("systemctl", "disable", "--now", "ssh.service"), commands)
+
+    def test_failed_ssh_service_change_restores_exact_owned_table_snapshot(self):
+        nft_inputs = []
+
+        def runner(command, input_text=None):
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
+                return 0, "table inet ming_filter { chain input { policy accept; } }", ""
+            if command[:3] == ["nft", "-c", "-f"]:
+                return 0, "", ""
+            if command[:2] == ["nft", "-f"]:
+                nft_inputs.append(input_text)
+                return 0, "", ""
+            if command == ["systemctl", "enable", "--now", "ssh.service"]:
+                return 1, "", "start failed"
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            result = self.api.mutate(
+                "ssh", "on", path=pathlib.Path(tempdir) / "state.json",
+                rules_path=pathlib.Path(tempdir) / "nftables.conf", runner=runner)
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            "destroy table inet ming_filter\n"
+            "table inet ming_filter { chain input { policy accept; } }",
+            nft_inputs[-1])
 
     def test_status_reports_four_independent_ssh_layers(self):
         status = self.api.build_status(
@@ -251,8 +305,10 @@ class SecurityControlTests(unittest.TestCase):
             ("systemctl", "is-active", "nftables.service"): (0, "active", ""),
             ("nft", "list", "table", "inet", "ming_filter"):
                 (0, "chain input { type filter hook input priority filter; policy drop; }", ""),
-            ("systemctl", "is-enabled", "unattended-upgrades.service"): (0, "enabled", ""),
-            ("systemctl", "is-active", "unattended-upgrades.service"): (0, "active", ""),
+            ("systemctl", "is-enabled", "apt-daily-upgrade.timer"): (0, "enabled", ""),
+            ("systemctl", "is-active", "apt-daily-upgrade.timer"): (0, "active", ""),
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "openssh-server"):
+                (0, "ii ", ""),
         }
 
         def runner(command, input_text=None):
@@ -262,15 +318,32 @@ class SecurityControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             path = pathlib.Path(tempdir) / "state.json"
             path.write_text(json.dumps(self.api.DEFAULT_STATE), encoding="utf-8")
-            status = self.api.status(path, runner=runner)
+            apt_path = pathlib.Path(tempdir) / "20auto-upgrades"
+            apt_path.write_text(
+                'APT::Periodic::Enable "1";\nAPT::Periodic::Unattended-Upgrade "1";\n',
+                encoding="utf-8")
+            status = self.api.status(path, runner=runner, apt_path=apt_path)
         self.assertTrue(status["firewall"]["effective"])
         self.assertTrue(status["security_updates"]["effective"])
+        self.assertTrue(status["ssh"]["installed"])
         self.assertIn(("nft", "list", "table", "inet", "ming_filter"), commands)
+        self.assertIn(
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "openssh-server"), commands)
 
     def test_firewall_mutation_persists_validated_rules_for_reboot(self):
+        applied_rules = "table inet old {}"
+
         def runner(command, input_text=None):
-            if command[:3] == ["nft", "list", "ruleset"]:
-                return 0, "table inet old {}", ""
+            nonlocal applied_rules
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
+                return 0, applied_rules, ""
+            if command[:2] == ["nft", "-f"]:
+                applied_rules = input_text
+                return 0, "", ""
+            if command == ["systemctl", "is-enabled", "nftables.service"]:
+                return 0, "enabled", ""
+            if command == ["systemctl", "is-active", "nftables.service"]:
+                return 0, "active", ""
             if command[:2] == ["systemctl", "list-unit-files"]:
                 return 1, "", ""
             return 0, "", ""
@@ -307,6 +380,61 @@ class SecurityControlTests(unittest.TestCase):
         self.assertFalse(result["checks"]["empty_passwords_disabled"])
         self.assertFalse(result["checks"]["root_account_locked"])
 
+    def test_security_updates_mutation_uses_apt_periodic_without_nft(self):
+        commands = []
+
+        def runner(command, input_text=None):
+            commands.append(tuple(command))
+            if command == ["systemctl", "is-enabled", "apt-daily-upgrade.timer"]:
+                return 0, "enabled", ""
+            if command == ["systemctl", "is-active", "apt-daily-upgrade.timer"]:
+                return 0, "active", ""
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            result = self.api.mutate(
+                "security-updates", "on", path=root / "state.json",
+                rules_path=root / "nftables.conf", apt_path=root / "20auto-upgrades",
+                runner=runner)
+            apt_config = (root / "20auto-upgrades").read_text(encoding="utf-8")
+        self.assertTrue(result["ok"])
+        self.assertIn('APT::Periodic::Enable "1";', apt_config)
+        self.assertIn('APT::Periodic::Unattended-Upgrade "1";', apt_config)
+        self.assertFalse(any(command and command[0] == "nft" for command in commands))
+
+    def test_desired_readback_mismatch_rolls_back_and_fails(self):
+        commands = []
+
+        def runner(command, input_text=None):
+            commands.append(tuple(command))
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
+                return 0, "chain input { policy accept; }", ""
+            if command[:3] == ["nft", "-c", "-f"] or command[:2] == ["nft", "-f"]:
+                return 0, "", ""
+            if command == ["systemctl", "is-enabled", "nftables.service"]:
+                return 0, "enabled", ""
+            if command == ["systemctl", "is-active", "nftables.service"]:
+                return 0, "active", ""
+            return 1, "", "missing"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            result = self.api.mutate(
+                "firewall", "on", path=root / "state.json",
+                rules_path=root / "nftables.conf", apt_path=root / "20auto-upgrades",
+                runner=runner)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertIn("readback mismatch", result["error"])
+
+    def test_ssh_readback_requires_service_and_firewall_layers(self):
+        observed = self.api.build_status(
+            state=dict(self.api.DEFAULT_STATE, ssh=True),
+            probes={"ssh_enabled": True, "ssh_active": False,
+                    "ssh_firewall_allowed": True})
+        self.assertFalse(self.api.desired_matches("ssh", True, observed))
+
     def test_public_default_is_false_for_home_profile(self):
         def runner(command, input_text=None):
             if command == ["sshd", "-T"]:
@@ -325,7 +453,7 @@ class SecurityControlTests(unittest.TestCase):
 
         def runner(command, input_text=None):
             nonlocal enable_failed
-            if command[:3] == ["nft", "list", "ruleset"]:
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
                 return 0, "table inet old {}", ""
             if command == ["systemctl", "enable", "--now", "ssh.service"]:
                 enable_failed = True
@@ -386,6 +514,41 @@ class AccountControlTests(unittest.TestCase):
             marker.write_text("skipped\n", encoding="utf-8")
             self.assertTrue(self.api.retire_skipped_marker("user", marker_path=marker))
             self.assertFalse(self.api.retire_skipped_marker("user", marker_path=root))
+
+    def test_marker_update_rejects_symlink_and_unsafe_config_directory(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            config = root / "ming-os"
+            config.mkdir(mode=0o700)
+            victim = root / "victim"
+            victim.write_text("skipped\n", encoding="utf-8")
+            marker = config / "oobe-account-done"
+            try:
+                marker.symlink_to(victim)
+            except OSError:
+                self.skipTest("symlink creation is unavailable")
+            uid = config.stat().st_uid
+            self.assertFalse(self.api.retire_skipped_marker(
+                "user", marker_path=marker, expected_uid=uid))
+            self.assertEqual("skipped", victim.read_text(encoding="utf-8").strip())
+            marker.unlink()
+            marker.write_text("skipped\n", encoding="utf-8")
+            config.chmod(0o777)
+            self.assertFalse(self.api.retire_skipped_marker(
+                "user", marker_path=marker, expected_uid=uid))
+
+    def test_marker_update_uses_private_atomic_temp_and_preserves_regular_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = pathlib.Path(tempdir) / "ming-os"
+            config.mkdir(mode=0o700)
+            marker = config / "oobe-account-done"
+            marker.write_text("skipped\n", encoding="utf-8")
+            uid = config.stat().st_uid
+            self.assertTrue(self.api.retire_skipped_marker(
+                "user", marker_path=marker, expected_uid=uid))
+            self.assertFalse(marker.is_symlink())
+            self.assertTrue(stat.S_ISREG(marker.stat().st_mode))
+            self.assertEqual("configured", marker.read_text(encoding="utf-8").strip())
 
     def test_clear_password_verifies_passwordless_status(self):
         calls = []

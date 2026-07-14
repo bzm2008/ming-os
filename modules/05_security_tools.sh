@@ -28,6 +28,13 @@ deploy_security_policy() {
 SECURITYSTATE
     chmod 0600 /etc/ming-security/control.json
 
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'APTPERIODIC'
+APT::Periodic::Enable "1";
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APTPERIODIC
+    chmod 0644 /etc/apt/apt.conf.d/20auto-upgrades
+
     install -d -m 0755 /etc/NetworkManager/conf.d
     cat > /etc/NetworkManager/conf.d/20-ming-security-defaults.conf << 'NMSECURITY'
 [connection]
@@ -43,7 +50,7 @@ SSHDSECURITY
 
     systemctl enable nftables.service
     systemctl disable ssh.service
-    systemctl enable unattended-upgrades.service
+    systemctl enable apt-daily.timer apt-daily-upgrade.timer
 }
 
 deploy_polkit_actions() {

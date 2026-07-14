@@ -17,7 +17,7 @@
 #   1. 配置清华 TUNA APT 源
 #   2. 安装 Linux 内核、systemd、基础工具
 #   3. 配置语言环境 (zh_CN.UTF-8) 与时区 (Asia/Shanghai)
-#   4. 创建默认用户 ming 并配置 sudo
+#   4. 创建默认用户 ming（特权操作仅通过受控 helper）
 #   5. 安装 NetworkManager 与基础网络工具
 #   6. 配置系统标识为 Ming OS
 # ============================================================================
@@ -796,9 +796,10 @@ configure_users() {
     done
 
     # 将 ming 用户加入必要组（逐个添加，跳过不存在的组）
-    for grp in sudo adm cdrom dip plugdev lpadmin netdev audio video render input scanner bluetooth nopasswdlogin autologin; do
+    for grp in adm cdrom dip plugdev lpadmin netdev audio video render input scanner bluetooth nopasswdlogin autologin; do
         getent group "${grp}" >/dev/null 2>&1 && usermod -aG "${grp}" "${MING_USER}" || true
     done
+    gpasswd -d "${MING_USER}" sudo >/dev/null 2>&1 || true
 
     # Privileged desktop actions use narrowly scoped polkit helpers.
     rm -f /etc/sudoers.d/"${MING_USER}"
@@ -1978,7 +1979,7 @@ ensure_ming_user() {
     local user_name="user"
     local user_home="/home/${user_name}"
     local groups=(
-        users sudo adm cdrom dip plugdev lp lpadmin netdev audio video render input
+        users adm cdrom dip plugdev lp lpadmin netdev audio video render input
         scanner bluetooth nopasswdlogin autologin
     )
     local grp
@@ -1990,6 +1991,7 @@ ensure_ming_user() {
             || chroot "${target}" groupadd -r "${grp}" >/dev/null 2>&1 \
             || true
     done
+    chroot "${target}" gpasswd -d "${user_name}" sudo >/dev/null 2>&1 || true
 
     if chroot "${target}" getent passwd "${user_name}" >/dev/null 2>&1; then
         chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true

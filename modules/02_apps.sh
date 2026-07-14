@@ -370,7 +370,7 @@ PLYMOUTHSCRIPT
 LIVE_USERNAME="${MING_USER}"
 LIVE_USER_FULLNAME="Ming OS User"
 LIVE_HOSTNAME="ming-os"
-LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video render plugdev netdev powerdev scanner bluetooth sudo adm lpadmin nopasswdlogin autologin"
+LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video render plugdev netdev powerdev scanner bluetooth adm lpadmin nopasswdlogin autologin"
 LIVECONFIG
 
     mkdir -p /etc/lightdm/lightdm.conf.d
@@ -429,6 +429,7 @@ for grp in nopasswdlogin autologin; do
     getent group "${grp}" >/dev/null 2>&1 || groupadd -r "${grp}" 2>/dev/null || true
     usermod -aG "${grp}" "${target_user}" 2>/dev/null || true
 done
+gpasswd -d "${target_user}" sudo >/dev/null 2>&1 || true
 
 # installer boot 用专用 kiosk session，普通 boot 用 xfce
 session="xfce"
