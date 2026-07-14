@@ -1702,6 +1702,8 @@ class StatusWidget(Gtk.Box):
         device_module = load_device_control()
         self.device_controller = device_module.DeviceController() if device_module else None
         self.volume_timer = None
+        self.volume_sink_id = ""
+        self.volume_sink_name = ""
         self.brightness_timer = None
         self.updating_controls = False
         self.control_states = {
@@ -2021,7 +2023,8 @@ class StatusWidget(Gtk.Box):
             if not self.device_controller:
                 result = {"ok": False, "error": "设备控制服务不可用", "value": None}
             elif kind == "volume":
-                result = self.device_controller.set_volume(value)
+                result = (self.device_controller.set_volume(value, sink_id=self.volume_sink_id)
+                          if self.volume_sink_id else self.device_controller.set_volume(value))
             else:
                 result = self.device_controller.set_brightness(value)
             GLib.idle_add(self.apply_control_result, kind, generation, result)
@@ -2045,7 +2048,8 @@ class StatusWidget(Gtk.Box):
             state.settle(generation, value)
             if kind == "volume":
                 self.volume_scale.set_value(value)
-                self.volume_label.set_text("音量 %d%%" % value)
+                self.volume_label.set_text("%s %d%%" % (
+                    self.volume_sink_name or "音量", value))
                 self.volume_scale.queue_draw()
             else:
                 self.brightness_scale.set_value(value)
@@ -2315,13 +2319,19 @@ class StatusWidget(Gtk.Box):
             "通知 %d" % notification_count if notification_count else "通知")
         self.updating_controls = True
         audio_available = bool(audio.get("available"))
+        default_sink = str(audio.get("default_sink") or "")
+        selected_output = next((item for item in audio.get("playback_devices", [])
+                                if item.get("id") == default_sink), {})
+        self.volume_sink_id = default_sink
+        self.volume_sink_name = str(selected_output.get("display_name") or "当前输出")
         volume = audio.get("value") if audio_available else 0
         self.volume_scale.set_sensitive(audio_available)
         volume_state = self.control_states["volume"]
         if not volume_state.should_hold_status():
             self.volume_scale.set_value(max(0, min(100, volume or 0)))
             self.volume_label.set_text(
-                "音量 %d%%" % volume if audio_available else "未检测到输出设备")
+                "%s %d%%" % (self.volume_sink_name, volume)
+                if audio_available else "未检测到输出设备")
         elif volume_state.optimistic_value is not None:
             self.volume_scale.set_value(volume_state.optimistic_value)
             self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)

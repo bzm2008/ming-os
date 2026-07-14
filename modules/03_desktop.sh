@@ -1698,6 +1698,8 @@ ZoomEnabled=true
 ZoomPercent=148
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
+PinOnly=false
+CurrentWorkspaceOnly=false
 #自动隐藏延迟
 UnhideDelay=0
 HideDelay=0
@@ -3228,6 +3230,12 @@ picom_running() {
     probe_timeout pgrep -u "$(id -u)" -x picom >/dev/null 2>&1
 }
 
+compositor_enabled() {
+    local settings="${HOME}/.config/ming-os/settings.json"
+    [[ -r "${settings}" ]] || return 0
+    ! grep -Eq '"compositor_profile"[[:space:]]*:[[:space:]]*"off"' "${settings}"
+}
+
 wait_for_process() {
     local kind="$1"
     local deadline="$2"
@@ -3335,6 +3343,7 @@ start_xrender_picom() {
 }
 
 start_picom() {
+    compositor_enabled || { picom_recovered=true; return 0; }
     local started_at finished_at deadline_at
     if picom_running; then
         picom_recovered=true
@@ -3400,7 +3409,7 @@ write_metrics() {
     MING_PHONE_RUNNING="${phone_running}" MING_PHONE_READY="${phone_ready}" \
     MING_PHONE_FALLBACK="${phone_fallback}" MING_XFDESKTOP="${xfdesktop}" \
     MING_DOCK_RUNNING="${dock}" MING_DOCK_VISIBLE="${dock_visible}" \
-    MING_PICOM_RUNNING="${compositor}" MING_PICOM_BACKEND="${compositor_backend}" \
+    MING_PICOM_RUNNING="${compositor}" MING_PICOM_ENABLED="$(compositor_enabled && printf true || printf false)" MING_PICOM_BACKEND="${compositor_backend}" \
     MING_PHONE_PID_COUNT="${phone_pid_count}" MING_PLANK_PID_COUNT="${plank_pid_count}" \
     MING_PICOM_PID_COUNT="${picom_pid_count}" MING_PHONE_DUPLICATES="${phone_duplicates}" \
     MING_PLANK_DUPLICATES="${plank_duplicates}" MING_PICOM_DUPLICATES="${picom_duplicates}" \
@@ -3442,6 +3451,7 @@ payload = {
         "duplicates": integer("MING_PLANK_DUPLICATES"),
     },
     "picom": {
+        "enabled": boolean("MING_PICOM_ENABLED"),
         "running": boolean("MING_PICOM_RUNNING"),
         "backend": os.environ.get("MING_PICOM_BACKEND", "none"),
         "pid_count": integer("MING_PICOM_PID_COUNT"),
@@ -3465,7 +3475,7 @@ payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
     and payload["plank"]["visible"]
-    and payload["picom"]["running"]
+    and (not payload["picom"]["enabled"] or payload["picom"]["running"])
 )
 path = Path(os.environ["MING_METRICS_FILE"])
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -4581,7 +4591,7 @@ wintypes:
 };
 
 detect-rounded-corners = true;
-detect-client-opacity = true;
+detect-client-opacity = false;
 detect-transient = true;
 detect-client-leader = true;
 PICOMCFG
@@ -4657,7 +4667,7 @@ active-opacity = 1.0;
 frame-opacity = 1.0;
 
 detect-rounded-corners = true;
-detect-client-opacity = true;
+detect-client-opacity = false;
 detect-transient = true;
 PICOMLOWMEM
 

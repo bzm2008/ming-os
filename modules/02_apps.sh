@@ -54,6 +54,8 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     desktop-file-utils
     im-config
     blueman
+    bamfdaemon
+    libbamf3-2
 )
 
 run_required_step() {
@@ -112,186 +114,7 @@ install_xfce_desktop() {
         librsvg2-common \
         imagemagick || return 1
 
-    mkdir -p /etc/xdg/picom
-    cat > /etc/xdg/picom/picom.conf << PICOMDEFAULT
-backend = "glx";
-vsync = false;
-unredir-if-possible = false;
-
-shadow = true;
-shadow-radius = 8;
-shadow-opacity = 0.24;
-shadow-offset-x = -8;
-shadow-offset-y = -8;
-shadow-exclude = [
-    "name = 'Notification'",
-    "class_g = 'Conky'",
-    "class_g ?= 'Notify-osd'",
-    "class_g = 'Cairo-clock'",
-    "_GTK_FRAME_EXTENTS@:c",
-    "name = 'xfce4-notifyd'",
-    "window_type = 'dock'",
-    "window_type = 'desktop'"
-];
-
-fading = true;
-fade-in-step = 3.0e-2;
-fade-out-step = 3.0e-2;
-fade-delta = 4;
-
-active-opacity = 1.0;
-inactive-opacity = 1.0;
-frame-opacity = 1.0;
-inactive-opacity-override = false;
-
-blur-background = false;
-blur-background-frame = false;
-blur-background-fixed = false;
-blur-background-exclude = [
-    "window_type = 'dock'",
-    "window_type = 'desktop'",
-    "_GTK_FRAME_EXTENTS@:c"
-];
-wintypes:
-{
-    tooltip = { fade = true; shadow = true; opacity = 0.9; focus = true; };
-    dock = { shadow = false; opacity = 0.92; };
-    dnd = { shadow = false; };
-    popup_menu = { opacity = 1.0; };
-    dropdown_menu = { opacity = 1.0; };
-    notification = { shadow = true; opacity = 0.94; };
-};
-
-detect-client-leader = true;
-detect-transient = true;
-use-damage = true;
-log-level = "warn";
-xrender-sync-fence = true;
-PICOMDEFAULT
-
-    # 老旧GPU回退配置（当 GLX 不可用时自动降级到 xrender）
-    mkdir -p /etc/xdg/picom-backup
-    cat > /etc/xdg/picom/picom-fallback.conf << PICOMFALLBACK
-backend = "xrender";
-vsync = false;
-unredir-if-possible = false;
-shadow = false;
-blur-background = false;
-fading = true;
-fade-in-step = 5.0e-2;
-fade-out-step = 5.0e-2;
-fade-delta = 4;
-active-opacity = 1.0;
-inactive-opacity = 1.0;
-frame-opacity = 1.0;
-inactive-opacity-override = false;
-use-damage = true;
-log-level = "warn";
-detect-client-leader = true;
-detect-transient = true;
-wintypes:
-{
-    dock = { shadow = false; opacity = 0.92; };
-    notification = { shadow = false; opacity = 0.94; };
-};
-PICOMFALLBACK
-
-    # Picom 启动包装器（自动探测 GLX 可用性，低内存/老显卡回退）
-    cat > /usr/local/bin/ming-picom << 'PICOMWRAP'
-#!/usr/bin/env bash
-set -u
-
-CONF="${HOME}/.config/picom/picom.conf"
-LOWMEM="/etc/xdg/picom/picom-lowmem.conf"
-FALLBACK="/etc/xdg/picom/picom-fallback.conf"
-PICOM_BIN=$(command -v picom 2>/dev/null || echo "picom")
-MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
-LOG="/tmp/ming-picom.log"
-CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
-RENDERER=""
-DIRECT_RENDERING=""
-
-log() {
-    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${LOG}" 2>/dev/null || true
-}
-
-choose_config() {
-    local config="$1"
-    if [ -f "${config}" ]; then
-        printf '%s' "${config}"
-    elif [ -f "${FALLBACK}" ]; then
-        printf '%s' "${FALLBACK}"
-    else
-        printf '%s' "${CONF}"
-    fi
-}
-
-run_picom() {
-    local config
-    local reason="$2"
-    config="$(choose_config "$1")"
-    shift 2
-    local backend
-    backend="$(awk -F'"' '/^[[:space:]]*backend[[:space:]]*=/{print $2; exit}' "${config}" 2>/dev/null || true)"
-    log "selected config=${config} backend=${backend:-unknown} reason=${reason} mem_mb=${MEM_MB} renderer=${RENDERER:-unknown} direct=${DIRECT_RENDERING:-unknown}"
-    exec "${PICOM_BIN}" --config "${config}" -b "$@"
-}
-
-if command -v glxinfo >/dev/null 2>&1; then
-    GLXINFO="$(glxinfo -B 2>/dev/null || glxinfo 2>/dev/null || true)"
-    RENDERER="$(printf '%s\n' "${GLXINFO}" | awk -F: '/OpenGL renderer string/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
-    DIRECT_RENDERING="$(printf '%s\n' "${GLXINFO}" | awk -F: '/direct rendering/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
-fi
-
-if printf '%s\n' "${CMDLINE}" | grep -qwE 'nomodeset|i915.modeset=0|radeon.modeset=0|amdgpu.modeset=0|nouveau.modeset=0'; then
-    run_picom "${FALLBACK}" "kernel-modeset-disabled" "$@"
-fi
-
-case "$(printf '%s' "${RENDERER}" | tr '[:upper:]' '[:lower:]')" in
-    *llvmpipe*|*softpipe*|*software*rasterizer*|*swrast*)
-        run_picom "${FALLBACK}" "software-renderer" "$@"
-        ;;
-esac
-
-HAS_DRI=0
-IS_OLD_INTEL=0
-for dri in /dev/dri/renderD* /dev/dri/card*; do
-    if [ -e "${dri}" ]; then
-        HAS_DRI=1
-        break
-    fi
-done
-
-# These Intel generations often expose DRI but remain unstable with GLX blur.
-for dev in /sys/class/drm/card*/device; do
-    [ -e "${dev}" ] || continue
-    vendor_id=$(cat "${dev}/vendor" 2>/dev/null || true)
-    device_id=$(cat "${dev}/device" 2>/dev/null || true)
-    if [ "${vendor_id}" = "0x8086" ]; then
-        case "${device_id}" in
-            0x0042|0x0046|0x0102|0x0106|0x010a|0x0112|0x0116|0x0122|0x0126|0x0152|0x0156|0x015a|0x0162|0x0166|0x016a|0x0402|0x0412|0x0416|0x0a16|0x0a26|0x0a2e|0x0d16|0x0d22|0x0d26|0x29*|0x2a*|0x2e*)
-                IS_OLD_INTEL=1
-                ;;
-        esac
-    fi
-done
-
-if [ "${HAS_DRI}" -eq 0 ]; then
-    run_picom "${FALLBACK}" "no-dri-device" "$@"
-fi
-if [ "${MEM_MB}" -le 2600 ]; then
-    run_picom "${FALLBACK}" "very-low-memory" "$@"
-fi
-if [ "${IS_OLD_INTEL}" -eq 1 ]; then
-    run_picom "${FALLBACK}" "old-intel-glx-risk" "$@"
-fi
-if [ "${MEM_MB}" -le 4200 ]; then
-    run_picom "${LOWMEM}" "low-memory" "$@"
-fi
-
-run_picom "${CONF}" "modern-gpu" "$@"
-PICOMWRAP
-    chmod +x /usr/local/bin/ming-picom
+    # Picom configuration and wrapper are generated only by 03_desktop.sh.
 
     echo "lightdm lightdm/default-display-manager select lightdm" | debconf-set-selections
     apt install -y --no-install-recommends \
@@ -641,7 +464,66 @@ MINGFONTS
 
 # ======================== Microsoft Edge ========================
 
+install_edge_graphics_helper() {
+    cat > /usr/local/bin/ming-edge-graphics << 'MINGEDGEGRAPHICS'
+#!/usr/bin/env bash
+set -uo pipefail
+
+state_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/ming-os"
+mode_file="${state_dir}/edge-graphics-mode"
+samples=/usr/share/ming-os/media-tests
+
+active_render_node() {
+    local node card boot candidate
+    for boot in /sys/class/drm/card*/device/boot_vga; do
+        [[ "$(cat "${boot}" 2>/dev/null || true)" == 1 ]] || continue
+        card="${boot%/device/boot_vga}"
+        for candidate in "${card}"/device/drm/renderD*; do
+            [[ -e "${candidate}" ]] || continue
+            node="/dev/dri/${candidate##*/}"
+            [[ -r "${node}" && -w "${node}" ]] && { printf '%s\n' "${node}"; return; }
+        done
+    done
+    for node in /dev/dri/renderD*; do
+        [[ -r "${node}" && -w "${node}" ]] && { printf '%s\n' "${node}"; return; }
+    done
+    return 1
+}
+
+decode_samples() {
+    local node="$1" sample
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    for sample in "${samples}/h264.mp4" "${samples}/vp9.webm"; do
+        [[ -s "${sample}" ]] || return 1
+        timeout 12 ffmpeg -v error -hwaccel vaapi -hwaccel_device "${node}" \
+            -hwaccel_output_format vaapi -i "${sample}" -frames:v 12 -f null - \
+            >/dev/null 2>&1 || return 1
+    done
+}
+
+mode="$(cat "${mode_file}" 2>/dev/null || printf auto)"
+node="$(active_render_node || true)"
+video=false
+[[ "${mode}" != compat && -n "${node}" ]] && decode_samples "${node}" && video=true
+
+case "${1:-status}" in
+    status)
+        printf '{"mode":"%s","render_node":"%s","video_decode":%s}\n' \
+            "${mode}" "${node}" "${video}"
+        ;;
+    test-video) ${video} ;;
+    set-mode)
+        [[ "${2:-}" == auto || "${2:-}" == compat ]] || exit 2
+        mkdir -p "${state_dir}" && printf '%s\n' "$2" >"${mode_file}"
+        ;;
+    *) printf 'Usage: %s status|test-video|set-mode auto|compat\n' "$0" >&2; exit 2 ;;
+esac
+MINGEDGEGRAPHICS
+    chmod 0755 /usr/local/bin/ming-edge-graphics
+}
+
 install_edge() {
+    install_edge_graphics_helper
     apt install -y --no-install-recommends \
         apt-transport-https \
         ca-certificates \
@@ -665,12 +547,12 @@ EDGEREPO
 #!/usr/bin/env bash
 set -e
 homepage=/usr/share/ming-os/homepage/index.html
-edge_args=()
+edge_args=(--ozone-platform=x11)
 edge_graphics_mode=software
 
 edge_gpu_mode() {
     local probe_cache probe_tmp probe_json
-    if [[ ! -e /dev/dri/renderD128 ]] \
+    if [[ -z "$(ming-edge-graphics status 2>/dev/null | sed -n 's/.*\"render_node\":\"\([^\"]*\)\".*/\1/p')" ]] \
         || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet) \
         || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|(i915|amdgpu|radeon|nouveau)\.modeset=0' /proc/cmdline 2>/dev/null; then
         printf '%s\n' software
@@ -691,7 +573,7 @@ edge_gpu_mode() {
     if ! grep -Fq '"desktop_rendering": true' <<< "${probe_json}" \
         || ! grep -Fq '"render_access": true' <<< "${probe_json}"; then
         printf '%s\n' software
-    elif grep -Fq '"edge_hardware_video": true' <<< "${probe_json}"; then
+    elif ming-edge-graphics test-video >/dev/null 2>&1; then
         printf '%s\n' video
     else
         # The compositor can still use the native GPU when VA-API has no
@@ -705,18 +587,17 @@ edge_graphics_mode="$(edge_gpu_mode)"
 if [[ "${edge_graphics_mode}" == software ]]; then
     # VirtualBox, no render node, safe-graphics mode, or failed VA-API all
     # use a deterministic software path to avoid black borders and hangs.
-    edge_args+=(--ozone-platform=x11 --disable-gpu --disable-gpu-compositing)
+    edge_args+=(--disable-gpu --disable-gpu-compositing)
 elif [[ "${edge_graphics_mode}" == video ]]; then
     # Only enable Chromium's VA-API path after ming-hardware-status has
     # confirmed a real KMS/Mesa path, render access and at least one supported
     # browser codec on a non-virtual host.
     edge_args+=(
         --enable-accelerated-video-decode
-        --enable-features=VaapiVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo
-        --use-gl=egl
+        --enable-features=VaapiVideoDecodeLinuxGL
     )
 else
-    edge_args+=(--ozone-platform=x11 --disable-accelerated-video-decode)
+    edge_args+=(--disable-accelerated-video-decode)
 fi
 # Keep browser playback independent from a stale PulseAudio user session.  This
 # is intentionally bounded and only repairs a missing/broken default output;

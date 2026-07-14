@@ -216,6 +216,57 @@ class DeviceControlTests(unittest.TestCase):
         self.assertIsNone(result["value"])
         self.assertEqual(63, result["requested"])
 
+    def test_volume_targets_valid_selected_sink_unmutes_and_reads_back(self):
+        sink = "alsa_output.usb-Headset.analog-stereo"
+        statuses = [{
+            "backend": "pactl", "server_available": True,
+            "playback_devices": [{"id": sink, "available": True, "active": False}],
+        }]
+        runner = FakeRunner({
+            ("pactl", "set-sink-volume", sink, "67%"): (0, "", ""),
+            ("pactl", "set-sink-mute", sink, "0"): (0, "", ""),
+            ("pactl", "get-sink-volume", sink): (0, "Volume: 67%", ""),
+            ("pactl", "get-sink-mute", sink): (0, "Mute: no", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.set_volume(67, sink_id=sink)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(sink, result["sink_id"])
+        self.assertEqual(67, result["value"])
+        self.assertFalse(result["muted"])
+        self.assertIn(("pactl", "set-sink-mute", sink, "0"), runner.commands)
+
+    def test_volume_rejects_sink_not_in_current_playback_devices(self):
+        runner = FakeRunner({})
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: {
+            "backend": "pactl", "server_available": True,
+            "playback_devices": [{"id": "known", "available": True}],
+        }
+
+        result = controller.set_volume(20, sink_id="stale-or-injected")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("invalid_sink", result["state"])
+        self.assertEqual([], runner.commands)
+
+    def test_set_volume_cli_forwards_structured_sink_identifier(self):
+        class VolumeController:
+            def set_volume(self, value, sink_id=None):
+                return {"ok": True, "value": value, "sink_id": sink_id, "muted": False}
+
+        output = io.StringIO()
+        rc = self.device.main(
+            ["set-volume", "45", "--sink", "bluez_output.headset"],
+            controller=VolumeController(), stdout=output)
+        self.assertEqual(0, rc)
+        self.assertEqual("bluez_output.headset", json.loads(output.getvalue())["sink_id"])
+
     def test_volume_falls_back_to_amixer_when_pactl_fails(self):
         runner = FakeRunner({
             ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "40%"): (1, "", "no server"),

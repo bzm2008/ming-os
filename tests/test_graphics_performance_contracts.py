@@ -48,12 +48,17 @@ class GrubPerformanceContracts(unittest.TestCase):
 
 
 class PicomPerformanceContracts(unittest.TestCase):
+    def test_desktop_is_the_single_picom_configuration_generator(self):
+        self.assertNotIn("cat > /etc/xdg/picom/picom.conf", APPS)
+        self.assertNotIn("cat > /usr/local/bin/ming-picom", APPS)
+
     def test_generated_picom_profiles_keep_windows_opaque_and_disable_unredirect(self):
-        for source in (APPS, DESKTOP):
+        for source in (DESKTOP,):
             self.assertGreaterEqual(source.count("unredir-if-possible = false;"), 2)
             self.assertIn("inactive-opacity = 1.0;", source)
             self.assertIn("active-opacity = 1.0;", source)
             self.assertIn("frame-opacity = 1.0;", source)
+            self.assertIn("detect-client-opacity = false;", source)
             self.assertNotIn('blur-method = "dual_kawase";', source)
             self.assertNotIn("blur-background = true;", source)
 
@@ -106,10 +111,11 @@ class EdgeVaapiContracts(unittest.TestCase):
         wrapper = APPS[start:end]
         self.assertIn("--enable-accelerated-video-decode", wrapper)
         self.assertIn("VaapiVideoDecodeLinuxGL", wrapper)
-        self.assertIn("UseMultiPlaneFormatForHardwareVideo", wrapper)
+        self.assertNotIn("UseMultiPlaneFormatForHardwareVideo", wrapper)
+        self.assertNotIn("--use-gl=egl", wrapper)
         self.assertIn("--disable-gpu", wrapper)
         self.assertIn("--disable-gpu-compositing", wrapper)
-        self.assertIn('"edge_hardware_video": true', wrapper)
+        self.assertIn("ming-edge-graphics test-video", wrapper)
         self.assertIn('"render_access": true', wrapper)
 
     def test_edge_wrapper_uses_generic_capability_result_not_intel_only_driver_name(self):

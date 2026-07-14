@@ -889,7 +889,7 @@ class DeviceController:
             "status": self.audio_status(),
         }
 
-    def set_volume(self, value):
+    def set_volume(self, value, sink_id=None):
         try:
             value = clamp_percent(value)
         except (TypeError, ValueError) as exc:
@@ -899,6 +899,41 @@ class DeviceController:
                 requested = None
             return self._control_result(
                 False, requested=requested, error=str(exc), state="invalid")
+        if sink_id is not None:
+            status = self.audio_status()
+            valid = next((device for device in status.get("playback_devices", [])
+                          if device.get("id") == sink_id and device.get("available")), None)
+            if (status.get("backend") != "pactl" or
+                    not status.get("server_available") or valid is None):
+                result = self._control_result(
+                    False, requested=value, error="所选音频输出已不可用，请刷新后重试。",
+                    backend="pactl", available=bool(status.get("server_available")),
+                    state="invalid_sink")
+                result.update({"sink_id": sink_id or "", "muted": None})
+                return result
+            for command in (
+                    ["pactl", "set-sink-volume", sink_id, "%d%%" % value],
+                    ["pactl", "set-sink-mute", sink_id, "0"]):
+                rc, output, error = self._run(command)
+                if rc != 0:
+                    result = self._control_result(
+                        False, requested=value, error=error or output or "音量设置失败。",
+                        backend="pactl", available=True)
+                    result.update({"sink_id": sink_id, "muted": None})
+                    return result
+            volume_rc, volume_output, volume_error = self._run(
+                ["pactl", "get-sink-volume", sink_id])
+            mute_rc, mute_output, mute_error = self._run(
+                ["pactl", "get-sink-mute", sink_id])
+            effective = parse_percent(volume_output)
+            muted_match = re.search(r"Mute:\s*(yes|no)", mute_output or "", re.I)
+            muted = muted_match.group(1).lower() == "yes" if muted_match else None
+            ok = volume_rc == 0 and effective is not None and mute_rc == 0 and muted is False
+            result = self._control_result(
+                ok, requested=value, value=effective, backend="pactl", available=True,
+                error="" if ok else (volume_error or mute_error or "无法确认所选输出的音量和静音状态。"))
+            result.update({"sink_id": sink_id, "muted": muted})
+            return result
         errors = []
         write_succeeded = False
         last_backend = ""
@@ -1509,6 +1544,7 @@ def build_parser():
     audio_output.add_argument("--id", dest="output_id", required=True)
     volume = subparsers.add_parser("set-volume")
     volume.add_argument("value", type=int)
+    volume.add_argument("--sink", dest="sink_id")
     brightness = subparsers.add_parser("set-brightness")
     brightness.add_argument("value", type=int)
     return parser
@@ -1554,7 +1590,8 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
     elif args.action == "audio-select-output":
         result = controller.audio_select_output(args.output_id)
     elif args.action == "set-volume":
-        result = controller.set_volume(args.value)
+        result = (controller.set_volume(args.value, sink_id=args.sink_id)
+                  if args.sink_id else controller.set_volume(args.value))
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)

@@ -1138,6 +1138,10 @@ if "X-GNOME-Autostart-enabled=true" not in phone_autostart or "Hidden=false" not
     errors.append("phone desktop autostart must be enabled")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
+dpkg_status = require_file("var/lib/dpkg/status", "Package: bamfdaemon")
+for package in ["bamfdaemon", "libbamf3-2"]:
+    if f"Package: {package}\n" not in dpkg_status:
+        errors.append(f"Dock runtime dependency is not installed: {package}")
 for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
@@ -1460,6 +1464,13 @@ edge_wrapper = require_file("usr/local/bin/ming-edge", "homepage=/usr/share/ming
 for marker in ["--ozone-platform=x11", "--disable-gpu"]:
     if marker not in edge_wrapper:
         errors.append(f"ming-edge missing VM graphics marker {marker}")
+for forbidden in ["--use-gl=egl", "UseMultiPlaneFormatForHardwareVideo"]:
+    if forbidden in edge_wrapper:
+        errors.append(f"ming-edge forces unstable graphics option {forbidden}")
+edge_graphics = require_file("usr/local/bin/ming-edge-graphics", "active_render_node")
+for marker in ["renderD*", "ffmpeg", "test-video", "set-mode", "auto", "compat"]:
+    if marker not in edge_graphics:
+        errors.append(f"ming-edge-graphics missing marker {marker}")
 require_file("usr/share/ming-os/homepage/index.html", "Ming OS")
 edge_policy = require_file("etc/opt/edge/policies/managed/ming-os.json", "HomepageLocation")
 if "RestoreOnStartupURLs" not in edge_policy:

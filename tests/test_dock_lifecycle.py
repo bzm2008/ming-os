@@ -6,6 +6,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
+APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 
 
 class DockLifecycleContracts(unittest.TestCase):
@@ -38,8 +39,14 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_plank_never_auto_hides(self):
         self.assertIn("HideMode=0", self.plank_settings)
+        self.assertIn("PinOnly=false", self.plank_settings)
+        self.assertIn("CurrentWorkspaceOnly=false", self.plank_settings)
         self.assertIn('ensure_plank_settings', self.watchdog)
         self.assertIn('^HideMode=', self.watchdog)
+
+    def test_dock_runtime_dependencies_are_required(self):
+        self.assertIn("bamfdaemon", APPS)
+        self.assertIn("libbamf3-2", APPS)
 
     def test_watchdog_validates_window_type_stacking_and_geometry(self):
         for marker in (

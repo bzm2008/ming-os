@@ -76,6 +76,11 @@ class ControlRequestStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    def test_volume_control_targets_current_sink_and_displays_its_name(self):
+        self.assertIn("self.volume_sink_id = default_sink", self.source)
+        self.assertIn('selected_output.get("display_name")', self.source)
+        self.assertIn("sink_id=self.volume_sink_id", self.source)
+
     def test_scale_styles_include_visible_trough_slider_and_highlight(self):
         source = self.source
         for marker in (
