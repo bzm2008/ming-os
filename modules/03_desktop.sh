@@ -1625,6 +1625,8 @@ WALLPAPERSVG1366
 
     [[ -f /usr/share/backgrounds/ming-os/default.png ]] || cp /usr/share/backgrounds/ming-os/default.svg /usr/share/backgrounds/ming-os/default.png
     [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
+    [[ -s /usr/share/backgrounds/ming-os/default-light.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-light.png
+    [[ -s /usr/share/backgrounds/ming-os/default-dark.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-dark.png
 
     mkdir -p /usr/share/plymouth/themes/ming-os
     cp /usr/share/backgrounds/ming-os/default.png /usr/share/plymouth/themes/ming-os/wallpaper.png 2>/dev/null || true
@@ -1644,90 +1646,8 @@ configure_xfce_panel() {
     rm -rf "${old_panel_dir}"
     mkdir -p "${old_panel_dir}"
 
-    cat > "${xfconf_dir}/xfce4-panel.xml" << 'PANELXML'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-panel" version="1.0">
-  <property name="configver" type="int" value="2"/>
-  <property name="panels" type="array">
-    <value type="int" value="0"/>
-    <property name="panel-0" type="empty">
-      <property name="position" type="string" value="p=6;x=0;y=0"/>
-      <property name="position-locked" type="bool" value="true"/>
-      <property name="autohide-behavior" type="uint" value="0"/>
-      <property name="length" type="uint" value="100"/>
-      <property name="length-adjust" type="bool" value="true"/>
-      <property name="size" type="uint" value="30"/>
-      <property name="icon-size" type="uint" value="18"/>
-      <property name="nrows" type="uint" value="1"/>
-      <property name="mode" type="uint" value="0"/>
-      <property name="background-style" type="uint" value="2"/>
-      <property name="background-rgba" type="array">
-        <value type="double" value="0.101961"/>
-        <value type="double" value="0.039216"/>
-        <value type="double" value="0.180392"/>
-        <value type="double" value="0.680000"/>
-      </property>
-      <property name="enter-opacity" type="uint" value="100"/>
-      <property name="leave-opacity" type="uint" value="88"/>
-      <property name="disable-struts" type="bool" value="false"/>
-      <property name="plugin-ids" type="array">
-        <value type="int" value="1"/>
-        <value type="int" value="2"/>
-        <value type="int" value="3"/>
-        <value type="int" value="4"/>
-        <value type="int" value="6"/>
-      </property>
-    </property>
-  </property>
-  <property name="plugins" type="empty">
-    <!-- plugin-1: Whisker Menu (Ming 品牌开始菜单) -->
-    <property name="plugin-1" type="string" value="whiskermenu">
-      <property name="button-icon" type="string" value="ming-os-menu"/>
-      <property name="button-title" type="string" value="Ming OS"/>
-      <property name="show-button-title" type="bool" value="true"/>
-      <property name="menu-width" type="uint" value="440"/>
-      <property name="menu-height" type="uint" value="520"/>
-      <property name="menu-opacity" type="uint" value="92"/>
-      <property name="position-categories-alternate" type="bool" value="false"/>
-      <property name="view-mode" type="uint" value="1"/>
-      <property name="show-generic-names" type="bool" value="true"/>
-      <property name="show-tooltips" type="bool" value="true"/>
-      <property name="launcher-show-description" type="bool" value="true"/>
-    </property>
-
-    <!-- plugin-2: 弹性分隔符（把右侧内容推到最右） -->
-    <property name="plugin-2" type="string" value="separator">
-      <property name="style" type="uint" value="0"/>
-      <property name="expand" type="bool" value="true"/>
-    </property>
-
-    <!-- plugin-3: 电源管理插件 (电池/亮度) -->
-    <property name="plugin-3" type="string" value="power-manager-plugin"/>
-
-    <!-- plugin-4: 状态托盘 (网络/音量/通知; Xfce 4.18 systray 已内置 SNI 支持) -->
-    <property name="plugin-4" type="string" value="systray">
-      <property name="square-icons" type="bool" value="true"/>
-      <property name="icon-size" type="uint" value="16"/>
-      <property name="known-legacy-items" type="array">
-        <value type="string" value="networkmanager applet"/>
-        <value type="string" value="pulseaudio plugin"/>
-      </property>
-    </property>
-
-    <!-- plugin-6: 时钟 -->
-    <property name="plugin-6" type="string" value="clock">
-      <property name="digital-layout" type="uint" value="3"/>
-      <property name="digital-time-format" type="string" value="%H:%M"/>
-      <property name="digital-date-format" type="string" value="%m月%d日"/>
-      <property name="tooltip-format" type="string" value="%Y年%m月%d日 %A"/>
-      <property name="mode" type="uint" value="2"/>
-    </property>
-  </property>
-</channel>
-PANELXML
-
-    # Dock-only mode: keep xfce4-panel installed for compatibility, but do not
-    # show the top taskbar. All user-facing entry points live in Plank Dock.
+    # Minimal compatibility state: if a distribution session tries to start
+    # xfce4-panel, it has no panels or plugins to expose alongside Ming shell.
     cat > "${xfconf_dir}/xfce4-panel.xml" << 'PANELXML_DOCK_ONLY'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
@@ -6602,39 +6522,6 @@ XSETTINGSCFG
   </property>
 </channel>
 SCREENSAVERCFG
-
-    # Whisker Menu 配置（26.3.0 玻璃主题版）
-    mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
-    cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
-button-title=Ming OS
-show-button-title=true
-launcher-icon-size=2
-button-icon=ming-os-menu
-show-favorites=true
-show-commands=true
-show-recent=true
-recent-items-max=6
-show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-edge.desktop,spark-store.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
-command-settings=ming-control-center
-command-lockscreen=ming-lock
-command-switchuser=dm-tool switch-to-greeter
-command-logoutuser=xfce4-session-logout --logout
-command-restart=xfce4-session-logout --reboot
-command-shutdown=xfce4-session-logout --halt
-search-actions=1
-position-categories-alternate=false
-position-commands-alternate=true
-position-search-alternate=false
-category-icon-size=1
-item-icon-size=2
-menu-width=440
-menu-height=540
-menu-opacity=95
-background-opacity=88
-view-mode=1
-sort-categories=true
-WHISKERRC
 
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4"
 }

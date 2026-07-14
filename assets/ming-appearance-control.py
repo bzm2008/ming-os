@@ -21,6 +21,11 @@ DEFAULTS = {
     "wallpaper": "default",
 }
 MAX_WALLPAPER_BYTES = 32 * 1024 * 1024
+BUILTIN_WALLPAPERS = {
+    "default": pathlib.Path("/usr/share/backgrounds/ming-os/default.png"),
+    "light": pathlib.Path("/usr/share/backgrounds/ming-os/default-light.png"),
+    "dark": pathlib.Path("/usr/share/backgrounds/ming-os/default-dark.png"),
+}
 
 
 def config_path():
@@ -100,6 +105,12 @@ def apply_runtime(config):
         ["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "%s %s" % (config["font_family"], config["font_size"])],
         ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "prefer-dark" if theme == "dark" else "default"],
     ]
+    wallpaper = BUILTIN_WALLPAPERS.get(config["wallpaper"], pathlib.Path(config["wallpaper"]))
+    if wallpaper.is_file():
+        commands.append([
+            "xfconf-query", "-c", "xfce4-desktop", "-p",
+            "/backdrop/screen0/monitor0/workspace0/last-image", "-n", "-t", "string", "-s", str(wallpaper),
+        ])
     for command in commands:
         try:
             subprocess.run(command, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -147,7 +158,7 @@ def main(argv=None):
             if value is not None:
                 config[key] = value
         if args.wallpaper:
-            if args.wallpaper in {"default", "light", "dark"}:
+            if args.wallpaper in BUILTIN_WALLPAPERS:
                 config["wallpaper"] = args.wallpaper
             else:
                 try:

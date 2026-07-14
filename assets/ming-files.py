@@ -29,6 +29,40 @@ def _load_model_module():
 MODEL = _load_model_module()
 CancellationToken = MODEL.CancellationToken
 
+
+def _load_shell_common():
+    candidates = [
+        Path(__file__).with_name("ming-shell-common.py"),
+        Path("/usr/local/lib/ming-os/ming-shell-common.py"),
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("ming_shell_common_for_files", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise RuntimeError("Ming shell common runtime is missing")
+
+
+COMMON = _load_shell_common()
+
+
+def resolve_icon(icon):
+    return COMMON.resolve_icon(icon)
+
+
+def set_resolved_icon(image, icon, pixel_size=None):
+    """Set a validated absolute image or a safe GTK theme name."""
+    resolved = resolve_icon(icon)
+    if Path(resolved).is_absolute():
+        image.set_from_file(resolved)
+    else:
+        image.set_from_icon_name(resolved)
+    if pixel_size is not None:
+        image.set_pixel_size(int(pixel_size))
+    return resolved
+
 try:
     import gi
 
@@ -297,7 +331,7 @@ if GTK_AVAILABLE:
             file_object = list_item.get_item()
             row.file_object = file_object
             item = file_object.item
-            row.icon.set_from_icon_name(item.icon_name)
+            set_resolved_icon(row.icon, item.icon_name, 28)
             row.name_label.set_label(item.display_name)
             row.type_label.set_label("文件夹" if item.is_directory else item.content_type)
             row.size_label.set_label("" if item.is_directory else self._format_size(item.size))
@@ -326,7 +360,7 @@ if GTK_AVAILABLE:
             tile = list_item.get_child()
             file_object = list_item.get_item()
             tile.file_object = file_object
-            tile.icon.set_from_icon_name(file_object.item.icon_name)
+            set_resolved_icon(tile.icon, file_object.item.icon_name, 48)
             tile.name_label.set_label(file_object.item.display_name)
 
         def _attach_context_gestures(self, widget):
@@ -969,14 +1003,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-# File and folder icons share the shell's safety rules when launchers provide
-# absolute icons. Regular MIME theme names continue through GTK unchanged.
-def resolve_icon(icon):
-    try:
-        common_path = Path(__file__).with_name("ming-shell-common.py")
-        spec = importlib.util.spec_from_file_location("ming_shell_common_for_files", common_path)
-        common = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(common)
-        return common.resolve_icon(icon)
-    except Exception:
-        return "application-x-executable"

@@ -102,6 +102,36 @@ LIBINPUT_PROPERTIES = {
     "disable_while_typing": ("libinput Disable While Typing Enabled",),
 }
 
+APPEARANCE_THEMES = ["system", "light", "dark"]
+APPEARANCE_FONTS = ["Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono"]
+APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
+APPEARANCE_ICON_SCALES = [0.75, 1.0, 1.25, 1.5]
+APPEARANCE_DOCK_SIZES = [36, 44, 48, 56, 64]
+APPEARANCE_WALLPAPERS = ["default", "light", "dark", "custom"]
+APPEARANCE_WALLPAPER_FILES = {
+    "default": "/usr/share/backgrounds/ming-os/default.png",
+    "light": "/usr/share/backgrounds/ming-os/default-light.png",
+    "dark": "/usr/share/backgrounds/ming-os/default-dark.png",
+}
+
+
+def appearance_control_values(status):
+    def selected(values, value, fallback=0):
+        try:
+            return values.index(value)
+        except ValueError:
+            return fallback
+    wallpaper = status.get("wallpaper", "default")
+    wallpaper = wallpaper if wallpaper in APPEARANCE_WALLPAPERS[:3] else "custom"
+    return (
+        selected(APPEARANCE_THEMES, status.get("theme")),
+        selected(APPEARANCE_FONTS, status.get("font_family")),
+        selected(APPEARANCE_FONT_SIZES, status.get("font_size"), 1),
+        selected(APPEARANCE_ICON_SCALES, status.get("desktop_icon_scale"), 1),
+        selected(APPEARANCE_DOCK_SIZES, status.get("dock_icon_size"), 2),
+        selected(APPEARANCE_WALLPAPERS, wallpaper),
+    )
+
 
 def pointer_device_snapshot():
     """Return libinput properties verbatim so unsupported hardware is diagnosable."""
@@ -2070,6 +2100,8 @@ class MingSettings(Adw.ApplicationWindow):
 
     def build_appearance(self):
         sc, box = self.page_scroller()
+        self.appearance_loading = True
+        self.appearance_controls = []
         group = Adw.PreferencesGroup(
             title="外观与桌面", description="主题、Noto 字体、图标和壁纸会立即保存并由 Ming 桌面重载。")
         box.append(group)
@@ -2080,23 +2112,66 @@ class MingSettings(Adw.ApplicationWindow):
             dropdown.set_valign(Gtk.Align.CENTER)
             dropdown.connect(
                 "notify::selected",
-                lambda widget, _param: run_async([
-                    "/usr/local/bin/ming-appearance-control", "apply", argument,
-                    str(values[min(widget.get_selected(), len(values) - 1)]), "--json"]),
+                self.on_appearance_choice, values, argument,
             )
             row.add_suffix(dropdown)
             group.add(row)
+            self.appearance_controls.append(dropdown)
 
-        choice("主题", ["system", "light", "dark"], ["跟随系统", "浅色", "深色"], "--theme")
-        choice("Noto 字体", ["Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono"],
+        choice("主题", APPEARANCE_THEMES, ["跟随系统", "浅色", "深色"], "--theme")
+        choice("Noto 字体", APPEARANCE_FONTS,
                ["Noto Sans", "Noto Serif", "Noto 中文", "Noto 等宽"], "--font-family")
-        choice("字体大小", [10, 11, 12, 14, 16], ["10", "11", "12", "14", "16"], "--font-size")
-        choice("桌面图标", [0.75, 1.0, 1.25, 1.5], ["小", "标准", "大", "特大"], "--desktop-icon-scale")
-        choice("Dock 图标", [36, 44, 48, 56, 64], ["36", "44", "48", "56", "64"], "--dock-icon-size")
+        choice("字体大小", APPEARANCE_FONT_SIZES, ["10", "11", "12", "14", "16"], "--font-size")
+        choice("桌面图标", APPEARANCE_ICON_SCALES, ["小", "标准", "大", "特大"], "--desktop-icon-scale")
+        choice("Dock 图标", APPEARANCE_DOCK_SIZES, ["36", "44", "48", "56", "64"], "--dock-icon-size")
+        choice("内置壁纸", APPEARANCE_WALLPAPERS, ["默认", "浅色", "深色", "自定义"], "--wallpaper")
         wallpaper = Gtk.Button(label="选择自定义壁纸")
         wallpaper.connect("clicked", self.on_choose_wallpaper)
         group.add(self.button_row("壁纸", "可使用 Ming 默认壁纸或选择本地图像。", wallpaper))
+        restore = Gtk.Button(label="恢复默认壁纸")
+        restore.connect("clicked", lambda _button: self.apply_appearance(["--wallpaper", "default"]))
+        group.add(self.button_row("恢复默认壁纸", "切换回 Ming 默认壁纸。", restore))
+        self.refresh_appearance_status()
         return sc
+
+    def appearance_command(self, *arguments):
+        installed = "/usr/local/bin/ming-appearance-control"
+        if os.path.isfile(installed):
+            return [installed] + list(arguments)
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ming-appearance-control.py")
+        return [sys.executable, local] + list(arguments)
+
+    def refresh_appearance_status(self):
+        self.appearance_loading = True
+        run_capture_async(self.appearance_command("status", "--json"), timeout=8,
+                          on_done=self.on_appearance_status)
+
+    def on_appearance_status(self, rc, output, error):
+        try:
+            status = json.loads(output) if rc == 0 else None
+        except ValueError:
+            status = None
+        if not isinstance(status, dict):
+            self.appearance_loading = False
+            self.toast(error or "无法读取外观设置。", "warning")
+            return
+        values = appearance_control_values(status)
+        for control, selected in zip(self.appearance_controls, values):
+            control.set_selected(selected)
+        self.appearance_loading = False
+
+    def on_appearance_choice(self, widget, _param, values, argument):
+        if self.appearance_loading:
+            return
+        selected = min(widget.get_selected(), len(values) - 1)
+        if argument == "--wallpaper" and values[selected] == "custom":
+            return
+        self.apply_appearance([argument, str(values[selected])])
+
+    def apply_appearance(self, arguments):
+        self.appearance_loading = True
+        run_capture_async(self.appearance_command("apply", *arguments, "--json"), timeout=15,
+                          on_done=lambda _rc, _output, _error: self.refresh_appearance_status())
 
     def on_choose_wallpaper(self, _button):
         dialog = Gtk.FileDialog(title="选择壁纸")
@@ -2107,7 +2182,7 @@ class MingSettings(Adw.ApplicationWindow):
             path = dialog.open_finish(result).get_path()
         except GLib.Error:
             return
-        run_async(["/usr/local/bin/ming-appearance-control", "apply", "--wallpaper", path, "--json"])
+        self.apply_appearance(["--wallpaper", path])
 
     def build_pointer(self):
         sc, box = self.page_scroller()

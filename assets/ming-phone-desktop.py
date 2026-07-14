@@ -182,8 +182,8 @@ def appearance_wallpaper_paths(appearance, fallbacks=None):
     wallpaper = str((appearance or {}).get("wallpaper", ""))
     named = {
         "default": Path("/usr/share/backgrounds/ming-os/default.png"),
-        "light": Path("/usr/share/backgrounds/ming-os/light.png"),
-        "dark": Path("/usr/share/backgrounds/ming-os/dark.png"),
+        "light": Path("/usr/share/backgrounds/ming-os/default-light.png"),
+        "dark": Path("/usr/share/backgrounds/ming-os/default-dark.png"),
     }
     if wallpaper in named:
         return [named[wallpaper]] + [path for path in fallbacks if path != named[wallpaper]]

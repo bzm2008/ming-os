@@ -80,9 +80,37 @@ class AppearanceControlTests(unittest.TestCase):
 
 class DeploymentContractTests(unittest.TestCase):
     def test_shell_consumers_use_shared_icon_resolver(self):
-        for name in ("ming-phone-desktop.py", "ming-app-drawer.py", "ming-launch.py", "ming-files.py"):
+        for name in ("ming-phone-desktop.py", "ming-app-drawer.py", "ming-launch.py"):
             text = (ROOT / "assets" / name).read_text(encoding="utf-8")
             self.assertIn("resolve_icon", text, name)
+
+    def test_rootfs_gate_scans_real_user_homes_and_skeleton(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("MING_USER"', build)
+        self.assertIn('root / "home/user/.config/autostart"', build)
+        self.assertIn('root / "etc/skel/.config/autostart"', build)
+        self.assertNotIn('root / "home/ming/.config/autostart"', build)
+
+    def test_builtin_wallpapers_use_deployed_names_everywhere(self):
+        paths = (
+            "assets/ming-phone-desktop.py", "assets/ming-appearance-control.py",
+            "assets/ming-settings.py", "modules/03_desktop.sh", "build_onion_os.sh")
+        sources = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in paths)
+        self.assertNotIn('/ming-os/light.png', sources)
+        self.assertNotIn('/ming-os/dark.png', sources)
+        for path in paths:
+            source = (ROOT / path).read_text(encoding="utf-8")
+            self.assertIn("default-light.png", source, path)
+            self.assertIn("default-dark.png", source, path)
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        self.assertIn('[[ -s /usr/share/backgrounds/ming-os/default-light.png ]]', desktop)
+        self.assertIn('[[ -s /usr/share/backgrounds/ming-os/default-dark.png ]]', desktop)
+
+    def test_retired_panel_and_whisker_configuration_is_not_generated(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        self.assertNotIn("whiskermenu-1.rc", desktop)
+        self.assertNotIn('value="whiskermenu"', desktop)
+        self.assertEqual(1, desktop.count('cat > "${xfconf_dir}/xfce4-panel.xml"'))
 
     def test_appearance_pointer_and_compatibility_pages_are_deployed(self):
         settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
@@ -147,6 +175,55 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
             self.assertEqual(image, ns["appearance_wallpaper_paths"]({"wallpaper": str(image)}, [root / "fallback"])[0])
             image.unlink()
             self.assertEqual(root / "fallback", ns["appearance_wallpaper_paths"]({"wallpaper": str(image)}, [root / "fallback"])[0])
+
+    def test_settings_maps_persisted_appearance_without_emitting_apply(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        tree = ast.parse(settings)
+        constants = [node for node in tree.body if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id.startswith("APPEARANCE_") for target in node.targets)]
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "appearance_control_values")
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=constants + [function], type_ignores=[])), settings, "exec"), namespace)
+        values = namespace["appearance_control_values"]({
+            "theme": "dark", "font_family": "Noto Serif", "font_size": 14,
+            "desktop_icon_scale": 1.5, "dock_icon_size": 56, "wallpaper": "light",
+        })
+        self.assertEqual((2, 1, 3, 3, 3, 1), values)
+        self.assertIn("self.appearance_loading", settings)
+        self.assertIn('"status", "--json"', settings)
+        self.assertIn("恢复默认壁纸", settings)
+
+
+class MingFilesIconBehaviorTests(unittest.TestCase):
+    def load_module(self):
+        path = ROOT / "assets/ming-files.py"
+        spec = importlib.util.spec_from_file_location("ming_files_icons", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_file_icon_widget_consumes_absolute_theme_and_fallback(self):
+        module = self.load_module()
+        class Image:
+            def __init__(self):
+                self.file = None
+                self.name = None
+                self.size = None
+            def set_from_file(self, value): self.file = value
+            def set_from_icon_name(self, value): self.name = value
+            def set_pixel_size(self, value): self.size = value
+        with tempfile.TemporaryDirectory() as temp:
+            icon = pathlib.Path(temp) / "file.png"
+            icon.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+            absolute = Image()
+            module.set_resolved_icon(absolute, str(icon), 32)
+            self.assertEqual(str(icon), absolute.file)
+            themed = Image()
+            module.set_resolved_icon(themed, "folder-symbolic", 24)
+            self.assertEqual("folder-symbolic", themed.name)
+            missing = Image()
+            module.set_resolved_icon(missing, str(icon.with_name("missing.png")), 24)
+            self.assertEqual("application-x-executable", missing.name)
 
 
 if __name__ == "__main__":

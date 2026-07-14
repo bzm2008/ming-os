@@ -1197,6 +1197,8 @@ if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "S
     errors.append("ming-update-gui must keep user-facing update UI in Chinese")
 
 require_path("usr/share/backgrounds/ming-os/default.png")
+require_path("usr/share/backgrounds/ming-os/default-light.png")
+require_path("usr/share/backgrounds/ming-os/default-dark.png")
 appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
 for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog", "ming-plank-watchdog"]:
     if marker not in appearance:
@@ -1813,7 +1815,17 @@ for retired_runtime in [
 ]:
     if (root / retired_runtime).exists():
         errors.append(f"retired duplicate shell runtime must not be installed: {retired_runtime}")
-autostart_roots = [root / "etc/xdg/autostart", root / "home/ming/.config/autostart"]
+configured_user = os.environ.get("MING_USER", "").strip()
+autostart_roots = [
+    root / "etc/xdg/autostart",
+    root / "etc/skel/.config/autostart",
+    root / "home/user/.config/autostart",
+]
+if configured_user and "/" not in configured_user:
+    autostart_roots.append(root / "home" / configured_user / ".config/autostart")
+home_root = root / "home"
+if home_root.is_dir():
+    autostart_roots.extend(path / ".config/autostart" for path in home_root.iterdir() if path.is_dir())
 for autostart_root in autostart_roots:
     if not autostart_root.exists():
         continue
