@@ -40,7 +40,7 @@ def caller_may_change(user, environ=None, uid_lookup=None):
     environ = os.environ if environ is None else environ
     pkexec_uid = environ.get("PKEXEC_UID")
     if not pkexec_uid:
-        return True
+        return False
     uid_lookup = uid_lookup or (pwd.getpwuid if pwd is not None else None)
     if uid_lookup is None:
         return False
@@ -74,68 +74,154 @@ def oobe_marker_for_user(user):
         return None
 
 
-def retire_skipped_marker(user, marker_path=None, expected_uid=None):
-    marker = pathlib.Path(marker_path) if marker_path is not None else oobe_marker_for_user(user)
-    if marker is None:
-        return True
-    temporary = None
-    try:
+def _safe_directory(path, expected_uid):
+    info = path.lstat()
+    return bool(
+        stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+        and info.st_uid == expected_uid
+        and (os.name == "nt" or not info.st_mode & 0o022))
+
+
+def _marker_context(user, marker_path=None, expected_uid=None):
+    identity = None
+    if pwd is not None:
         try:
-            identity = pwd.getpwnam(user) if pwd is not None else None
+            identity = pwd.getpwnam(user)
         except KeyError:
             identity = None
-        if expected_uid is None:
-            expected_uid = identity.pw_uid if identity is not None else marker.parent.stat().st_uid
-        parent_info = marker.parent.lstat()
-        if (stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode)
-                or parent_info.st_uid != expected_uid
-                or (os.name != "nt" and parent_info.st_mode & 0o022)):
-            return False
+    marker = pathlib.Path(marker_path) if marker_path is not None else oobe_marker_for_user(user)
+    if marker is None:
+        return None
+    if expected_uid is None:
+        expected_uid = identity.pw_uid if identity is not None else marker.parent.stat().st_uid
+    directories = [marker.parent]
+    if marker_path is None and identity is not None:
+        home = pathlib.Path(identity.pw_dir)
+        directories = [home, home / ".config", marker.parent]
+    if not all(_safe_directory(path, expected_uid) for path in directories):
+        raise OSError("unsafe marker directory")
+    parent_info = marker.parent.lstat()
+    parent_fd = None
+    if os.name != "nt":
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+            os, "O_NOFOLLOW", 0)
+        parent_fd = os.open(marker.parent, directory_flags)
+        opened_parent = os.fstat(parent_fd)
+        if (opened_parent.st_ino != parent_info.st_ino
+                or opened_parent.st_dev != parent_info.st_dev):
+            os.close(parent_fd)
+            raise OSError("marker directory changed while opening")
+        try:
+            marker_info = os.stat(marker.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            os.close(parent_fd)
+            raise
+    else:
         marker_info = marker.lstat()
-        if (stat.S_ISLNK(marker_info.st_mode) or not stat.S_ISREG(marker_info.st_mode)
-                or marker_info.st_uid != expected_uid
-                or (os.name != "nt" and marker_info.st_mode & 0o022)):
-            return False
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(marker, flags)
+    if (stat.S_ISLNK(marker_info.st_mode) or not stat.S_ISREG(marker_info.st_mode)
+            or marker_info.st_uid != expected_uid
+            or (os.name != "nt" and marker_info.st_mode & 0o022)):
+        if parent_fd is not None:
+            os.close(parent_fd)
+        raise OSError("unsafe marker file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(
+            marker.name if parent_fd is not None else marker, flags,
+            **({"dir_fd": parent_fd} if parent_fd is not None else {}))
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             opened_info = os.fstat(handle.fileno())
             if (opened_info.st_ino != marker_info.st_ino
                     or opened_info.st_dev != marker_info.st_dev):
+                raise OSError("marker changed while opening")
+            value = handle.read(128).strip()
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+    return marker, marker_info, expected_uid, parent_info, value
+
+
+def _replace_marker_state(user, replacement, marker_path=None, expected_uid=None,
+                          require_skipped=False):
+    context = _marker_context(user, marker_path, expected_uid)
+    if context is None:
+        return True
+    marker, marker_info, _uid, parent_info, marker_value = context
+    if marker_value == replacement:
+        return True
+    if marker_value != "skipped":
+        return not require_skipped
+    marker = pathlib.Path(marker_path) if marker_path is not None else oobe_marker_for_user(user)
+    temporary = None
+    parent_fd = None
+    temporary_name = None
+    try:
+        if os.name != "nt":
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+                os, "O_NOFOLLOW", 0)
+            parent_fd = os.open(marker.parent, directory_flags)
+            opened_parent = os.fstat(parent_fd)
+            if (opened_parent.st_ino != parent_info.st_ino
+                    or opened_parent.st_dev != parent_info.st_dev):
                 return False
-            marker_value = handle.read(128).strip()
-        if marker_value != "skipped":
-            return True
+        temporary_directory = (
+            "/proc/self/fd/%d" % parent_fd if parent_fd is not None else str(marker.parent))
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".oobe-account-done.", dir=str(marker.parent))
+            prefix=".oobe-account-done.", dir=temporary_directory)
         temporary = pathlib.Path(temporary_name)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write("configured\n")
+            handle.write(replacement + "\n")
             handle.flush()
             os.fsync(handle.fileno())
             os.fchmod(handle.fileno(), marker_info.st_mode & 0o777)
             if hasattr(os, "fchown"):
                 os.fchown(handle.fileno(), marker_info.st_uid, marker_info.st_gid)
-        os.replace(temporary, marker)
+        current_parent = marker.parent.lstat()
+        if (current_parent.st_ino != parent_info.st_ino
+                or current_parent.st_dev != parent_info.st_dev):
+            return False
+        current_marker = (
+            os.stat(marker.name, dir_fd=parent_fd, follow_symlinks=False)
+            if parent_fd is not None else marker.lstat())
+        if (current_marker.st_ino != marker_info.st_ino
+                or current_marker.st_dev != marker_info.st_dev):
+            return False
+        if parent_fd is not None:
+            os.replace(
+                temporary.name, marker.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            os.replace(temporary, marker)
         temporary = None
-        if os.name != "nt":
-            directory_flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-            directory_fd = os.open(marker.parent, os.O_RDONLY | directory_flags)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        return marker.read_text(encoding="utf-8").strip() == "configured"
+        if parent_fd is not None:
+            os.fsync(parent_fd)
+            descriptor = os.open(marker.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                                 dir_fd=parent_fd)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                return handle.read(128).strip() == replacement
+        return marker.read_text(encoding="utf-8").strip() == replacement
     except FileNotFoundError:
-        return True
+        return False
     except OSError:
         return False
     finally:
         if temporary is not None:
             try:
-                temporary.unlink()
+                if parent_fd is not None:
+                    os.unlink(temporary.name, dir_fd=parent_fd)
+                else:
+                    temporary.unlink()
             except OSError:
                 pass
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def retire_skipped_marker(user, marker_path=None, expected_uid=None):
+    try:
+        return _replace_marker_state(
+            user, "configured", marker_path=marker_path, expected_uid=expected_uid)
+    except OSError:
+        return False
 
 
 def set_password(user, password, runner=run_command, marker_path=None):
@@ -169,10 +255,41 @@ def clear_password(user, runner=run_command):
     return status
 
 
+def migrate_skipped(user, runner=run_command, marker_path=None, expected_uid=None):
+    validate_user(user)
+    try:
+        context = _marker_context(user, marker_path, expected_uid)
+    except (FileNotFoundError, OSError) as exc:
+        return {"ok": False, "migrated": False, "user": user,
+                "error": str(exc) or "unsafe OOBE marker"}
+    if context is None:
+        return {"ok": True, "migrated": False, "user": user, "error": ""}
+    marker, _info, uid, _parent, value = context
+    if value == "migrated-passwordless":
+        return {"ok": True, "migrated": False, "user": user, "error": ""}
+    if value != "skipped":
+        return {"ok": False, "migrated": False, "user": user,
+                "error": "OOBE marker is not skipped"}
+    result = clear_password(user, runner=runner)
+    if not result["ok"]:
+        result["migrated"] = False
+        return result
+    try:
+        replaced = _replace_marker_state(
+            user, "migrated-passwordless", marker_path=marker_path,
+            expected_uid=uid, require_skipped=True)
+    except OSError:
+        replaced = False
+    if not replaced:
+        return {"ok": False, "migrated": False, "user": user,
+                "error": "password cleared but OOBE marker migration failed"}
+    return {"ok": True, "migrated": True, "user": user, "error": ""}
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="ming-account-control")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("status", "set-password", "clear-password"):
+    for action in ("status", "set-password", "clear-password", "migrate-skipped"):
         command = sub.add_parser(action)
         command.add_argument("--user", required=True)
         if action == "status":
@@ -193,6 +310,8 @@ def main(argv=None, stdin=None, stdout=None):
                 result = {"ok": False, "error": "account does not match the active caller"}
             elif args.action == "clear-password":
                 result = clear_password(args.user)
+            elif args.action == "migrate-skipped":
+                result = migrate_skipped(args.user)
             else:
                 source = stdin or sys.stdin
                 result = set_password(args.user, source.readline(1026))

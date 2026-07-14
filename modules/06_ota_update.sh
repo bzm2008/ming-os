@@ -1964,45 +1964,38 @@ RELEASEFILE
 }
 
 deploy_passwordless_oobe_migration() {
-    cat > /usr/local/sbin/ming-account-password-migration << 'PASSWORDMIGRATION'
+    cat > /usr/local/bin/ming-account-password-migration << 'PASSWORDMIGRATION'
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOME_ROOT="${MING_HOME_ROOT:-/home}"
+marker="${MING_MARKER:-${HOME}/.config/ming-os/oobe-account-done}"
 ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"
-PASSWD_BIN="${MING_PASSWD_BIN:-passwd}"
+PKEXEC="${MING_PKEXEC:-pkexec}"
 
-for marker in "${HOME_ROOT}"/*/.config/ming-os/oobe-account-done; do
-    [[ -f "${marker}" ]] || continue
-    [[ "$(cat "${marker}" 2>/dev/null)" == "skipped" ]] || continue
-    user_name="$(stat -c '%U' "${marker}")"
-    [[ -n "${user_name}" && "${user_name}" != "UNKNOWN" ]] || continue
-    "${ACCOUNT_CONTROL}" clear-password --user "${user_name}" >/dev/null
-    "${PASSWD_BIN}" -S "${user_name}" | awk 'NR == 1 { exit !($2 == "NP") }'
-    temporary="${marker}.migration.$$"
-    printf '%s\n' migrated-passwordless > "${temporary}"
-    chmod --reference="${marker}" "${temporary}" 2>/dev/null || chmod 0600 "${temporary}"
-    chown --reference="${marker}" "${temporary}" 2>/dev/null || true
-    mv -f "${temporary}" "${marker}"
-done
+[[ -f "${marker}" && ! -L "${marker}" ]] || exit 0
+[[ "$(cat -- "${marker}" 2>/dev/null)" == "skipped" ]] || exit 0
+user_name="$(id -un)"
+"${PKEXEC}" "${ACCOUNT_CONTROL}" migrate-skipped --user "${user_name}" >/dev/null
 PASSWORDMIGRATION
-    chmod 0755 /usr/local/sbin/ming-account-password-migration
+    chmod 0755 /usr/local/bin/ming-account-password-migration
 
-    cat > /etc/systemd/system/ming-account-password-migration.service << 'PASSWORDMIGRATIONSERVICE'
-[Unit]
-Description=Ming OS passwordless OOBE compatibility migration
-After=local-fs.target
-ConditionPathExists=/usr/local/sbin/ming-account-control
+    install -d -m 0755 /etc/xdg/autostart
+    cat > /etc/xdg/autostart/ming-account-password-migration.desktop << 'PASSWORDMIGRATIONAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Account Compatibility Migration
+Exec=/usr/local/bin/ming-account-password-migration
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+PASSWORDMIGRATIONAUTO
+    chmod 0644 /etc/xdg/autostart/ming-account-password-migration.desktop
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/ming-account-password-migration
-
-[Install]
-WantedBy=multi-user.target
-PASSWORDMIGRATIONSERVICE
-    systemctl enable ming-account-password-migration.service
-    /usr/local/sbin/ming-account-password-migration
+    systemctl disable ming-account-password-migration.service 2>/dev/null || true
+    rm -f /etc/systemd/system/ming-account-password-migration.service \
+        /usr/local/sbin/ming-account-password-migration
+    systemctl daemon-reload 2>/dev/null || true
 }
 
 main() {

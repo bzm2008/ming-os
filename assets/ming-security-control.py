@@ -461,7 +461,9 @@ def quick_check(path=STATE_PATH, runner=run_command):
     root_fields = root_output.split()
     checks = {
         "firewall_enabled": current["firewall"]["effective"],
-        "public_default": current["profile"]["configured"] == "public",
+        "public_default": (
+            current["profile"]["configured"] == "public"
+            and current["profile"]["effective"] == "public"),
         "root_login_disabled": sshd_values.get("permitrootlogin") == "no",
         "empty_passwords_disabled": sshd_values.get("permitemptypasswords") == "no",
         "root_account_locked": root_rc == 0 and len(root_fields) > 1 and root_fields[1] in {"L", "LK"},

@@ -109,12 +109,19 @@ class SecurityBuildContracts(unittest.TestCase):
         self.assertNotIn("usermod -aG sudo user", preseed)
         self.assertNotIn("NOPASSWD", self.base + apps + preseed)
 
-    def test_oobe_and_ota_clear_only_skipped_passwords_with_readback(self):
+    def test_oobe_and_ota_use_user_session_migration_without_root_home_writes(self):
         self.assertIn("ming-account-control clear-password", self.desktop)
         self.assertIn("passwd -S", self.desktop)
         self.assertIn('== "skipped"', self.ota)
         self.assertIn('ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"', self.ota)
-        self.assertIn('clear-password --user "${user_name}"', self.ota)
+        self.assertIn('migrate-skipped --user "${user_name}"', self.ota)
+        self.assertIn("ming-account-password-migration.desktop", self.ota)
+        self.assertNotIn("cat > /etc/systemd/system/ming-account-password-migration.service", self.ota)
+        self.assertNotIn("ExecStart=/usr/local/sbin/ming-account-password-migration", self.ota)
+        self.assertNotIn("cat > /usr/local/sbin/ming-account-password-migration", self.ota)
+        self.assertNotIn(".migration.$$", self.ota)
+        self.assertNotIn('> "${temporary}"', self.ota)
+        self.assertNotIn('chown --reference="${marker}"', self.ota)
         self.assertNotIn("pkexec /bin/bash", self.desktop)
 
     def test_skipped_password_migration_is_strictly_one_shot(self):
@@ -122,7 +129,7 @@ class SecurityBuildContracts(unittest.TestCase):
         if not bash:
             self.skipTest("Git Bash is unavailable")
         script = self.ota.split(
-            "cat > /usr/local/sbin/ming-account-password-migration << 'PASSWORDMIGRATION'", 1
+            "cat > /usr/local/bin/ming-account-password-migration << 'PASSWORDMIGRATION'", 1
         )[1].split("PASSWORDMIGRATION", 1)[0]
         script = script.replace("\r\n", "\n")
         def shell_path(value):
@@ -141,20 +148,24 @@ class SecurityBuildContracts(unittest.TestCase):
             with account.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> %s\n" % (
                     "%s", shlex.quote(shell_path(calls))))
-            passwd = root / "passwd-status"
-            with passwd.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(
-                    "#!/usr/bin/env bash\nprintf '%s NP 2026-07-14 0 99999 7 -1\\n' \"$2\"\n")
-            account.chmod(0o755); passwd.chmod(0o755)
+            with account.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write("printf '%%s\\n' migrated-passwordless > %s\n" %
+                             shlex.quote(shell_path(marker)))
+            pkexec = root / "pkexec"
+            with pkexec.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write("#!/usr/bin/env bash\nexec \"$@\"\n")
+            account.chmod(0o755)
+            pkexec.chmod(0o755)
             script = script.replace(
-                'HOME_ROOT="${MING_HOME_ROOT:-/home}"',
-                "HOME_ROOT=%s" % shlex.quote(shell_path(root / "home")))
+                'marker="${MING_MARKER:-${HOME}/.config/ming-os/oobe-account-done}"',
+                "marker=%s" % shlex.quote(shell_path(marker)))
             script = script.replace(
                 'ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"',
                 "ACCOUNT_CONTROL=%s" % shlex.quote(shell_path(account)))
             script = script.replace(
-                'PASSWD_BIN="${MING_PASSWD_BIN:-passwd}"',
-                "PASSWD_BIN=%s" % shlex.quote(shell_path(passwd)))
+                'PKEXEC="${MING_PKEXEC:-pkexec}"',
+                "PKEXEC=%s" % shlex.quote(shell_path(pkexec)))
+            script = script.replace('user_name="$(id -un)"', 'user_name="alice"')
             migration = root / "migration.sh"
             with migration.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(script)
@@ -448,6 +459,22 @@ class SecurityControlTests(unittest.TestCase):
             result = self.api.quick_check(path, runner=runner)
         self.assertFalse(result["checks"]["public_default"])
 
+    def test_public_default_requires_effective_public_profile(self):
+        def runner(command, input_text=None):
+            if command == ["nft", "list", "table", "inet", "ming_filter"]:
+                return 0, "chain input { policy drop; udp dport 5353 accept; }", ""
+            if command == ["systemctl", "is-active", "nftables.service"]:
+                return 0, "active", ""
+            if command == ["sshd", "-T"]:
+                return 0, "permitrootlogin no\npermitemptypasswords no", ""
+            if command == ["passwd", "-S", "root"]:
+                return 0, "root L 2026-07-14 0 99999 7 -1", ""
+            return 1, "", ""
+        with tempfile.TemporaryDirectory() as tempdir:
+            result = self.api.quick_check(
+                pathlib.Path(tempdir) / "missing.json", runner=runner)
+        self.assertFalse(result["checks"]["public_default"])
+
     def test_failed_service_and_firewall_restore_reports_not_rolled_back(self):
         enable_failed = False
 
@@ -564,6 +591,71 @@ class AccountControlTests(unittest.TestCase):
         self.assertFalse(result["password_set"])
         self.assertEqual(("passwd", "-d", "user"), calls[0])
 
+    def test_migrate_skipped_clears_password_and_is_idempotent(self):
+        calls = []
+
+        def runner(command, input_text=None):
+            calls.append(tuple(command))
+            if command[:2] == ["passwd", "-S"]:
+                return 0, "user NP 2026-07-14 0 99999 7 -1", ""
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = pathlib.Path(tempdir) / "ming-os"
+            config.mkdir(mode=0o700)
+            marker = config / "oobe-account-done"
+            marker.write_text("skipped\n", encoding="utf-8")
+            uid = config.stat().st_uid
+            first = self.api.migrate_skipped(
+                "user", runner=runner, marker_path=marker, expected_uid=uid)
+            call_count = len(calls)
+            second = self.api.migrate_skipped(
+                "user", runner=runner, marker_path=marker, expected_uid=uid)
+            self.assertEqual("migrated-passwordless", marker.read_text(encoding="utf-8").strip())
+        self.assertTrue(first["ok"])
+        self.assertTrue(first["migrated"])
+        self.assertTrue(second["ok"])
+        self.assertFalse(second["migrated"])
+        self.assertEqual(call_count, len(calls))
+
+    def test_migrate_skipped_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            config = root / "ming-os"
+            config.mkdir(mode=0o700)
+            victim = root / "victim"
+            victim.write_text("skipped\n", encoding="utf-8")
+            marker = config / "oobe-account-done"
+            try:
+                marker.symlink_to(victim)
+            except OSError:
+                self.skipTest("symlink creation is unavailable")
+            uid = config.stat().st_uid
+            result = self.api.migrate_skipped(
+                "user", marker_path=marker, expected_uid=uid)
+            self.assertFalse(result["ok"])
+            self.assertEqual("skipped", victim.read_text(encoding="utf-8").strip())
+
+    def test_migrate_skipped_ignores_predictable_temp_spray(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = pathlib.Path(tempdir) / "ming-os"
+            config.mkdir(mode=0o700)
+            marker = config / "oobe-account-done"
+            marker.write_text("skipped\n", encoding="utf-8")
+            sprayed = config / (marker.name + ".migration.1234")
+            sprayed.write_text("do-not-touch\n", encoding="utf-8")
+            uid = config.stat().st_uid
+
+            def runner(command, input_text=None):
+                if command[:2] == ["passwd", "-S"]:
+                    return 0, "user NP 2026-07-14 0 99999 7 -1", ""
+                return 0, "", ""
+
+            result = self.api.migrate_skipped(
+                "user", runner=runner, marker_path=marker, expected_uid=uid)
+            self.assertTrue(result["ok"])
+            self.assertEqual("do-not-touch", sprayed.read_text(encoding="utf-8").strip())
+
     def test_pkexec_caller_can_only_change_its_own_account(self):
         class Record:
             pw_name = "alice"
@@ -571,7 +663,7 @@ class AccountControlTests(unittest.TestCase):
         lookup = lambda uid: Record()
         self.assertTrue(self.api.caller_may_change("alice", {"PKEXEC_UID": "1000"}, lookup))
         self.assertFalse(self.api.caller_may_change("bob", {"PKEXEC_UID": "1000"}, lookup))
-        self.assertTrue(self.api.caller_may_change("bob", {}, lookup))
+        self.assertFalse(self.api.caller_may_change("bob", {}, lookup))
 
 
 class EthernetAndNotificationTests(unittest.TestCase):
