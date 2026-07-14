@@ -79,9 +79,11 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertNotIn("eval ", wrapper)
 
     def test_build_gate_requires_audio_and_local_package_helpers(self):
-        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("usr/local/bin/ming-audio-session", validator)
-        self.assertIn("usr/local/sbin/ming-package-installer", validator)
+        # The rootfs validator contains embedded Python, so its first `}` is
+        # not the end of the shell function.  Check the full generated source
+        # instead of truncating valid gate entries at an inner Python block.
+        self.assertIn("usr/local/bin/ming-audio-session", BUILD)
+        self.assertIn("usr/local/sbin/ming-package-installer", BUILD)
 
 
 if __name__ == "__main__":

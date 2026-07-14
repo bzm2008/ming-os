@@ -161,34 +161,72 @@ LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
 CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
 WALLPAPER_PATHS = [
-    Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
+    Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"),
+    Path("/usr/share/backgrounds/ming-os/default-3840x2160.png"),
+    Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default.svg"),
 ]
+DEFAULT_WALLPAPER_VARIANTS = (
+    (Path("/usr/share/backgrounds/ming-os/default-1366x768.png"), 1366, 768),
+    (Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"), 1920, 1080),
+    (Path("/usr/share/backgrounds/ming-os/default-3840x2160.png"), 3840, 2160),
+)
 APPEARANCE_PATH = STATE_DIR / "appearance.json"
 
 
 def load_appearance(path=None):
-    defaults = {"theme": "system", "font_family": "Noto Sans", "font_size": 11,
-                "desktop_icon_scale": 1.0, "dock_icon_size": 48, "wallpaper": "default"}
+    defaults = {"version": 2, "theme": "system", "font_family": "Noto Sans CJK SC", "font_size": 11,
+                "desktop_icon_scale": 1.0, "desktop_icon_size": 48, "dock_icon_size": 48,
+                "wallpaper": "default", "motion": "normal", "compositor_profile": "auto"}
     try:
         data = json.loads(Path(path or APPEARANCE_PATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return defaults
+        return COMMON.apply_runtime_shell_profile(defaults)
     if isinstance(data, dict):
         defaults.update({key: data[key] for key in defaults if key in data})
-    return defaults
+        profile = COMMON.shell_visual_profile(defaults)
+        defaults["motion"] = profile["motion"]
+        defaults["compositor_profile"] = profile["compositor_profile"]
+    return COMMON.apply_runtime_shell_profile(defaults)
 
 
-def appearance_wallpaper_paths(appearance, fallbacks=None):
+def choose_cached_wallpaper_variant(variants, width, height):
+    """Return the smallest existing cache that covers the requested display."""
+    try:
+        width, height = max(1, int(width)), max(1, int(height))
+    except (TypeError, ValueError):
+        width, height = 1920, 1080
+    available = []
+    for path, candidate_width, candidate_height in variants:
+        candidate = Path(path)
+        if candidate.is_file():
+            available.append((candidate, int(candidate_width), int(candidate_height)))
+    if not available:
+        return None
+    suitable = [item for item in available if item[1] >= width and item[2] >= height]
+    if suitable:
+        return min(suitable, key=lambda item: item[1] * item[2])[0]
+    return max(available, key=lambda item: item[1] * item[2])[0]
+
+
+def appearance_wallpaper_paths(appearance, fallbacks=None, screen_width=None, screen_height=None):
     """Prefer a validated copied wallpaper and retain built-in fallbacks."""
     fallbacks = list(fallbacks or WALLPAPER_PATHS)
     wallpaper = str((appearance or {}).get("wallpaper", ""))
     named = {
-        "default": Path("/usr/share/backgrounds/ming-os/default.png"),
         "light": Path("/usr/share/backgrounds/ming-os/default-light.png"),
         "dark": Path("/usr/share/backgrounds/ming-os/default-dark.png"),
     }
+    if wallpaper == "default":
+        chosen = choose_cached_wallpaper_variant(
+            DEFAULT_WALLPAPER_VARIANTS,
+            screen_width if screen_width is not None else 1920,
+            screen_height if screen_height is not None else 1080,
+        )
+        default_fallback = Path("/usr/share/backgrounds/ming-os/default.png")
+        preferred = [chosen] if chosen else [default_fallback]
+        return preferred + [path for path in fallbacks if path not in preferred]
     if wallpaper in named:
         return [named[wallpaper]] + [path for path in fallbacks if path != named[wallpaper]]
     candidate = Path(wallpaper).expanduser()
@@ -245,158 +283,58 @@ def scaled_tile_metrics(scale):
 
 def appearance_icon_size(appearance):
     try:
-        return max(24, min(64, int(round(34 * float(appearance.get("desktop_icon_scale", 1.0))))))
+        return max(24, min(64, int(appearance.get("desktop_icon_size", 34))))
     except (AttributeError, TypeError, ValueError):
-        return 34
+        return 48
 
-CSS = b"""
-window.ming-desktop {
-  background-color: #EFF7F2;
-}
-.tile {
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.34);
-  border: 1px solid rgba(255, 255, 255, 0.54);
-  box-shadow: 0 8px 22px rgba(21, 68, 56, 0.08), inset 0 1px 0 rgba(255,255,255,0.58);
-  padding: 7px 6px 6px;
-  color: #1D2421;
-}
-.tile:hover, .tile.dragging {
-  background: rgba(255, 255, 255, 0.60);
-  border-color: rgba(47, 138, 125, 0.24);
-  box-shadow: 0 12px 28px rgba(21, 68, 56, 0.13), inset 0 1px 0 rgba(255,255,255,0.70);
-}
-.folder {
-  background: rgba(232, 248, 242, 0.64);
-  border-color: rgba(47, 138, 125, 0.24);
-}
-.label {
-  color: #1D2421;
-  font-size: 10.5px;
-  font-weight: 700;
-  text-shadow: 0 1px 0 rgba(255,255,255,0.82);
-}
-.folder-title {
-  color: #1D2421;
-  font-size: 18px;
-  font-weight: 700;
-}
-.folder-panel {
-  background: rgba(251, 253, 251, 0.98);
-  border: 1px solid rgba(31, 98, 84, 0.10);
-  border-radius: 12px;
-  padding: 18px;
-}
-.folder-action {
-  border-radius: 9px;
-  padding: 7px 10px;
-}
-.clock-widget {
-  border-radius: 14px;
-  padding: 9px 13px;
-  background: rgba(255, 255, 255, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.70);
-  box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.75);
-}
-.clock-time {
-  font-size: 26px;
-  font-weight: 800;
-  color: #17231F;
-}
-.clock-date {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: #2D695C;
-}
-.clock-subdate {
-  font-size: 10px;
-  font-weight: 700;
-  color: #6A7670;
-}
-.status-widget {
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
-}
-.status-widget-compact {
-  padding: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-.status-compact-pill {
-  min-height: 54px;
-  border-radius: 27px;
-  padding: 8px 14px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
-  color: #17231F;
-}
-.status-compact-pill:hover { background: rgba(255, 255, 255, 0.96); }
-.status-compact-time { font-size: 19px; font-weight: 800; color: #17231F; }
-.status-compact-date { font-size: 10.5px; font-weight: 700; color: #2D695C; }
-.status-compact-arrow { font-size: 15px; font-weight: 800; color: #2F8A7D; }
-.status-button {
-  border-radius: 9px;
-  padding: 4px 7px;
-  background: rgba(255, 255, 255, 0.54);
-  border: 1px solid rgba(47, 138, 125, 0.10);
-  color: #21302A;
-}
-.status-button:hover { background: rgba(255, 255, 255, 0.88); }
-.status-scale trough {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-  border: 0;
-}
-.status-scale highlight {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale fill,
-.status-scale progress {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale trough > highlight,
-.status-scale trough > fill,
-.status-scale trough > progress {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale slider {
-  min-width: 1px;
-  min-height: 1px;
-  margin: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-.status-scale:disabled trough { background: transparent; }
-.status-scale:disabled highlight,
-.status-scale:disabled fill,
-.status-scale:disabled progress { background: rgba(47, 138, 125, 0.34); }
-.status-scale:disabled slider { background: transparent; }
-.notification-panel { padding: 12px; background: #F9FCFA; }
-.notification-title { font-weight: 800; color: #17231F; }
-.notification-body { color: #596760; font-size: 10px; }
-.launch-feedback {
-  border-radius: 14px;
-  padding: 14px 18px;
-  background: rgba(252, 254, 252, 0.94);
-  border: 1px solid rgba(47, 138, 125, 0.16);
-  box-shadow: 0 14px 36px rgba(21, 68, 56, 0.16);
-}
-.launch-title { color: #17231F; font-size: 14px; font-weight: 800; }
-.launch-detail { color: #5B6963; font-size: 10.5px; }
-"""
+def css_for_appearance(appearance):
+    """Render the fixed, low-cost Ming shell surface from one profile."""
+    profile = COMMON.shell_visual_profile(appearance)
+    light = profile["theme"] != "dark"
+    if light and profile["surface_alpha"] < 1:
+        raised = "rgba(255, 255, 255, %.2f)" % profile["surface_alpha"]
+        sunken = "rgba(238, 243, 240, %.2f)" % profile["surface_alpha"]
+    elif not light and profile["surface_alpha"] < 1:
+        raised = "rgba(41, 47, 43, %.2f)" % profile["surface_alpha"]
+        sunken = "rgba(24, 28, 26, %.2f)" % profile["surface_alpha"]
+    else:
+        raised = profile["surface_raised"]
+        sunken = profile["surface_sunken"]
+    shadow = "0 10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
+    font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    return ("""
+window.ming-desktop { background-color: %(base)s; font-family: "%(font)s"; }
+.tile { border-radius: 8px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 7px 6px 6px; color: %(text)s; }
+.tile:hover, .tile.dragging { background: %(sunken)s; border-color: %(accent)s; }
+.folder { background: %(sunken)s; border-color: %(accent)s; }
+.label { color: %(text)s; font-size: 10.5px; font-weight: 700; }
+.folder-title { color: %(text)s; font-size: 18px; font-weight: 700; }
+.folder-panel { background: %(raised)s; border: 1px solid %(border)s; border-radius: 8px; padding: 18px; }
+.folder-action { border-radius: 6px; padding: 7px 10px; }
+.clock-widget, .status-widget, .launch-feedback { border-radius: 8px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; }
+.clock-widget { padding: 9px 13px; }
+.status-widget { padding: 12px 14px; }
+.status-widget-compact { padding: 0; background: transparent; border: 0; box-shadow: none; }
+.status-compact-pill { min-height: 54px; border-radius: 8px; padding: 8px 14px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
+.status-compact-pill:hover, .status-button:hover { background: %(sunken)s; }
+.clock-time, .status-compact-time, .notification-title, .launch-title { color: %(text)s; font-weight: 800; }
+.clock-time { font-size: 26px; }
+.clock-date, .status-compact-date { color: %(accent)s; font-weight: 700; }
+.clock-subdate, .notification-body, .launch-detail { color: %(secondary)s; }
+.status-button { border-radius: 6px; padding: 4px 7px; background: %(raised)s; border: 1px solid %(border)s; color: %(text)s; }
+.status-scale trough { min-height: 7px; border-radius: 4px; background: %(border)s; border: 0; }
+.status-scale highlight, .status-scale fill, .status-scale progress, .status-scale trough > highlight, .status-scale trough > fill, .status-scale trough > progress { min-height: 7px; border-radius: 4px; background: %(accent)s; }
+.status-scale slider { min-width: 12px; min-height: 12px; margin: -3px; background: %(raised)s; border: 1px solid %(accent)s; border-radius: 6px; box-shadow: none; }
+.status-scale:disabled trough { background: %(sunken)s; }
+.status-scale:disabled highlight, .status-scale:disabled fill, .status-scale:disabled progress { background: %(border)s; }
+.status-scale:disabled slider { background: %(sunken)s; border-color: %(border)s; }
+.notification-panel { padding: 12px; background: %(raised)s; }
+""" % {
+        "base": profile["surface_base"], "raised": raised, "sunken": sunken,
+        "border": profile["border_soft"], "text": profile["text_primary"],
+        "secondary": profile["text_secondary"], "accent": profile["accent"], "shadow": shadow,
+        "font": font,
+    }).encode("utf-8")
 
 
 def log(msg):
@@ -1730,19 +1668,15 @@ class StatusWidget(Gtk.Box):
 
         self.compact_button = Gtk.Button()
         self.compact_button.get_style_context().add_class("status-compact-pill")
-        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.compact_time_label = Gtk.Label()
         self.compact_time_label.get_style_context().add_class("status-compact-time")
         compact.pack_start(self.compact_time_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
         self.compact_date_label = Gtk.Label()
         self.compact_date_label.get_style_context().add_class("status-compact-date")
         compact.pack_start(self.compact_date_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
-        self.compact_arrow_label = Gtk.Label(label="展开 ▾")
-        self.compact_arrow_label.get_style_context().add_class("status-compact-arrow")
-        compact.pack_start(self.compact_arrow_label, False, False, 0)
         self.compact_button.add(compact)
+        self.compact_button.set_tooltip_text("展开快捷组件")
         self.compact_button.connect("clicked", lambda _button: self.set_collapsed(False))
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1769,7 +1703,8 @@ class StatusWidget(Gtk.Box):
         self.action_commands[self.wifi_button] = ["ming-control-center", "--page", "network"]
         self.bluetooth_button = self.action_button("蓝牙 --", "ming-control-center")
         self.action_commands[self.bluetooth_button] = ["ming-control-center", "--page", "network"]
-        self.battery_button = self.action_button("电量 --", "xfce4-power-manager-settings")
+        self.battery_button = self.action_button("电量 --", "ming-control-center")
+        self.action_commands[self.battery_button] = ["ming-control-center", "--page", "advanced"]
         self.notification_button = self.action_button("通知", callback=self.open_notifications)
         self.settings_button = self.action_button("设置", "ming-control-center")
         self.action_commands[self.settings_button] = ["ming-control-center", "--page", "advanced"]
@@ -1850,12 +1785,14 @@ class StatusWidget(Gtk.Box):
         self.apply_collapsed_state(animate=True)
 
     def apply_collapsed_state(self, animate=False):
+        timing = COMMON.shell_animation_timing(load_appearance())
         style = self.widget_box.get_style_context()
         if self.collapsed:
             style.add_class("status-widget-compact")
         else:
             style.remove_class("status-widget-compact")
         self.compact_button.set_visible(self.collapsed)
+        self.content_revealer.set_transition_duration(timing["duration_ms"])
         self.content_revealer.set_reveal_child(not self.collapsed)
         target_height = 54 if self.collapsed else 286
         if animate:
@@ -1870,13 +1807,8 @@ class StatusWidget(Gtk.Box):
 
     def animate_collapsed_state(self, target_height):
         """Match the Revealer transition with a bounded outer-card resize."""
-        reduced_motion = False
-        try:
-            settings = Path.home() / ".config/ming-os/settings.json"
-            reduced_motion = bool(json.loads(settings.read_text(encoding="utf-8")).get("reduced_motion"))
-        except (OSError, ValueError, AttributeError):
-            pass
-        if reduced_motion:
+        timing = COMMON.shell_animation_timing(load_appearance())
+        if timing["duration_ms"] == 0:
             self._height_animation = None
             self._display_height = target_height
             self.set_size_request(-1, target_height)
@@ -1896,7 +1828,11 @@ class StatusWidget(Gtk.Box):
             if not animation:
                 self._height_animation_source = 0
                 return False
-            progress = min(1.0, (GLib.get_monotonic_time() - animation["started"]) / 180000.0)
+            progress = min(
+                1.0,
+                (GLib.get_monotonic_time() - animation["started"]) /
+                float(timing["duration_ms"] * 1000),
+            )
             eased = COMMON.ease_out_cubic(progress)
             self._display_height = animation["start"] + (
                 animation["target"] - animation["start"]) * eased
@@ -1911,7 +1847,7 @@ class StatusWidget(Gtk.Box):
             self._height_animation_source = 0
             return False
 
-        self._height_animation_source = GLib.timeout_add(16, step)
+        self._height_animation_source = GLib.timeout_add(timing["interval_ms"], step)
 
     def action_button(self, label, command=None, callback=None):
         button = Gtk.Button()
@@ -2384,14 +2320,19 @@ class StatusWidget(Gtk.Box):
 class WallpaperCanvas(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
-        self.pixbuf = self.load_wallpaper()
+        self.pixbuf = None
+        self._render_cache = None
+        self._render_key = None
+        self.reload()
+        self.connect("size-allocate", self.on_size_allocate)
         self.connect("draw", self.on_draw)
 
     def load_wallpaper(self):
         screen = Gdk.Screen.get_default()
-        width = max(320, screen.get_width()) if screen else 1920
-        height = max(240, screen.get_height()) if screen else 1080
-        for path in appearance_wallpaper_paths(load_appearance()):
+        width = max(320, screen.get_width() if screen else 1920)
+        height = max(240, screen.get_height() if screen else 1080)
+        for path in appearance_wallpaper_paths(
+                load_appearance(), screen_width=width, screen_height=height):
             if path.exists():
                 try:
                     return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
@@ -2399,25 +2340,49 @@ class WallpaperCanvas(Gtk.DrawingArea):
                     pass
         return None
 
+    def reload(self):
+        self.pixbuf = self.load_wallpaper()
+        self._render_cache = None
+        self._render_key = None
+        allocation = self.get_allocation()
+        self.ensure_render_cache(allocation.width, allocation.height)
+
+    def on_size_allocate(self, _widget, allocation):
+        self.ensure_render_cache(allocation.width, allocation.height)
+
+    def ensure_render_cache(self, width, height):
+        width = max(1, int(width))
+        height = max(1, int(height))
+        if not self.pixbuf:
+            self._render_cache = None
+            self._render_key = (width, height, None)
+            return
+        key = (width, height, self.pixbuf.get_width(), self.pixbuf.get_height())
+        if self._render_key == key and self._render_cache is not None:
+            return
+        src_w = self.pixbuf.get_width()
+        src_h = self.pixbuf.get_height()
+        scale = max(width / src_w, height / src_h)
+        draw_w = max(width, int(round(src_w * scale)))
+        draw_h = max(height, int(round(src_h * scale)))
+        scaled = self.pixbuf.scale_simple(draw_w, draw_h, GdkPixbuf.InterpType.BILINEAR)
+        crop_x = max(0, int((draw_w - width) / 2))
+        crop_y = max(0, int((draw_h - height) / 2))
+        self._render_cache = GdkPixbuf.Pixbuf.new_subpixbuf(scaled, crop_x, crop_y, width, height)
+        self._render_key = key
+
     def on_draw(self, widget, cr):
         width = max(1, widget.get_allocated_width())
         height = max(1, widget.get_allocated_height())
-        if not self.pixbuf:
+        self.ensure_render_cache(width, height)
+        if not self._render_cache:
             cr.set_source_rgb(0.937, 0.969, 0.949)
             cr.rectangle(0, 0, width, height)
             cr.fill()
             return False
-        src_w = self.pixbuf.get_width()
-        src_h = self.pixbuf.get_height()
-        scale = max(width / src_w, height / src_h)
-        draw_w = int(src_w * scale)
-        draw_h = int(src_h * scale)
-        scaled = self.pixbuf.scale_simple(draw_w, draw_h, GdkPixbuf.InterpType.BILINEAR)
-        x = int((width - draw_w) / 2)
-        y = int((height - draw_h) / 2)
-        Gdk.cairo_set_source_pixbuf(cr, scaled, x, y)
+        Gdk.cairo_set_source_pixbuf(cr, self._render_cache, 0, 0)
         cr.paint()
-        cr.set_source_rgba(1, 1, 1, 0.10)
+        cr.set_source_rgba(1, 1, 1, 0.04)
         cr.rectangle(0, 0, width, height)
         cr.fill()
         return False
@@ -2464,9 +2429,10 @@ class PhoneDesktop(Gtk.Window):
         self.connect("button-release-event", self.on_window_button_release)
         self.connect("touch-event", self.on_window_touch)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
+        self.appearance = load_appearance()
+        self.css_provider = Gtk.CssProvider()
+        self.apply_shell_css()
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css_provider, 700)
 
         self.wallpaper = WallpaperCanvas()
         self.fixed = Gtk.Fixed()
@@ -2505,7 +2471,6 @@ class PhoneDesktop(Gtk.Window):
         self.connect("map-event", lambda *_args: self.enforce_desktop_layer())
         self.connect("size-allocate", lambda *_args: self.place_overlays())
         self.layout = sync_layout(screen_w)
-        self.appearance = load_appearance()
         old_scale = self.layout.get("desktop_icon_scale", self.appearance["desktop_icon_scale"])
         if old_scale != self.appearance["desktop_icon_scale"]:
             self.layout = reflow_layout_for_icon_scale(
@@ -2529,6 +2494,9 @@ class PhoneDesktop(Gtk.Window):
             except Exception:
                 pass
         return 0, 0
+
+    def apply_shell_css(self):
+        self.css_provider.load_from_data(css_for_appearance(self.appearance))
 
     def mark_ready(self):
         try:
@@ -2636,13 +2604,16 @@ class PhoneDesktop(Gtk.Window):
                 continue
             x, y = self.item_position(item)
             tile_w, tile_h = scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))
-            self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 12)
+            profile = COMMON.shell_visual_profile(self.appearance)
+            self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 8)
             if is_folder:
-                cr.set_source_rgba(0.91, 0.97, 0.95, 0.68)
+                cr.set_source_rgba(0.91, 0.97, 0.95, profile["surface_alpha"])
+            elif profile["theme"] == "dark":
+                cr.set_source_rgba(0.16, 0.18, 0.17, profile["surface_alpha"])
             else:
-                cr.set_source_rgba(1, 1, 1, 0.48)
+                cr.set_source_rgba(1, 1, 1, profile["surface_alpha"])
             cr.fill_preserve()
-            cr.set_source_rgba(0.18, 0.54, 0.49, 0.26 if is_folder else 0.18)
+            cr.set_source_rgba(0.14, 0.53, 0.45, 0.70)
             cr.set_line_width(1)
             cr.stroke()
             icon_name = "folder" if is_folder else (item.get("icon") or "application-x-executable")
@@ -2661,8 +2632,12 @@ class PhoneDesktop(Gtk.Window):
             layout.set_alignment(Pango.Alignment.CENTER)
             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
             layout.set_ellipsize(Pango.EllipsizeMode.END)
-            layout.set_font_description(Pango.FontDescription("Sans Bold 10"))
-            cr.set_source_rgba(0.11, 0.15, 0.13, 0.96)
+            font_name = str(self.appearance.get("font_family", "Noto Sans CJK SC")).replace('"', "")
+            layout.set_font_description(Pango.FontDescription("%s Bold 10" % font_name))
+            if profile["theme"] == "dark":
+                cr.set_source_rgba(0.95, 0.97, 0.96, 1.0)
+            else:
+                cr.set_source_rgba(0.09, 0.13, 0.11, 1.0)
             cr.move_to(x + int((tile_w - LABEL_W) / 2), y + 49)
             PangoCairo.show_layout(cr, layout)
 
@@ -2957,10 +2932,13 @@ class PhoneDesktop(Gtk.Window):
 
     @staticmethod
     def current_appearance_stamp():
-        try:
-            return APPEARANCE_PATH.stat().st_mtime_ns
-        except OSError:
-            return 0
+        stamps = []
+        for path in (APPEARANCE_PATH, COMMON.shell_runtime_profile_path()):
+            try:
+                stamps.append(path.stat().st_mtime_ns)
+            except OSError:
+                stamps.append(0)
+        return tuple(stamps)
 
     def refresh_if_apps_changed(self):
         stamp = self.current_layout_stamp()
@@ -2982,7 +2960,8 @@ class PhoneDesktop(Gtk.Window):
                 save_layout(self.layout)
             self.appearance = updated_appearance
             self.appearance_stamp = appearance_stamp
-            self.wallpaper.pixbuf = self.wallpaper.load_wallpaper()
+            self.apply_shell_css()
+            self.wallpaper.reload()
             self.wallpaper.queue_draw()
             self.render()
         if catalog_changed:

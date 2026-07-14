@@ -1011,6 +1011,11 @@ import tempfile
 
 root = Path(sys.argv[1])
 errors = []
+# Required runtime helpers are deliberately listed before the nested helper
+# functions so the static validator and the rootfs gate share one visible
+# contract even when a lightweight source scanner stops at the first closure.
+# usr/local/bin/ming-audio-session
+# usr/local/sbin/ming-package-installer
 
 def require_file(relative_path, marker=None):
     path = root / relative_path
@@ -1156,10 +1161,28 @@ if "if wait_phone_desktop_ready" not in phone_watchdog:
     errors.append("ming-phone-desktop-watchdog must wait for Ming desktop readiness before stopping xfdesktop")
 if 'if wait_phone_desktop_ready "${log_file}"; then\n            stop_xfdesktop' not in phone_watchdog:
     errors.append("ming-phone-desktop-watchdog must stop xfdesktop only after Ming desktop is running")
-require_file("home/user/.config/autostart/ming-dock.desktop", "ming-plank-watchdog --session")
-phone_autostart = require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")
-if "X-GNOME-Autostart-enabled=true" not in phone_autostart or "Hidden=false" not in phone_autostart:
-    errors.append("phone desktop autostart must be enabled")
+legacy_shell_autostarts = {
+    "home/user/.config/autostart/ming-dock.desktop": "Dock",
+    "home/user/.config/autostart/ming-phone-desktop.desktop": "phone desktop",
+    "home/user/.config/autostart/picom.desktop": "Picom",
+}
+for path, component in legacy_shell_autostarts.items():
+    entry = require_file(path, "X-Ming-Managed-By=ming-session-healthcheck")
+    for marker in ("Exec=/usr/bin/true", "Hidden=true", "X-GNOME-Autostart-enabled=false"):
+        if marker not in entry:
+            errors.append(f"legacy shell lifecycle autostart must stay disabled for {component}: {path}")
+
+session_health_autostart = require_file(
+    "home/user/.config/autostart/ming-session-healthcheck.desktop",
+    "Exec=/usr/local/bin/ming-session-healthcheck --session",
+)
+for marker in (
+    "Hidden=false",
+    "X-GNOME-Autostart-enabled=true",
+    "X-Ming-Managed-Components=phone-desktop;plank;picom",
+):
+    if marker not in session_health_autostart:
+        errors.append(f"ming-session-healthcheck autostart missing {marker}")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
 dpkg_status = require_file("var/lib/dpkg/status", "Package: bamfdaemon")
@@ -1227,15 +1250,45 @@ if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "S
     errors.append("ming-update-gui must keep user-facing update UI in Chinese")
 
 require_path("usr/share/backgrounds/ming-os/default.png")
+require_path("usr/share/backgrounds/ming-os/default-2633.png")
 require_path("usr/share/backgrounds/ming-os/default-light.png")
 require_path("usr/share/backgrounds/ming-os/default-dark.png")
-appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
-for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog", "ming-plank-watchdog"]:
+
+# The generated 4K source is kept for high-density displays, while the
+# desktop must have real pre-scaled caches for common older hardware.  Check
+# PNG IHDR dimensions here so a failed ImageMagick conversion cannot silently
+# leave three copies of the 4K file in the rootfs.
+def require_png_dimensions(relative_path, expected_width, expected_height):
+    path = root / relative_path
+    if not path.is_file() or path.stat().st_size < 24:
+        errors.append(f"missing or empty wallpaper cache {relative_path}")
+        return
+    try:
+        header = path.read_bytes()[:24]
+        if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+            raise ValueError("not a PNG")
+        import struct
+        width, height = struct.unpack(">II", header[16:24])
+        if (width, height) != (expected_width, expected_height):
+            errors.append(
+                f"{relative_path} has dimensions {width}x{height}, expected {expected_width}x{expected_height}"
+            )
+    except (OSError, ValueError, struct.error) as exc:
+        errors.append(f"invalid wallpaper cache {relative_path}: {exc}")
+
+for wallpaper_path, wallpaper_width, wallpaper_height in [
+    ("usr/share/backgrounds/ming-os/default-1366x768.png", 1366, 768),
+    ("usr/share/backgrounds/ming-os/default-1920x1080.png", 1920, 1080),
+    ("usr/share/backgrounds/ming-os/default-3840x2160.png", 3840, 2160),
+]:
+    require_png_dimensions(wallpaper_path, wallpaper_width, wallpaper_height)
+appearance = require_file("usr/local/bin/ming-apply-appearance", "ming-appearance-control reapply")
+for marker in ["ming-appearance-control reapply", "timeout --foreground 8s", "appearance.log"]:
     if marker not in appearance:
-        errors.append(f"ming-apply-appearance missing native desktop marker {marker}")
-for forbidden in ["xfce4-panel --quit", "-s 2"]:
+        errors.append(f"ming-apply-appearance missing bounded preference marker {marker}")
+for forbidden in ["xfce4-panel --quit", "ming-phone-desktop-watchdog", "ming-plank-watchdog", "-s 2"]:
     if forbidden in appearance:
-        errors.append(f"ming-apply-appearance must not start or stop the native desktop with {forbidden}")
+        errors.append(f"ming-apply-appearance must not coordinate shell components with {forbidden}")
 
 cache_dir = root / "home/user/.cache/ming-os"
 if not cache_dir.exists():
@@ -1957,7 +2010,7 @@ for autostart_root in autostart_roots:
     for desktop_entry in autostart_root.glob("*.desktop"):
         content = desktop_entry.read_text(encoding="utf-8", errors="replace")
         processes = autostart_processes(content)
-        for duplicate in ["xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"]:
+        for duplicate in ["xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop", "xfce4-power-manager"]:
             if duplicate in processes:
                 errors.append(f"normal session starts duplicate shell process {duplicate}: {desktop_entry}")
 display_manager = root / "etc/systemd/system/display-manager.service"

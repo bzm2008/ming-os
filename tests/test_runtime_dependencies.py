@@ -19,6 +19,11 @@ def control_center_wrapper_source():
     )[1].split("MINGCONTROLWRAPPER", 1)[0]
 
 
+def generated_script_source(path, marker):
+    start = "cat > %s << '%s'" % (path, marker)
+    return DESKTOP.split(start, 1)[1].split(marker, 1)[0]
+
+
 REQUIRED_PACKAGES = [
     "python3-gi",
     "gir1.2-gtk-4.0",
@@ -137,7 +142,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
     def test_every_required_install_function_propagates_mandatory_command_failures(self):
         expected_guards = {
             "install_xfce_desktop": (
-                "xfce4-power-manager || return 1",
+                "desktop-base || return 1",
                 "imagemagick || return 1",
                 "plymouth-themes || return 1",
             ),
@@ -248,6 +253,36 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "exec /usr/local/bin/ming-settings",
         ):
             self.assertIn(marker, wrapper)
+
+    def test_control_center_is_not_overwritten_after_the_gtk4_wrapper_is_installed(self):
+        self.assertEqual(
+            1,
+            DESKTOP.count("cat > /usr/local/bin/ming-control-center <<"),
+            "a legacy control center must not replace the Ming Settings wrapper",
+        )
+        self.assertNotIn("nm-connection-editor", DESKTOP)
+
+    def test_status_center_network_action_uses_ming_settings_and_reports_launch_errors(self):
+        status = generated_script_source(
+            "/usr/local/bin/ming-status-center", "STATUSCENTER"
+        )
+        self.assertIn(
+            "('连接网络', 'network-wireless', ['ming-control-center', '--page', 'network'])",
+            status,
+        )
+        self.assertIn("def launch_action", status)
+        self.assertIn("无法打开", status)
+        self.assertNotIn("nm-connection-editor", status)
+        self.assertNotIn("subprocess.Popen(command, shell=True)", status)
+
+    def test_welcome_network_button_uses_ming_settings_without_silent_failure(self):
+        welcome = generated_script_source("/usr/local/bin/ming-welcome", "WELCOMEPY")
+        self.assertIn(
+            "subprocess.Popen(['ming-control-center', '--page', 'network']",
+            welcome,
+        )
+        self.assertIn("无法打开网络设置", welcome)
+        self.assertNotIn("nm-connection-editor", welcome)
 
 
 if __name__ == "__main__":

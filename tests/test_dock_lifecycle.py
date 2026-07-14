@@ -241,6 +241,8 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_compositor_profile_controls_wrapper_and_crash_recovery(self):
         self.assertIn("compositor_profile", self.session_healthcheck)
+        self.assertIn("appearance.json", self.session_healthcheck)
+        self.assertIn("auto|compat|off", self.session_healthcheck)
         self.assertIn("picom-fallback.conf", self.session_healthcheck)
         self.assertIn("compositor_profile", self.source.split(
             "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("MINGPICOM", 1)[0])
@@ -249,7 +251,7 @@ class DockLifecycleContracts(unittest.TestCase):
         wrapper = self.source.split(
             "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
         harness = r'''work="$(mktemp -d)"
-printf '{"compositor_profile":"software"}' >"${work}/settings.json"
+printf '{"compositor_profile":"compat"}' >"${work}/settings.json"
 for name in main fallback lowmem; do printf 'backend = "xrender";\n' >"${work}/${name}.conf"; done
 cat >"${work}/fake-picom" <<'EOF'
 #!/usr/bin/env bash
@@ -267,6 +269,14 @@ export MING_PICOM_BIN="${work}/fake-picom"
         output = result.stdout.decode(errors="replace")
         self.assertIn("--config ", output)
         self.assertIn("fallback.conf", output)
+
+    def test_compat_picom_config_keeps_shell_surfaces_fully_opaque(self):
+        fallback = self.source.split(
+            "cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'", 1
+        )[1].split("PICOMFALLBACK", 1)[0]
+        self.assertIn("dock = { shadow = false; opacity = 1.0; };", fallback)
+        self.assertIn("notification = { shadow = false; opacity = 1.0; };", fallback)
+        self.assertIn("detect-client-opacity = false;", fallback)
 
     def test_picom_wrapper_does_not_start_when_persisted_off(self):
         wrapper = self.source.split(

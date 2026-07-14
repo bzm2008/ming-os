@@ -587,17 +587,20 @@ MINGSCALE
 
     chmod +x /usr/local/bin/ming-scale
 
-    # 创建自启动项
+    # Do not auto-run this legacy scaler.  26.3.3 stores user-selected font,
+    # desktop icon and Dock sizes in appearance.json; automatic Xfce/Plank
+    # writes would overwrite those choices after every login.
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-scale.desktop" << SCALEAUTOSTART
 [Desktop Entry]
 Type=Application
-Name=Ming Display Scale
-Comment=Auto-configure display scaling
-Exec=/usr/local/bin/ming-scale
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
+Name=Ming Legacy Display Scale Migration
+Comment=Disabled: appearance.json owns user display preferences
+Exec=/usr/bin/true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-appearance-control
 SCALEAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-scale.desktop"
 }
@@ -1114,20 +1117,22 @@ label selection,
 }
 
 button.suggested-action {
-    background-image: linear-gradient(to bottom, #31C476, #147D74);
+    background-image: none;
+    background-color: #238673;
     border-color: #00453E;
     color: #ffffff;
 }
 button.suggested-action:hover {
-    background-image: linear-gradient(to bottom, #3DD486, #1A9088);
+    background-image: none;
+    background-color: #1D705F;
 }
 
 /* macOS 风格圆角窗口边框 */
 window decoration {
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
 }
 headerbar {
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
 }
 MINGGTKCSS
 
@@ -1168,10 +1173,10 @@ GTK2SETTINGS
     mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0
     cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'
 @define-color theme_bg_color #F7F9F6;
-@define-color theme_fg_color #1D2421;
-@define-color theme_selected_bg_color #2FAE8F;
+@define-color theme_fg_color #17201C;
+@define-color theme_selected_bg_color #238673;
 @define-color theme_selected_fg_color #ffffff;
-@define-color borders rgba(31, 98, 84, 0.12);
+@define-color borders #D8E2DD;
 @define-color theme_base_color #FFFFFF;
 @define-color theme_text_color #1D2421;
 @define-color insensitive_bg_color #EEF3F0;
@@ -1186,30 +1191,28 @@ GTK2SETTINGS
 window {
   background-color: @theme_bg_color;
   color: @theme_fg_color;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 window decoration {
-  border-radius: 12px;
-  box-shadow: 0 12px 28px rgba(26, 67, 56, 0.09);
+  border-radius: 8px;
+  box-shadow: 0 12px 18px rgba(23, 32, 28, 0.12);
   margin: 0;
 }
 
 button {
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 7px 15px;
   border: 1px solid @borders;
   background-image: none;
-  background-color: rgba(255, 255, 255, 0.90);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
-  transition: background-color 160ms ease-out, border-color 160ms ease-out, box-shadow 180ms ease-out;
   min-height: 30px;
 }
 
 button:hover {
   background-color: #FFFFFF;
-  border-color: rgba(47, 138, 125, 0.24);
-  box-shadow: 0 4px 12px rgba(30, 70, 58, 0.06);
+  border-color: #9FC8BC;
 }
 
 button:active {
@@ -1224,7 +1227,7 @@ button:disabled {
 button.suggested-action {
   background-image: none;
   background-color: #2F8A7D;
-  border-color: rgba(24, 103, 89, 0.24);
+  border-color: #186759;
   color: #FFFFFF;
 }
 
@@ -1235,33 +1238,32 @@ button.suggested-action:hover {
 
 button.destructive-action {
   color: #A64653;
-  border-color: rgba(166, 70, 83, 0.20);
-  background-color: rgba(255, 249, 249, 0.94);
+  border-color: #E4B7BE;
+  background-color: #FFF9F9;
 }
 
 entry {
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 7px 12px;
   border: 1px solid @borders;
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   min-height: 30px;
 }
 
 entry:focus {
   border-color: #2F8A7D;
-  box-shadow: 0 0 0 2px rgba(47, 138, 125, 0.10);
 }
 
 notebook header {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   border: none;
 }
 
 notebook tab {
-  border-radius: 10px 10px 0 0;
+  border-radius: 6px 6px 0 0;
   padding: 7px 16px;
-  background-color: rgba(238, 243, 240, 0.92);
+  background-color: #EEF3F0;
   color: @unfocused_fg_color;
   border: 1px solid transparent;
   border-bottom: none;
@@ -1276,29 +1278,29 @@ notebook tab:checked {
 
 scrollbar slider {
   border-radius: 6px;
-  background-color: rgba(71, 111, 98, 0.28);
+  background-color: #B7C7C0;
   min-width: 8px;
   min-height: 24px;
 }
 
 scrollbar slider:hover {
-  background-color: rgba(47, 138, 125, 0.34);
+  background-color: #8EB8AA;
 }
 
 tooltip {
-  border-radius: 10px;
-  background-color: rgba(28, 39, 35, 0.94);
+  border-radius: 6px;
+  background-color: #202522;
   color: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid #47514C;
   padding: 7px 11px;
 }
 
 menu, .menu {
-  background-color: rgba(255, 255, 255, 0.96);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 4px;
-  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.07);
+  box-shadow: 0 10px 18px rgba(23, 32, 28, 0.12);
 }
 
 menuitem {
@@ -1309,29 +1311,29 @@ menuitem {
 }
 
 menuitem:hover {
-  background-color: rgba(47, 138, 125, 0.08);
+  background-color: #E8F2EE;
 }
 
 headerbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
-  border-bottom: 1px solid rgba(47, 138, 125, 0.08);
-  border-radius: 12px 12px 0 0;
+  border-bottom: 1px solid #D8E2DD;
+  border-radius: 8px 8px 0 0;
   padding: 5px 10px;
   min-height: 38px;
 }
 
 toolbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
 }
 
 .separator {
-  color: rgba(47, 138, 125, 0.10);
+  color: #E1E9E5;
 }
 
 switch {
-  border-radius: 17px;
+  border-radius: 8px;
   background-color: #DEE7E4;
   border: 1px solid @borders;
 }
@@ -1351,13 +1353,13 @@ scale slider {
 
 scale trough {
   border-radius: 4px;
-  background-color: rgba(47, 138, 125, 0.08);
+  background-color: #E5EEEA;
   min-height: 6px;
 }
 
 progressbar trough {
   border-radius: 6px;
-  background-color: rgba(47, 138, 125, 0.07);
+  background-color: #E5EEEA;
   min-height: 8px;
 }
 
@@ -1368,7 +1370,7 @@ progressbar progress {
 
 checkbutton check, radiobutton radio {
   border-radius: 5px;
-  background-color: rgba(255, 255, 255, 0.94);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
   min-width: 18px;
   min-height: 18px;
@@ -1380,18 +1382,18 @@ checkbutton check:checked, radiobutton radio:checked {
 }
 
 .view, iconview {
-  background-color: rgba(255, 255, 255, 0.80);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .view:selected, iconview:selected {
-  background-color: rgba(47, 138, 125, 0.12);
+  background-color: #E1F0EA;
   color: @theme_selected_fg_color;
 }
 
 treeview header button {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   color: @theme_fg_color;
   border: none;
   border-bottom: 1px solid @borders;
@@ -1403,14 +1405,14 @@ placessidebar,
 .sidebar,
 paned > box,
 stacksidebar {
-  background-color: rgba(238, 243, 240, 0.92);
-  border-right: 1px solid rgba(47, 138, 125, 0.10);
+  background-color: #EEF3F0;
+  border-right: 1px solid #D8E2DD;
 }
 
 placessidebar row,
 .sidebar row,
 stacksidebar row {
-  border-radius: 10px;
+  border-radius: 6px;
   margin: 2px 6px;
   padding: 6px 9px;
 }
@@ -1418,20 +1420,20 @@ stacksidebar row {
 placessidebar row:selected,
 .sidebar row:selected,
 stacksidebar row:selected {
-  background-color: rgba(47, 138, 125, 0.12);
+  background-color: #E1F0EA;
   color: #1D2421;
 }
 
 .titlebar,
 decoration {
-  border-radius: 12px 12px 0 0;
+  border-radius: 8px 8px 0 0;
 }
 
 .whiskermenu-window,
 #whiskermenu-window {
-  background-color: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(31, 98, 84, 0.14);
-  border-radius: 14px;
+  background-color: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
 }
 
 spinbutton entry {
@@ -1444,11 +1446,11 @@ spinbutton button {
 }
 
 .xfce4-panel {
-  background-color: rgba(255, 255, 255, 0.74);
-  border: 1px solid rgba(31, 98, 84, 0.10);
-  border-radius: 14px;
+  background-color: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   margin: 6px 8px 4px 8px;
-  box-shadow: 0 8px 22px rgba(30, 70, 58, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.60);
+  box-shadow: 0 10px 18px rgba(30, 70, 58, 0.10), inset 0 1px 0 #FFFFFF;
   padding: 2px 6px;
 }
 
@@ -1464,13 +1466,13 @@ spinbutton button {
 }
 
 .xfce4-panel button:hover {
-  background-color: rgba(47, 138, 125, 0.11);
-  border-color: rgba(47, 138, 125, 0.24);
+  background-color: #E8F2EE;
+  border-color: #9FC8BC;
 }
 
 .xfce4-panel button:checked {
-  background-color: rgba(47, 138, 125, 0.17);
-  border-color: rgba(47, 138, 125, 0.32);
+  background-color: #D8ECE4;
+  border-color: #7DAE9F;
 }
 MINGGLASSCSS
 
@@ -1513,16 +1515,45 @@ setup_wallpaper() {
     local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
     local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
     local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
+    local asset_2633="/tmp/ming-build/assets/wallpaper-ming-2633-abstract.png"
     local asset_png="/tmp/ming-build/assets/wallpaper-default.png"
+
+    # The release wallpaper is a versioned product asset, not an optional
+    # decoration.  Failing here prevents a build from silently falling back to
+    # an older image when the generated bitmap was forgotten at commit time.
+    if [[ ! -s "${asset_2633}" ]]; then
+        echo "[03_desktop][ERROR] missing required 26.3.3 default wallpaper: ${asset_2633}" >&2
+        return 1
+    fi
+
+    render_wallpaper_variant() {
+        local source="$1" destination="$2" dimensions="$3"
+        if command -v convert &>/dev/null; then
+            convert "${source}" \
+                -resize "${dimensions}^" \
+                -gravity center \
+                -extent "${dimensions}" \
+                "${destination}" 2>/dev/null || cp "${source}" "${destination}"
+        else
+            cp "${source}" "${destination}"
+        fi
+    }
 
     # 浅色壁纸
     [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 默认壁纸：优先 Ming 浅色纸感壁纸，风景壁纸保留为可选资产。
+    # 26.3.3's generated abstract asset takes precedence once staged.  The
+    # older images remain selectable fallbacks for an interrupted asset build.
     local primary=""
-    if [[ -f "${asset_light}" ]]; then
+    if [[ -f "${asset_2633}" ]]; then
+        primary="${asset_2633}"
+        cp "${asset_2633}" /usr/share/backgrounds/ming-os/default-2633.png
+        cp "${asset_2633}" /usr/share/backgrounds/ming-os/default.png
+        [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
+        [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
+    elif [[ -f "${asset_light}" ]]; then
         primary="${asset_light}"
         cp "${asset_light}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
@@ -1541,16 +1572,14 @@ setup_wallpaper() {
 
     if [[ -n "${primary}" ]]; then
         cp "${primary}" /usr/share/backgrounds/ming-os/default.png
-        if command -v convert &>/dev/null; then
-            convert /usr/share/backgrounds/ming-os/default.png \
-                -resize 1366x768^ \
-                -gravity center \
-                -extent 1366x768 \
-                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || \
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        else
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        fi
+        # Keep the generated 4K source untouched and derive smaller files once
+        # during staging.  The desktop chooses one cache instead of scaling the
+        # original asset on every low-resolution session.
+        cp "${primary}" /usr/share/backgrounds/ming-os/default-3840x2160.png
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1920x1080.png 1920x1080
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1366x768.png 1366x768
     fi
 
     cat > /usr/share/backgrounds/ming-os/default.svg << 'WALLPAPERSVG'
@@ -1579,8 +1608,6 @@ setup_wallpaper() {
   <path d="M0 846 C338 720 548 856 842 744 C1088 650 1304 726 1548 590 C1708 500 1810 520 1920 466 L1920 1080 L0 1080Z" fill="#FFFFFF" opacity="0.34"/>
   <circle cx="450" cy="320" r="210" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
   <circle cx="450" cy="320" r="138" fill="none" stroke="#1E7F70" stroke-width="2" opacity="0.08"/>
-  <text x="124" y="172" font-family="sans-serif" font-size="54" font-weight="700" fill="#1D2421">Ming OS</text>
-  <text x="128" y="218" font-family="sans-serif" font-size="22" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG
 
@@ -1598,8 +1625,6 @@ WALLPAPERSVG
   <path d="M0 520 C190 448 286 548 456 472 C626 394 750 432 906 370 C1080 302 1196 350 1366 286 L1366 768 L0 768Z" fill="#2FAE8F" opacity="0.17"/>
   <path d="M0 612 C238 512 392 618 596 536 C784 462 936 522 1112 424 C1226 362 1286 378 1366 336 L1366 768 L0 768Z" fill="#FFFFFF" opacity="0.34"/>
   <circle cx="320" cy="228" r="148" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
-  <text x="86" y="126" font-family="sans-serif" font-size="42" font-weight="700" fill="#1D2421">Ming OS</text>
-  <text x="88" y="164" font-family="sans-serif" font-size="18" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG1366
 
@@ -1624,7 +1649,14 @@ WALLPAPERSVG1366
     fi
 
     [[ -f /usr/share/backgrounds/ming-os/default.png ]] || cp /usr/share/backgrounds/ming-os/default.svg /usr/share/backgrounds/ming-os/default.png
-    [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
+    [[ -f /usr/share/backgrounds/ming-os/default-3840x2160.png ]] || \
+        cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-3840x2160.png
+    [[ -f /usr/share/backgrounds/ming-os/default-1920x1080.png ]] || \
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1920x1080.png 1920x1080
+    [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || \
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1366x768.png 1366x768
     [[ -s /usr/share/backgrounds/ming-os/default-light.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-light.png
     [[ -s /usr/share/backgrounds/ming-os/default-dark.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-dark.png
 
@@ -1690,7 +1722,7 @@ DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.d
 Position=3
 #对齐: 3=居中
 Alignment=3
-#图标大小（ming-scale 会按分辨率覆盖）
+#图标大小（由 appearance.json 保持用户选择）
 IconSize=40
 #悬停放大开关
 ZoomEnabled=true
@@ -1908,14 +1940,14 @@ window#ming-dock-window {
   background: transparent;
 }
 .dock {
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 18px 42px rgba(21, 68, 56, 0.18), inset 0 1px 0 rgba(255,255,255,0.82);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #FFFFFF;
+  box-shadow: 0 10px 18px rgba(21, 68, 56, 0.14), inset 0 1px 0 #FFFFFF;
 }
 .dock-button {
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 5px;
   background: rgba(255, 255, 255, 0.22);
   border: 1px solid transparent;
@@ -3877,14 +3909,29 @@ picom_running() {
 }
 
 compositor_profile() {
+    local appearance="${HOME}/.config/ming-os/appearance.json"
     local settings="${HOME}/.config/ming-os/settings.json"
-    local profile=""
-    profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" 2>/dev/null | head -n1)"
-    case "${profile}" in auto|software|off) printf '%s\n' "${profile}" ;; *) printf 'auto\n' ;; esac
+    local profile="" settings_profile=""
+    profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${appearance}" 2>/dev/null | head -n1)"
+    settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" 2>/dev/null | head -n1)"
+    # An existing 26.3.2 software preference wins over a newly created
+    # appearance file that still contains only the default auto profile.
+    if [[ "${profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software ) ]]; then
+        profile="${settings_profile}"
+    fi
+    [[ -n "${profile}" ]] || profile="${settings_profile}"
+    [[ "${profile}" == software ]] && profile=compat
+    case "${profile}" in auto|compat|off) printf '%s\n' "${profile}" ;; *) printf 'auto\n' ;; esac
 }
 
 compositor_enabled() {
     [[ "$(compositor_profile)" != off ]]
+}
+
+runtime_profile_request() {
+    local runtime_profile="${log_dir}/shell-visual.json"
+    sed -n 's/.*"requested_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "${runtime_profile}" 2>/dev/null | head -n1
 }
 
 wait_for_process() {
@@ -4001,8 +4048,19 @@ start_picom() {
     fi
     local started_at finished_at deadline_at
     if picom_running; then
-        picom_recovered=true
-        return 0
+        local requested runtime_requested
+        requested="$(compositor_profile)"
+        runtime_requested="$(runtime_profile_request)"
+        if [[ "${runtime_requested}" == "${requested}" ]]; then
+            picom_recovered=true
+            return 0
+        fi
+        log "restarting Picom after compositor profile change ${runtime_requested:-unknown}->${requested}"
+        pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
+        for _wait in $(seq 1 10); do
+            picom_running || break
+            sleep 0.1
+        done
     fi
     picom_restarts=$((picom_restarts + 1))
     started_at="$(now_ms)"
@@ -4143,9 +4201,10 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    # Establish the effective renderer before Ming Shell draws its first frame.
+    start_picom || log 'Picom is not healthy after startup deadline'
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
-    start_picom || log 'Picom is not healthy after startup deadline'
     ensure_audio_session
     write_metrics startup "${phone_fallback}"
     log 'session startup check complete'
@@ -4154,11 +4213,11 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    start_picom || log 'Picom repair did not recover a compositor'
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
     start_plank_dock || log 'Plank Dock repair did not recover a visible window'
-    start_picom || log 'Picom repair did not recover a compositor'
     ensure_audio_session
     write_metrics supervisor "${phone_fallback}"
     log 'session supervisor check complete'
@@ -4268,7 +4327,7 @@ import sys
 CSS = b'''
 window { background: #F7F9F6; }
 .root {
-  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 58%, #E5EFE9);
+  background: #F7FAF8;
   color: #1C2320;
 }
 .title { font-size: 24px; font-weight: 800; color: #1C2320; }
@@ -4276,29 +4335,23 @@ window { background: #F7F9F6; }
 .time { font-size: 34px; font-weight: 800; color: #1C2320; }
 .date { font-size: 12px; color: #5C6963; }
 .tile {
-  background: rgba(255,255,255,0.78);
-  border: 1px solid rgba(31,98,84,0.09);
-  border-radius: 12px;
+  background: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   padding: 12px;
   color: #1C2320;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,138,125,0.22);
+  background: #FFFFFF;
+  border-color: #9FC8BC;
   box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .tile label { color: #1C2320; font-weight: 700; }
 .danger {
-  background: rgba(255,247,247,0.90);
-  border-color: rgba(178,59,72,0.28);
+  background: #FFF7F7;
+  border-color: #E4B7BE;
 }
 '''
-
-def run(command):
-    try:
-        subprocess.Popen(command, shell=True)
-    except Exception:
-        pass
 
 def text(command, fallback='--'):
     try:
@@ -4360,14 +4413,14 @@ class StatusCenter(Gtk.ApplicationWindow):
         root.pack_start(grid, True, True, 0)
 
         actions = [
-            ('连接网络', 'network-wireless', 'nm-connection-editor'),
-            ('声音', 'multimedia-volume-control', 'pavucontrol'),
-            ('电源', 'battery', 'xfce4-power-manager-settings'),
-            ('显示', 'video-display', 'ming-control-center --page display'),
-            ('设置', 'ming-control-center', 'ming-control-center'),
-            ('应用库', 'ming-app-library', 'ming-app-library'),
-            ('锁屏', 'system-lock-screen', 'ming-lock'),
-            ('退出/关机', 'system-shutdown', 'xfce4-session-logout'),
+            ('连接网络', 'network-wireless', ['ming-control-center', '--page', 'network']),
+            ('声音', 'multimedia-volume-control', ['pavucontrol']),
+            ('电源', 'battery', ['ming-control-center', '--page', 'advanced']),
+            ('显示', 'video-display', ['ming-control-center', '--page', 'display']),
+            ('设置', 'ming-control-center', ['ming-control-center']),
+            ('应用库', 'ming-app-library', ['ming-app-library']),
+            ('锁屏', 'system-lock-screen', ['ming-lock']),
+            ('退出/关机', 'system-shutdown', ['xfce4-session-logout']),
         ]
         for index, (label, icon, command) in enumerate(actions):
             button = self.tile(label, icon, command, danger=(label == '退出/关机'))
@@ -4382,7 +4435,7 @@ class StatusCenter(Gtk.ApplicationWindow):
         button.get_style_context().add_class('tile')
         if danger:
             button.get_style_context().add_class('danger')
-        button.connect('clicked', lambda _button: run(command))
+        button.connect('clicked', lambda _button: self.launch_action(label, command))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_valign(Gtk.Align.CENTER)
         image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
@@ -4393,6 +4446,12 @@ class StatusCenter(Gtk.ApplicationWindow):
         box.pack_start(text_label, False, False, 0)
         button.add(box)
         return button
+
+    def launch_action(self, label, command):
+        try:
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError):
+            self.summary.set_text('无法打开%s。请从 Ming 设置中重试。' % label)
 
     def refresh(self):
         now = datetime.datetime.now()
@@ -4430,39 +4489,39 @@ APP_DIRS = ['/usr/share/applications', os.path.expanduser('~/.local/share/applic
 CSS = b'''
 window { background: #F7F9F6; }
 .root {
-  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 52%, #E5EFE9);
+  background: #F7FAF8;
   color: #1C2320;
 }
 .title { font-size: 26px; font-weight: 800; color: #1C2320; }
 .subtitle { font-size: 12px; color: #5C6963; }
 .search {
   min-height: 42px;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.82);
+  border-radius: 6px;
+  background: #FFFFFF;
   color: #1C2320;
-  border: 1px solid rgba(31,98,84,0.09);
+  border: 1px solid #D8E2DD;
   padding: 0 12px;
 }
 .app-tile {
-  background: rgba(255,255,255,0.78);
-  border: 1px solid rgba(31,98,84,0.09);
-  border-radius: 12px;
+  background: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   padding: 10px;
   color: #1C2320;
 }
 .app-tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,138,125,0.22);
+  background: #FFFFFF;
+  border-color: #9FC8BC;
   box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .app-name { font-size: 11px; font-weight: 700; color: #1C2320; }
 .quick-button {
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 9px 12px;
-  background: rgba(255,255,255,0.78);
+  background: #FFFFFF;
   color: #1C2320;
 }
-.quick-button:hover { background: rgba(47,138,125,0.10); }
+.quick-button:hover { background: #E8F2EE; }
 '''
 
 def read_desktop_file(path):
@@ -4862,9 +4921,8 @@ case "${1:-}" in
         fi
         ;;
     repair-display)
-        rm -f "${HOME}/.config/ming-os/scale-done" 2>/dev/null || true
-        /usr/local/bin/ming-scale >/tmp/ming-scale.log 2>&1 || true
         /usr/local/bin/ming-apply-appearance >/tmp/ming-appearance.log 2>&1 || true
+        /usr/local/bin/ming-session-healthcheck --once >/tmp/ming-session-repair.log 2>&1 || true
         info "界面显示已重新整理：壁纸、主题、Dock 和缩放会在几秒内刷新。"
         ;;
     repair-store)
@@ -4920,7 +4978,9 @@ ColorPalette=#1D2421;#D75D66;#58B88F;#D7B95A;#5A8CCF;#7B72B9;#4DB9B1;#D4F7F1;#51
 TERMINALRC
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4/terminal"
 
-    cat > /usr/local/bin/ming-control-center << 'MINGCONTROL'
+    # Retired GTK3 control center retained only as inert migration source.  It
+    # must not overwrite the GTK4 Ming Settings wrapper installed above.
+    : << 'MINGCONTROL'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
@@ -4931,7 +4991,7 @@ import sys
 TASKS = [
     ('检查系统更新', 'ming-update-icon', '下载并安装新版本 Ming OS', 'ming-helper update'),
     ('修复界面显示', 'ming-display', '重新整理壁纸、缩放和 Dock', 'ming-helper repair-display'),
-    ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'nm-connection-editor'),
+    ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'ming-control-center --page network'),
     ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'ming-helper install-wechat'),
     ('微信省内存启动', 'wechat', '适合 2GB 内存和群组较多账号', 'ming-helper wechat-light'),
     ('清理微信缓存', 'edit-clear', '释放微信缓存占用的磁盘和内存压力', 'ming-helper clean-wechat'),
@@ -4942,8 +5002,8 @@ TASKS = [
     ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'ming-helper organize-desktop'),
     ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'ming-helper memory'),
     ('声音和音量', 'multimedia-volume-control', '调节扬声器、麦克风和输出设备', 'pavucontrol'),
-    ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
-    ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
+    ('电源和电池', 'battery', '调节亮度、合盖和省电', 'ming-settings --page advanced'),
+    ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'ming-settings --page appearance'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
     ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
@@ -4954,7 +5014,7 @@ window {
   background: #F6F8F6;
 }
 .root {
-  background: linear-gradient(135deg, #F8FAF8, #EEF6F2 55%, #DDEFE8);
+  background: #F7FAF8;
   color: #1D2421;
 }
 .title {
@@ -4967,18 +5027,18 @@ window {
   color: #4F625A;
 }
 .tile {
-  background: rgba(255,255,255,0.76);
-  border: 1px solid rgba(31,98,84,0.13);
-  border-radius: 10px;
+  background: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   padding: 12px;
   color: #1D2421;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,174,143,0.36);
+  background: #FFFFFF;
+  border-color: #8FC3B4;
 }
 .tile:active {
-  background: rgba(47,174,143,0.14);
+  background: #E1F0EA;
 }
 .tile label {
   color: #1D2421;
@@ -5173,8 +5233,8 @@ ensure_wps_office() {
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.2 Picom 配置 - 老显卡/虚拟机稳定路径
-# 普通应用窗口保持不透明；透明度只留给 Dock 与通知等独立界面。
+# Ming OS 26.3.3 Picom configuration: fixed shell surfaces only.
+# Normal applications stay completely opaque; no background sampling or blur.
 backend = "glx";
 vsync = false;
 unredir-if-possible = false;
@@ -5213,7 +5273,7 @@ shadow-exclude = [
 ];
 
 # ---- 圆角窗口 ----
-corner-radius = 12;
+corner-radius = 8;
 rounded-corners-exclude = [
   "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
@@ -5228,21 +5288,18 @@ frame-opacity = 1.0;
 inactive-opacity-override = false;
 
 # ---- 渐入渐出 ----
-fading = true;
-fade-in-step = 0.04;
-fade-out-step = 0.04;
-fade-delta = 5;
+fading = false;
 
 # ---- wintypes ----
 wintypes:
 {
-  tooltip = { fade = true; shadow = true; opacity = 0.90; focus = true; };
-  dock = { shadow = false; opacity = 0.92; };
+  tooltip = { fade = false; shadow = true; opacity = 1.0; focus = true; };
+  dock = { shadow = false; opacity = 0.95; };
   dnd = { shadow = false; };
   dropdown_menu = { shadow = true; opacity = 1.0; };
   popup_menu = { shadow = true; opacity = 1.0; };
   utility = { shadow = true; opacity = 1.0; };
-  notification = { shadow = true; opacity = 0.94; };
+  notification = { shadow = true; opacity = 0.95; };
 };
 
 detect-rounded-corners = true;
@@ -5251,7 +5308,7 @@ detect-transient = true;
 detect-client-leader = true;
 PICOMCFG
 
-    # Fallback 配置 (老显卡 xrender, 无 blur, 无动画)
+# Compat configuration (old GPUs/VMs): no shell transparency or fading.
     mkdir -p /etc/xdg/picom
     cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'
 backend = "xrender";
@@ -5268,63 +5325,40 @@ shadow-exclude = [
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
-fading = true;
-fade-in-step = 0.06;
-fade-out-step = 0.06;
+fading = false;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
 wintypes:
 {
-  dock = { shadow = false; opacity = 0.92; };
-  notification = { shadow = false; opacity = 0.94; };
+  dock = { shadow = false; opacity = 1.0; };
+  notification = { shadow = false; opacity = 1.0; };
 };
 detect-client-opacity = false;
 PICOMFALLBACK
 
-    # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
+    # Retained only as a compatibility alias for older preferences.  Low-memory
+    # sessions use the same fully opaque Xrender path as every other compat mode.
     cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'
-backend = "glx";
+backend = "xrender";
 vsync = true;
 unredir-if-possible = false;
-glx-no-stencil = true;
-glx-no-rebind-pixmap = true;
 use-damage = true;
-
-# 不启用 blur（blur 是 GPU/内存消耗大户）
-blur-background = false;
-
-# 轻阴影
-shadow = true;
-shadow-radius = 8;
-shadow-opacity = 0.20;
-shadow-offset-x = -6;
-shadow-offset-y = -6;
+shadow = false;
+shadow-radius = 0;
+shadow-opacity = 0;
+shadow-offset-x = -4;
+shadow-offset-y = -4;
 shadow-exclude = [
+  "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
-
-# 圆角保留（纯 CPU 开销极低）
-corner-radius = 10;
-rounded-corners-exclude = [
-  "window_type = 'dock'",
-  "window_type = 'desktop'",
-];
-
-# 渐入渐出（transform/opacity 动画，不触发 layout）
-fading = true;
-fade-in-step = 0.05;
-fade-out-step = 0.05;
-fade-delta = 5;
-
+fading = false;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
-
-detect-rounded-corners = true;
 detect-client-opacity = false;
-detect-transient = true;
 PICOMLOWMEM
 
     cat > /usr/local/bin/ming-picom << 'MINGPICOM'
@@ -5334,17 +5368,38 @@ set -u
 log="/tmp/ming-picom.log"
 picom_bin="${MING_PICOM_BIN:-picom}"
 settings_file="${MING_COMPOSITOR_SETTINGS:-${HOME}/.config/ming-os/settings.json}"
+appearance_file="${MING_APPEARANCE_SETTINGS:-${HOME}/.config/ming-os/appearance.json}"
 main_conf="${MING_PICOM_MAIN_CONF:-${HOME}/.config/picom/picom.conf}"
 fallback_conf="${MING_PICOM_FALLBACK_CONF:-/etc/xdg/picom/picom-fallback.conf}"
 lowmem_conf="${MING_PICOM_LOWMEM_CONF:-/etc/xdg/picom/picom-lowmem.conf}"
+runtime_profile_file="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/shell-visual.json"
 config="${main_conf}"
 reason="modern-gpu"
-compositor_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings_file}" 2>/dev/null | head -n1)"
-compositor_profile="${compositor_profile:-auto}"
+
+write_runtime_profile() {
+    local requested="$1" effective="$2" profile_reason="$3"
+    local runtime_dir temporary
+    runtime_dir="$(dirname "${runtime_profile_file}")"
+    mkdir -p "${runtime_dir}" 2>/dev/null || return 0
+    temporary="${runtime_profile_file}.tmp.$$"
+    umask 077
+    printf '{"version":1,"requested_profile":"%s","effective_profile":"%s","reason":"%s"}\n' \
+        "${requested}" "${effective}" "${profile_reason}" >"${temporary}" 2>/dev/null || return 0
+    mv -f "${temporary}" "${runtime_profile_file}" 2>/dev/null || rm -f "${temporary}" 2>/dev/null || true
+}
+appearance_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${appearance_file}" 2>/dev/null | head -n1)"
+settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings_file}" 2>/dev/null | head -n1)"
+compositor_profile="${appearance_profile:-${settings_profile:-auto}}"
+if [[ "${appearance_profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software ) ]]; then
+    compositor_profile="${settings_profile}"
+fi
+[[ "${compositor_profile}" == software ]] && compositor_profile=compat
+case "${compositor_profile}" in auto|compat|off) ;; *) compositor_profile=auto ;; esac
 
 if [[ "${compositor_profile}" == off ]]; then
+    write_runtime_profile "${compositor_profile}" off "disabled-by-user"
     exit 0
-elif [[ "${compositor_profile}" == software ]]; then
+elif [[ "${compositor_profile}" == compat ]]; then
     config="${fallback_conf}"
     reason="persisted-software-profile"
 fi
@@ -5356,6 +5411,13 @@ renderer=""
 if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
 fi
+render_node=""
+for candidate in /dev/dri/renderD*; do
+    if [[ -r "${candidate}" && -w "${candidate}" ]]; then
+        render_node="${candidate}"
+        break
+    fi
+done
 
 if [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
     config="${fallback_conf}"
@@ -5366,6 +5428,12 @@ elif [[ "${compositor_profile}" == auto && ( "${cmdline}" == *nomodeset* || "${c
 elif [[ "${compositor_profile}" == auto && ! -d /dev/dri ]]; then
     config="${fallback_conf}"
     reason="no-dri"
+elif [[ "${compositor_profile}" == auto && -z "${render_node}" ]]; then
+    config="${fallback_conf}"
+    reason="no-render-node"
+elif [[ "${compositor_profile}" == auto && -z "${renderer}" ]]; then
+    config="${fallback_conf}"
+    reason="renderer-unverified"
 elif [[ "${compositor_profile}" == auto && ( "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ) ]]; then
     config="${fallback_conf}"
     reason="software-renderer"
@@ -5373,8 +5441,8 @@ elif [[ "${compositor_profile}" == auto && "${renderer}" == *svga3d* ]] || { [[ 
     config="${fallback_conf}"
     reason="virtual-machine-gpu"
 elif [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
-    config="${lowmem_conf}"
-    reason="balanced-low-memory-${mem_mb}mb"
+    config="${fallback_conf}"
+    reason="low-memory-${mem_mb}mb"
 elif [[ "${compositor_profile}" == auto ]] && echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
     config="${fallback_conf}"
     reason="old-intel-gpu"
@@ -5385,12 +5453,20 @@ if [[ ! -f "${config}" ]]; then
     reason="${reason}-missing-main"
 fi
 
+effective_profile=auto
+if [[ "${config}" == "${fallback_conf}" || "${config}" == "${lowmem_conf}" ]]; then
+    effective_profile=compat
+fi
+write_runtime_profile "${compositor_profile}" "${effective_profile}" "${reason}"
+
 {
-    printf '[%s] backend config=%s reason=%s mem_mb=%s renderer=%s gpu=%s\n' \
-        "$(date '+%F %T')" "${config}" "${reason}" "${mem_mb}" "${renderer:-unknown}" "${gpu:-unknown}"
+    printf '[%s] backend config=%s effective=%s reason=%s mem_mb=%s render_node=%s renderer=%s gpu=%s\n' \
+        "$(date '+%F %T')" "${config}" "${effective_profile}" "${reason}" "${mem_mb}" \
+        "${render_node:-none}" "${renderer:-unknown}" "${gpu:-unknown}"
 } >> "${log}" 2>/dev/null || true
 
 if ! command -v "${picom_bin}" >/dev/null 2>&1; then
+    write_runtime_profile "${compositor_profile}" off "${reason}-picom-missing"
     printf '[%s] picom command missing\n' "$(date '+%F %T')" >> "${log}" 2>/dev/null || true
     exit 0
 fi
@@ -5412,7 +5488,7 @@ configure_notification_filter() {
 <channel name="xfce4-notifyd" version="1.0">
   <property name="notify-location" type="uint" value="3"/>
   <property name="theme" type="string" value="Smoke"/>
-  <property name="initial-opacity" type="double" value="0.85"/>
+  <property name="initial-opacity" type="double" value="0.95"/>
   <property name="expire-timeout" type="int" value="3"/>
   <property name="do-fadeout" type="bool" value="true"/>
   <property name="do-slideout" type="bool" value="true"/>
@@ -5420,10 +5496,8 @@ configure_notification_filter() {
   <property name="log-max-size" type="int" value="50"/>
   <property name="known-applications" type="array">
     <value type="string" value="network-manager-applet"/>
-    <value type="string" value="xfce4-power-manager"/>
     <value type="string" value="pulseaudio"/>
     <value type="string" value="garlic-claw"/>
-    <value type="string" value="xfce4-power-manager-settings"/>
   </property>
 </channel>
 NOTIFYCFG
@@ -5697,6 +5771,21 @@ configure_autostart() {
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
 
+    # Override the 26.3.2 scaler on both fresh installs and in-place updates.
+    # It used to rewrite fonts, panel and Dock settings after login; 26.3.3
+    # keeps those preferences in appearance.json instead.
+    cat > "${autostart_dir}/ming-scale.desktop" << 'SCALEMIGRATION'
+[Desktop Entry]
+Type=Application
+Name=Ming Legacy Display Scale Migration
+Comment=Disabled: Ming appearance preferences are persistent
+Exec=/usr/bin/true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-appearance-control
+SCALEMIGRATION
+
     # Picom is owned by ming-session-healthcheck.  Keep a disabled compatibility
     # entry for the Settings backend, but never launch Picom directly at login.
     cat > "${autostart_dir}/picom.desktop" << PICOMAUTOSTART
@@ -5715,17 +5804,17 @@ PICOMAUTOSTART
     # 遗留入口，避免恢复默认值时产生第二套托盘。
     rm -f "${autostart_dir}/nm-applet.desktop" "${autostart_dir}/volumeicon.desktop"
 
-    # 电源管理器（笔记本电池图标）
-    cat > "${autostart_dir}/xfce4-power-manager.desktop" << POWERAUTOSTART
+    # UPower, brightnessctl and systemd-logind back Ming's battery, brightness
+    # and lid controls.  Override the system entry rather than merely removing
+    # a user file, otherwise /etc/xdg/autostart would relaunch it at login.
+    cat > "${autostart_dir}/xfce4-power-manager.desktop" << 'POWERHIDDEN'
 [Desktop Entry]
 Type=Application
-Name=Power Manager
-Comment=电源管理
-Exec=xfce4-power-manager
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-POWERAUTOSTART
+Name=Xfce Power Manager compatibility override
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+POWERHIDDEN
 
     cat > "${autostart_dir}/xfce4-screensaver.desktop" << SCREENSAVERAUTO
 [Desktop Entry]
@@ -5881,14 +5970,14 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         self.add(self.main_box)
 
         css = b'''
-        window { background-color: #F7F9F6; border-radius: 16px; }
+        window { background-color: #F7F9F6; border-radius: 8px; }
         .welcome-title { font-size: 28px; font-weight: bold; color: #1D2421; margin-top: 30px; }
         .welcome-subtitle { font-size: 16px; color: #5C6963; margin-top: 10px; margin-bottom: 20px; }
-        .big-button { font-size: 18px; padding: 16px 40px; border-radius: 12px;
+        .big-button { font-size: 18px; padding: 16px 40px; border-radius: 6px;
                       background-color: #2F8A7D; color: white; border: none; min-height: 52px; }
         .big-button:hover { background-color: #28786E; }
-        .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                          background-color: rgba(255,255,255,0.78); color: #1D2421; border: 1px solid rgba(31,98,84,0.14); min-height: 52px; }
+        .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 6px;
+                          background-color: #FFFFFF; color: #1D2421; border: 1px solid #D8E2DD; min-height: 52px; }
         .step-label { font-size: 14px; color: #5C6963; margin-top: 16px; }
         .done-icon { font-size: 64px; color: #2F8A7D; }
         '''
@@ -6012,9 +6101,18 @@ class WelcomeWindow(Gtk.ApplicationWindow):
 
     def open_wifi(self):
         try:
-            subprocess.Popen(['nm-connection-editor'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except:
-            pass
+            subprocess.Popen(['ming-control-center', '--page', 'network'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError):
+            dialog = Gtk.MessageDialog(
+                transient_for=self,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.CLOSE,
+                text='无法打开网络设置',
+            )
+            dialog.format_secondary_text('请完成首次设置后，在 Ming 设置的“网络与蓝牙”页面重试。')
+            dialog.run()
+            dialog.destroy()
+            return
         self.next_step()
 
     def finish(self):
@@ -7240,113 +7338,18 @@ SCREENSAVERCFG
 configure_appearance_enforcer() {
     cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
 #!/usr/bin/env bash
-# Ming OS 外观强制应用 - 每次登录运行，确保美化生效
-WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
-WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
-
-appearance_phone_env="${MING_PHONE_DESKTOP-__unset__}"
-if [[ -r /etc/default/ming-os ]]; then
-    . /etc/default/ming-os
+# Appearance is intentionally a bounded, one-shot preference reapply.  The
+# session coordinator exclusively owns the desktop, Dock and Picom lifecycle.
+set -u
+log_file="${HOME}/.cache/ming-os/appearance.log"
+mkdir -p "$(dirname "${log_file}")" 2>/dev/null || true
+if command -v ming-appearance-control >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground 8s ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
+    else
+        ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
+    fi
 fi
-if [[ "${appearance_phone_env}" != "__unset__" ]]; then
-    MING_PHONE_DESKTOP="${appearance_phone_env}"
-fi
-: "${MING_PHONE_DESKTOP:=1}"
-
-# 等待 xfdesktop / xfconfd 就绪
-for i in $(seq 1 15); do
-    if xfconf-query -c xfce4-desktop -l &>/dev/null; then break; fi
-    sleep 1
-done
-
-# 低分辨率优先使用小尺寸壁纸，减小内存占用
-WALL="${WALL_PNG}"
-RES=$(xrandr --current 2>/dev/null | grep '\*' | head -1 | awk '{print $1}')
-W=$(echo "${RES}" | cut -d'x' -f1)
-if [[ -n "${W}" && "${W}" -le 1366 && -f "${WALL_1366}" ]]; then
-    WALL="${WALL_1366}"
-fi
-
-# 对每一个真实 backdrop 属性（逐显示器/逐工作区）套用壁纸。
-# 这样无论连接器叫 monitorVGA-1 / monitorHDMI-1 / monitorscreen 都能命中。
-mapfile -t PROPS < <(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/last-image$')
-if [[ ${#PROPS[@]} -eq 0 ]]; then
-    # 首次登录 xfconf 数据库为空，无法枚举属性。
-    # 解决方案：把所有常见连接器名称全部写一遍，确保至少一个命中。
-    # 真实机器连接器名（xrandr --listmonitors）各不相同：
-    # VGA-1 / HDMI-1 / DP-1 / eDP-1 / LVDS-1 / Virtual-1 / screen 等。
-    for mon in screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1; do
-        for ws in workspace0 workspace1; do
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/last-image" \
-                -n -t string -s "${WALL}" 2>/dev/null || true
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/image-style" \
-                -n -t int -s 5 2>/dev/null || true
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/image-path" \
-                -n -t string -s "${WALL}" 2>/dev/null || true
-        done
-    done
-else
-    for p in "${PROPS[@]}"; do
-        xfconf-query -c xfce4-desktop -p "${p}" -s "${WALL}" 2>/dev/null || true
-        # 同步设置缩放方式为 5 (zoomed/拉伸填充)
-        style_prop="${p%/last-image}/image-style"
-        xfconf-query -c xfce4-desktop -p "${style_prop}" -n -t int -s 5 2>/dev/null || true
-        # 同时写 image-path（部分 XFCE 版本优先读这个）
-        path_prop="${p%/last-image}/image-path"
-        xfconf-query -c xfce4-desktop -p "${path_prop}" -n -t string -s "${WALL}" 2>/dev/null || true
-    done
-fi
-
-# 强制主题/图标主题（防止首次会话回退到默认）
-xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
-xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/fullscreen-inhibit -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
-
-MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
-PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
-if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
-    sed -i "s/^IconSize=.*/IconSize=36/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
-fi
-
-# Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
-# 停止 xfdesktop，因此启动失败时仍保留原生桌面作为安全后备。
-xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
-
-# Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
-mkdir -p "${HOME}/.cache/sessions"
-rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
-if pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
-    pkill -TERM -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 || true
-fi
-
-# 确保 Ming 手机桌面在运行。它必须早于 Dock 出现，避免只剩空壁纸。
-# MING_PHONE_DESKTOP=0 保留 Xfce 原生桌面作为显式兼容模式。
-if [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && command -v ming-phone-desktop-watchdog &>/dev/null; then
-    /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || true
-elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1; then
-    (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
-fi
-
-# Ensure the primary Plank Dock is visible after the compositor/session settles.
-if command -v ming-plank-watchdog &>/dev/null; then
-    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
-fi
-
-if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then
-    (sleep 1 && nohup xfce4-screensaver >/dev/null 2>&1 &) 2>/dev/null || true
-fi
-
 exit 0
 APPLYAPPEARANCE
     chmod +x /usr/local/bin/ming-apply-appearance
@@ -7542,9 +7545,8 @@ main() {
     echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
 
     generate_ming_icons
-    configure_hidpi_autoscale
     install_themes
-    setup_wallpaper
+    setup_wallpaper || return 1
     configure_ming_shell
     install_ming_settings
     cleanup_retired_ming_entries

@@ -89,6 +89,64 @@ class AppearanceControlTests(unittest.TestCase):
             self.assertEqual(52, payload["dock_icon_size"])
             self.assertFalse(any((home / ".config/ming-os").glob("*.tmp")))
 
+    def test_visual_profile_round_trips_and_migrates_legacy_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = pathlib.Path(temp)
+            legacy_path = home / ".config/ming-os/appearance.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text(json.dumps({
+                "desktop_icon_scale": 1.25,
+                "compositor_profile": "software",
+            }), encoding="utf-8")
+
+            result = self.run_control(
+                home, "apply", "--desktop-icon-size", "56", "--motion", "reduced",
+                "--compositor-profile", "compat")
+            self.assertEqual(0, result.returncode, result.stderr)
+            status = json.loads(self.run_control(home, "status").stdout)
+            self.assertEqual(2, status["version"])
+            self.assertEqual("Noto Sans CJK SC", status["font_family"])
+            self.assertEqual(56, status["desktop_icon_size"])
+            self.assertEqual("reduced", status["motion"])
+            self.assertEqual("compat", status["compositor_profile"])
+            self.assertEqual(1.25, status["desktop_icon_scale"])
+
+    def test_invalid_primary_appearance_uses_last_known_good_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = pathlib.Path(temp)
+            result = self.run_control(home, "apply", "--theme", "dark", "--font-size", "14")
+            self.assertEqual(0, result.returncode, result.stderr)
+            primary = home / ".config/ming-os/appearance.json"
+            backup = home / ".config/ming-os/appearance.last-good.json"
+            self.assertTrue(backup.is_file())
+            primary.write_text("{not valid json", encoding="utf-8")
+            status = json.loads(self.run_control(home, "status").stdout)
+            self.assertEqual("dark", status["theme"])
+            self.assertEqual(14, status["font_size"])
+
+    def test_import_wallpaper_creates_a_persistent_thumbnail_and_reset(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        with tempfile.TemporaryDirectory() as temp:
+            home = pathlib.Path(temp)
+            source = home / "source.png"
+            source.write_bytes(png)
+            imported = self.run_control(home, "import-wallpaper", str(source))
+            self.assertEqual(0, imported.returncode, imported.stderr)
+            status = json.loads(self.run_control(home, "status").stdout)
+            self.assertEqual(
+                str(home / ".local/share/backgrounds/ming-os/custom-wallpaper.png"),
+                status["wallpaper"],
+            )
+            self.assertTrue((home / ".cache/ming-os/wallpaper/custom-wallpaper-thumb.png").is_file())
+
+            reset = self.run_control(home, "reset")
+            self.assertEqual(0, reset.returncode, reset.stderr)
+            status = json.loads(self.run_control(home, "status").stdout)
+            self.assertEqual("default", status["wallpaper"])
+            self.assertEqual("normal", status["motion"])
+            self.assertEqual("auto", status["compositor_profile"])
+
     def test_invalid_custom_wallpaper_falls_back_without_replacing_config(self):
         with tempfile.TemporaryDirectory() as temp:
             home = pathlib.Path(temp)
@@ -104,7 +162,7 @@ class AppearanceControlTests(unittest.TestCase):
         self.assertIn("def fsync_directory", source)
         self.assertIn('getattr(os, "O_DIRECTORY"', source)
         self.assertGreaterEqual(source.count("fsync_directory("), 3)
-        plank = source[source.index('plank = pathlib.Path.home()'):source.index("def parser")]
+        plank = source[source.index('plank = home_path()'):source.index("def parser")]
         self.assertIn("finally:", plank)
         self.assertIn("os.unlink(temporary)", plank)
 
@@ -202,6 +260,26 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('[[ -s /usr/share/backgrounds/ming-os/default-light.png ]]', desktop)
         self.assertIn('[[ -s /usr/share/backgrounds/ming-os/default-dark.png ]]', desktop)
 
+    def test_default_wallpaper_stages_resolution_cache_variants(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        setup = desktop[desktop.index("setup_wallpaper() {"):
+                        desktop.index("# ======================== Xfce 顶部菜单栏", desktop.index("setup_wallpaper() {"))]
+        for name in (
+            "default-2633.png",
+            "default-1366x768.png",
+            "default-1920x1080.png",
+            "default-3840x2160.png",
+        ):
+            self.assertIn(name, setup)
+        self.assertIn('cp "${primary}" /usr/share/backgrounds/ming-os/default-3840x2160.png', setup)
+
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("def require_png_dimensions", build)
+        for dimensions in ("1366, 768", "1920, 1080", "3840, 2160"):
+            self.assertIn(dimensions, build)
+        self.assertIn("missing required 26.3.3 default wallpaper", setup)
+        self.assertIn("setup_wallpaper || return 1", desktop)
+
     def test_retired_panel_and_whisker_configuration_is_not_generated(self):
         desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
         self.assertNotIn("whiskermenu-1.rc", desktop)
@@ -231,12 +309,101 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertNotIn("Exec=volumeicon", desktop)
         self.assertIn("8", desktop[desktop.index("ming-phone-desktop did not publish ready marker") - 1800:desktop.index("ming-phone-desktop did not publish ready marker")])
 
+    def test_appearance_enforcer_only_reapplies_preferences(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        enforcer = desktop[desktop.index("configure_appearance_enforcer() {"):
+                            desktop.index("# ======================== 触屏手势", desktop.index("configure_appearance_enforcer() {"))]
+        self.assertIn("ming-appearance-control reapply", enforcer)
+        for forbidden in (
+            "ming-phone-desktop-watchdog",
+            "ming-plank-watchdog",
+            "ming-session-healthcheck --session",
+        ):
+            self.assertNotIn(forbidden, enforcer)
+
+    def test_default_session_hides_legacy_power_manager_and_keeps_shell_palette_bounded(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        autostart = desktop[desktop.index("configure_autostart() {"):
+                             desktop.index("setup_welcome_wizard() {", desktop.index("configure_autostart() {"))]
+        self.assertIn('xfce4-power-manager.desktop', autostart)
+        self.assertIn("Hidden=true", autostart)
+        self.assertNotIn("Exec=xfce4-power-manager", autostart)
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        drawer = (ROOT / "assets/ming-app-drawer.py").read_text(encoding="utf-8")
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        for source in (phone, drawer):
+            self.assertIn("COMMON.shell_visual_profile", source)
+            self.assertNotIn("border-radius: 12px", source)
+            self.assertNotIn("border-radius: 14px", source)
+        self.assertIn("#D8E2DD", settings)
+        self.assertNotIn("background: linear-gradient(to bottom, #F7FAF6", settings)
+
+    def test_compat_runtime_profile_makes_shell_opaque_without_mutating_auto_preference(self):
+        common = load_common()
+        with tempfile.TemporaryDirectory() as temp:
+            cache = pathlib.Path(temp) / "shell-visual.json"
+            cache.write_text(json.dumps({"effective_profile": "compat"}), encoding="utf-8")
+            effective = common.apply_runtime_shell_profile(
+                {"compositor_profile": "auto", "motion": "normal"}, cache)
+            self.assertEqual("compat", effective["compositor_profile"])
+            profile = common.shell_visual_profile(effective)
+            self.assertEqual(1.0, profile["surface_alpha"])
+            self.assertEqual(33, profile["interval_ms"])
+            explicit = common.apply_runtime_shell_profile(
+                {"compositor_profile": "off"}, cache)
+            self.assertEqual("off", explicit["compositor_profile"])
+
+    def test_compat_picom_and_legacy_scaler_cannot_override_appearance(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        picom = desktop.split("cat > /usr/local/bin/ming-picom << 'MINGPICOM'\n", 1)[1].split(
+            "\nMINGPICOM\n", 1)[0]
+        self.assertIn("runtime_profile_file", picom)
+        self.assertIn("render_node", picom)
+        self.assertIn("reason=\"low-memory-${mem_mb}mb\"", picom)
+        self.assertNotIn("config=\"${lowmem_conf}\"", picom)
+        lowmem = desktop.split(
+            "cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'\n", 1)[1].split(
+                "\nPICOMLOWMEM\n", 1)[0]
+        self.assertIn('backend = "xrender"', lowmem)
+        self.assertIn("fading = false", lowmem)
+        self.assertNotIn("corner-radius", lowmem)
+        autostart = desktop[desktop.index("configure_autostart() {"):
+                             desktop.index("setup_welcome_wizard() {", desktop.index("configure_autostart() {"))]
+        scale_entry = autostart[autostart.index("ming-scale.desktop"):autostart.index("# Picom", autostart.index("ming-scale.desktop"))]
+        self.assertIn("Hidden=true", scale_entry)
+        self.assertIn("X-GNOME-Autostart-enabled=false", scale_entry)
+        main = desktop[desktop.index("main() {"):]
+        self.assertNotIn("configure_hidpi_autoscale", main)
+
+    def test_compact_status_widget_shows_only_time_and_date(self):
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        compact = phone[phone.index("self.compact_button = Gtk.Button()"):
+                        phone.index("header = Gtk.Box", phone.index("self.compact_button = Gtk.Button()"))]
+        self.assertIn("compact_time_label", compact)
+        self.assertIn("compact_date_label", compact)
+        self.assertNotIn("展开 ▾", compact)
+        self.assertNotIn("Gtk.Label(label=\"|\")", compact)
+
     def test_build_gate_rejects_duplicate_shell_runtimes(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
-        for process in ("xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"):
+        for process in ("xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop", "xfce4-power-manager"):
             self.assertIn(process, build)
         self.assertIn("retired duplicate shell runtime must not be installed", build)
         self.assertIn("normal session starts duplicate shell process", build)
+
+    def test_build_gate_requires_only_the_unified_shell_coordinator_at_login(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("ming-session-healthcheck.desktop", build)
+        self.assertIn("X-Ming-Managed-Components=phone-desktop;plank;picom", build)
+        self.assertIn("legacy shell lifecycle autostart must stay disabled", build)
+        self.assertNotIn(
+            'require_file("home/user/.config/autostart/ming-dock.desktop", "ming-plank-watchdog --session")',
+            build,
+        )
+        self.assertNotIn(
+            'require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")',
+            build,
+        )
 
 
 class DesktopAppearanceBehaviorTests(unittest.TestCase):
@@ -288,6 +455,52 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
             image.unlink()
             self.assertEqual(root / "fallback", ns["appearance_wallpaper_paths"]({"wallpaper": str(image)}, [root / "fallback"])[0])
 
+    def test_cached_wallpaper_uses_the_smallest_suitable_variant(self):
+        path = ROOT / "assets/ming-phone-desktop.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function = next(
+            (node for node in tree.body
+             if isinstance(node, ast.FunctionDef) and node.name == "choose_cached_wallpaper_variant"),
+            None,
+        )
+        self.assertIsNotNone(function)
+        namespace = {"Path": pathlib.Path}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                     str(path), "exec"), namespace)
+        choose = namespace["choose_cached_wallpaper_variant"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            cache = []
+            for width, height in ((1366, 768), (1920, 1080), (3840, 2160)):
+                item = root / ("default-%dx%d.png" % (width, height))
+                item.write_bytes(b"cache")
+                cache.append((item, width, height))
+            self.assertEqual(cache[0][0], choose(cache, 1024, 768))
+            self.assertEqual(cache[1][0], choose(cache, 1600, 900))
+            self.assertEqual(cache[2][0], choose(cache, 2560, 1440))
+
+    def test_shell_visual_profile_is_shared_and_compat_uses_opaque_short_animations(self):
+        common = load_common()
+        auto = common.shell_visual_profile({"theme": "light", "compositor_profile": "auto", "motion": "normal"})
+        compat = common.shell_visual_profile({"theme": "dark", "compositor_profile": "software", "motion": "normal"})
+        reduced = common.shell_animation_timing({"compositor_profile": "compat", "motion": "reduced"})
+        self.assertEqual(0.96, auto["surface_alpha"])
+        self.assertEqual("compat", compat["compositor_profile"])
+        self.assertEqual(1.0, compat["surface_alpha"])
+        self.assertEqual(33, compat["interval_ms"])
+        self.assertEqual({"duration_ms": 0, "interval_ms": 0}, reduced)
+
+    def test_phone_uses_shared_shell_visual_profile_and_cached_wallpaper_frame(self):
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        canvas = phone[phone.index("class WallpaperCanvas"):
+                       phone.index("class PhoneDesktop", phone.index("class WallpaperCanvas"))]
+        draw = canvas[canvas.index("    def on_draw"):]
+        for marker in ("COMMON.shell_visual_profile", "COMMON.shell_animation_timing", "css_for_appearance"):
+            self.assertIn(marker, phone)
+        for marker in ("self._render_key", 'connect("size-allocate"', "ensure_render_cache"):
+            self.assertIn(marker, canvas)
+        self.assertNotIn("scale_simple", draw)
+
     def test_settings_maps_persisted_appearance_without_emitting_apply(self):
         settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
         tree = ast.parse(settings)
@@ -298,9 +511,10 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=constants + [function], type_ignores=[])), settings, "exec"), namespace)
         values = namespace["appearance_control_values"]({
             "theme": "dark", "font_family": "Noto Serif", "font_size": 14,
-            "desktop_icon_scale": 1.5, "dock_icon_size": 56, "wallpaper": "light",
+            "desktop_icon_size": 56, "dock_icon_size": 56, "wallpaper": "light",
+            "motion": "reduced", "compositor_profile": "compat",
         })
-        self.assertEqual((2, 1, 3, 3, 3, 1), values)
+        self.assertEqual((2, 1, 3, 3, 3, 1, 1, 1), values)
         self.assertIn("self.appearance_loading", settings)
         self.assertIn('"status", "--json"', settings)
         self.assertIn("恢复默认壁纸", settings)

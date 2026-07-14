@@ -105,14 +105,34 @@ LIBINPUT_PROPERTIES = {
 APPEARANCE_THEMES = ["system", "light", "dark"]
 APPEARANCE_FONTS = ["Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono"]
 APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
-APPEARANCE_ICON_SCALES = [0.75, 1.0, 1.25, 1.5]
+APPEARANCE_ICON_SIZES = [36, 44, 48, 56, 64]
 APPEARANCE_DOCK_SIZES = [36, 44, 48, 56, 64]
 APPEARANCE_WALLPAPERS = ["default", "light", "dark", "custom"]
+APPEARANCE_MOTION = ["normal", "reduced"]
+APPEARANCE_COMPOSITORS = ["auto", "compat", "off"]
 APPEARANCE_WALLPAPER_FILES = {
     "default": "/usr/share/backgrounds/ming-os/default.png",
     "light": "/usr/share/backgrounds/ming-os/default-light.png",
     "dark": "/usr/share/backgrounds/ming-os/default-dark.png",
 }
+
+
+def apply_adw_color_scheme(theme):
+    scheme = {
+        "light": Adw.ColorScheme.FORCE_LIGHT,
+        "dark": Adw.ColorScheme.FORCE_DARK,
+        "system": Adw.ColorScheme.DEFAULT,
+    }.get(theme, Adw.ColorScheme.DEFAULT)
+    Adw.StyleManager.get_default().set_color_scheme(scheme)
+
+
+def appearance_theme_from_disk():
+    try:
+        with open(os.path.join(HOME, ".config", "ming-os", "appearance.json"), encoding="utf-8") as handle:
+            theme = json.load(handle).get("theme", "system")
+        return theme if theme in APPEARANCE_THEMES else "system"
+    except (OSError, ValueError, AttributeError):
+        return "system"
 
 
 def appearance_control_values(status):
@@ -127,9 +147,11 @@ def appearance_control_values(status):
         selected(APPEARANCE_THEMES, status.get("theme")),
         selected(APPEARANCE_FONTS, status.get("font_family")),
         selected(APPEARANCE_FONT_SIZES, status.get("font_size"), 1),
-        selected(APPEARANCE_ICON_SCALES, status.get("desktop_icon_scale"), 1),
+        selected(APPEARANCE_ICON_SIZES, status.get("desktop_icon_size"), 2),
         selected(APPEARANCE_DOCK_SIZES, status.get("dock_icon_size"), 2),
         selected(APPEARANCE_WALLPAPERS, wallpaper),
+        selected(APPEARANCE_MOTION, status.get("motion")),
+        selected(APPEARANCE_COMPOSITORS, status.get("compositor_profile")),
     )
 
 
@@ -685,25 +707,26 @@ class MingSettings(Adw.ApplicationWindow):
         self.nav_list.select_row(self.nav_list.get_row_at_index(initial_index))
 
     def install_css(self):
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+        apply_adw_color_scheme(appearance_theme_from_disk())
         css = b"""
         window.ming-settings-window {
-            background: #F4F7F3;
-            color: #1B2320;
+            background: #F7FAF8;
+            color: #17201C;
+            font-family: "Noto Sans CJK SC";
         }
 
         .ming-settings-sidebar {
-            background: alpha(#EEF3EF, 0.98);
-            border-right: 1px solid alpha(#2F8A7D, 0.08);
+            background: #EEF3F0;
+            border-right: 1px solid #D8E2DD;
         }
 
         .ming-settings-content {
-            background: linear-gradient(to bottom, #F7FAF6, #F1F5F0);
+            background: #F7FAF8;
         }
 
         .ming-settings-window headerbar {
-            background: alpha(#FFFFFF, 0.94);
-            border-bottom: 1px solid alpha(#2F8A7D, 0.06);
+            background: #FFFFFF;
+            border-bottom: 1px solid #D8E2DD;
             min-height: 44px;
         }
 
@@ -713,18 +736,18 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window row.ming-nav-row {
-            border-radius: 12px;
+            border-radius: 6px;
             margin: 3px 0;
             min-height: 46px;
         }
 
         .ming-settings-window row.ming-nav-row:hover {
-            background: alpha(#2F8A7D, 0.06);
+            background: #EEF3F0;
         }
 
         .ming-settings-window row.ming-nav-row:selected {
-            background: alpha(#2F8A7D, 0.10);
-            color: #1B2320;
+            background: #E1F1EC;
+            color: #17201C;
         }
 
         .ming-settings-window row.ming-time-sync-ok {
@@ -757,14 +780,14 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: alpha(#FFFFFF, 0.94);
-            border-radius: 14px;
-            border: 1px solid alpha(#2F8A7D, 0.06);
+            background: #FFFFFF;
+            border-radius: 8px;
+            border: 1px solid #D8E2DD;
             padding: 4px;
         }
 
         .ming-settings-window button {
-            border-radius: 10px;
+            border-radius: 6px;
             min-height: 38px;
             padding-left: 15px;
             padding-right: 15px;
@@ -781,22 +804,22 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
-            border-radius: 10px;
+            border-radius: 6px;
         }
 
         .ming-settings-window progressbar trough {
             min-height: 8px;
-            border-radius: 999px;
-            background: alpha(#2F8A7D, 0.08);
+            border-radius: 4px;
+            background: #D8E2DD;
         }
 
         .ming-settings-window progressbar progress {
-            border-radius: 999px;
-            background: #2F8A7D;
+            border-radius: 4px;
+            background: #238673;
         }
 
         .ming-settings-window label.dim-label {
-            color: alpha(#21302A, 0.66);
+            color: #53615A;
         }
 
         .ming-feedback-dialog {
@@ -2149,9 +2172,11 @@ class MingSettings(Adw.ApplicationWindow):
         choice("Noto 字体", APPEARANCE_FONTS,
                ["Noto Sans", "Noto Serif", "Noto 中文", "Noto 等宽"], "--font-family")
         choice("字体大小", APPEARANCE_FONT_SIZES, ["10", "11", "12", "14", "16"], "--font-size")
-        choice("桌面图标", APPEARANCE_ICON_SCALES, ["小", "标准", "大", "特大"], "--desktop-icon-scale")
+        choice("桌面图标", APPEARANCE_ICON_SIZES, ["小", "标准", "较大", "大", "特大"], "--desktop-icon-size")
         choice("Dock 图标", APPEARANCE_DOCK_SIZES, ["36", "44", "48", "56", "64"], "--dock-icon-size")
         choice("内置壁纸", APPEARANCE_WALLPAPERS, ["默认", "浅色", "深色", "自定义"], "--wallpaper")
+        choice("界面动效", APPEARANCE_MOTION, ["正常", "减少"], "--motion")
+        choice("图形兼容", APPEARANCE_COMPOSITORS, ["自动", "兼容", "关闭"], "--compositor-profile")
         wallpaper = Gtk.Button(label="选择自定义壁纸")
         wallpaper.connect("clicked", self.on_choose_wallpaper)
         group.add(self.button_row("壁纸", "可使用 Ming 默认壁纸或选择本地图像。", wallpaper))
@@ -2183,6 +2208,7 @@ class MingSettings(Adw.ApplicationWindow):
             self.toast(error or "无法读取外观设置。", "warning")
             return
         values = appearance_control_values(status)
+        apply_adw_color_scheme(status.get("theme", "system"))
         for control, selected in zip(self.appearance_controls, values):
             control.set_selected(selected)
         self.appearance_loading = False
@@ -2324,7 +2350,7 @@ class MingSettings(Adw.ApplicationWindow):
         window_grp.add(self.backend_combo_row(
             "合成器模式", "自动模式优先；老显卡或虚拟机可选择软件模式。",
             "compositor_profile", ["自动", "软件兼容", "关闭"],
-            ["auto", "software", "off"]))
+            ["auto", "compat", "off"]))
 
         power_grp = Adw.PreferencesGroup(title="电源策略")
         box.append(power_grp)

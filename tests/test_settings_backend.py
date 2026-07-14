@@ -153,16 +153,28 @@ class SettingsBackendTests(unittest.TestCase):
         result = self.backend.set_value("reduced_motion", True)
         self.assertTrue(result["ok"])
         self.assertIs(True, self.backend.get_value("reduced_motion")["value"])
+        appearance = json.loads((pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual("reduced", appearance["motion"])
 
-    def test_software_compositor_profile_restarts_picom_and_persists_autostart(self):
-        result = self.backend.set_value("compositor_profile", "software")
+    def test_compat_compositor_profile_restarts_picom_and_persists_every_state_file(self):
+        result = self.backend.set_value("compositor_profile", "compat")
         self.assertTrue(result["ok"])
         self.assertIn("picom --config /etc/xdg/picom/picom-fallback.conf", self.runner.picom_command)
         autostart = pathlib.Path(self.tempdir.name) / ".config/autostart/picom.desktop"
         content = autostart.read_text(encoding="utf-8")
         self.assertIn("Exec=picom --config /etc/xdg/picom/picom-fallback.conf", content)
         self.assertIn("X-GNOME-Autostart-enabled=true", content)
-        self.assertEqual("software", self.backend.get_value("compositor_profile")["value"])
+        self.assertEqual("compat", self.backend.get_value("compositor_profile")["value"])
+        appearance = json.loads((pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual("compat", appearance["compositor_profile"])
+
+    def test_legacy_software_compositor_profile_reads_as_compat(self):
+        self.backend.local_path.parent.mkdir(parents=True)
+        self.backend.local_path.write_text('{"compositor_profile":"software"}', encoding="utf-8")
+        self.runner.picom_command = "picom --config /etc/xdg/picom/picom-fallback.conf --log-level=warn"
+        self.assertEqual("compat", self.backend.get_value("compositor_profile")["value"])
 
     def test_disabled_compositor_stops_picom_and_disables_autostart(self):
         self.backend.set_value("compositor_profile", "auto")

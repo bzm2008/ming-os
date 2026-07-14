@@ -409,7 +409,8 @@ class DesktopSourceTests(unittest.TestCase):
             "inactive-opacity = 1.0",
             "active-opacity = 1.0",
             "frame-opacity = 1.0",
-            'pkill -TERM -u "$(id -u)" -x xfce4-panel',
+            "X-Ming-Managed-Components=phone-desktop;plank;picom",
+            "Exec=/usr/local/bin/ming-session-healthcheck --session",
         ]:
             self.assertIn(marker, self.desktop)
 

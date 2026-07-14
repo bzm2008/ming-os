@@ -96,7 +96,7 @@ SETTING_SPECS = {
     },
     "reduced_motion": {"kind": "bool", "backend": "local"},
     "compositor_profile": {
-        "kind": "enum", "choices": ("auto", "software", "off"), "backend": "local",
+        "kind": "enum", "choices": ("auto", "compat", "off"), "backend": "local",
     },
     "lid_close_action": {
         "kind": "enum", "choices": ("nothing", "suspend", "hibernate"),
@@ -115,6 +115,8 @@ class SettingsBackend:
         self.waiter = waiter
         self.home = pathlib.Path(home or os.path.expanduser("~"))
         self.local_path = self.home / ".config/ming-os/settings.json"
+        self.appearance_path = self.home / ".config/ming-os/appearance.json"
+        self.runtime_profile_path = self.home / ".cache/ming-os/shell-visual.json"
         self.plank_path = self.home / ".config/plank/dock1/settings"
         self.autostart_dir = self.home / ".config/autostart"
         self.picom_autostart_path = self.autostart_dir / "picom.desktop"
@@ -175,6 +177,74 @@ class SettingsBackend:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    def _read_appearance(self):
+        try:
+            data = json.loads(self.appearance_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_appearance(self, data):
+        self.appearance_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix="appearance-", dir=str(self.appearance_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.appearance_path)
+            try:
+                directory_fd = os.open(str(self.appearance_path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+            readback = json.loads(self.appearance_path.read_text(encoding="utf-8"))
+            if readback != data:
+                raise OSError("appearance configuration readback did not match")
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _write_runtime_shell_profile(self, requested, effective, reason):
+        self.runtime_profile_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "requested_profile": self._canonical_compositor_profile(requested),
+            "effective_profile": self._canonical_compositor_profile(effective),
+            "reason": str(reason),
+        }
+        fd, temporary = tempfile.mkstemp(prefix="shell-visual-", dir=str(self.runtime_profile_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.runtime_profile_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    @staticmethod
+    def _canonical_compositor_profile(value):
+        if value == "software":
+            return "compat"
+        return value if value in {"auto", "compat", "off"} else "auto"
+
+    def _write_appearance_values(self, **values):
+        data = self._read_appearance()
+        try:
+            version = int(data.get("version", 2) or 2)
+        except (TypeError, ValueError):
+            version = 2
+        data["version"] = max(2, version)
+        data.update(values)
+        self._write_appearance(data)
 
     def _plank_config(self):
         parser = configparser.ConfigParser(interpolation=None)
@@ -271,9 +341,10 @@ class SettingsBackend:
         return expected_exe == actual_exe and tuple(expected[1:]) == tuple(actual[1:])
 
     def _picom_command(self, profile):
+        profile = self._canonical_compositor_profile(profile)
         if profile == "auto":
             return ["/usr/local/bin/ming-picom"]
-        if profile == "software":
+        if profile == "compat":
             return [
                 "picom", "--config", "/etc/xdg/picom/picom-fallback.conf",
                 "--log-level=warn"]
@@ -302,10 +373,14 @@ class SettingsBackend:
         if rc not in (0, 1):
             raise RuntimeError(xfwm_error or "无法读取 Xfwm 合成状态")
         running, process_output = self._picom_process()
-        saved_profile = self._read_local().get("compositor_profile", "auto")
+        saved_profile = self._canonical_compositor_profile(
+            self._read_local().get(
+                "compositor_profile", self._read_appearance().get("compositor_profile", "auto")))
         return {
             "autostart": self._snapshot_file(self.picom_autostart_path),
             "local": self._snapshot_file(self.local_path),
+            "appearance": self._snapshot_file(self.appearance_path),
+            "runtime_profile": self._snapshot_file(self.runtime_profile_path),
             "xfwm_exists": rc == 0 and xfwm_value != "",
             "xfwm_value": xfwm_value,
             "picom_running": running,
@@ -326,6 +401,8 @@ class SettingsBackend:
         try:
             self._restore_file(self.picom_autostart_path, snapshot["autostart"])
             self._restore_file(self.local_path, snapshot["local"])
+            self._restore_file(self.appearance_path, snapshot["appearance"])
+            self._restore_file(self.runtime_profile_path, snapshot["runtime_profile"])
         except OSError as exc:
             errors.append("无法恢复配置文件：%s" % exc)
         try:
@@ -363,7 +440,9 @@ class SettingsBackend:
         elif rc == 0 and xfwm_value:
             errors.append("原 Xfwm 属性缺失状态未恢复")
         for path, key in (
-            (self.picom_autostart_path, "autostart"), (self.local_path, "local")):
+            (self.picom_autostart_path, "autostart"), (self.local_path, "local"),
+            (self.appearance_path, "appearance"),
+            (self.runtime_profile_path, "runtime_profile")):
             try:
                 current = self._snapshot_file(path)
             except OSError as exc:
@@ -374,6 +453,7 @@ class SettingsBackend:
         return errors
 
     def _apply_compositor_profile(self, profile):
+        profile = self._canonical_compositor_profile(profile)
         try:
             snapshot = self._capture_compositor_state()
         except (OSError, RuntimeError) as exc:
@@ -392,11 +472,13 @@ class SettingsBackend:
                 running, output = self._wait_for_picom(True)
                 if not running:
                     raise RuntimeError("Picom 未能启动")
-                if profile == "software" and "picom-fallback.conf" not in output:
+                if profile == "compat" and "picom-fallback.conf" not in output:
                     raise RuntimeError("Picom 未使用软件兼容配置")
             data = self._read_local()
             data["compositor_profile"] = profile
             self._write_local(data)
+            self._write_appearance_values(compositor_profile=profile)
+            self._write_runtime_shell_profile(profile, profile, "settings-selection")
             readback = self._compositor_readback()
             if not readback["ok"] or readback["value"] != profile:
                 raise RuntimeError(readback.get("error") or "合成器设置写入后未生效")
@@ -409,7 +491,9 @@ class SettingsBackend:
             return self._result(False, "compositor_profile", error=message)
 
     def _compositor_readback(self):
-        profile = self._read_local().get("compositor_profile", "auto")
+        profile = self._canonical_compositor_profile(
+            self._read_local().get(
+                "compositor_profile", self._read_appearance().get("compositor_profile", "auto")))
         running, command = self._picom_process()
         if profile == "off":
             if running:
@@ -417,7 +501,7 @@ class SettingsBackend:
             return self._result(True, "compositor_profile", "off")
         if not running:
             return self._result(False, "compositor_profile", error="Picom 未运行")
-        if profile == "software" and "picom-fallback.conf" not in command:
+        if profile == "compat" and "picom-fallback.conf" not in command:
             return self._result(False, "compositor_profile", error="软件兼容配置未生效")
         return self._result(True, "compositor_profile", profile)
 
@@ -429,8 +513,15 @@ class SettingsBackend:
         if backend == "local":
             if key == "compositor_profile":
                 return self._compositor_readback()
-            defaults = {"reduced_motion": False, "compositor_profile": "auto"}
-            return self._result(True, key, self._read_local().get(key, defaults.get(key)))
+            if key == "reduced_motion":
+                local = self._read_local()
+                appearance = self._read_appearance()
+                if "motion" in appearance:
+                    value = appearance.get("motion") == "reduced"
+                else:
+                    value = bool(local.get("reduced_motion", False))
+                return self._result(True, key, value)
+            return self._result(True, key, self._read_local().get(key))
         if backend == "plank":
             parser = self._plank_config()
             raw = parser.get("PlankDockPreferences", spec["key"], fallback="0")
@@ -467,6 +558,8 @@ class SettingsBackend:
         spec = SETTING_SPECS.get(key)
         if not spec:
             return self._result(False, key, error="不支持的设置项")
+        if key == "compositor_profile" and value == "software":
+            value = "compat"
         try:
             validated = self._validate(spec, value)
         except ValueError as exc:
@@ -479,6 +572,9 @@ class SettingsBackend:
             data = self._read_local()
             data[key] = validated
             self._write_local(data)
+            if key == "reduced_motion":
+                self._write_appearance_values(
+                    motion="reduced" if validated else "normal")
         elif backend == "plank":
             parser = self._plank_config()
             parser.set("PlankDockPreferences", spec["key"], str(encoded))

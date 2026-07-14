@@ -123,20 +123,61 @@ def drawer_geometry(workarea):
     return COMMON.Rect(workarea.x, workarea.y + workarea.height - height, workarea.width, height)
 
 
-def reduced_motion_enabled(path=None):
-    path = pathlib.Path(path or pathlib.Path.home() / ".config/ming-os/settings.json")
+def load_shell_appearance(path=None):
+    appearance_path = pathlib.Path(path or pathlib.Path.home() / ".config/ming-os/appearance.json")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(appearance_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(data.get("reduced_motion", False)) if isinstance(data, dict) else False
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if not data and path is None:
+        legacy = pathlib.Path.home() / ".config/ming-os/settings.json"
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    return COMMON.apply_runtime_shell_profile(data if isinstance(data, dict) else {})
+
+
+def reduced_motion_enabled(path=None):
+    return COMMON.shell_visual_profile(load_shell_appearance(path))["motion"] == "reduced"
 
 
 def drawer_transition(reduced_motion):
+    timing = COMMON.shell_animation_timing(load_shell_appearance())
     return {
-        "duration_ms": 0 if reduced_motion else ANIMATION_DURATION_MS,
+        "duration_ms": 0 if reduced_motion else timing["duration_ms"],
+        "interval_ms": 0 if reduced_motion else timing["interval_ms"],
         "start_opacity": 1.0,
     }
+
+
+def drawer_css(appearance):
+    profile = COMMON.shell_visual_profile(appearance)
+    light = profile["theme"] != "dark"
+    if profile["surface_alpha"] < 1:
+        raised = "rgba(255, 255, 255, 0.96)" if light else "rgba(41, 47, 43, 0.96)"
+    else:
+        raised = profile["surface_raised"]
+    shadow = "0 -10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
+    font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    return ("""
+window#ming-app-drawer { background: %(base)s; font-family: "%(font)s"; }
+.drawer-root { background: %(raised)s; border-top: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 20px; }
+.drawer-header { padding-bottom: 2px; }
+.drawer-close { border-radius: 6px; padding: 7px 14px; }
+.drawer-category { border-radius: 6px; padding: 6px 12px; }
+.drawer-category:checked { background: %(accent)s; color: #ffffff; }
+.drawer-tile { border-radius: 8px; padding: 10px 8px; background: transparent; border: 1px solid transparent; }
+.drawer-tile:hover { background: %(sunken)s; border-color: %(accent)s; }
+.drawer-label { color: %(text)s; font-weight: 700; font-size: 11px; }
+.drawer-diagnostic { color: #B63E3E; font-size: 9px; font-weight: 700; }
+""" % {
+        "base": profile["surface_base"], "raised": raised, "sunken": profile["surface_sunken"],
+        "border": profile["border_soft"], "accent": profile["accent"],
+        "text": profile["text_primary"], "shadow": shadow, "font": font,
+    }).encode("utf-8")
 
 
 class DrawerAnimation:
@@ -278,6 +319,7 @@ class DrawerController:
         self._animation = DrawerAnimation()
         self._animation_source = 0
         self._animation_geometry = None
+        self._animation_interval = 16
 
     def _workarea(self):
         display = self.Gdk.Display.get_default()
@@ -295,30 +337,11 @@ class DrawerController:
         window.set_type_hint(self.Gdk.WindowTypeHint.DIALOG)
         window.set_accept_focus(True)
         window.set_focus_on_map(True)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(b"""
-        window#ming-app-drawer { background: #F8FBF9; }
-        .drawer-root {
-          background: #F8FBF9;
-          border-top: 1px solid rgba(47, 138, 125, 0.16);
-          padding: 20px;
-        }
-        .drawer-header { padding-bottom: 2px; }
-        .drawer-close { border-radius: 9px; padding: 7px 14px; }
-        .drawer-category { border-radius: 8px; padding: 6px 12px; }
-        .drawer-category:checked { background: #2F8A7D; color: #ffffff; }
-        .drawer-tile {
-          border-radius: 10px;
-          padding: 10px 8px;
-          background: transparent;
-          border: 1px solid transparent;
-        }
-        .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
-        .drawer-label { color: #1D2924; font-weight: 700; font-size: 11px; }
-        .drawer-diagnostic { color: #A33A32; font-size: 9px; font-weight: 700; }
-        """)
+        self.css_provider = Gtk.CssProvider()
+        self.appearance = load_shell_appearance()
+        self.css_provider.load_from_data(drawer_css(self.appearance))
         Gtk.StyleContext.add_provider_for_screen(
-            self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            self.Gdk.Screen.get_default(), self.css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
         window.set_name("ming-app-drawer")
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -472,8 +495,12 @@ class DrawerController:
         # animations are disabled.
         self.apps = discover_apps()
         self.refresh()
+        self.appearance = load_shell_appearance()
+        self.css_provider.load_from_data(drawer_css(self.appearance))
         geometry = drawer_geometry(self._workarea())
         transition = drawer_transition(reduced_motion_enabled())
+        self._animation.duration_ms = max(1, transition["duration_ms"] or ANIMATION_DURATION_MS)
+        self._animation_interval = transition["interval_ms"] or 16
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:
             self.window.move(int(geometry.x), int(geometry.y))
@@ -520,7 +547,7 @@ class DrawerController:
                 self.window.hide()
             return False
 
-        self._animation_source = self.GLib.timeout_add(16, step)
+        self._animation_source = self.GLib.timeout_add(self._animation_interval, step)
 
     def toggle(self):
         if self.window.get_visible() and self._animation.target > 0.0:

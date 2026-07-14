@@ -178,7 +178,7 @@ def autostart_exec(content, current_desktop="XFCE"):
 
 def autostart_processes(content, current_desktop="XFCE"):
     """Return duplicate-shell executables actually launched by an active entry."""
-    duplicate_shell = {"xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop"}
+    duplicate_shell = {"xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop", "xfce4-power-manager"}
     try:
         parser = configparser.ConfigParser(interpolation=None, strict=False)
         parser.optionxform = str
@@ -294,6 +294,118 @@ class RuntimeSocket:
 def ease_out_cubic(progress):
     progress = min(1.0, max(0.0, float(progress)))
     return 1.0 - (1.0 - progress) ** 3
+
+
+# The shell uses fixed surfaces rather than sampled/blurred backgrounds.  Keep
+# the palette and profile calculation dependency-free so the GTK3 desktop,
+# drawer and other small shell helpers make the same low-cost decision.
+SHELL_PALETTE = {
+    "surface_base_light": "#F7FAF8",
+    "surface_raised_light": "#FFFFFF",
+    "surface_sunken_light": "#EEF3F0",
+    "surface_base_dark": "#202522",
+    "surface_raised_dark": "#292F2B",
+    "surface_sunken_dark": "#181C1A",
+    "border_soft_light": "#D8E2DD",
+    "border_soft_dark": "#3D4742",
+    "text_primary_light": "#17201C",
+    "text_secondary_light": "#53615A",
+    "text_primary_dark": "#F2F6F4",
+    "text_secondary_dark": "#B7C2BC",
+    "accent": "#238673",
+    "warning": "#B56A18",
+    "error": "#B63E3E",
+}
+
+
+def shell_runtime_profile_path():
+    """Return the small session-owned cache that records the effective renderer.
+
+    Appearance preferences deliberately describe the user's requested mode.
+    The session coordinator writes this separate cache after detecting a VM,
+    software renderer, or low-memory machine.  Keeping it separate prevents a
+    temporary compatibility fallback from overwriting the user's ``auto``
+    choice.
+    """
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if cache_home:
+        base = pathlib.Path(cache_home).expanduser()
+    else:
+        base = pathlib.Path(os.environ.get("HOME") or pathlib.Path.home()).expanduser() / ".cache"
+    return base / "ming-os" / "shell-visual.json"
+
+
+def apply_runtime_shell_profile(appearance, runtime_path=None):
+    """Overlay a verified compatibility fallback without mutating preferences.
+
+    This function intentionally performs disk I/O only when a shell consumer
+    reloads its appearance.  Rendering paths use ``shell_visual_profile`` on
+    the already-normalized result and therefore never read this file per frame.
+    """
+    result = dict(appearance) if isinstance(appearance, dict) else {}
+    requested = result.get("compositor_profile", "auto")
+    if requested == "software":
+        requested = "compat"
+        result["compositor_profile"] = requested
+    if requested != "auto":
+        return result
+    path = pathlib.Path(runtime_path or shell_runtime_profile_path())
+    try:
+        runtime = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return result
+    if not isinstance(runtime, dict):
+        return result
+    effective = runtime.get("effective_profile")
+    if effective in {"compat", "off"}:
+        result["compositor_profile"] = effective
+    return result
+
+
+def shell_visual_profile(appearance=None):
+    """Normalize appearance state for low-cost shell surfaces and animation."""
+    data = appearance if isinstance(appearance, dict) else {}
+    theme = data.get("theme", "system")
+    theme = theme if theme in {"light", "dark", "system"} else "system"
+    compositor = data.get("compositor_profile", "auto")
+    # 26.3.2 persisted this name.  Treat it as a migration alias, not a third
+    # active profile, so old settings safely become the documented compat mode.
+    if compositor == "software":
+        compositor = "compat"
+    compositor = compositor if compositor in {"auto", "compat", "off"} else "auto"
+    motion = data.get("motion", "")
+    if motion not in {"normal", "reduced"}:
+        motion = "reduced" if data.get("reduced_motion") else "normal"
+    dark = theme == "dark"
+    prefix = "dark" if dark else "light"
+    # `system` deliberately uses the light neutral shell until GTK informs the
+    # application otherwise; this avoids transient dark/light flashes at login.
+    alpha = 0.96 if compositor == "auto" else 1.0
+    return {
+        "theme": theme,
+        "compositor_profile": compositor,
+        "motion": motion,
+        "surface_alpha": alpha,
+        "surface_base": SHELL_PALETTE["surface_base_" + prefix],
+        "surface_raised": SHELL_PALETTE["surface_raised_" + prefix],
+        "surface_sunken": SHELL_PALETTE["surface_sunken_" + prefix],
+        "border_soft": SHELL_PALETTE["border_soft_" + prefix],
+        "text_primary": SHELL_PALETTE["text_primary_" + prefix],
+        "text_secondary": SHELL_PALETTE["text_secondary_" + prefix],
+        "accent": SHELL_PALETTE["accent"],
+        "interval_ms": 16 if compositor == "auto" else 33,
+    }
+
+
+def shell_animation_timing(appearance=None):
+    """Return the only animation cadence allowed for the Ming shell."""
+    profile = shell_visual_profile(appearance)
+    if profile["motion"] == "reduced":
+        return {"duration_ms": 0, "interval_ms": 0}
+    return {
+        "duration_ms": 200 if profile["compositor_profile"] == "auto" else 180,
+        "interval_ms": profile["interval_ms"],
+    }
 
 
 def _localized(section, key, locale_name):

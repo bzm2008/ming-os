@@ -13,16 +13,24 @@ import struct
 
 
 DEFAULTS = {
-    "version": 1,
+    "version": 2,
     "theme": "system",
-    "font_family": "Noto Sans",
+    "font_family": "Noto Sans CJK SC",
     "font_size": 11,
     "desktop_icon_scale": 1.0,
+    "desktop_icon_size": 48,
     "dock_icon_size": 48,
     "wallpaper": "default",
+    "motion": "normal",
+    "compositor_profile": "auto",
 }
 MAX_WALLPAPER_BYTES = 32 * 1024 * 1024
 MAX_WALLPAPER_PIXELS = 16 * 1024 * 1024
+FONT_FAMILIES = ("Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono")
+ICON_SCALES = (0.75, 1.0, 1.25, 1.5)
+ICON_SIZES = tuple(range(32, 73, 4))
+MOTION_VALUES = ("normal", "reduced")
+COMPOSITOR_PROFILES = ("auto", "compat", "off")
 BUILTIN_WALLPAPERS = {
     "default": pathlib.Path("/usr/share/backgrounds/ming-os/default.png"),
     "light": pathlib.Path("/usr/share/backgrounds/ming-os/default-light.png"),
@@ -31,7 +39,22 @@ BUILTIN_WALLPAPERS = {
 
 
 def config_path():
-    return pathlib.Path.home() / ".config/ming-os/appearance.json"
+    return home_path() / ".config/ming-os/appearance.json"
+
+
+def last_good_config_path():
+    return home_path() / ".config/ming-os/appearance.last-good.json"
+
+
+def home_path():
+    # `Path.home()` ignores HOME under some Windows test hosts.  The deployed
+    # Linux session still resolves to the same user directory, while honoring
+    # HOME keeps the command hermetic for recovery and test environments.
+    return pathlib.Path(os.environ.get("HOME") or pathlib.Path.home()).expanduser()
+
+
+def legacy_settings_path():
+    return home_path() / ".config/ming-os/settings.json"
 
 
 def fsync_directory(path):
@@ -47,16 +70,76 @@ def fsync_directory(path):
         pass
 
 
-def load_config(path=None):
-    path = pathlib.Path(path or config_path())
+def normalize_config(raw):
+    """Read current and 26.3.2 appearance formats without losing preferences."""
+    result = dict(DEFAULTS)
+    raw = raw if isinstance(raw, dict) else {}
+    theme = raw.get("theme")
+    if theme in {"light", "dark", "system"}:
+        result["theme"] = theme
+    family = raw.get("font_family")
+    if family in FONT_FAMILIES:
+        result["font_family"] = family
+    try:
+        size = int(raw.get("font_size", result["font_size"]))
+        if 9 <= size <= 18:
+            result["font_size"] = size
+    except (TypeError, ValueError):
+        pass
+    try:
+        scale = float(raw.get("desktop_icon_scale", result["desktop_icon_scale"]))
+        if scale in ICON_SCALES:
+            result["desktop_icon_scale"] = scale
+    except (TypeError, ValueError):
+        pass
+    try:
+        icon_size = int(raw.get("desktop_icon_size", result["desktop_icon_size"]))
+        if icon_size in ICON_SIZES:
+            result["desktop_icon_size"] = icon_size
+    except (TypeError, ValueError):
+        pass
+    try:
+        dock_size = int(raw.get("dock_icon_size", result["dock_icon_size"]))
+        if 32 <= dock_size <= 64 and dock_size % 4 == 0:
+            result["dock_icon_size"] = dock_size
+    except (TypeError, ValueError):
+        pass
+    wallpaper = raw.get("wallpaper")
+    if isinstance(wallpaper, str) and wallpaper:
+        result["wallpaper"] = wallpaper
+    motion = raw.get("motion")
+    if motion not in MOTION_VALUES:
+        motion = "reduced" if raw.get("reduced_motion") else "normal"
+    result["motion"] = motion
+    profile = raw.get("compositor_profile", "auto")
+    if profile == "software":
+        profile = "compat"
+    if profile in COMPOSITOR_PROFILES:
+        result["compositor_profile"] = profile
+    return result
+
+
+def _read_config(path):
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return dict(DEFAULTS)
-    result = dict(DEFAULTS)
-    if isinstance(raw, dict):
-        result.update({key: raw[key] for key in DEFAULTS if key in raw})
-    return result
+        return None
+    return normalize_config(raw)
+
+
+def load_config(path=None):
+    path = pathlib.Path(path or config_path())
+    config = _read_config(path)
+    if config is not None:
+        return config
+    # A torn write or bad manual edit must not reset a working desktop to
+    # defaults.  Only the canonical per-user file has this recovery sibling;
+    # explicit test/import paths remain self-contained.
+    if path == config_path():
+        fallback = _read_config(last_good_config_path())
+        if fallback is not None:
+            return fallback
+    return dict(DEFAULTS)
 
 
 def atomic_write(path, value):
@@ -78,6 +161,85 @@ def atomic_write(path, value):
             pass
 
 
+def save_config(value, path=None, save_last_good=False):
+    path = pathlib.Path(path or config_path())
+    normalized = normalize_config(value)
+    atomic_write(path, normalized)
+    if load_config(path) != normalized:
+        raise OSError("appearance configuration could not be read back")
+    if save_last_good:
+        backup = last_good_config_path()
+        atomic_write(backup, normalized)
+        if _read_config(backup) != normalized:
+            raise OSError("last known good appearance configuration could not be read back")
+    return normalized
+
+
+def apply_and_commit(config, previous=None):
+    """Persist one requested change, verify it, and retain a recoverable copy."""
+    previous = normalize_config(previous if isinstance(previous, dict) else load_config())
+    config = save_config(config)
+    try:
+        apply_runtime(config)
+    except OSError:
+        # Keep a desktop that was known to work rather than a half-applied
+        # appearance choice.  Runtime rollback is best effort because a broken
+        # Xfconf daemon cannot be repaired by this command alone.
+        save_config(previous, save_last_good=True)
+        try:
+            apply_runtime(previous)
+        except OSError:
+            pass
+        raise
+    return save_config(config, save_last_good=True)
+
+
+def sync_legacy_shell_state(config):
+    """Keep the pre-26.3.3 controls coherent when a user changes shell mode."""
+    path = legacy_settings_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    raw["reduced_motion"] = config.get("motion") == "reduced"
+    raw["compositor_profile"] = config.get("compositor_profile", "auto")
+    atomic_write(path, raw)
+
+
+def wallpaper_thumbnail_path():
+    return home_path() / ".cache/ming-os/wallpaper/custom-wallpaper-thumb.png"
+
+
+def write_wallpaper_thumbnail(source):
+    """Create one import-time preview; desktop resolution caches remain in GTK."""
+    source = pathlib.Path(source)
+    target = wallpaper_thumbnail_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".wallpaper-thumb-", suffix=".png", dir=str(target.parent))
+    os.close(descriptor)
+    try:
+        converted = False
+        try:
+            completed = subprocess.run(
+                ["convert", str(source), "-thumbnail", "480x270^", "-gravity", "center",
+                 "-extent", "480x270", temporary],
+                timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            converted = completed.returncode == 0 and os.path.getsize(temporary) > 0
+        except (OSError, subprocess.TimeoutExpired):
+            converted = False
+        if not converted:
+            shutil.copyfile(source, temporary)
+        os.replace(temporary, target)
+        fsync_directory(target.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    return str(target)
+
+
 def copy_wallpaper(source):
     source = pathlib.Path(source).expanduser()
     try:
@@ -86,7 +248,7 @@ def copy_wallpaper(source):
         safe_wallpaper_dimensions(source)
     except OSError as exc:
         raise ValueError("wallpaper cannot be read") from exc
-    target_dir = pathlib.Path.home() / ".local/share/backgrounds/ming-os"
+    target_dir = home_path() / ".local/share/backgrounds/ming-os"
     target_dir.mkdir(parents=True, exist_ok=True)
     suffix = source.suffix.lower() if source.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"} else ".img"
     target = target_dir / ("custom-wallpaper" + suffix)
@@ -96,6 +258,7 @@ def copy_wallpaper(source):
         shutil.copyfile(source, temporary)
         os.replace(temporary, target)
         fsync_directory(target_dir)
+        write_wallpaper_thumbnail(target)
     finally:
         try:
             os.unlink(temporary)
@@ -151,25 +314,57 @@ def safe_wallpaper_dimensions(path):
 def apply_runtime(config):
     if os.environ.get("MING_APPEARANCE_NO_APPLY") == "1":
         return
+
+    def checked(command, label):
+        try:
+            completed = subprocess.run(
+                command, timeout=4, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError("%s could not be applied" % label) from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise OSError("%s could not be applied%s" % (
+                label, ": " + detail[:160] if detail else ""))
+        return completed.stdout.strip()
+
+    def xfconf_set(channel, property_name, value, label):
+        command = ["xfconf-query", "-c", channel, "-p", property_name, "-s", value]
+        try:
+            checked(command, label)
+        except OSError:
+            # Existing channels accept the short form.  New channels need a
+            # typed property, so retry that documented creation form once.
+            checked(
+                ["xfconf-query", "-c", channel, "-p", property_name,
+                 "-n", "-t", "string", "-s", value], label)
+        actual = checked(
+            ["xfconf-query", "-c", channel, "-p", property_name], label + " readback")
+        if actual != value:
+            raise OSError("%s readback did not match the requested value" % label)
+
     theme = config["theme"]
-    gtk_theme = "Adwaita-dark" if theme == "dark" else "Adwaita"
-    commands = [
-        ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName", "-s", gtk_theme],
-        ["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "%s %s" % (config["font_family"], config["font_size"])],
-        ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "prefer-dark" if theme == "dark" else "default"],
-    ]
+    gtk_theme = "Adwaita-dark" if theme == "dark" else "Ming-Glass"
+    xfconf_set("xsettings", "/Net/ThemeName", gtk_theme, "GTK theme")
+    xfconf_set(
+        "xsettings", "/Gtk/FontName", "%s %s" % (config["font_family"], config["font_size"]),
+        "GTK font")
+    color_scheme = "prefer-dark" if theme == "dark" else "default"
+    checked(
+        ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", color_scheme],
+        "GTK4 color scheme")
+    gsettings_actual = checked(
+        ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+        "GTK4 color scheme readback")
+    if color_scheme not in gsettings_actual:
+        raise OSError("GTK4 color scheme readback did not match the requested value")
+
     wallpaper = BUILTIN_WALLPAPERS.get(config["wallpaper"], pathlib.Path(config["wallpaper"]))
     if wallpaper.is_file():
-        commands.append([
-            "xfconf-query", "-c", "xfce4-desktop", "-p",
-            "/backdrop/screen0/monitor0/workspace0/last-image", "-n", "-t", "string", "-s", str(wallpaper),
-        ])
-    for command in commands:
-        try:
-            subprocess.run(command, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    plank = pathlib.Path.home() / ".config/plank/dock1/settings"
+        xfconf_set(
+            "xfce4-desktop", "/backdrop/screen0/monitor0/workspace0/last-image", str(wallpaper),
+            "desktop wallpaper")
+    plank = home_path() / ".config/plank/dock1/settings"
     temporary = None
     try:
         lines = plank.read_text(encoding="utf-8").splitlines() if plank.is_file() else []
@@ -184,14 +379,20 @@ def apply_runtime(config):
             os.fsync(stream.fileno())
         os.replace(temporary, plank)
         fsync_directory(plank.parent)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise OSError("Dock icon size could not be applied") from exc
     finally:
         if temporary:
             try:
                 os.unlink(temporary)
             except OSError:
                 pass
+    try:
+        actual_lines = plank.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise OSError("Dock icon size could not be read back") from exc
+    if "IconSize=%s" % config["dock_icon_size"] not in actual_lines:
+        raise OSError("Dock icon size readback did not match the requested value")
 
 
 def parser():
@@ -201,12 +402,22 @@ def parser():
     status.add_argument("--json", action="store_true")
     apply = sub.add_parser("apply")
     apply.add_argument("--theme", choices=("light", "dark", "system"))
-    apply.add_argument("--font-family", choices=("Noto Sans", "Noto Serif", "Noto Sans CJK SC", "Noto Mono"))
+    apply.add_argument("--font-family", choices=FONT_FAMILIES)
     apply.add_argument("--font-size", type=int, choices=range(9, 19))
-    apply.add_argument("--desktop-icon-scale", type=float, choices=(0.75, 1.0, 1.25, 1.5))
+    apply.add_argument("--desktop-icon-scale", type=float, choices=ICON_SCALES)
+    apply.add_argument("--desktop-icon-size", type=int, choices=ICON_SIZES)
     apply.add_argument("--dock-icon-size", type=int, choices=range(32, 65, 4))
     apply.add_argument("--wallpaper")
+    apply.add_argument("--motion", choices=MOTION_VALUES)
+    apply.add_argument("--compositor-profile", choices=COMPOSITOR_PROFILES)
     apply.add_argument("--json", action="store_true")
+    imported = sub.add_parser("import-wallpaper")
+    imported.add_argument("file")
+    imported.add_argument("--json", action="store_true")
+    reset = sub.add_parser("reset")
+    reset.add_argument("--json", action="store_true")
+    reapply = sub.add_parser("reapply")
+    reapply.add_argument("--json", action="store_true")
     return result
 
 
@@ -214,7 +425,11 @@ def main(argv=None):
     args = parser().parse_args(argv)
     config = load_config()
     if args.command == "apply":
-        for key in ("theme", "font_family", "font_size", "desktop_icon_scale", "dock_icon_size"):
+        previous = dict(config)
+        shell_state_requested = args.motion is not None or args.compositor_profile is not None
+        for key in (
+                "theme", "font_family", "font_size", "desktop_icon_scale", "desktop_icon_size",
+                "dock_icon_size", "motion", "compositor_profile"):
             value = getattr(args, key)
             if value is not None:
                 config[key] = value
@@ -227,8 +442,34 @@ def main(argv=None):
                 except ValueError as exc:
                     print(str(exc), file=sys.stderr)
                     return 2
-        atomic_write(config_path(), config)
-        apply_runtime(config)
+        try:
+            config = apply_and_commit(config, previous)
+        except OSError as exc:
+            print("外观设置未生效，已恢复到上一次可用配置：%s" % exc, file=sys.stderr)
+            return 1
+        if shell_state_requested:
+            sync_legacy_shell_state(config)
+    elif args.command == "import-wallpaper":
+        previous = dict(config)
+        try:
+            config["wallpaper"] = copy_wallpaper(args.file)
+            config = apply_and_commit(config, previous)
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    elif args.command == "reset":
+        try:
+            config = apply_and_commit(DEFAULTS, config)
+        except OSError as exc:
+            print("外观设置未生效，已恢复到上一次可用配置：%s" % exc, file=sys.stderr)
+            return 1
+        sync_legacy_shell_state(config)
+    elif args.command == "reapply":
+        try:
+            config = apply_and_commit(config, config)
+        except OSError as exc:
+            print("外观配置无法重新应用：%s" % exc, file=sys.stderr)
+            return 1
     if getattr(args, "json", False):
         print(json.dumps(config, ensure_ascii=False, sort_keys=True))
     else:

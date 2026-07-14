@@ -92,7 +92,6 @@ install_xfce_desktop() {
         xfce4-settings \
         xfdesktop4 \
         xfce4-terminal \
-        xfce4-taskmanager \
         xfce4-notifyd \
         python3-gi \
         gir1.2-gtk-3.0 \
@@ -105,8 +104,7 @@ install_xfce_desktop() {
         ristretto \
         xdg-user-dirs \
         xdg-utils \
-        desktop-base \
-        xfce4-power-manager || return 1
+        desktop-base || return 1
 
     apt install -y --no-install-recommends \
         picom \
