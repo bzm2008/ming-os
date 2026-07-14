@@ -8,8 +8,9 @@ BASE = ROOT / "modules" / "01_base.sh"
 BUILD = ROOT / "build_onion_os.sh"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 FINALIZE = ROOT / "modules" / "07_finalize.sh"
-SMOKE = ROOT / "scratch" / "ming-release-smoke.sh"
+SMOKE = ROOT / "tests" / "fixtures" / "ming-release-smoke.sh"
 RESUME = ROOT / "resume_build.sh"
+README = ROOT / "README.md"
 
 
 class ReleaseGateContracts(unittest.TestCase):
@@ -169,6 +170,26 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, smoke)
 
+    def test_release_identity_is_2633_and_smoke_is_a_tracked_fixture(self):
+        """Release-critical checks cannot depend on ignored local scratch files."""
+        self.assertTrue(SMOKE.is_file())
+        self.assertIn('readonly MING_OS_VERSION="26.3.3"', self.build)
+        self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2633"', self.build)
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn("# Ming OS 26.3.3 Home Edition", readme)
+        self.assertIn("ming-os-26.3.3-home-amd64.iso", readme)
+
+    def test_readme_ota_example_is_actionable_and_declares_the_2632_transition_limit(self):
+        readme = README.read_text(encoding="utf-8")
+        for marker in (
+            '"has_update": true',
+            '"ready": true',
+            '"update_type": "major"',
+            "26.3.2",
+            "grub-reboot",
+        ):
+            self.assertIn(marker, readme)
+
     def test_installed_identity_contains_ota_restore_gate(self):
         for marker in [
             "ming.ota=1",
@@ -177,6 +198,14 @@ class ReleaseGateContracts(unittest.TestCase):
             "ming-ota-restore.log",
             '"${engine}" restore',
         ]:
+            self.assertIn(marker, self.base)
+
+    def test_build_gate_requires_the_safe_graphics_persistence_runtime(self):
+        for marker in (
+            "/usr/local/sbin/ming-safe-graphics-persist",
+            "ming-safe-graphics-persist.service",
+        ):
+            self.assertIn(marker, self.build)
             self.assertIn(marker, self.base)
 
     def test_separate_home_ota_is_preserved_without_fake_restore(self):

@@ -575,9 +575,14 @@ class InstallerBootContractTests(unittest.TestCase):
         self.assertIn("must not eject the mounted live medium", self.build)
 
     def test_identity_and_root_uuid_are_finalized_before_grub_install(self):
-        expected = "  - shellprocess@ming-identity\n  - shellprocess@ming-bootloader"
-        self.assertIn(expected, self.base)
+        expected = (
+            "  - shellprocess@ming-identity\n"
+            "  - shellprocess@ming-installed-desktop-gate\n"
+            "  - shellprocess@ming-bootloader"
+        )
+        self.assertIn(expected, self.desktop)
         self.assertGreaterEqual(self.desktop.count(expected), 2)
+        self.assertIn("installed desktop verification must pass before GRUB installation", self.build)
 
     def test_bios_grub_uses_target_environment_and_rejects_bad_config(self):
         start = self.base.index("install_bios_grub()")

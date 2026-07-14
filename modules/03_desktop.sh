@@ -6276,6 +6276,14 @@ UCACFG
 # ======================== Live 安装器脚本 ========================
 
 deploy_live_installer() {
+    local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
+    if [[ ! -s "${verifier_source}" ]]; then
+        echo "ERROR: missing installer verification asset: ${verifier_source}" >&2
+        return 1
+    fi
+    install -d -m 0755 /usr/local/sbin
+    install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
 #!/usr/bin/env bash
 set -u
@@ -6313,6 +6321,9 @@ instances:
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -6342,6 +6353,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -6436,6 +6448,14 @@ script:
   - "/usr/local/sbin/ming-install-bootloader"
 BOOTLOADERCONF
 
+cat > /etc/calamares/modules/ming-installed-desktop-gate.conf <<'INSTALLEDDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed /target"
+INSTALLEDDESKTOPGATECONF
+
 cat > /etc/default/locale <<'DEFAULTLOCALE'
 LANG=zh_CN.UTF-8
 LANGUAGE=zh_CN:zh
@@ -6504,6 +6524,11 @@ unpack:
     destination: ""
 UNPACKFSCONF
 
+if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
+    log "ERROR: Live Calamares verification failed; manual partitioning or live squashfs contract is invalid"
+    exit 2
+fi
+
 log "unpackfs_source=${squash}"
 log "unpackfs_stable_source=${squash_link}"
 log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
@@ -6551,6 +6576,9 @@ instances:
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -6579,6 +6607,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:

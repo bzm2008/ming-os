@@ -347,6 +347,15 @@ class OtaModuleContracts(unittest.TestCase):
         self.assertNotIn("update-grub || true", self.module)
         self.assertIn("failed to regenerate GRUB after OTA staging", self.module)
 
+    def test_major_ota_sets_a_one_time_grub_boot_after_regenerating_the_menu(self):
+        """A staged upgrade must not require the user to pick an OTA menu entry."""
+        staging = self.module.split("install_update() {", 1)[1].split("manifest_apply_identity()", 1)[0]
+        self.assertIn("command -v grub-reboot", staging)
+        self.assertIn('grub-reboot "Ming OS ${version} OTA Installer"', staging)
+        self.assertLess(staging.index("update-grub"), staging.index("grub-reboot"))
+        self.assertIn("failed to schedule one-time OTA boot", staging)
+        self.assertNotIn("重启后请选择", staging)
+
     def test_pkexec_state_update_preserves_original_owner(self):
         self.assertIn("stat -c '%u:%g'", self.module)
         self.assertIn('chown "${owner}" "${tmp}"', self.module)

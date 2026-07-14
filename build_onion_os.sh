@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
-readonly MING_OS_VERSION="26.3.2"
+readonly MING_OS_VERSION="26.3.3"
 readonly MING_OS_BUILD_SUFFIX=""
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
-readonly ISO_VOLUME_ID="MING_OS_2632"
+readonly ISO_VOLUME_ID="MING_OS_2633"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
@@ -472,7 +472,8 @@ for phase in settings.get("sequence", []) or []:
 expected_steps = [
     "shellprocess@ming-ota-preflight", "ming-ota-target-guard@ming-ota-target-guard",
     "partition", "mount", "unpackfs", "machineid", "fstab", "networkcfg",
-    "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity", "shellprocess@ming-bootloader",
+    "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity",
+    "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader",
     "umount",
 ]
 for step in expected_steps:
@@ -484,9 +485,11 @@ if all(step in exec_steps for step in ["shellprocess@ming-ota-preflight", "parti
 if all(step in exec_steps for step in ["ming-ota-target-guard@ming-ota-target-guard", "partition"]):
     if exec_steps.index("ming-ota-target-guard@ming-ota-target-guard") > exec_steps.index("partition"):
         errors.append("OTA target disk guard must run before the destructive partition step")
-if all(step in exec_steps for step in ["shellprocess@ming-identity", "shellprocess@ming-bootloader"]):
-    if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-bootloader"):
-        errors.append("installed identity and root UUID must be finalized before GRUB installation")
+if all(step in exec_steps for step in ["shellprocess@ming-identity", "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader"]):
+    if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-installed-desktop-gate"):
+        errors.append("installed identity and root UUID must be finalized before desktop verification")
+    if exec_steps.index("shellprocess@ming-installed-desktop-gate") > exec_steps.index("shellprocess@ming-bootloader"):
+        errors.append("installed desktop verification must pass before GRUB installation")
 blocked_show_steps = {"locale", "keyboard", "users"}
 for step in blocked_show_steps.intersection(show_steps):
     errors.append(f"settings.conf visible sequence must not show {step}")
@@ -513,6 +516,8 @@ if not any(isinstance(item, dict) and item.get("id") == "ming-ota-target-guard" 
     errors.append("settings.conf missing ming-ota-target-guard instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
     errors.append("settings.conf missing ming-identity instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installed-desktop-gate" for item in instances):
+    errors.append("settings.conf missing ming-installed-desktop-gate instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-bootloader" for item in instances):
     errors.append("settings.conf missing ming-bootloader instance")
 
@@ -565,12 +570,19 @@ libpwquality_text = "\n".join(str(item) for item in libpwquality)
 if "dictcheck=0" not in libpwquality_text or "enforcing=0" not in libpwquality_text:
     errors.append("users.conf must disable libpwquality dictionary enforcement")
 
+desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
+if desktop_gate.get("dontChroot") is not True:
+    errors.append("installed desktop gate must inspect /target from the Live environment")
+if "/usr/local/sbin/ming-installer-verify installed /target" not in (desktop_gate.get("script") or []):
+    errors.append("installed desktop gate must validate the target before bootloader installation")
+
 grub_install = root / "usr/sbin/grub-install"
 if not grub_install.is_file():
     errors.append("live installer environment is missing /usr/sbin/grub-install; BIOS bootloader install will fail")
 
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
+    "usr/local/sbin/ming-installer-verify",
     "usr/local/sbin/ming-install-bootloader",
     "usr/local/sbin/ming-finish-install-reboot",
     "usr/local/bin/ming-calamares-launcher",
@@ -681,6 +693,10 @@ validate_iso_grub_config() {
         log_error "ISO GRUB must keep a safe-graphics entry"
         exit 1
     fi
+    if ! grep -Fq 'ming.safe_graphics=1' "${grub_cfg}"; then
+        log_error "ISO GRUB safe-graphics entry must identify itself for installed-boot persistence"
+        exit 1
+    fi
     if ! grep -Fq 'terminal_input console' "${grub_cfg}"; then
         log_error "ISO GRUB must use console input for old firmware keyboard compatibility"
         exit 1
@@ -725,7 +741,7 @@ validate_isolinux_fallback() {
         log_error "isolinux fallback must boot Linux directly, not chain-load GRUB"
         return 1
     fi
-    for marker in 'DEFAULT install' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1' 'nomodeset'; do
+    for marker in 'DEFAULT install' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1' 'ming.safe_graphics=1' 'nomodeset'; do
         if ! grep -Fq "${marker}" "${cfg}"; then
             log_error "isolinux fallback missing marker: ${marker}"
             return 1
@@ -753,6 +769,14 @@ validate_required_desktop_runtime() {
             return 1
         fi
     done
+    if ! chroot_exec /bin/sh -c '
+        test -x /usr/local/sbin/ming-safe-graphics-persist &&
+        test -s /etc/systemd/system/ming-safe-graphics-persist.service &&
+        test -L /etc/systemd/system/multi-user.target.wants/ming-safe-graphics-persist.service
+    '; then
+        log_error "safe-graphics persistence runtime is incomplete in the target system"
+        return 1
+    fi
     if ! chroot_exec fc-match monospace 2>/dev/null \
         | grep -Eq 'Noto Sans Mono|Noto Mono|DejaVu Sans Mono|Liberation Mono'; then
         log_error "fontconfig monospace fallback does not resolve to a monospace family"
@@ -2064,7 +2088,7 @@ menuentry "安装 Ming OS ${MING_OS_VERSION} (Install Ming OS)" {
 }
 
 menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphics)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 ming.safe_graphics=1 nomodeset vga=791
     initrd /live/initrd
 }
 
@@ -2262,7 +2286,7 @@ LABEL safe
   MENU LABEL Install Ming OS (Safe Graphics)
   KERNEL /live/vmlinuz
   INITRD /live/initrd
-  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 ming.safe_graphics=1 nomodeset vga=791
 
 LABEL oldpc
   MENU LABEL Ming OS Old PC Compatibility

@@ -45,6 +45,7 @@ class GrubPerformanceContracts(unittest.TestCase):
         safe = re.search(r"LABEL safe.*?(?=\nLABEL oldpc|ISOLINUXCFG)", section, re.S)
         self.assertIsNotNone(safe)
         self.assertIn("nomodeset", safe.group(0))
+        self.assertIn("ming.safe_graphics=1", safe.group(0))
 
 
 class PicomPerformanceContracts(unittest.TestCase):
@@ -163,6 +164,53 @@ class EdgeVaapiContracts(unittest.TestCase):
         self.assertIn("default_entry", BUILD)
         self.assertIn("Safe Graphics", BUILD)
         self.assertIn("must keep a safe-graphics entry", BUILD)
+
+    def test_safe_graphics_selection_persists_without_polluting_normal_boot(self):
+        """Out-of-range KMS recovery must survive the first installed reboot."""
+        for source in (BUILD, BASE):
+            blocks = menuentry_blocks(source)
+            # The build script embeds Python release validation snippets that
+            # mention menu titles. Only inspect real menu blocks with a kernel
+            # command, not those quoted implementation details.
+            safe_blocks = [
+                block for block in blocks
+                if "Safe Graphics" in block
+                and re.search(r"^\s*(?:linux|APPEND)\s", block, re.M)
+            ]
+            self.assertTrue(safe_blocks)
+            self.assertTrue(all("ming.safe_graphics=1" in block for block in safe_blocks))
+            normal_blocks = [
+                block for block in blocks
+                if re.search(r"^\s*(?:linux|APPEND)\s", block, re.M)
+                and "Safe Graphics" not in block
+            ]
+            self.assertTrue(all("ming.safe_graphics=1" not in block for block in normal_blocks))
+
+        for marker in (
+            "ming-safe-graphics-persist",
+            'GRUB_DEFAULT="Ming OS (Safe Graphics)"',
+            "safe_graphics_requested",
+            "ming.safe_graphics=1",
+            "multi-user.target",
+        ):
+            self.assertIn(marker, BASE)
+
+    def test_safe_graphics_install_logic_belongs_to_installed_identity_not_ota_preflight(self):
+        """Safe-graphics selection is an installer setting, not an OTA gate."""
+        preflight = BASE.split("cat > /usr/local/sbin/ming-ota-preflight << 'MINGOTAPREFLIGHT'", 1)[1].split(
+            "\nMINGOTAPREFLIGHT", 1
+        )[0]
+        identity = BASE.split("cat > /usr/local/sbin/ming-fix-installed-identity << 'MINGIDENTITY'", 1)[1].split(
+            "\nMINGIDENTITY", 1
+        )[0]
+        self.assertNotIn("configure_safe_graphics_default", preflight)
+        for marker in (
+            "safe_graphics_requested()",
+            "ota_install_requested()",
+            "configure_safe_graphics_default()",
+            "configure_safe_graphics_default",
+        ):
+            self.assertIn(marker, identity)
 
     def test_official_debian_grub_generator_remains_executable_for_kernel_fallback(self):
         self.assertIn('"${noisy_grub}" == "10_linux"', BASE)

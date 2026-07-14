@@ -1947,7 +1947,7 @@ MINGOTAPREFLIGHT
 set -uo pipefail
 
 target="${1:-}"
-version="${MING_OS_VERSION:-26.3.2}"
+version="${MING_OS_VERSION:-26.3.3}"
 
 find_target_root() {
     local candidate
@@ -2031,6 +2031,32 @@ cmdline_value() {
         esac
     done
     return 1
+}
+
+safe_graphics_requested() {
+    grep -Eq '(^|[[:space:]])ming\.safe_graphics=1([[:space:]]|$)' /proc/cmdline 2>/dev/null \
+        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)' /proc/cmdline 2>/dev/null
+}
+
+ota_install_requested() {
+    grep -Eq '(^|[[:space:]])ming\.ota=1([[:space:]]|$)' /proc/cmdline 2>/dev/null
+}
+
+configure_safe_graphics_default() {
+    local safe_cfg="${target}/etc/default/grub.d/20-ming-safe-graphics.cfg"
+
+    if safe_graphics_requested; then
+        cat > "${safe_cfg}" <<'SAFEGRAPHICSDEFAULT'
+# Created when Ming OS was installed through the explicit Safe Graphics entry.
+# Keep that fallback as the default until the user deliberately changes it.
+GRUB_DEFAULT="Ming OS (Safe Graphics)"
+GRUB_TIMEOUT_STYLE=menu
+GRUB_TIMEOUT=8
+SAFEGRAPHICSDEFAULT
+    elif ! ota_install_requested; then
+        # A normal fresh install must not inherit a stale compatibility default.
+        rm -f "${safe_cfg}"
+    fi
 }
 
 restore_ota_home() {
@@ -2231,7 +2257,7 @@ menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu -
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
 
@@ -2322,6 +2348,7 @@ GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
 GRUBCFG
+configure_safe_graphics_default
 
 mkdir -p "${target}/usr/share"
 ln -sf /etc/ming-release "${target}/usr/share/ming-release" 2>/dev/null || true
@@ -2413,6 +2440,62 @@ NETMOD
 chroot "${target}" depmod -a 2>/dev/null || true
 MINGIDENTITY
     chmod +x /usr/local/sbin/ming-fix-installed-identity
+
+    cat > /usr/local/sbin/ming-safe-graphics-persist <<'MINGSAFEGRAPHICSPERSIST'
+#!/usr/bin/env bash
+set -euo pipefail
+
+safe_cfg=/etc/default/grub.d/20-ming-safe-graphics.cfg
+
+safe_graphics_requested() {
+    grep -Eq '(^|[[:space:]])ming\.safe_graphics=1([[:space:]]|$)' /proc/cmdline 2>/dev/null \
+        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)' /proc/cmdline 2>/dev/null
+}
+
+write_safe_default() {
+    local tmp changed=false
+    install -d -m 0755 /etc/default/grub.d
+    tmp="$(mktemp /etc/default/grub.d/.20-ming-safe-graphics.XXXXXX)"
+    trap 'rm -f -- "${tmp:-}"' EXIT
+    cat > "${tmp}" <<'SAFEGRAPHICSDEFAULT'
+# Keep the known-working emergency video path selected after a Safe Graphics boot.
+GRUB_DEFAULT="Ming OS (Safe Graphics)"
+GRUB_TIMEOUT_STYLE=menu
+GRUB_TIMEOUT=8
+SAFEGRAPHICSDEFAULT
+    chmod 0644 "${tmp}"
+    if [[ ! -f "${safe_cfg}" ]] || ! cmp -s "${tmp}" "${safe_cfg}"; then
+        mv -f "${tmp}" "${safe_cfg}"
+        changed=true
+    fi
+    ${changed} || return 0
+    if command -v update-grub >/dev/null 2>&1; then
+        update-grub
+    elif command -v grub-mkconfig >/dev/null 2>&1; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+    fi
+}
+
+safe_graphics_requested || exit 0
+write_safe_default
+MINGSAFEGRAPHICSPERSIST
+    chmod 0755 /usr/local/sbin/ming-safe-graphics-persist
+
+    cat > /etc/systemd/system/ming-safe-graphics-persist.service <<'MINGSAFEGRAPHICSSERVICE'
+[Unit]
+Description=Preserve Ming OS Safe Graphics boot selection
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-safe-graphics-persist
+
+[Install]
+WantedBy=multi-user.target
+MINGSAFEGRAPHICSSERVICE
+    ln -sfn ../ming-safe-graphics-persist.service \
+        /etc/systemd/system/multi-user.target.wants/ming-safe-graphics-persist.service
 
     cat > /usr/local/sbin/ming-install-bootloader << 'MINGBOOTLOADER'
 #!/usr/bin/env bash
@@ -3813,7 +3896,7 @@ menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
 }
 menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
 menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {

@@ -813,6 +813,14 @@ GRUBMENU
         log_error "failed to regenerate GRUB after OTA staging"
         return 1
     fi
+    if ! command -v grub-reboot >/dev/null 2>&1 || \
+       ! grub-reboot "Ming OS ${version} OTA Installer"; then
+        install -m 0644 "${previous_cfg}" "${custom_cfg}"
+        command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 || true
+        rm -f "${previous_cfg}" "${STAGING_RECORD}"
+        log_error "failed to schedule one-time OTA boot"
+        return 1
+    fi
     rm -f "${previous_cfg}"
 
     update_state_fields "${sfile}" \
@@ -822,7 +830,7 @@ GRUBMENU
         --arg record "${STAGING_RECORD}"
     chmod 644 "${sfile}"
     log_info "OTA 启动项已写入 ${custom_cfg}。"
-    log_info "重启后请选择：Ming OS ${version} OTA Installer"
+    log_info "下一次重启将自动进入 Ming OS ${version} OTA Installer。"
 }
 
 manifest_apply_identity() {

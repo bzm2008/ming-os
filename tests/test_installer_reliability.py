@@ -6,6 +6,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERIFY_PATH = ROOT / "assets" / "ming-installer-verify.py"
+DESKTOP_MODULE = ROOT / "modules" / "03_desktop.sh"
+BUILD = ROOT / "build_onion_os.sh"
 
 
 def load_verifier():
@@ -88,6 +90,22 @@ def create_installed_root(root):
 
 
 class InstallerReliabilityContracts(unittest.TestCase):
+    def test_verifier_is_deployed_and_runs_before_calamares_bootloader(self):
+        """Live and installed-system checks must be in the generated ISO path."""
+        desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        build = BUILD.read_text(encoding="utf-8")
+
+        self.assertIn("ming-installer-verify.py", desktop)
+        self.assertIn("/usr/local/sbin/ming-installer-verify", desktop)
+        self.assertIn("ming-installer-verify live --source", desktop)
+        self.assertIn("ming-installed-desktop-gate", desktop)
+        self.assertIn("ming-installer-verify installed /target", desktop)
+        self.assertIn("dontChroot: true", desktop)
+        self.assertIn("shellprocess@ming-installed-desktop-gate", desktop)
+        self.assertIn("shellprocess@ming-identity\n  - shellprocess@ming-installed-desktop-gate", desktop)
+        self.assertIn("settings.conf missing ming-installed-desktop-gate instance", build)
+        self.assertIn("ming-installer-verify", build)
+
     def test_live_validation_reports_both_manual_and_full_disk_choices(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
