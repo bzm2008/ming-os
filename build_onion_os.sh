@@ -1279,6 +1279,20 @@ drawer_desktop = require_file("usr/share/applications/ming-app-library.desktop",
 if "NoDisplay=true" not in drawer_desktop:
     errors.append("application drawer desktop entry must stay hidden outside the Dock")
 
+# ming-app-library is retained only as a compatibility command for old menu
+# entries.  Validate the deployed rootfs file itself so a late desktop module
+# cannot replace it with the retired standalone application library.
+drawer_wrapper = require_file("usr/local/bin/ming-app-library")
+expected_drawer_wrapper = "#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/local/bin/ming-app-drawer --toggle \"$@\""
+if drawer_wrapper.strip() != expected_drawer_wrapper:
+    errors.append("ming-app-library must be the drawer-only compatibility wrapper")
+forbidden_drawer_wrapper_markers = ("Gio.DesktopAppInfo", "shell=True")
+for forbidden_marker in forbidden_drawer_wrapper_markers:
+    if forbidden_marker in drawer_wrapper:
+        errors.append(
+            f"ming-app-library compatibility wrapper must not contain {forbidden_marker}"
+        )
+
 update_gui = require_file("usr/local/bin/ming-update-gui", "Ming OS 更新管理器")
 if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "System Update" in update_gui:
     errors.append("ming-update-gui must keep user-facing update UI in Chinese")

@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 
@@ -49,6 +50,35 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn('Exec=/usr/local/bin/ming-running-apps menu', self.desktop)
         self.assertIn('rm -f "${desktop}/Ming 应用库.desktop"', self.desktop)
         self.assertNotIn('"ming-app-library.desktop",\n    "ming-files.desktop"', self.phone)
+
+    def test_last_deployed_app_library_wrapper_is_drawer_only(self):
+        """No late legacy application library can replace the drawer wrapper."""
+        wrappers = re.findall(
+            r"cat > /usr/local/bin/ming-app-library << '([^']+)'\n(.*?)\n\1",
+            self.desktop,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(1, len(wrappers))
+        _marker, wrapper = wrappers[-1]
+        self.assertEqual(
+            '#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/local/bin/ming-app-drawer --toggle "$@"',
+            wrapper.strip(),
+        )
+
+    def test_legacy_app_library_desktop_entry_is_not_deployed(self):
+        self.assertNotIn("APPLIBAPP", self.desktop)
+        self.assertEqual(
+            1,
+            self.desktop.count("cat > /usr/share/applications/ming-app-library.desktop"),
+        )
+
+    def test_rootfs_gate_rejects_a_legacy_app_library_wrapper(self):
+        self.assertIn(
+            'drawer_wrapper = require_file("usr/local/bin/ming-app-library")',
+            self.build,
+        )
+        self.assertIn("ming-app-library must be the drawer-only compatibility wrapper", self.build)
+        self.assertIn("forbidden_drawer_wrapper_markers", self.build)
 
     def test_dock_uses_launch_broker_proxies(self):
         self.assertIn("ming-launch-broker.desktop", self.desktop)
