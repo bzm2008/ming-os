@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import json
 import os
 import pathlib
@@ -469,6 +470,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.drawer = APP_DRAWER.read_text(encoding="utf-8")
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.apps = APPS_MODULE.read_text(encoding="utf-8")
         cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
@@ -573,11 +575,25 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("pgrep -f", self.apps)
         self.assertIn("wmctrl -lx", self.apps)
 
-    def test_settings_and_app_library_fit_the_monitor_workarea(self):
+    def test_settings_and_app_drawer_fit_the_monitor_workarea(self):
         self.assertIn("responsive_window_size", self.settings)
         self.assertNotIn("self.set_default_size(1000, 700)", self.settings)
-        self.assertIn("responsive_window_size", self.desktop)
-        self.assertNotIn("self.set_default_size(840, 560)", self.desktop)
+        self.assertIn("monitor.get_workarea()", self.drawer)
+        self.assertIn("geometry = drawer_geometry(self._workarea())", self.drawer)
+        self.assertIn("self.window.resize(int(geometry.width), int(geometry.height))", self.drawer)
+
+        spec = importlib.util.spec_from_file_location("ming_app_drawer_workarea_contract", APP_DRAWER)
+        drawer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drawer)
+        # The GDK workarea excludes the Dock and any other reserved screen edge.
+        dock_reserved_workarea = {"x": 8, "y": 24, "width": 1350, "height": 680}
+        geometry = drawer.drawer_geometry(dock_reserved_workarea)
+
+        self.assertEqual(8.0, geometry.x)
+        self.assertEqual(1350.0, geometry.width)
+        self.assertEqual(round(680 * drawer.DRAWER_HEIGHT_RATIO), geometry.height)
+        self.assertEqual(704.0, geometry.y + geometry.height)
+        self.assertLess(geometry.y + geometry.height, 768.0)
 
     def test_ota_resolves_home_before_user_paths(self):
         home_resolution = 'HOME="${HOME:-$(resolve_home)}"'
