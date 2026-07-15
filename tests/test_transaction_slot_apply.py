@@ -7,6 +7,11 @@ import tarfile
 import tempfile
 import unittest
 
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SLOT_PATH = ROOT / "assets" / "ming-transaction-slot.py"
@@ -138,6 +143,24 @@ class TransactionSlotApplyTests(unittest.TestCase):
             self.prepare(plan=plan, payload_path=extra)
         self.assertEqual(caught.exception.code, "E_CONTENT_POLICY")
         self.assertFalse(self.state_root.exists())
+
+    @unittest.skipIf(zstd is None, "stdlib Zstandard fixture support is unavailable")
+    def test_tar_zst_payload_is_streamed_without_temporary_extraction(self):
+        compressed = self.root / "payload.tar.zst"
+        compressed.write_bytes(zstd.compress(self.payload.read_bytes()))
+        plan = json.loads(json.dumps(self.plan))
+        plan["verified_artifacts"]["payload_sha256"] = hashlib.sha256(compressed.read_bytes()).hexdigest()
+        result = self.prepare(plan=plan, payload_path=compressed)
+        candidate = pathlib.Path(result["candidate_root"])
+        self.assertEqual((candidate / "usr" / "share" / "ming-os" / "version").read_bytes(), self.new_content)
+        self.assertFalse(list(self.root.rglob("*.decompressed")))
+
+    @unittest.skipIf(zstd is None, "stdlib Zstandard fixture support is unavailable")
+    def test_zstd_compatibility_stream_reads_without_tarfile_native_support(self):
+        compressed = self.root / "compat.tar.zst"
+        compressed.write_bytes(zstd.compress(self.payload.read_bytes()))
+        with self.apply_module.open_zstd_stream(compressed) as stream:
+            self.assertEqual(stream.read(), self.payload.read_bytes())
 
     def test_clone_preserves_machine_state_and_excludes_home_boot_and_update_store(self):
         result = self.prepare()

@@ -2,6 +2,7 @@
 """Preflight and apply a verified payload to an inactive Ming OS slot."""
 
 import datetime
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -9,6 +10,7 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
 import tarfile
 import uuid
 
@@ -66,6 +68,73 @@ def _append_log(path, transaction_id, event, **fields):
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def open_zstd_stream(path):
+    path = pathlib.Path(path)
+    try:
+        from compression import zstd
+
+        with zstd.open(path, "rb") as stream:
+            yield stream
+        return
+    except ImportError:
+        pass
+    try:
+        import zstandard
+
+        with path.open("rb") as source:
+            with zstandard.ZstdDecompressor().stream_reader(source) as stream:
+                yield stream
+        return
+    except ImportError:
+        pass
+    try:
+        process = subprocess.Popen(
+            ["zstd", "-dc", "--", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise ApplyError("E_CONTENT_POLICY", "Zstandard payload support is unavailable") from exc
+    try:
+        if process.stdout is None:
+            raise ApplyError("E_CONTENT_POLICY", "Zstandard stream is unavailable")
+        yield process.stdout
+        process.stdout.close()
+        try:
+            returncode = process.wait(timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            raise ApplyError("E_CONTENT_POLICY", "Zstandard payload decompression timed out") from exc
+        if returncode != 0:
+            error = process.stderr.read(512) if process.stderr else b""
+            raise ApplyError(
+                "E_CONTENT_POLICY",
+                "Zstandard payload decompression failed",
+                {"stderr": error.decode("utf-8", errors="replace")},
+            )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stderr:
+            process.stderr.close()
+
+
+@contextlib.contextmanager
+def open_payload_tar(path):
+    try:
+        archive = tarfile.open(path, "r:*")
+    except (tarfile.ReadError, tarfile.CompressionError):
+        with open_zstd_stream(path) as stream:
+            with tarfile.open(fileobj=stream, mode="r|") as archive:
+                yield archive
+    else:
+        with archive:
+            yield archive
+
+
 class PayloadArchive:
     def __init__(self, path, index):
         self.path = pathlib.Path(path)
@@ -84,9 +153,8 @@ class PayloadArchive:
     def validate(self):
         required = self.required_hashes()
         try:
-            with tarfile.open(self.path, "r:*") as archive:
-                members = archive.getmembers()
-                for member in members:
+            with open_payload_tar(self.path) as archive:
+                for member in archive:
                     if not member.isreg() or not member.name.startswith("objects/"):
                         raise ApplyError("E_CONTENT_POLICY", "payload contains a non-object member")
                     digest = member.name.removeprefix("objects/")
@@ -115,15 +183,22 @@ class PayloadArchive:
         name = self.members.get(digest)
         if not name:
             raise ApplyError("E_CONTENT_POLICY", "payload object was not validated")
-        with tarfile.open(self.path, "r:*") as archive:
-            member = archive.getmember(name)
-            stream = archive.extractfile(member)
-            if stream is None:
-                raise ApplyError("E_CONTENT_POLICY", "payload object cannot be opened")
-            with pathlib.Path(output).open("wb") as handle:
-                shutil.copyfileobj(stream, handle, 1024 * 1024)
-                handle.flush()
-                os.fsync(handle.fileno())
+        found = False
+        with open_payload_tar(self.path) as archive:
+            for member in archive:
+                if member.name != name:
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ApplyError("E_CONTENT_POLICY", "payload object cannot be opened")
+                with pathlib.Path(output).open("wb") as handle:
+                    shutil.copyfileobj(stream, handle, 1024 * 1024)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                found = True
+                break
+        if not found:
+            raise ApplyError("E_CONTENT_POLICY", "validated payload object disappeared")
         if _sha256(output) != digest:
             raise ApplyError("E_ARTIFACT_HASH", "payload object changed during application")
 
