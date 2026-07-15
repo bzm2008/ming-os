@@ -1,0 +1,41 @@
+#!/bin/sh
+set -u
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+rootmnt="${rootmnt:-/root}"
+requested=""
+for argument in $(cat /proc/cmdline); do
+    case "${argument}" in
+        ming.slot=legacy) requested="legacy" ;;
+        ming.slot=A) requested="A" ;;
+        ming.slot=B) requested="B" ;;
+    esac
+done
+[ -n "${requested}" ] || exit 0
+
+runtime=/run/ming-update
+physical="${runtime}/physical-root"
+mkdir -p "${physical}"
+if ! mount --bind "${rootmnt}" "${physical}"; then
+    exit 0
+fi
+
+state_root="${physical}/var/lib/ming-update"
+result="$(timeout 15 /usr/bin/python3 /usr/lib/ming-update/ming-transaction-boot.py select \
+    --state-root "${state_root}" --physical-root "${physical}" --requested-slot "${requested}" 2>/dev/null || true)"
+selected="$(printf '%s' "${result}" | /usr/bin/python3 -c 'import json,sys; value=json.load(sys.stdin); print(value["selected_root"] if value.get("ok") else "")' 2>/dev/null || true)"
+[ -n "${selected}" ] || exit 0
+[ -d "${selected}" ] || exit 0
+
+if [ "${selected}" != "${physical}" ]; then
+    mount --bind "${selected}" "${rootmnt}" || exit 0
+fi
+mkdir -p "${rootmnt}/home" "${rootmnt}/boot" "${rootmnt}/var/lib/ming-update"
+mount --bind "${physical}/home" "${rootmnt}/home" || exit 0
+mount --bind "${physical}/boot" "${rootmnt}/boot" || exit 0
+mount --bind "${state_root}" "${rootmnt}/var/lib/ming-update" || exit 0
