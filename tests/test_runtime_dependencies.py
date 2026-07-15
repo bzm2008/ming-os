@@ -1,3 +1,4 @@
+import os
 import pathlib
 import re
 import subprocess
@@ -22,6 +23,37 @@ def control_center_wrapper_source():
 def generated_script_source(path, marker):
     start = "cat > %s << '%s'" % (path, marker)
     return DESKTOP.split(start, 1)[1].split(marker, 1)[0]
+
+
+def package_install_gui_source():
+    return generated_script_source(
+        "/usr/local/bin/ming-package-install-gui", "MINGPACKAGEGUI"
+    )
+
+
+def package_install_gui_python_source():
+    gui = package_install_gui_source()
+    return gui.split("if python3 -", 1)[1].split("\n", 1)[1].split(
+        "\nMINGPACKAGEUIPY", 1
+    )[0]
+
+
+def run_package_install_gui_python(result, installer_rc=0):
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        result_file = root / "result.json"
+        result_file.write_text(result, encoding="utf-8")
+        environment = dict(os.environ)
+        environment["PATH"] = str(root / "empty-bin")
+        completed = subprocess.run(
+            [sys.executable, "-c", package_install_gui_python_source(),
+             str(result_file), str(installer_rc)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        return completed
 
 
 REQUIRED_PACKAGES = [
@@ -108,7 +140,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("zenity --error", DESKTOP)
         self.assertIn("ming-phone-desktop --sync", DESKTOP)
         self.assertIn("launcher_warnings", DESKTOP)
-        self.assertIn("启动器需要修复", DESKTOP)
+        self.assertIn("软件已安装，但暂时无法启动", DESKTOP)
         final_menu = DESKTOP.split("configure_simplified_menus() {", 1)[1].split(
             "\n# ========================", 1)[0]
         self.assertIn("安装 DEB 软件包", final_menu)
@@ -117,6 +149,71 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("以管理员身份编辑", final_menu)
         self.assertIn("以管理员身份打开", final_menu)
         self.assertIn("询问 Garlic Claw", final_menu)
+
+    def test_package_install_gui_distinguishes_installation_from_launch_readiness(self):
+        gui = package_install_gui_source()
+
+        self.assertIn('result.get("ok") is True', gui)
+        self.assertIn('result.get("launch_ready") is True', gui)
+        self.assertIn("if not isinstance(result, dict):", gui)
+        self.assertIn("if not isinstance(repaired, dict):", gui)
+        self.assertIn("软件已安装，但暂时无法启动", gui)
+        self.assertIn('"/usr/local/sbin/ming-package-installer", "repair"', gui)
+        self.assertIn("/var/log/ming-package-installer.log", gui)
+        self.assertIn("timeout --foreground 8s ming-phone-desktop --sync", gui)
+        embedded = gui.split("if python3 -", 1)[1].split("\n", 1)[1].split(
+            "\nMINGPACKAGEUIPY", 1
+        )[0]
+        compile(embedded, "<ming-package-install-gui>", "exec")
+
+    def test_package_install_gui_treats_non_object_json_as_a_readable_failure(self):
+        completed = run_package_install_gui_python("[]")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertNotIn("AttributeError", completed.stderr)
+        self.assertIn("软件安装失败", completed.stderr)
+
+    def test_package_install_gui_requires_literal_true_for_ok(self):
+        completed = run_package_install_gui_python(
+            '{"ok": "true", "launch_ready": true, "package": "sample"}'
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("软件安装失败", completed.stderr)
+
+    def test_package_install_gui_requires_literal_true_for_launch_readiness(self):
+        completed = run_package_install_gui_python(
+            '{"ok": true, "launch_ready": "false", "package": "sample"}'
+        )
+
+        self.assertEqual(0, completed.returncode)
+        self.assertIn("软件已安装，但暂时无法启动", completed.stderr)
+
+    def test_package_install_gui_syncs_after_successful_unlaunchable_install(self):
+        completed = run_package_install_gui_python(
+            '{"ok": true, "launch_ready": false, "package": "sample"}'
+        )
+        gui = package_install_gui_source()
+        success_branch = gui.split("\nMINGPACKAGEUIPY\nthen\n", 1)[1].split(
+            "\nfi\nexit 1", 1
+        )[0]
+
+        self.assertEqual(0, completed.returncode)
+        self.assertIn("软件已安装，但暂时无法启动", completed.stderr)
+        self.assertIn("timeout --foreground 8s ming-phone-desktop --sync", success_branch)
+
+    def test_package_install_gui_does_not_sync_after_failed_installation(self):
+        completed = run_package_install_gui_python(
+            '{"ok": false, "error": "install failed"}', installer_rc=4
+        )
+        gui = package_install_gui_source()
+        failure_branch = gui.split("\nMINGPACKAGEUIPY\nthen\n", 1)[1].split(
+            "\nfi\nexit 1", 1
+        )[1]
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("软件安装失败", completed.stderr)
+        self.assertNotIn("ming-phone-desktop --sync", failure_branch)
 
     def test_apps_module_has_a_dedicated_required_runtime_package_set(self):
         block = APPS.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0]

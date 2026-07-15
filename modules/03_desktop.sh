@@ -278,6 +278,7 @@ fi
 if python3 - "${result_file}" "${installer_rc}" << 'MINGPACKAGEUIPY'
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -288,29 +289,85 @@ try:
     result = json.loads(raw)
 except (TypeError, ValueError):
     result = {}
-ok = bool(result.get("ok")) and return_code == 0
+if not isinstance(result, dict):
+    result = {}
+ok = result.get("ok") is True and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
 log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
+if "launch_ready" in result:
+    launch_ready = result.get("launch_ready") is True
+else:
+    launch_ready = ok
 launcher_warnings = result.get("launcher_warnings")
 launcher_warnings = launcher_warnings if isinstance(launcher_warnings, list) else []
+
+
+def warning_lines(items):
+    values = [str(item.get("error") or "启动器不可用")
+              for item in items if isinstance(item, dict)]
+    return values[:3] or ["未找到可用的图形启动器。"]
+
+
+def repair_package(package_name):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package_name):
+        return False, "软件包名称无效，无法执行自动修复。"
+    try:
+        completed = subprocess.run(
+            ["pkexec", "/usr/local/sbin/ming-package-installer", "repair", package_name],
+            capture_output=True, check=False, text=True, timeout=210,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "修复超时，请查看安装日志后重试。"
+    except OSError as exc:
+        return False, "无法启动修复程序：%s" % exc
+    try:
+        repaired = json.loads(completed.stdout.strip())
+    except (TypeError, ValueError):
+        repaired = {}
+    if not isinstance(repaired, dict):
+        repaired = {}
+    repair_ok = repaired.get("ok") is True and completed.returncode == 0
+    if "launch_ready" in repaired:
+        repair_ready = repaired.get("launch_ready") is True
+    else:
+        repair_ready = repair_ok
+    if repair_ok and repair_ready:
+        return True, "已重新安装并验证启动器。"
+    return False, str(repaired.get("error") or "修复没有恢复可用启动器。")
+
+
 if ok:
     title = "软件安装完成"
     detail = "已安装：%s%s\n应用抽屉和桌面将自动刷新。\n日志：%s" % (
         package, (" " + version) if version else "", log_path)
-    if launcher_warnings:
-        title = "软件已安装，但启动器需要修复"
-        warnings = [str(item.get("error") or "启动器不可用")
-                    for item in launcher_warnings if isinstance(item, dict)]
-        detail += "\n\n注意：" + "；".join(warnings[:3])
+    if not launch_ready:
+        title = "软件已安装，但暂时无法启动"
+        detail += "\n\n原因：" + "；".join(warning_lines(launcher_warnings))
+        detail += "\n可选择“尝试修复”重新安装软件包。"
 else:
     title = "软件安装失败"
     reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
     detail = "%s\n日志：%s" % (reason[:1200], log_path)
 if shutil.which("zenity"):
-    subprocess.run(
-        ["zenity", "--info" if ok else "--error", "--title=" + title,
-         "--text=" + detail, "--width=520"], check=False)
+    if ok and not launch_ready:
+        choice = subprocess.run(
+            ["zenity", "--question", "--title=" + title, "--text=" + detail,
+             "--ok-label=尝试修复", "--cancel-label=稍后处理", "--width=560"],
+            check=False,
+        )
+        if choice.returncode == 0:
+            repaired, repair_detail = repair_package(package)
+            repair_title = "软件修复完成" if repaired else "软件仍无法启动"
+            subprocess.run(
+                ["zenity", "--info" if repaired else "--error", "--title=" + repair_title,
+                 "--text=" + repair_detail + "\n日志：" + log_path, "--width=560"],
+                check=False,
+            )
+    else:
+        subprocess.run(
+            ["zenity", "--info" if ok else "--error", "--title=" + title,
+             "--text=" + detail, "--width=520"], check=False)
 elif shutil.which("notify-send"):
     subprocess.run(
         ["notify-send", "-u", "normal" if ok else "critical", title, detail], check=False)
@@ -320,7 +377,7 @@ raise SystemExit(0 if ok else 1)
 MINGPACKAGEUIPY
 then
     if command -v ming-phone-desktop >/dev/null 2>&1; then
-        ming-phone-desktop --sync >/dev/null 2>&1 || true
+        timeout --foreground 8s ming-phone-desktop --sync >/dev/null 2>&1 || true
     fi
     exit 0
 fi
