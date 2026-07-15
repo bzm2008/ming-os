@@ -68,6 +68,9 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
                     "rolled_back": ("更新未通过健康检查，已自动回滚", "check"),
                 },
                 "OTA_ERROR_MESSAGES": {},
+                "OTA_MESSAGE_KEYS": {
+                    "update.status.committed": "committed",
+                },
             },
         )
         for state, expected in {
@@ -90,6 +93,10 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
             self.assertEqual(expected, result["title"])
         self.assertNotEqual("更新已完成", presenter({"state": "staged"})["title"])
         self.assertNotEqual("更新已完成", presenter({"state": "pending_health"})["title"])
+        self.assertEqual(
+            "更新已完成",
+            presenter({"message_key": "update.status.committed"})["title"],
+        )
 
     def test_settings_maps_frozen_error_codes_without_terminal_text(self):
         presenter = standalone_function(
@@ -104,6 +111,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
                     "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
                     "E_HEALTH_ROOT": "新系统健康检查失败，系统正在回滚。",
                 },
+                "OTA_MESSAGE_KEYS": {},
             },
         )
         for code, expected in (
@@ -149,7 +157,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
             "ota_status_presentation",
             {"OTA_STATE_MESSAGES": {}, "OTA_ERROR_MESSAGES": {
                 "E_SPACE": "可用空间不足，更新已安全拒绝。",
-            }},
+            }, "OTA_MESSAGE_KEYS": {}},
         )
         message = presenter({"ok": False, "error_code": "E_SPACE"})["detail"]
         apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")

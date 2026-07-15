@@ -283,6 +283,23 @@ OTA_STATE_MESSAGES = {
     "rolled_back": ("更新未通过健康检查，已自动回滚", "check"),
 }
 
+OTA_MESSAGE_KEYS = {
+    "update.status.new": "new",
+    "update.status.verified": "verified",
+    "update.status.staging": "staging",
+    "update.status.staged": "staged",
+    "update.status.armed": "armed",
+    "update.status.booting": "booting",
+    "update.status.pending_health": "pending_health",
+    "update.status.committing": "committing",
+    "update.status.committed": "committed",
+    "update.status.aborting": "aborting",
+    "update.status.aborted": "aborted",
+    "update.status.rollback_armed": "rollback_armed",
+    "update.status.rolling_back": "rolling_back",
+    "update.status.rolled_back": "rolled_back",
+}
+
 OTA_ERROR_MESSAGES = {
     "E_BOOTSTRAP_REQUIRED": "此系统需要先安装官方 OTA 更新组件。请使用受信任的 26.3.2 bootstrap，完成校验后再检查更新。",
     "E_SPACE": "可用空间不足，更新已安全拒绝。请释放空间后重新检查；不要绕过空间门禁。",
@@ -315,7 +332,10 @@ def ota_status_presentation(status):
     progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
     message_args = status.get("message_args") if isinstance(status.get("message_args"), dict) else {}
 
+    message_key = str(status.get("message_key") or "")
     state = str(status.get("state") or transaction.get("state") or "")
+    if not state:
+        state = OTA_MESSAGE_KEYS.get(message_key, "")
     error_code = str(status.get("error_code") or "")
     current_version = str(
         status.get("current_version")
