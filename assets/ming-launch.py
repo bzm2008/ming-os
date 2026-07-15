@@ -464,7 +464,7 @@ class LaunchBroker:
             return False
         if not verified:
             error = RuntimeError("desktop launcher verification failed")
-            self.record_event(request, "activation_rejected", error)
+            self.record_event(request, "activation_failed", error)
             self.report_error(request, error)
             return False
         try:
@@ -534,6 +534,19 @@ class LaunchBroker:
             )
 
 
+def feedback_icon_name(request):
+    """Return an animation icon without interpreting a trusted shell wrapper."""
+    icon_name = "application-x-executable"
+    if request.mode != "desktop_app_info" and request.desktop_file:
+        try:
+            entry = COMMON.parse_desktop_file(request.desktop_file)
+        except ValueError:
+            entry = None
+        if entry and entry.icon:
+            icon_name = entry.icon
+    return COMMON.resolve_icon(icon_name)
+
+
 def animate_launch(request, origin):
     try:
         import gi
@@ -567,12 +580,7 @@ def animate_launch(request, origin):
     window.get_style_context().add_class("ming-launch-feedback")
 
     overlay = Gtk.Overlay()
-    icon_name = "application-x-executable"
-    if request.desktop_file:
-        entry = COMMON.parse_desktop_file(request.desktop_file)
-        if entry and entry.icon:
-            icon_name = entry.icon
-    icon_name = COMMON.resolve_icon(icon_name)
+    icon_name = feedback_icon_name(request)
     if pathlib.Path(icon_name).is_absolute():
         image = Gtk.Image()
         pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), icon_name, 48)

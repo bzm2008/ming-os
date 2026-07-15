@@ -102,6 +102,67 @@ class LaunchResultTests(unittest.TestCase):
             [status for status, _detail in events],
         )
 
+    def test_non_reduced_wrapper_activation_uses_a_safe_feedback_icon(self):
+        events = []
+        icons = []
+        desktop = pathlib.Path(tempfile.gettempdir()).resolve() / "store-wrapper.desktop"
+
+        def animate(request, _origin):
+            icons.append(self.launch.feedback_icon_name(request))
+
+        broker = self.launch.LaunchBroker(
+            spawn=lambda _argv: self.fail("desktop app info must not spawn"),
+            desktop_activator=lambda _path: True,
+            trusted_verifier=lambda _path: True,
+            animate=animate,
+            reduced_motion=lambda: False,
+            probe=lambda *_args, **_kwargs: None,
+            record_event=lambda _request, status, detail="": events.append((status, str(detail))),
+            report_error=lambda *_args: None,
+        )
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(desktop), mode="desktop_app_info",
+        )
+
+        self.assertTrue(broker.launch(request))
+        self.assertEqual(["application-x-executable"], icons)
+        self.assertEqual(["activated"], [status for status, _detail in events])
+
+    def test_rejected_wrapper_activation_is_reported_as_failed_and_is_retryable(self):
+        events = []
+        activations = []
+        verifications = []
+        desktop = pathlib.Path(tempfile.gettempdir()).resolve() / "untrusted-wrapper.desktop"
+
+        def verify(path):
+            verifications.append(path)
+            return False
+
+        broker = self.launch.LaunchBroker(
+            spawn=lambda _argv: self.fail("desktop app info must not spawn"),
+            desktop_activator=lambda path: activations.append(path) or True,
+            trusted_verifier=verify,
+            animate=lambda *_args: self.fail("must not animate"),
+            reduced_motion=lambda: True,
+            probe=lambda *_args, **_kwargs: None,
+            now=lambda: 1.0,
+            record_event=lambda _request, status, detail="": events.append((status, str(detail))),
+            report_error=lambda *_args: None,
+        )
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(desktop), mode="desktop_app_info",
+        )
+
+        self.assertFalse(broker.launch(request))
+        self.assertFalse(broker.launch(request))
+        self.assertEqual([str(desktop), str(desktop)], verifications)
+        self.assertEqual([], activations)
+        self.assertEqual(
+            ["activation_failed", "activation_failed"],
+            [status for status, _detail in events],
+        )
+        self.assertTrue(all("verification failed" in detail for _status, detail in events))
+
     def test_descriptor_revalidation_is_the_last_check_before_desktop_activation(self):
         with tempfile.TemporaryDirectory() as directory:
             applications = pathlib.Path(directory) / "applications"
