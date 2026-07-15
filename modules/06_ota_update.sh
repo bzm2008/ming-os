@@ -13,8 +13,97 @@ readonly OTA_API_ENDPOINT="/api/onion-update"
 install_ota_dependencies() {
     echo "Installing OTA update dependencies..."
     apt install -y --no-install-recommends \
-        curl wget jq rsync python3 squashfs-tools zenity yad libnotify-bin \
+        curl wget jq rsync python3 gpgv zstd initramfs-tools grub-common squashfs-tools zenity yad libnotify-bin \
         pkexec polkitd lxpolkit
+}
+
+deploy_transaction_runtime() {
+    echo "Deploying transactional OTA runtime..."
+    local source="/tmp/ming-build/assets"
+    local runtime="/usr/local/lib/ming-update"
+    local asset
+    local -a runtime_assets=(
+        ming-update-cli.py
+        ming-transaction-verify.py
+        ming-transaction-state.py
+        ming-transaction-slot.py
+        ming-transaction-apply.py
+        ming-transaction-rollback.py
+        ming-transaction-boot.py
+        ming-transaction-health.py
+        ming-transaction-engine.py
+        ming-transaction-diagnostics.py
+        ming-ota-bootstrap-capability.py
+        ming-transaction-allowlist.txt
+    )
+
+    install -d -m 0755 "${runtime}" /usr/share/ming-update/trust \
+        /usr/share/polkit-1/actions /etc/initramfs-tools/hooks /etc/grub.d \
+        /etc/systemd/system /var/lib/ming-update /var/cache/ming-update /var/log/ming-update
+    for asset in "${runtime_assets[@]}"; do
+        [[ -s "${source}/${asset}" ]] || {
+            echo "[06_ota_update][ERROR] Missing transaction asset: ${asset}" >&2
+            return 1
+        }
+        install -m 0644 "${source}/${asset}" "${runtime}/${asset}"
+    done
+    for asset in ming-update-cli.py ming-transaction-health.py ming-transaction-diagnostics.py ming-ota-bootstrap-capability.py; do
+        chmod 0755 "${runtime}/${asset}"
+    done
+
+    [[ -s "${source}/trust/ming-ota-release-keyring.gpg" && ! -L "${source}/trust/ming-ota-release-keyring.gpg" ]] || {
+        echo "[06_ota_update][ERROR] Reviewed Ming OTA release keyring is required for image construction." >&2
+        return 1
+    }
+    [[ -s "${source}/trust/ming-ota-key-policy.json" && ! -L "${source}/trust/ming-ota-key-policy.json" ]] || {
+        echo "[06_ota_update][ERROR] Reviewed Ming OTA key policy is required for image construction." >&2
+        return 1
+    }
+    install -m 0644 "${source}/trust/ming-ota-release-keyring.gpg" /usr/share/ming-update/trust/release-keyring.gpg
+    install -m 0644 "${source}/trust/ming-ota-key-policy.json" /usr/share/ming-update/trust/key-policy.json
+
+    [[ -s "${source}/initramfs/ming-transaction-hook" ]] || {
+        echo "[06_ota_update][ERROR] Missing transaction initramfs hook." >&2
+        return 1
+    }
+    [[ -s "${source}/initramfs/ming-transaction-local-premount" ]] || {
+        echo "[06_ota_update][ERROR] Missing transaction initramfs selector." >&2
+        return 1
+    }
+    install -m 0755 "${source}/initramfs/ming-transaction-hook" /etc/initramfs-tools/hooks/ming-transaction
+    install -m 0755 "${source}/initramfs/ming-transaction-local-premount" "${runtime}/ming-transaction-local-premount"
+    install -m 0755 "${source}/grub/40_ming_transaction" /etc/grub.d/40_ming_transaction
+    install -m 0644 "${source}/systemd/ming-transaction-health.service" /etc/systemd/system/ming-transaction-health.service
+    install -m 0644 "${source}/systemd/ming-transaction-reconcile.service" /etc/systemd/system/ming-transaction-reconcile.service
+    install -m 0644 "${source}/polkit/org.mingos.update.policy" /usr/share/polkit-1/actions/org.mingos.update.policy
+
+    cat > /usr/local/bin/ming-update << 'UPDATECLI'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/ming-update/ming-update-cli.py "$@"
+UPDATECLI
+    cat > /usr/local/sbin/ming-transaction-health << 'HEALTHCLI'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/ming-update/ming-transaction-health.py "$@"
+HEALTHCLI
+    cat > /usr/local/bin/ming-transaction-diagnostics << 'DIAGNOSTICSCLI'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/ming-update/ming-transaction-diagnostics.py "$@"
+DIAGNOSTICSCLI
+    chmod 0755 /usr/local/bin/ming-update /usr/local/sbin/ming-transaction-health /usr/local/bin/ming-transaction-diagnostics
+    printf '%s\n' 'transactional-slot-v1' > /var/lib/ming-update/protocol-version
+    chmod 0644 /var/lib/ming-update/protocol-version
+    install -d -m 0755 /etc/default/grub.d /boot/grub
+    cat > /etc/default/grub.d/40-ming-transaction.cfg << 'GRUBTRANSACTION'
+GRUB_DEFAULT=saved
+GRUB_SAVEDEFAULT=false
+GRUBTRANSACTION
+    grub-editenv /boot/grub/grubenv create
+    grub-editenv /boot/grub/grubenv set saved_entry=ming-legacy
+    grub-editenv /boot/grub/grubenv list | grep -Fxq 'saved_entry=ming-legacy'
+    install -d -m 0755 /etc/systemd/system/multi-user.target.wants
+    ln -sfn ../ming-transaction-health.service /etc/systemd/system/multi-user.target.wants/ming-transaction-health.service
+    ln -sfn ../ming-transaction-reconcile.service /etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service
+    /usr/local/lib/ming-update/ming-ota-bootstrap-capability.py --write-marker >/dev/null
 }
 
 deploy_ota_backup_engine() {
@@ -27,10 +116,10 @@ deploy_ota_backup_engine() {
     bash -n /usr/local/sbin/ming-ota-backup
 }
 
-deploy_ota_cli() {
-    echo "Deploying ming-update CLI..."
+deploy_recovery_ota_cli() {
+    echo "Deploying guarded recovery OTA helper..."
 
-    cat > /usr/local/bin/ming-update << 'OTACLI'
+    cat > /usr/local/lib/ming-update/ming-recovery-update << 'OTACLI'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1613,31 +1702,31 @@ case "${1:-help}" in
 esac
 OTACLI
 
-    chmod +x /usr/local/bin/ming-update
-    bash -n /usr/local/bin/ming-update
+    chmod +x /usr/local/lib/ming-update/ming-recovery-update
+    bash -n /usr/local/lib/ming-update/ming-recovery-update
 }
 
 deploy_systemd_services() {
-    echo "Creating ming-update systemd services and timers..."
+    echo "Creating transactional ming-update check timer..."
 
-    # 每周一凌晨3点定期检查（原有）
+    # The public CLI is JSON-only.  A periodic check may update its structured
+    # cache, but it must never invoke the retired recovery ISO workflow.
     cat > /etc/systemd/system/ming-update-check.service << 'SYSTEMDSERVICE'
 [Unit]
-Description=Ming OS OTA Update Check
+Description=Ming OS transactional OTA update check
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-Environment=MING_UPDATE_BACKGROUND_CHECK=1
-ExecStart=/usr/local/bin/ming-update check
+ExecStart=/usr/local/bin/ming-update check --json
 StandardOutput=journal
 StandardError=journal
 SYSTEMDSERVICE
 
     cat > /etc/systemd/system/ming-update-check.timer << 'SYSTEMDTIMER'
 [Unit]
-Description=Ming OS OTA Update Check Timer
+Description=Ming OS transactional OTA update check timer
 
 [Timer]
 OnCalendar=Mon *-*-* 03:00:00
@@ -1648,303 +1737,34 @@ Persistent=true
 WantedBy=timers.target
 SYSTEMDTIMER
 
-    # 开机联网后自动检查（新增）：静默检查，有更新则桌面通知
-    cat > /etc/systemd/system/ming-update-boot-check.service << 'BOOTCHECK'
-[Unit]
-Description=Ming OS Boot-time Update Check
-After=network-online.target graphical.target
-Wants=network-online.target
-ConditionPathExists=/usr/local/bin/ming-update
-
-[Service]
-Type=oneshot
-# 延迟90秒，等桌面完全就绪后弹通知
-ExecStartPre=/bin/sleep 90
-ExecStart=/usr/local/bin/ming-boot-update-check
-StandardOutput=journal
-StandardError=journal
-# 检查失败不影响登录体验
-SuccessExitStatus=0 1
-
-[Install]
-WantedBy=graphical.target
-BOOTCHECK
-
-    # 自动检查通知脚本（用户级，有更新弹 zenity/notify-send）
-    cat > /usr/local/bin/ming-boot-update-check << 'BOOTCHECKSCRIPT'
-#!/usr/bin/env bash
-# Ming OS 开机自动检查更新（静默，有更新才弹通知）
-set -uo pipefail
-
-LOG="/tmp/ming-boot-check.log"
-exec >> "${LOG}" 2>&1
-
-echo "[$(date '+%F %T')] Boot update check started"
-
-# 网络不通就退出，不阻塞；这个标记只由自动检查写入，供电源菜单判定。
-MING_UPDATE_BACKGROUND_CHECK=1 /usr/local/bin/ming-update check >/tmp/ming-update-check.log 2>&1
-rc=$?
-echo "[$(date '+%F %T')] ming-update check rc=${rc}"
-
-# 没有 manifest 说明没有更新，静默退出。ming-update 的 root cache
-# 固定放在 /var/cache/ming-update，不要拼接一个并不存在的 root 子目录。
-manifest="/var/cache/ming-update/update_info.json"
-[ -f "${manifest}" ] || exit 0
-
-has_update=$(jq -r '.has_update // false' "${manifest}" 2>/dev/null)
-[ "${has_update}" = "true" ] || exit 0
-
-new_version=$(jq -r '.version // "新版本"' "${manifest}" 2>/dev/null)
-
-# 找到当前登录用户的 DISPLAY
-for user_home in /home/*; do
-    uname=$(basename "${user_home}")
-    display=$(cat /proc/*/environ 2>/dev/null | tr '\0' '\n' | grep "^DISPLAY=" | head -1 | cut -d= -f2)
-    if [ -n "${display}" ]; then
-        export DISPLAY="${display}"
-        export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "${uname}" 2>/dev/null)/bus"
-        break
-    fi
-done
-
-# 桌面通知
-notify-send \
-    -i system-software-update \
-    -a "Ming OS 更新" \
-    "发现新版本 ${new_version}" \
-    "打开「铭设置」→「系统更新」可一键更新；电源菜单也会提供“更新并关机”。" \
-    2>/dev/null || true
-
-echo "[$(date '+%F %T')] Notification sent for version ${new_version}"
-BOOTCHECKSCRIPT
-    chmod +x /usr/local/bin/ming-boot-update-check
-
+    # Retire the pre-transactional boot notifier instead of allowing it to
+    # parse an old cache or call unsupported public CLI verbs.
+    systemctl disable --now ming-update-boot-check.service 2>/dev/null || true
+    rm -f -- /etc/systemd/system/ming-update-boot-check.service \
+        /usr/local/bin/ming-boot-update-check
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable ming-update-check.timer 2>/dev/null || true
-    systemctl enable ming-update-boot-check.service 2>/dev/null || true
     systemctl start ming-update-check.timer 2>/dev/null || true
+    return 0
 }
 
 deploy_gui_tool() {
-    echo "Deploying ming-update GUI (Chinese final)..."
+    echo "Retiring standalone Ming update launcher..."
 
-    cat > /usr/local/bin/ming-update-gui << 'OTAGUI'
-#!/usr/bin/env bash
-set -uo pipefail
-
-readonly CACHE_DIR="/var/cache/ming-update"
-readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
-readonly CHECK_LOG="/tmp/ming-update-check.log"
-readonly DOWNLOAD_LOG="/tmp/ming-update-download.log"
-readonly INSTALL_LOG="/tmp/ming-update-install.log"
-
-have_zenity() { command -v zenity >/dev/null 2>&1; }
-
-manifest_file() {
-    if [[ -f "${CACHE_DIR}/update_info.json" ]]; then
-        printf '%s\n' "${CACHE_DIR}/update_info.json"
-    else
-        printf '%s\n' "${USER_CACHE_DIR}/update_info.json"
-    fi
-}
-
-log_tail() {
-    local file="$1"
-    if [[ -f "${file}" ]]; then
-        tail -n 80 "${file}"
-    else
-        echo "没有日志文件：${file}"
-    fi
-}
-
-show_info() {
-    if have_zenity; then
-        zenity --info --title="$1" --text="$2" --width=560 2>/dev/null || true
-    else
-        printf '%s\n%s\n' "$1" "$2"
-    fi
-}
-
-show_error() {
-    if have_zenity; then
-        zenity --error --title="$1" --text="$2" --width=660 2>/dev/null || true
-    else
-        printf '错误：%s\n%s\n' "$1" "$2" >&2
-    fi
-}
-
-ask_yes_no() {
-    if have_zenity; then
-        zenity --question --title="$1" --text="$2" --ok-label="${3:-确定}" --cancel-label="${4:-取消}" --width=580 2>/dev/null
-    else
-        printf '%s\n%s\n' "$1" "$2"
-        return 1
-    fi
-}
-
-run_with_progress() {
-    local title="$1"
-    local text="$2"
-    local log_file="$3"
-    shift 3
-
-    : > "${log_file}"
-    if have_zenity; then
-        (
-            echo "10"
-            echo "# ${text}"
-            "$@" > "${log_file}" 2>&1
-            rc=$?
-            echo "${rc}" > "${log_file}.rc"
-            echo "100"
-            echo "# 完成"
-        ) | zenity --progress --title="${title}" --text="${text}" --percentage=0 --auto-close --no-cancel --width=480 2>/dev/null || true
-        return "$(cat "${log_file}.rc" 2>/dev/null || echo 1)"
-    fi
-
-    "$@" > "${log_file}" 2>&1
-}
-
-check_update_gui() {
-    if ! run_with_progress "检查更新" "正在检查 Ming OS 更新..." "${CHECK_LOG}" /usr/local/bin/ming-update check; then
-        show_error "检查更新失败" "无法完成更新检查。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
-        return 1
-    fi
-
-    local manifest
-    manifest=$(manifest_file)
-    if [[ ! -f "${manifest}" ]]; then
-        show_info "已是最新版本" "当前没有可安装更新。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
-        return 0
-    fi
-
-    local version notes ready
-    version=$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || echo "unknown")
-    notes=$(jq -r '.release_notes // .message // "暂无更新说明。"' "${manifest}" 2>/dev/null || echo "暂无更新说明。")
-    ready=$(jq -r '.ready // true' "${manifest}" 2>/dev/null || echo "true")
-    if [[ "${ready}" != "true" ]]; then
-        show_info "更新尚未就绪" "服务器已登记版本 ${version}，但下载包仍在准备或校验中。\n\n${notes}"
-        return 0
-    fi
-
-    if ask_yes_no "发现新版本" "发现 Ming OS ${version}。\n\n${notes}\n\n是否现在下载？" "下载" "稍后"; then
-        download_update_gui
-    fi
-}
-
-download_update_gui() {
-    if ! run_with_progress "下载更新" "正在下载并校验更新包..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-update download; then
-        show_error "下载失败" "更新没有下载完成。\n\n日志：\n$(log_tail "${DOWNLOAD_LOG}")"
-        return 1
-    fi
-    if ask_yes_no "下载完成" "更新已下载并校验完成。\n\n是否写入 OTA 启动项？" "安装" "稍后"; then
-        install_update_gui
-    else
-        show_info "下载完成" "你可以稍后重新打开系统更新并选择安装。"
-    fi
-}
-
-install_update_gui() {
-    if ! ask_yes_no "安装更新" "安装会写入 GRUB OTA 启动项，之后需要重启并选择 Ming OS OTA Installer。\n\n是否继续？" "继续" "取消"; then
-        return 0
-    fi
-
-    : > "${INSTALL_LOG}"
-    local rc=1
-    if command -v pkexec >/dev/null 2>&1; then
-        pkexec /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    else
-        /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    fi
-
-    if [[ ${rc} -eq 0 ]]; then
-        show_info "安装准备完成" "OTA 启动项已写入。\n\n重启后在 GRUB 中选择 Ming OS OTA Installer。"
-    else
-        show_error "安装失败" "无法写入 OTA 启动项。\n\n日志：\n$(log_tail "${INSTALL_LOG}")"
-    fi
-    return "${rc}"
-}
-
-main_menu() {
-    if ! have_zenity; then
-        /usr/local/bin/ming-update "${1:-check}"
-        return $?
-    fi
-
-    while true; do
-        local choice
-        choice=$(zenity --list \
-            --title="Ming OS 更新管理器" \
-            --text="请选择操作" \
-            --column="操作" --column="说明" \
-            "检查更新" "检查是否有新版本" \
-            "下载更新" "下载并校验已发现的更新" \
-            "安装更新" "写入 OTA 启动项" \
-            "查看状态" "显示当前更新状态" \
-            --width=560 --height=360 \
-            --ok-label="执行" --cancel-label="退出" 2>/dev/null)
-        [[ $? -eq 0 ]] || break
-        case "${choice}" in
-            "检查更新") check_update_gui ;;
-            "下载更新") download_update_gui ;;
-            "安装更新") install_update_gui ;;
-            "查看状态")
-                local status_text
-                status_text=$(/usr/local/bin/ming-update status 2>&1)
-                show_info "更新状态" "${status_text}"
-                ;;
-        esac
-    done
-}
-
-case "${1:-menu}" in
-    menu) main_menu ;;
-    check) check_update_gui ;;
-    download) download_update_gui ;;
-    install) install_update_gui ;;
-    *) echo "用法：ming-update-gui [menu|check|download|install]"; exit 1 ;;
-esac
-OTAGUI
-
-    chmod +x /usr/local/bin/ming-update-gui
-    bash -n /usr/local/bin/ming-update-gui
-
-    # Keep old launchers working without retaining a second, divergent update
-    # workflow.  All visible update choices now live in Ming Settings.
+    # Compatibility command only: Settings is the sole visible update surface.
     cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'
 #!/usr/bin/env bash
-# Ming OS 更新管理器（兼容入口；实际界面统一位于 Ming 设置中心）
-# 系统更新兼容入口：统一跳转到铭设置的系统更新页。
+# Ming OS 更新管理器兼容入口；实际界面统一位于 Ming 设置中心。
 exec /usr/local/bin/ming-control-center --page update "$@"
 OTAGUIREDIRECT
-    chmod +x /usr/local/bin/ming-update-gui
+    chmod 0755 /usr/local/bin/ming-update-gui
     bash -n /usr/local/bin/ming-update-gui
 
-    cat > /usr/share/applications/ming-update.desktop << DESKTOPFILE
-[Desktop Entry]
-Name=系统更新
-Name[zh_CN]=系统更新
-Comment=检查并安装 Ming OS 更新
-Comment[zh_CN]=检查并安装 Ming OS 系统更新
-Exec=/usr/local/bin/ming-control-center --page update
-Icon=ming-update-icon
-Terminal=false
-Type=Application
-Categories=System;Settings;
-Keywords=update;upgrade;system;
-StartupNotify=true
-NoDisplay=true
-DESKTOPFILE
-
-    mkdir -p "/home/${MING_USER}/Desktop"
-    cp /usr/share/applications/ming-update.desktop "/home/${MING_USER}/Desktop/"
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/ming-update.desktop"
-    chmod +x "/home/${MING_USER}/Desktop/ming-update.desktop"
+    # Remove the legacy shell and desktop copies generated by older releases.
+    rm -f -- /usr/share/applications/ming-update.desktop
+    rm -f -- "/home/${MING_USER}/Desktop/ming-update.desktop"
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+    return 0
 }
 
 create_version_file() {
@@ -2008,13 +1828,14 @@ PASSWORDMIGRATIONAUTO
 
 main() {
     echo "=====> [06_ota_update] Deploying OTA update system <====="
-    install_ota_dependencies
-    deploy_ota_backup_engine
-    deploy_ota_cli
-    deploy_systemd_services
-    deploy_gui_tool
-    deploy_passwordless_oobe_migration
-    create_version_file
+    install_ota_dependencies || return 1
+    deploy_ota_backup_engine || return 1
+    deploy_transaction_runtime || return 1
+    deploy_recovery_ota_cli || return 1
+    deploy_systemd_services || return 1
+    deploy_gui_tool || return 1
+    deploy_passwordless_oobe_migration || return 1
+    create_version_file || return 1
     echo "=====> [06_ota_update] OTA update system deployed <====="
 }
 

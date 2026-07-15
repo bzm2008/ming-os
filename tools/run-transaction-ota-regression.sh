@@ -18,18 +18,24 @@ python3 -m unittest \
     tests.test_transaction_boot \
     tests.test_transaction_health_bootstrap \
     tests.test_transaction_engine \
+    tests.test_transaction_bootstrap \
+    tests.test_transaction_runtime_deployment \
+    tests.test_update_single_flow \
     tests.test_ota_target_guard \
     tests.test_ota_backup
 
 python3 -m py_compile \
     assets/ming-transaction-*.py \
+    assets/ming-update-cli.py \
     assets/ming-ota-bootstrap-capability.py \
-    tests/test_transaction_*.py
+    tests/test_transaction_*.py \
+    tests/test_update_single_flow.py
 
 bash -n \
     assets/initramfs/ming-transaction-hook \
     assets/initramfs/ming-transaction-local-premount \
     assets/grub/40_ming_transaction \
+    tools/build-ming-ota-bootstrap.sh \
     tools/run-transaction-ota-regression.sh
 
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -38,12 +44,26 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     install -Dm0644 assets/systemd/ming-transaction-health.service "${verify_root}/etc/systemd/system/ming-transaction-health.service"
     install -Dm0644 assets/systemd/ming-transaction-reconcile.service "${verify_root}/etc/systemd/system/ming-transaction-reconcile.service"
     install -Dm0755 /bin/true "${verify_root}/usr/local/sbin/ming-transaction-health"
+    install -Dm0755 /bin/true "${verify_root}/usr/local/bin/ming-update"
     install -Dm0755 /bin/true "${verify_root}/bin/true"
+    cat > "${verify_root}/etc/systemd/system/ming-update-check.service" <<'UNIT'
+[Unit]
+Description=Ming OS transactional OTA update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ming-update check --json
+StandardOutput=journal
+StandardError=journal
+UNIT
     for unit in \
         sysinit.target \
         basic.target \
         shutdown.target \
         local-fs.target \
+        network-online.target \
         multi-user.target \
         graphical.target \
         dbus.service \
@@ -57,15 +77,20 @@ if command -v systemd-analyze >/dev/null 2>&1; then
             printf '[Unit]\nDescription=Regression fixture %s\n' "${unit}" > "${verify_root}/etc/systemd/system/${unit}"
         fi
     done
-    systemd-analyze verify --root="${verify_root}" "${verify_root}/etc/systemd/system/ming-transaction-health.service" "${verify_root}/etc/systemd/system/ming-transaction-reconcile.service"
+    systemd-analyze verify --root="${verify_root}" "${verify_root}/etc/systemd/system/ming-transaction-health.service" \
+        "${verify_root}/etc/systemd/system/ming-transaction-reconcile.service" \
+        "${verify_root}/etc/systemd/system/ming-update-check.service"
 fi
 
 if git rev-parse --show-toplevel >/dev/null 2>&1; then
     git diff --check -- \
         assets/ming-transaction-*.py \
+        assets/ming-update-cli.py \
         assets/ming-ota-bootstrap-capability.py \
         tests/test_transaction_*.py \
+        tests/test_update_single_flow.py \
         tests/fixtures/transaction_fault_matrix.json \
+        tools/build-ming-ota-bootstrap.sh \
         tools/run-transaction-ota-regression.sh \
         .github/workflows/transaction-ota-regression.yml
 fi
