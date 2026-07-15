@@ -8,6 +8,7 @@ import math
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -22,6 +23,7 @@ MAX_ICON_BYTES = 8 * 1024 * 1024
 ICON_EXTENSIONS = {".png", ".svg"}
 _FIELD_CODE = re.compile(r"%[fFuUdDnNickvm]")
 _SHELL_NAME = {"sh", "bash", "dash", "zsh", "ksh"}
+_LAUNCH_REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
 
 
 class Rect:
@@ -80,6 +82,74 @@ class CommandResult:
 
 class InstanceAlreadyRunning(RuntimeError):
     pass
+
+
+class LaunchRequestResult:
+    """The bounded broker result, with legacy boolean compatibility."""
+
+    __slots__ = ("state", "error")
+
+    def __init__(self, state, error=""):
+        if state not in {"accepted", "rejected", "unavailable"}:
+            raise ValueError("invalid launch request state")
+        self.state = state
+        self.error = str(error or "")[:512]
+
+    @property
+    def accepted(self):
+        return self.state == "accepted"
+
+    @property
+    def rejected(self):
+        return self.state == "rejected"
+
+    @property
+    def unavailable(self):
+        return self.state == "unavailable"
+
+    def __bool__(self):
+        return self.accepted
+
+
+def new_launch_request_id():
+    return secrets.token_hex(16)
+
+
+def is_launch_request_id(value):
+    return isinstance(value, str) and bool(_LAUNCH_REQUEST_ID.fullmatch(value))
+
+
+def launch_result_message(request_id, accepted, error=""):
+    if not is_launch_request_id(request_id) or not isinstance(accepted, bool):
+        raise ValueError("invalid launch result")
+    message = {
+        "version": 1,
+        "action": "launch-result",
+        "request_id": request_id,
+        "accepted": accepted,
+    }
+    if not accepted:
+        message["error"] = str(error or "launch request was rejected").replace("\x00", " ")[:512]
+    return message
+
+
+def parse_launch_result(message, request_id):
+    if not is_launch_request_id(request_id) or not isinstance(message, dict):
+        return LaunchRequestResult("rejected", "invalid broker response")
+    if not set(message).issubset({"version", "action", "request_id", "accepted", "error"}):
+        return LaunchRequestResult("rejected", "invalid broker response")
+    if (
+            message.get("version") != 1
+            or message.get("action") != "launch-result"
+            or message.get("request_id") != request_id
+            or not isinstance(message.get("accepted"), bool)):
+        return LaunchRequestResult("rejected", "invalid broker response")
+    if message["accepted"]:
+        return LaunchRequestResult("accepted")
+    error = message.get("error", "launch request was rejected")
+    if not isinstance(error, str):
+        error = "launch request was rejected"
+    return LaunchRequestResult("rejected", error)
 
 
 def _safe_icon_dimensions(path, head, max_dimension=4096, max_pixels=16 * 1024 * 1024):
@@ -693,27 +763,42 @@ def runtime_socket_path(service):
 
 
 def send_launch_request(desktop_file, source="unknown", rect=None, timeout=0.4):
-    """Send one launch request to the running broker and report acceptance."""
+    """Return a bounded accepted, rejected, or unavailable broker result."""
     if source not in {"desktop", "drawer", "dock", "unknown"}:
         source = "unknown"
     try:
         path = pathlib.Path(desktop_file).expanduser()
         if not path.is_file() or path.suffix != ".desktop":
-            return False
+            return LaunchRequestResult("rejected", "desktop file is unavailable")
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 5:
+            return LaunchRequestResult("rejected", "invalid launch request")
+        request_id = new_launch_request_id()
         message = {
             "version": 1,
             "action": "launch",
+            "request_id": request_id,
             "source": source,
             "rect": Rect.from_mapping(rect).to_dict() if rect is not None else None,
             "desktop_file": str(path),
         }
+    except (AttributeError, TypeError, ValueError):
+        return LaunchRequestResult("rejected", "invalid launch request")
+    try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(float(timeout))
+            client.settimeout(timeout)
             client.connect(str(runtime_socket_path("launch")))
             client.sendall(encode_json_line(message))
-        return True
+            try:
+                response = recv_json_line(client, timeout=timeout)
+            except (TypeError, ValueError):
+                # The socket was reachable, but the peer did not provide a
+                # valid correlated reply.  Falling back here could execute a
+                # second launch after a compromised or stale broker response.
+                return LaunchRequestResult("rejected", "invalid broker response")
     except (AttributeError, OSError, TypeError, ValueError):
-        return False
+        return LaunchRequestResult("unavailable", "launch broker is unavailable")
+    return parse_launch_result(response, request_id)
 
 
 def broker_fallback_argv(desktop_file, source):
@@ -726,7 +811,7 @@ def broker_fallback_argv(desktop_file, source):
         raise ValueError("desktop file path is invalid") from exc
     if not isinstance(path, str) or not path or "\x00" in path:
         raise ValueError("desktop file path is invalid")
-    return ("ming-launch", "--desktop-file", path, "--source", source)
+    return ("/usr/local/bin/ming-launch", "--desktop-file", path, "--source", source)
 
 
 def run_command(argv, timeout=8):

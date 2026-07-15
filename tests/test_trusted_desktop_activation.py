@@ -1,6 +1,10 @@
+import ast
 import importlib.util
 import os
 import pathlib
+import socket
+import shutil
+import shlex
 import stat
 import tempfile
 import threading
@@ -13,6 +17,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMMON_PATH = ROOT / "assets" / "ming-shell-common.py"
 LAUNCH_PATH = ROOT / "assets" / "ming-launch.py"
+PHONE_PATH = ROOT / "assets" / "ming-phone-desktop.py"
 
 
 def load_common():
@@ -129,13 +134,227 @@ class TrustedDesktopActivationTests(unittest.TestCase):
     def test_broker_fallback_argv_allows_only_known_desktop_surfaces(self):
         desktop = "/usr/share/applications/store-wrapper.desktop"
         self.assertEqual(
-            ("ming-launch", "--desktop-file", desktop, "--source", "drawer"),
+            ("/usr/local/bin/ming-launch", "--desktop-file", desktop, "--source", "drawer"),
             self.common.broker_fallback_argv(desktop, "drawer"),
         )
         for source in ("unknown", "ipc", "desktop-copy", ""):
             with self.subTest(source=source):
                 with self.assertRaises(ValueError):
                     self.common.broker_fallback_argv(desktop, source)
+
+    def test_broker_fallback_argv_is_independent_of_a_shadowed_path(self):
+        desktop = "/usr/share/applications/store-wrapper.desktop"
+        with mock.patch.dict(os.environ, {"PATH": "/tmp/ming-launch-shadow"}, clear=False):
+            argv = self.common.broker_fallback_argv(desktop, "desktop")
+        self.assertEqual("/usr/local/bin/ming-launch", argv[0])
+        self.assertEqual(("--desktop-file", desktop, "--source", "desktop"), argv[1:])
+
+    def test_send_launch_request_returns_false_for_correlated_rejection(self):
+        """A response rejection must not be mistaken for a broker outage."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop = root / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\nExec=store-wrapper\n",
+                encoding="utf-8",
+            )
+            client, server = socket.socketpair()
+            received = {}
+
+            class ConnectedClient:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    client.close()
+
+                @staticmethod
+                def connect(_path):
+                    return None
+
+                @staticmethod
+                def settimeout(value):
+                    client.settimeout(value)
+
+                @staticmethod
+                def sendall(payload):
+                    client.sendall(payload)
+
+                @staticmethod
+                def recv(size):
+                    return client.recv(size)
+
+            def reject_once():
+                try:
+                    message = self.common.recv_json_line(server, timeout=0.5)
+                    received.update(message)
+                    try:
+                        server.sendall(self.common.encode_json_line({
+                            "version": 1,
+                            "action": "launch-result",
+                            "request_id": message.get("request_id", "0" * 32),
+                            "accepted": False,
+                            "error": "system desktop wrapper is not verified",
+                        }))
+                    except OSError:
+                        pass
+                finally:
+                    server.close()
+
+            worker = threading.Thread(target=reject_once, daemon=True)
+            worker.start()
+            with mock.patch.object(self.common, "runtime_socket_path", return_value=root / "launch.sock"):
+                with mock.patch.object(self.common.socket, "AF_UNIX", 0, create=True):
+                    with mock.patch.object(self.common.socket, "socket", return_value=ConnectedClient()):
+                        result = self.common.send_launch_request(desktop, "drawer", timeout=0.5)
+            worker.join(1)
+
+        self.assertFalse(result)
+        self.assertRegex(received.get("request_id", ""), r"^[a-f0-9]{32}$")
+
+    def test_send_launch_request_rejects_malformed_response_after_connection(self):
+        """A reachable broker with a bad reply must never trigger local fallback."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop = root / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\nExec=store-wrapper\n",
+                encoding="utf-8",
+            )
+            client, server = socket.socketpair()
+
+            class ConnectedClient:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    client.close()
+
+                @staticmethod
+                def connect(_path):
+                    return None
+
+                @staticmethod
+                def settimeout(value):
+                    client.settimeout(value)
+
+                @staticmethod
+                def sendall(payload):
+                    client.sendall(payload)
+
+                @staticmethod
+                def recv(size):
+                    return client.recv(size)
+
+            def respond_once():
+                try:
+                    self.common.recv_json_line(server, timeout=0.5)
+                    server.sendall(b"not-json\n")
+                finally:
+                    server.close()
+
+            worker = threading.Thread(target=respond_once, daemon=True)
+            worker.start()
+            with mock.patch.object(self.common, "runtime_socket_path", return_value=root / "launch.sock"):
+                with mock.patch.object(self.common.socket, "AF_UNIX", 0, create=True):
+                    with mock.patch.object(self.common.socket, "socket", return_value=ConnectedClient()):
+                        result = self.common.send_launch_request(desktop, "drawer", timeout=0.5)
+            worker.join(1)
+
+        self.assertFalse(result)
+        self.assertTrue(result.rejected)
+        self.assertFalse(result.unavailable)
+        self.assertEqual("invalid broker response", result.error)
+
+    def test_managed_package_wrapper_copy_retains_its_canonical_broker_source(self):
+        """A friendly Desktop filename must not turn a system wrapper into a broken duplicate."""
+        source = PHONE_PATH.read_text(encoding="utf-8")
+        self.assertIn("X-Ming-Source-Desktop", source)
+        self.assertIn("def trusted_wrapper_source_path", source)
+        self.assertIn("def managed_desktop_source_path", source)
+
+        tree = ast.parse(source)
+        wanted = {
+            "app_id", "safe_name", "_desktop_has_marker", "_mark_desktop_file",
+            "trusted_wrapper_source_path", "managed_desktop_source_path", "write_managed_wrapper_proxy",
+            "copy_desktop",
+            "read_app", "add_app_from_path", "load_apps",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        )
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_PATH),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_PATH), "exec"), namespace)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            applications = root / "applications"
+            desktop_dir = root / "Desktop"
+            applications.mkdir()
+            desktop_dir.mkdir()
+            system_wrapper = applications / "store-wrapper.desktop"
+            system_wrapper.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\nIcon=store-wrapper\n",
+                encoding="utf-8",
+            )
+
+            class Entry:
+                name = "Store Wrapper"
+                icon = "store-wrapper"
+                categories = ("Utility",)
+                argv = ()
+                diagnostic = ""
+
+            class Common:
+                @staticmethod
+                def diagnose_desktop_file(path):
+                    self.assertEqual(system_wrapper.resolve(), pathlib.Path(path).resolve())
+                    return Entry()
+
+                @staticmethod
+                def is_system_desktop_activation_candidate(path):
+                    return pathlib.Path(path).resolve() == system_wrapper.resolve()
+
+            namespace["COMMON"] = Common()
+            self.assertEqual(
+                system_wrapper.resolve(),
+                namespace["trusted_wrapper_source_path"](system_wrapper),
+            )
+            probe = desktop_dir / "proxy-probe.desktop"
+            shutil.copy2(system_wrapper, probe)
+            self.assertTrue(namespace["write_managed_wrapper_proxy"](probe, system_wrapper))
+            probe.unlink()
+            copied = namespace["copy_desktop"](
+                system_wrapper, desktop_dir, name="Store Wrapper", managed=True)
+            self.assertEqual("Store Wrapper.desktop", copied.name)
+            copy_text = copied.read_text(encoding="utf-8")
+            self.assertIn("X-Ming-Source-Desktop={}".format(system_wrapper.resolve()), copy_text)
+            self.assertIn(
+                "Exec=/usr/local/bin/ming-launch --desktop-file {} --source desktop".format(
+                    shlex.quote(str(system_wrapper.resolve()))),
+                copy_text,
+            )
+            self.assertEqual(str(system_wrapper.resolve()), namespace["read_app"](copied)["path"])
+
+            namespace["APP_DIRS"] = [desktop_dir, applications]
+            apps = namespace["load_apps"]()
+            self.assertEqual([str(system_wrapper.resolve())], [app["path"] for app in apps])
+            self.assertEqual([""], [app["diagnostic"] for app in apps])
 
     def test_rejects_candidate_when_resolution_indicates_a_symlink(self):
         with tempfile.TemporaryDirectory() as directory:

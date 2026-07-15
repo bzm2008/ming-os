@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import pathlib
+import socket
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -162,6 +164,146 @@ class LaunchResultTests(unittest.TestCase):
             [status for status, _detail in events],
         )
         self.assertTrue(all("verification failed" in detail for _status, detail in events))
+
+    def test_final_verification_rejection_returns_correlated_ipc_result(self):
+        """The UI must receive rejection before it hides a wrapper launch request."""
+        broker = self.launch.LaunchBroker(
+            trusted_verifier=lambda _path: False,
+            spawn=lambda _argv: self.fail("rejected wrapper must not spawn"),
+            animate=lambda *_args: None,
+            reduced_motion=lambda: True,
+            report_error=lambda *_args: None,
+        )
+        server = self.launch.LaunchServer(broker=broker)
+        handler = getattr(server, "_handle_connection", None)
+        self.assertIsNotNone(handler, "LaunchServer must return an IPC result for each request")
+        if handler is None:
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+            client, connection = socket.socketpair()
+            self.addCleanup(client.close)
+            request_id = "a" * 32
+            client.sendall(self.launch.COMMON.encode_json_line({
+                "version": 1,
+                "action": "launch",
+                "request_id": request_id,
+                "desktop_file": str(desktop),
+                "source": "drawer",
+                "rect": None,
+            }))
+            preflighted = []
+
+            def idle_add(callback, value):
+                preflighted.append(value)
+                callback(value)
+                return 1
+
+            def dispatch(value):
+                return self.launch.schedule_launch_after_preflight(
+                    idle_add, server.broker, value, timeout=0.1)
+
+            with mock.patch.object(self.launch, "allowed_application_dirs", return_value=(applications,)):
+                with mock.patch.object(
+                        self.launch.COMMON, "is_system_desktop_activation_candidate", return_value=True):
+                    with mock.patch.object(
+                            self.launch, "verify_package_owned_system_desktop",
+                            side_effect=AssertionError("final verification must run in GTK preflight")):
+                        self.assertFalse(handler(connection, dispatch))
+            response = self.launch.COMMON.recv_json_line(client, timeout=0.5)
+
+        self.assertEqual({
+            "version": 1,
+            "action": "launch-result",
+            "request_id": request_id,
+            "accepted": False,
+            "error": "system desktop wrapper is not verified",
+        }, response)
+        self.assertEqual(1, len(preflighted))
+
+    def test_accepted_ipc_request_is_dispatched_exactly_once(self):
+        """Moving acknowledgement after preflight must not retain the old dispatch."""
+        server = self.launch.LaunchServer()
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "single-launch.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Single Launch\nExec=single-launch\n",
+                encoding="utf-8",
+            )
+            client, connection = socket.socketpair()
+            self.addCleanup(client.close)
+            request_id = "b" * 32
+            client.sendall(self.launch.COMMON.encode_json_line({
+                "version": 1,
+                "action": "launch",
+                "request_id": request_id,
+                "desktop_file": str(desktop),
+                "source": "drawer",
+                "rect": None,
+            }))
+            dispatched = []
+            with mock.patch.object(self.launch, "allowed_application_dirs", return_value=(applications,)):
+                self.assertTrue(server._handle_connection(connection, dispatched.append))
+            response = self.launch.COMMON.recv_json_line(client, timeout=0.5)
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(1, len(dispatched))
+
+    def test_gtk_schedule_ack_waits_for_final_preflight(self):
+        """The socket worker cannot acknowledge a wrapper before GTK verifies it."""
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(pathlib.Path(tempfile.gettempdir()).resolve() / "store-wrapper.desktop"),
+            mode="desktop_app_info",
+        )
+        preflight_started = threading.Event()
+        allow_preflight = threading.Event()
+        returned = threading.Event()
+        events = []
+
+        class Broker:
+            @staticmethod
+            def preflight(value):
+                events.append(("preflight", value))
+                preflight_started.set()
+                allow_preflight.wait(1)
+                return True
+
+            @staticmethod
+            def launch(value):
+                events.append(("launch", value))
+                return True
+
+        def idle_add(callback, value):
+            threading.Thread(target=callback, args=(value,), daemon=True).start()
+            return 1
+
+        results = []
+
+        def wait_for_schedule():
+            results.append(
+                self.launch.schedule_launch_after_preflight(
+                    idle_add, Broker(), request, timeout=0.5))
+            returned.set()
+
+        worker = threading.Thread(target=wait_for_schedule, daemon=True)
+        worker.start()
+        self.assertTrue(preflight_started.wait(0.5))
+        self.assertFalse(returned.is_set())
+        allow_preflight.set()
+        self.assertTrue(returned.wait(0.5))
+        worker.join(1)
+
+        self.assertTrue(results[0].accepted)
+        self.assertEqual(["preflight", "launch"], [name for name, _value in events])
 
     def test_descriptor_revalidation_is_the_last_check_before_desktop_activation(self):
         with tempfile.TemporaryDirectory() as directory:

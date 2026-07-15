@@ -277,7 +277,7 @@ def _is_shell_wrapper_error(error):
 
 def request_from_desktop_file(
         desktop_file, source="unknown", rect=None, allowed_dirs=None,
-        candidate_verifier=None, trusted_verifier=None):
+        candidate_verifier=None, trusted_verifier=None, defer_trusted_verification=False):
     path = _allowed_desktop_path(desktop_file, allowed_dirs)
     try:
         entry = COMMON.parse_desktop_file(path)
@@ -288,7 +288,7 @@ def request_from_desktop_file(
         if not verifier(path):
             raise
         final_verifier = trusted_verifier or verify_package_owned_system_desktop
-        if not final_verifier(path):
+        if not defer_trusted_verification and not final_verifier(path):
             raise ValueError("system desktop wrapper is not verified")
         return LaunchRequest((), source, rect, str(path), mode="desktop_app_info")
     if entry is None:
@@ -296,20 +296,24 @@ def request_from_desktop_file(
     return LaunchRequest(entry.argv, source, rect, str(path))
 
 
-def request_from_message(message, allowed_dirs=None):
-    allowed_keys = {"version", "action", "desktop_file", "source", "rect"}
+def request_from_message(message, allowed_dirs=None, defer_trusted_verification=False):
+    allowed_keys = {"version", "action", "request_id", "desktop_file", "source", "rect"}
     if (
-        not isinstance(message, dict)
-        or message.get("version") != IPC_VERSION
-        or message.get("action") != "launch"
-        or not set(message).issubset(allowed_keys)
+            not isinstance(message, dict)
+            or message.get("version") != IPC_VERSION
+            or message.get("action") != "launch"
+            or not set(message).issubset(allowed_keys)
     ):
         raise ValueError("invalid launch message")
+    request_id = message.get("request_id")
+    if request_id is not None and not COMMON.is_launch_request_id(request_id):
+        raise ValueError("invalid launch request id")
     return request_from_desktop_file(
         message.get("desktop_file"),
         source=message.get("source", "unknown"),
         rect=message.get("rect"),
         allowed_dirs=allowed_dirs,
+        defer_trusted_verification=defer_trusted_verification,
     )
 
 
@@ -453,6 +457,12 @@ class LaunchBroker:
         self.record_event = record_event or record_launch_event
         self._recent = {}
 
+    def preflight(self, request):
+        """Perform the last trusted-wrapper check before a GIO activation."""
+        if request.mode != "desktop_app_info":
+            return True
+        return bool(self.trusted_verifier(request.desktop_file))
+
     def launch(self, request):
         moment = self.now()
         key = request.desktop_file or "\x1f".join(request.argv)
@@ -465,7 +475,7 @@ class LaunchBroker:
 
     def _launch_desktop_app_info(self, request, key, moment):
         try:
-            verified = self.trusted_verifier(request.desktop_file)
+            verified = self.preflight(request)
         except Exception as exc:
             self.record_event(request, "activation_failed", exc)
             self.report_error(request, exc)
@@ -640,6 +650,55 @@ def schedule_launch(idle_add, broker, request):
     return idle_add(dispatch, request)
 
 
+def schedule_launch_after_preflight(idle_add, broker, request, timeout=0.25):
+    """Schedule a launch only after GTK has completed its final preflight.
+
+    The IPC thread waits only for this bounded acknowledgement.  If GTK is
+    unavailable or does not answer, it fails closed rather than claiming the
+    request was accepted and allowing desktop code to run a fallback.
+    """
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        return COMMON.LaunchRequestResult("rejected", "invalid launch scheduling timeout")
+    if timeout <= 0 or timeout > 2:
+        return COMMON.LaunchRequestResult("rejected", "invalid launch scheduling timeout")
+
+    completed = threading.Event()
+    cancelled = threading.Event()
+    state = {"result": COMMON.LaunchRequestResult("rejected", "launch preflight was not run")}
+
+    def dispatch(value):
+        if cancelled.is_set():
+            return False
+        try:
+            preflight = getattr(broker, "preflight", None)
+            if not callable(preflight):
+                state["result"] = COMMON.LaunchRequestResult("rejected", "launch preflight is unavailable")
+            elif not preflight(value):
+                state["result"] = COMMON.LaunchRequestResult("rejected", "system desktop wrapper is not verified")
+            else:
+                state["result"] = COMMON.LaunchRequestResult("accepted")
+        except Exception as exc:
+            state["result"] = COMMON.LaunchRequestResult("rejected", str(exc) or "desktop launcher verification failed")
+        finally:
+            completed.set()
+        if state["result"].accepted and not cancelled.is_set():
+            broker.launch(value)
+        return False
+
+    try:
+        source_id = idle_add(dispatch, request)
+    except Exception:
+        return COMMON.LaunchRequestResult("rejected", "launch scheduling failed")
+    if not source_id:
+        return COMMON.LaunchRequestResult("rejected", "launch scheduling failed")
+    if not completed.wait(timeout):
+        cancelled.set()
+        return COMMON.LaunchRequestResult("rejected", "launch preflight timed out")
+    return state["result"]
+
+
 class LaunchServer:
     def __init__(self, broker=None):
         self.broker = broker or LaunchBroker()
@@ -649,11 +708,55 @@ class LaunchServer:
         with connection:
             return request_from_message(COMMON.recv_json_line(connection, timeout=0.5))
 
+    @staticmethod
+    def _send_result(connection, request_id, accepted, error=""):
+        if request_id is None:
+            return True
+        if not COMMON.is_launch_request_id(request_id):
+            return False
+        try:
+            connection.sendall(COMMON.encode_json_line(
+                COMMON.launch_result_message(request_id, accepted, error)))
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _handle_connection(self, connection, dispatch):
+        """Validate one request, return its correlated result, then dispatch it."""
+        request_id = None
+        try:
+            with connection:
+                message = COMMON.recv_json_line(connection, timeout=0.5)
+                if isinstance(message, dict):
+                    request_id = message.get("request_id")
+                try:
+                    request = request_from_message(message, defer_trusted_verification=True)
+                except ValueError as exc:
+                    self._send_result(connection, request_id, False, str(exc))
+                    return False
+                try:
+                    dispatched = dispatch(request)
+                except Exception as exc:
+                    self._send_result(connection, request_id, False, str(exc) or "launch scheduling failed")
+                    return False
+                if isinstance(dispatched, COMMON.LaunchRequestResult):
+                    if not dispatched.accepted:
+                        self._send_result(connection, request_id, False, dispatched.error)
+                        return False
+                elif dispatched is False:
+                    self._send_result(connection, request_id, False, "launch scheduling failed")
+                    return False
+                if not self._send_result(connection, request_id, True):
+                    return False
+        except (OSError, ValueError):
+            return False
+        return True
+
     def _accept_loop(self, dispatch):
         while True:
             try:
                 connection, _address = self.socket.accept()
-                dispatch(self._read_request(connection))
+                self._handle_connection(connection, dispatch)
             except (OSError, ValueError):
                 continue
 
@@ -670,7 +773,7 @@ class LaunchServer:
             return
         threading.Thread(
             target=self._accept_loop,
-            args=(lambda request: schedule_launch(GLib.idle_add, self.broker, request),),
+            args=(lambda request: schedule_launch_after_preflight(GLib.idle_add, self.broker, request),),
             name="ming-launch-ipc",
             daemon=True,
         ).start()
@@ -680,14 +783,8 @@ class LaunchServer:
 
 
 def send_to_broker(request):
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(0.4)
-            client.connect(str(COMMON.runtime_socket_path("launch")))
-            client.sendall(COMMON.encode_json_line(request.to_message()))
-        return True
-    except (AttributeError, OSError, ValueError):
-        return False
+    rect = request.rect.to_dict() if request.rect else None
+    return COMMON.send_launch_request(request.desktop_file, request.source, rect)
 
 
 def request_from_args(args):
@@ -714,16 +811,22 @@ def main(argv=None):
         request = request_from_args(args)
     except (ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
-    if send_to_broker(request):
+    broker_result = send_to_broker(request)
+    if broker_result:
         return 0
+    if getattr(broker_result, "rejected", False):
+        return 1
     server = LaunchServer()
     try:
         server.serve_forever(initial_request=request)
     except COMMON.InstanceAlreadyRunning:
         for _attempt in range(5):
             time.sleep(0.05)
-            if send_to_broker(request):
+            broker_result = send_to_broker(request)
+            if broker_result:
                 return 0
+            if getattr(broker_result, "rejected", False):
+                return 1
         return 1
     return 0
 

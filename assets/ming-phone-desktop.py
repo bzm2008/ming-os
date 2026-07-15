@@ -97,6 +97,8 @@ DESKTOP_MANIFEST_PATH = STATE_DIR / "desktop-generated-manifest.json"
 DESKTOP_MANIFEST_VERSION = 1
 DESKTOP_MANAGED_MARKER = "X-Ming-Managed"
 DESKTOP_MANAGED_MARKER_LINE = "X-Ming-Managed=true"
+DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
+MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
 APP_DIRS = [DESKTOP_DIR, Path("/usr/share/applications"), HOME / ".local/share/applications"]
@@ -528,16 +530,19 @@ def legacy_desktop_entry(path):
 
 
 def read_app(path):
+    source_resolver = globals().get("managed_desktop_source_path")
+    source_path = source_resolver(path) if callable(source_resolver) else None
+    effective_path = source_path or Path(path)
     diagnose = getattr(COMMON, "diagnose_desktop_file", None)
     if not callable(diagnose):
-        legacy = legacy_desktop_entry(path)
+        legacy = legacy_desktop_entry(effective_path)
         if legacy is None:
             return None
         return {
-            "id": app_id(path),
+            "id": app_id(effective_path),
             "type": "app",
-            "path": str(path),
-            "basename": Path(path).name,
+            "path": str(effective_path),
+            "basename": effective_path.name,
             "name": legacy["name"],
             "icon": legacy["icon"],
             "categories": legacy["categories"],
@@ -545,17 +550,17 @@ def read_app(path):
             "diagnostic": legacy["diagnostic"],
         }
     try:
-        entry = diagnose(path)
+        entry = diagnose(effective_path)
     except (OSError, ValueError):
         return None
     if entry is None:
         return None
     return {
-        "id": app_id(path),
+        "id": app_id(effective_path),
         "type": "app",
-        "path": str(path),
-        "basename": Path(path).name,
-        "name": entry.name or Path(path).stem,
+        "path": str(effective_path),
+        "basename": effective_path.name,
+        "name": entry.name or effective_path.stem,
         "icon": entry.icon or "application-x-executable",
         "categories": ";".join(entry.categories),
         "diagnostic": entry.diagnostic,
@@ -578,8 +583,12 @@ def launch_item(item, source_rect=None):
     if not callable(sender) or not callable(fallback):
         log(f"launch validation unavailable for {path}")
         return False
-    if sender(path, "desktop", source_rect):
+    broker_result = sender(path, "desktop", source_rect)
+    if broker_result and not getattr(broker_result, "rejected", False):
         return True
+    if getattr(broker_result, "rejected", False):
+        log(f"launch broker rejected {path} source=desktop")
+        return False
     log(f"launch broker unavailable; starting broker fallback for {path} source=desktop")
     try:
         subprocess.Popen(fallback(path, "desktop"), shell=False)
@@ -965,6 +974,78 @@ def _mark_desktop_file(path):
         return False
 
 
+def trusted_wrapper_source_path(path):
+    """Return a protected package wrapper source suitable for a Ming proxy."""
+    checker = getattr(COMMON, "is_system_desktop_activation_candidate", None)
+    diagnose = getattr(COMMON, "diagnose_desktop_file", None)
+    if not callable(checker) or not callable(diagnose):
+        return None
+    try:
+        source = Path(path).resolve(strict=True)
+        if not checker(source):
+            return None
+        entry = diagnose(source)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if entry is None or getattr(entry, "diagnostic", "") or getattr(entry, "argv", ()):
+        return None
+    return source
+
+
+def managed_desktop_source_path(path):
+    """Resolve only a Ming-generated Desktop proxy back to its package source."""
+    target = Path(path)
+    if not _desktop_has_marker(target):
+        return None
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    match = re.search(
+        r"(?im)^\s*{}\s*=\s*(.*?)\s*$".format(re.escape(DESKTOP_SOURCE_MARKER)), text)
+    value = match.group(1).strip() if match else ""
+    if not value or "\x00" in value or not os.path.isabs(value):
+        return None
+    return trusted_wrapper_source_path(value)
+
+
+def write_managed_wrapper_proxy(target, source):
+    """Replace a copied shell wrapper with a broker-only Desktop proxy."""
+    target = Path(target)
+    try:
+        source = Path(source).resolve(strict=True)
+        text = target.read_text(encoding="utf-8")
+        command = "Exec={} --desktop-file {} --source desktop".format(
+            MING_LAUNCH_PATH, shlex.quote(str(source)))
+        rewritten, count = re.subn(
+            r"(?m)^\s*Exec\s*=.*$", lambda _match: command, text, count=1)
+        if count != 1:
+            return False
+        rewritten = re.sub(
+            r"(?im)^\s*{}\s*=.*(?:\r?\n|$)".format(re.escape(DESKTOP_SOURCE_MARKER)),
+            "", rewritten)
+        header = re.search(r"(?im)^\s*\[Desktop Entry\]\s*$", rewritten)
+        if not header:
+            return False
+        insert_at = header.end()
+        if rewritten.startswith("\r\n", insert_at):
+            insert_at += 2
+        elif insert_at < len(rewritten) and rewritten[insert_at] == "\n":
+            insert_at += 1
+        else:
+            rewritten = rewritten[:insert_at] + "\n" + rewritten[insert_at:]
+            insert_at += 1
+        rewritten = (
+            rewritten[:insert_at]
+            + "{}={}\n".format(DESKTOP_SOURCE_MARKER, source)
+            + rewritten[insert_at:]
+        )
+        target.write_text(rewritten, encoding="utf-8")
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 def _manifest_relative(path):
     try:
         return Path(path).resolve().relative_to(DESKTOP_DIR.resolve()).as_posix()
@@ -1026,6 +1107,8 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
     src = Path(path)
     if not src.is_file():
         return None
+    wrapper_resolver = globals().get("trusted_wrapper_source_path")
+    wrapper_source = wrapper_resolver(src) if managed and callable(wrapper_resolver) else None
     target_dir.mkdir(parents=True, exist_ok=True)
     target_name = src.name if preserve_basename else f"{safe_name(name or src.stem)}.desktop"
     target = target_dir / target_name
@@ -1045,6 +1128,12 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
                 suffix += 1
             target = candidate
         shutil.copy2(src, target)
+        if wrapper_source and not write_managed_wrapper_proxy(target, wrapper_source):
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return None
         if managed:
             _mark_desktop_file(target)
         target.chmod(0o755)
@@ -1080,7 +1169,12 @@ def sync_files(layout):
             target.relative_to(DESKTOP_DIR)
         except ValueError:
             continue
-        if target.is_file() and target.resolve() not in source_paths:
+        source_resolver = globals().get("managed_desktop_source_path")
+        target_source = source_resolver(target) if callable(source_resolver) else None
+        if (
+                target.is_file()
+                and target.resolve() not in source_paths
+                and target_source not in source_paths):
             try:
                 target.unlink()
             except OSError:

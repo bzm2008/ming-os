@@ -176,6 +176,45 @@ class AppDrawerCoreTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertEqual([("recent", str(desktop)), ("hide",)], events)
 
+    def test_drawer_keeps_open_when_broker_explicitly_rejects_launch(self):
+        """A verified-socket rejection is not a broker outage or a successful launch."""
+        app = FakeApp("Store Wrapper", path="/usr/share/applications/store-wrapper.desktop")
+        app.diagnostic = ""
+        events = []
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                events.append(("dialog", kwargs.get("text")))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
+        fake_gtk = types.SimpleNamespace(
+            MessageDialog=Dialog,
+            MessageType=types.SimpleNamespace(ERROR="error"),
+            ButtonsType=types.SimpleNamespace(CLOSE="close"),
+        )
+        controller = types.SimpleNamespace(
+            recent=types.SimpleNamespace(touch=lambda path: events.append(("recent", str(path)))),
+            hide=lambda: events.append(("hide",)),
+            window=None,
+            Gtk=fake_gtk,
+        )
+
+        rejection = types.SimpleNamespace(rejected=True)
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=rejection):
+            with mock.patch.object(self.drawer.subprocess, "Popen") as popen:
+                self.assertFalse(self.drawer.DrawerController.launch(controller, app, None))
+
+        popen.assert_not_called()
+        self.assertEqual([("dialog", "无法打开此应用")], events)
+
     def test_drawer_local_fallback_uses_only_the_trusted_broker_argv(self):
         """A stopped socket may start the broker, but never execute the catalog argv."""
         app = FakeApp(
@@ -190,7 +229,7 @@ class AppDrawerCoreTests(unittest.TestCase):
             hide=lambda: events.append(("hide",)),
         )
         expected = (
-            "ming-launch", "--desktop-file", str(app.path), "--source", "drawer",
+            "/usr/local/bin/ming-launch", "--desktop-file", str(app.path), "--source", "drawer",
         )
         with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=False):
             with mock.patch.object(

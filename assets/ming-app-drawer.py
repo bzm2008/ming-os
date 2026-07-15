@@ -466,8 +466,10 @@ class DrawerController:
             origin = widget.get_window().get_origin()
             allocation = widget.get_allocation()
             rect = widget_source_rect(origin, allocation)
-        started = COMMON.send_launch_request(str(app.path), "drawer", rect)
-        if not started:
+        broker_result = COMMON.send_launch_request(str(app.path), "drawer", rect)
+        rejected = bool(getattr(broker_result, "rejected", False))
+        started = bool(broker_result) and not rejected
+        if not started and not rejected:
             try:
                 fallback_argv = COMMON.broker_fallback_argv(str(app.path), "drawer")
                 subprocess.Popen(fallback_argv, shell=False)
