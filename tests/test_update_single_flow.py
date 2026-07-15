@@ -27,6 +27,14 @@ def standalone_function(source, name, namespace=None):
     return namespace[name]
 
 
+def ota_presenter(source):
+    start = source.index("OTA_STATE_MESSAGES = {")
+    end = source.index("\ndef pci_driver_summary", start)
+    namespace = {"re": re}
+    exec(source[start:end], namespace)
+    return namespace["ota_status_presentation"]
+
+
 class UpdateSingleFlowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -89,13 +97,22 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
             "rolling_back": "正在自动回滚到上一版本",
             "rolled_back": "更新未通过健康检查，已自动回滚",
         }.items():
-            result = presenter({"state": state})
+            result = presenter({"schema": "ming.update.cli.v1", "state": state})
             self.assertEqual(expected, result["title"])
-        self.assertNotEqual("更新已完成", presenter({"state": "staged"})["title"])
-        self.assertNotEqual("更新已完成", presenter({"state": "pending_health"})["title"])
+        self.assertNotEqual(
+            "更新已完成",
+            presenter({"schema": "ming.update.cli.v1", "state": "staged"})["title"],
+        )
+        self.assertNotEqual(
+            "更新已完成",
+            presenter({"schema": "ming.update.cli.v1", "state": "pending_health"})["title"],
+        )
         self.assertEqual(
             "更新已完成",
-            presenter({"message_key": "update.status.committed"})["title"],
+            presenter({
+                "schema": "ming.update.cli.v1",
+                "message_key": "update.status.committed",
+            })["title"],
         )
 
     def test_settings_maps_frozen_error_codes_without_terminal_text(self):
@@ -120,25 +137,100 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
             ("E_MANIFEST_SIGNATURE", "更新清单签名校验失败，更新已安全拒绝。"),
             ("E_ROLLBACK_STATE", "更新失败，系统已回滚到上一版本。"),
         ):
-            self.assertIn(expected, presenter({"ok": False, "error_code": code})["detail"])
-        rollback = presenter({"state": "rolled_back", "error_code": "E_HEALTH_ROOT"})["detail"]
+            self.assertIn(expected, presenter({
+                "schema": "ming.update.cli.v1", "ok": False, "error_code": code,
+            })["detail"])
+        rollback = presenter({
+            "schema": "ming.update.cli.v1",
+            "state": "rolled_back",
+            "error_code": "E_HEALTH_ROOT",
+        })["detail"]
         self.assertIn("已自动回滚", rollback)
         self.assertNotIn("正在回滚", rollback)
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
         self.assertNotIn('run_async(["ming-update", "check"]', update)
         self.assertIn('["ming-update", "check", "--json"]', update)
-        self.assertIn('"ming-transaction-diagnostics"', update)
+        self.assertNotIn('"ming-transaction-diagnostics"', update)
+
+    def test_settings_refuses_missing_or_unknown_cli_schema(self):
+        presenter = ota_presenter(self.settings)
+        actionable = {
+            "ok": True,
+            "state": "new",
+            "action": "apply",
+            "release_id": "ming-os-26.3.3-amd64-1",
+            "manifest_sha256": "a" * 64,
+        }
+        for schema in (None, "ming.update.cli.v2", "legacy.update.v1"):
+            payload = dict(actionable)
+            if schema is not None:
+                payload["schema"] = schema
+            result = presenter(payload)
+            self.assertEqual("check", result["button_state"])
+            self.assertEqual("error", result["severity"])
+            self.assertIn("更新协议不受支持", result["title"])
+        update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
+        self.assertNotIn('"error_code": "E_COMMAND"', update)
+        self.assertIn('"error_code": "E_PROTOCOL_UNSUPPORTED"', update)
+
+    def test_settings_maps_every_frozen_stable_error_code(self):
+        for code in (
+            "E_ARGUMENT", "E_TRANSACTION_NOT_FOUND", "E_BUSY", "E_NOT_CANCELABLE",
+            "E_SPACE", "E_SOURCE_UNSUPPORTED", "E_BOOTSTRAP_REQUIRED",
+            "E_MANIFEST_SIGNATURE", "E_MANIFEST_SCHEMA", "E_MANIFEST_EXPIRED",
+            "E_ARTIFACT_SIGNATURE", "E_ARTIFACT_HASH", "E_CONTENT_POLICY",
+            "E_CLONE", "E_PACKAGE_STATE", "E_PACKAGE_APPLY",
+            "E_PROTECTED_PATH_CHANGED", "E_CANDIDATE_SEAL", "E_GRUB_WRITE",
+            "E_GRUB_READBACK", "E_INITRAMFS_CONTRACT", "E_SLOT_MOUNT",
+            "E_SLOT_MISMATCH", "E_HEALTH_TIMEOUT", "E_HEALTH_ROOT",
+            "E_HEALTH_PACKAGES", "E_HEALTH_SERVICE", "E_HEALTH_DESKTOP_PROBE",
+            "E_ROLLBACK_GRUB", "E_ROLLBACK_STATE", "E_ROLLBACK_SLOT",
+            "E_STATE_SCHEMA", "E_STATE_TRANSITION", "E_STATE_DURABILITY",
+            "E_STATE_RECONCILE", "E_BOOTSTRAP_SIGNATURE", "E_BOOTSTRAP_VERSION",
+            "E_PROTOCOL_UNSUPPORTED", "E_KEY_POLICY",
+        ):
+            self.assertIn('"%s"' % code, self.settings)
 
     def test_settings_exposes_sanitized_transaction_diagnostics_export(self):
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
         self.assertIn("导出更新诊断", update)
         self.assertIn("self.update_diagnostics_button", update)
         export = method_block(self.settings, "    def export_update_diagnostics", "    # ---- 5. 显示与无障碍")
-        self.assertIn("ming-transaction-diagnostics", export)
-        self.assertIn('"export"', export)
-        self.assertIn('"--state-root", "/var/lib/ming-update"', export)
+        self.assertIn('"ming-update", "logs"', export)
         self.assertIn('"--transaction"', export)
-        self.assertIn('"--output"', export)
+        self.assertIn('"--json"', export)
+        self.assertNotIn("ming-transaction-diagnostics", export)
+        self.assertNotIn("--state-root", export)
+        self.assertNotIn("/var/lib/ming-update", export)
+
+    def test_settings_polls_wait_states_without_overlapping_timers(self):
+        update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
+        self.assertIn("self.update_poll_source", update)
+        self.assertIn("GLib.timeout_add_seconds(2", update)
+        self.assertIn('timeout=10', update)
+        self.assertIn('presentation["button_state"] == "wait"', update)
+        self.assertIn("GLib.source_remove", update)
+
+    def test_update_progress_and_severity_are_reset_from_each_status(self):
+        presenter = ota_presenter(self.settings)
+        waiting = presenter({
+            "schema": "ming.update.cli.v1",
+            "state": "staging",
+            "progress": {"phase": "clone", "percent": 0},
+        })
+        complete = presenter({
+            "schema": "ming.update.cli.v1",
+            "state": "committed",
+            "progress": {"phase": "idle", "percent": 100},
+        })
+        self.assertTrue(waiting["show_progress"])
+        self.assertFalse(complete["show_progress"])
+        status = method_block(
+            self.settings, "    def apply_update_status(self, status):",
+            "    def on_update_action(self, _btn):")
+        self.assertIn('remove_css_class("error")', status)
+        self.assertIn('remove_css_class("warning")', status)
+        self.assertIn('set_visible(presentation["show_progress"])', status)
 
     def test_settings_binds_the_shown_update_to_the_privileged_apply_request(self):
         """A root-side cache must not silently replace the version shown in Settings."""
@@ -159,7 +251,9 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
                 "E_SPACE": "可用空间不足，更新已安全拒绝。",
             }, "OTA_MESSAGE_KEYS": {}},
         )
-        message = presenter({"ok": False, "error_code": "E_SPACE"})["detail"]
+        message = presenter({
+            "schema": "ming.update.cli.v1", "ok": False, "error_code": "E_SPACE",
+        })["detail"]
         apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")
 
         self.assertIn("可用空间不足", message)

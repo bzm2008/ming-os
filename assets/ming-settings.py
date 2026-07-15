@@ -301,13 +301,27 @@ OTA_MESSAGE_KEYS = {
 }
 
 OTA_ERROR_MESSAGES = {
+    "E_ARGUMENT": "更新请求参数无效，操作未执行。",
+    "E_TRANSACTION_NOT_FOUND": "未找到对应的更新事务，请重新检查更新。",
     "E_BOOTSTRAP_REQUIRED": "此系统需要先安装官方 OTA 更新组件。请使用受信任的 26.3.2 bootstrap，完成校验后再检查更新。",
+    "E_SOURCE_UNSUPPORTED": "当前系统版本不在此更新的支持范围内。",
     "E_SPACE": "可用空间不足，更新已安全拒绝。请释放空间后重新检查；不要绕过空间门禁。",
     "E_MANIFEST_SIGNATURE": "更新清单签名校验失败，更新已安全拒绝。请重新获取官方清单，不要跳过签名校验。",
     "E_MANIFEST_SCHEMA": "更新清单格式不受支持，更新已安全拒绝。",
+    "E_MANIFEST_EXPIRED": "更新清单已过期，请重新检查更新。",
     "E_ARTIFACT_SIGNATURE": "更新包签名校验失败，更新已安全拒绝。",
     "E_ARTIFACT_HASH": "更新包完整性校验失败，更新已安全拒绝。",
     "E_CONTENT_POLICY": "更新内容不在受信任范围内，更新已安全拒绝。",
+    "E_CLONE": "无法创建候选系统，当前系统未被修改。",
+    "E_PACKAGE_STATE": "当前软件包状态不适合更新，请先修复软件包状态。",
+    "E_PACKAGE_APPLY": "候选系统的软件包更新失败，当前系统未被修改。",
+    "E_PROTECTED_PATH_CHANGED": "受保护的系统配置发生变化，更新已安全中止。",
+    "E_CANDIDATE_SEAL": "候选系统完整性校验失败，更新已安全中止。",
+    "E_GRUB_WRITE": "无法安排下一次更新启动，默认启动项保持不变。",
+    "E_GRUB_READBACK": "无法确认更新启动项，默认启动项保持不变。",
+    "E_INITRAMFS_CONTRACT": "启动环境不支持此事务更新，操作已安全拒绝。",
+    "E_SLOT_MOUNT": "候选系统无法挂载，系统将保留上一版本。",
+    "E_SLOT_MISMATCH": "候选系统与更新事务不匹配，系统将保留上一版本。",
     "E_HEALTH_TIMEOUT": "新系统健康检查超时，系统正在回滚。",
     "E_HEALTH_ROOT": "新系统健康检查失败，系统正在回滚。",
     "E_HEALTH_PACKAGES": "新系统软件包检查失败，系统正在回滚。",
@@ -316,9 +330,14 @@ OTA_ERROR_MESSAGES = {
     "E_ROLLBACK_GRUB": "回滚启动项失败，请保留日志并联系支持人员。",
     "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
     "E_ROLLBACK_SLOT": "更新失败，系统已回滚到上一版本。",
+    "E_STATE_SCHEMA": "更新状态格式无效，已停止后续更新操作。",
+    "E_STATE_TRANSITION": "更新状态转换无效，已停止后续更新操作。",
+    "E_STATE_DURABILITY": "无法安全保存更新状态，操作已中止。",
+    "E_STATE_RECONCILE": "无法安全恢复更新状态，请保留日志并联系支持人员。",
     "E_BOOTSTRAP_SIGNATURE": "bootstrap 签名校验失败，未执行安装。",
     "E_BOOTSTRAP_VERSION": "bootstrap 版本不兼容，未执行安装。",
     "E_PROTOCOL_UNSUPPORTED": "当前系统不支持事务型 OTA，请先完成官方 bootstrap。",
+    "E_KEY_POLICY": "更新签名密钥不符合当前信任策略，操作已拒绝。",
     "E_BUSY": "已有更新事务正在运行，请等待当前事务结束。",
     "E_NOT_CANCELABLE": "当前更新已经进入不可取消阶段。",
 }
@@ -327,6 +346,24 @@ OTA_ERROR_MESSAGES = {
 def ota_status_presentation(status):
     """Return a stable presentation model for one frozen CLI JSON response."""
     status = status if isinstance(status, dict) else {}
+    schema = str(status.get("schema") or "")
+    if schema != "ming.update.cli.v1":
+        return {
+            "state": "",
+            "error_code": "E_PROTOCOL_UNSUPPORTED",
+            "title": "更新协议不受支持",
+            "detail": "更新服务未返回受支持的 ming.update.cli.v1 状态，未执行任何更新操作。",
+            "button_state": "check",
+            "button_label": "检查更新",
+            "severity": "error",
+            "progress": 0,
+            "progress_phase": "",
+            "show_progress": False,
+            "transaction_id": "",
+            "release_id": "",
+            "manifest_sha256": "",
+            "log_path": "",
+        }
     transaction = status.get("transaction") if isinstance(status.get("transaction"), dict) else {}
     update = status.get("update") if isinstance(status.get("update"), dict) else {}
     progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
@@ -443,6 +480,8 @@ def ota_status_presentation(status):
         "button_label": {"apply": "立即更新", "wait": "等待完成", "check": "检查更新"}.get(default_action, "检查更新"),
         "severity": severity,
         "progress": percent,
+        "progress_phase": str(progress.get("phase") or ""),
+        "show_progress": default_action == "wait",
         "transaction_id": str(transaction.get("id") or status.get("transaction_id") or ""),
         "release_id": release_id,
         "manifest_sha256": manifest_sha256,
@@ -1971,6 +2010,8 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_manifest_sha256 = ""
         self.update_release_id = ""
         self.update_transaction_id = ""
+        self.update_poll_source = 0
+        self.update_status_inflight = False
 
         self.update_status = Gtk.Label(label="点击“检查更新”了解是否有新版本。", xalign=0, wrap=True)
         self.update_status.set_margin_top(6)
@@ -2015,21 +2056,40 @@ class MingSettings(Adw.ApplicationWindow):
             payload = {
                 "schema": "ming.update.cli.v1",
                 "ok": False,
-                "error_code": "E_COMMAND",
-                "message_key": "update.command_failed",
+                "error_code": "E_PROTOCOL_UNSUPPORTED",
+                "message_key": "update.protocol.invalid_response",
             }
         return payload
 
     def refresh_update_status(self):
         if not hasattr(self, "update_action_button"):
             return False
+        if self.update_status_inflight:
+            return False
+        self.update_status_inflight = True
 
         def done(rc, output, error):
+            self.update_status_inflight = False
             self.apply_update_status(self._update_status_payload(rc, output, error))
             return False
 
-        run_capture_async(["ming-update", "status", "--json"], timeout=8, on_done=done)
+        run_capture_async(["ming-update", "status", "--json"], timeout=10, on_done=done)
         return False
+
+    def cancel_update_poll(self):
+        if self.update_poll_source:
+            GLib.source_remove(self.update_poll_source)
+            self.update_poll_source = 0
+
+    def schedule_update_poll(self):
+        self.cancel_update_poll()
+
+        def poll_once():
+            self.update_poll_source = 0
+            self.refresh_update_status()
+            return False
+
+        self.update_poll_source = GLib.timeout_add_seconds(2, poll_once)
 
     def apply_update_status(self, status):
         presentation = ota_status_presentation(status)
@@ -2044,13 +2104,23 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_detail.set_label(presentation["detail"])
         self.update_detail.set_visible(bool(presentation["detail"]))
         self.update_diagnostics_button.set_sensitive(bool(self.update_transaction_id))
-        if presentation["progress"]:
-            self.update_bar.set_fraction(presentation["progress"] / 100.0)
-            self.update_bar.set_text("%d%%" % presentation["progress"])
+        self.update_status.remove_css_class("error")
+        self.update_status.remove_css_class("warning")
+        self.update_bar.set_visible(presentation["show_progress"])
+        self.update_bar.set_fraction(presentation["progress"] / 100.0)
+        if presentation["show_progress"]:
+            phase = presentation["progress_phase"] or "处理中"
+            self.update_bar.set_text("%s · %d%%" % (phase, presentation["progress"]))
+        else:
+            self.update_bar.set_text("")
         if presentation["severity"] in {"error", "warning"} and presentation["detail"]:
             # Status refreshes are not actionable failures, so keep the
             # visible card readable without opening a modal every time.
             self.update_status.add_css_class("error" if presentation["severity"] == "error" else "warning")
+        if presentation["button_state"] == "wait":
+            self.schedule_update_poll()
+        else:
+            self.cancel_update_poll()
 
     def on_update_action(self, _btn):
         if getattr(self, "update_action_state", "check") == "apply":
@@ -2059,6 +2129,7 @@ class MingSettings(Adw.ApplicationWindow):
             self.on_update_check()
 
     def on_update_check(self):
+        self.cancel_update_poll()
         self.update_action_button.set_sensitive(False)
         self.update_bar.set_visible(True)
         self.update_bar.set_fraction(0.15)
@@ -2072,6 +2143,7 @@ class MingSettings(Adw.ApplicationWindow):
         run_capture_async(["ming-update", "check", "--json"], timeout=60, on_done=done)
 
     def on_update_apply(self):
+        self.cancel_update_poll()
         if not self.update_release_id or not re.fullmatch(r"[0-9A-Za-z._:-]+", self.update_release_id):
             self.update_action_state = "check"
             self.update_action_button.set_label("检查更新")
@@ -2120,21 +2192,31 @@ class MingSettings(Adw.ApplicationWindow):
 
         def done(rc, output, error):
             self.update_diagnostics_button.set_sensitive(True)
-            try:
-                payload = json.loads(output) if output else {}
-            except (TypeError, ValueError):
-                payload = {}
-            if rc == 0 and payload.get("ok"):
-                self.toast("更新诊断已导出到 %s。" % target, "info")
-            else:
+            payload = self._update_status_payload(rc, output, error)
+            if payload.get("schema") != "ming.update.cli.v1" or not payload.get("ok"):
                 self.toast("更新诊断导出失败。请保留事务日志并联系支持人员。", "error")
+                return
+            temporary = "%s.tmp.%s" % (target, os.getpid())
+            try:
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                    handle.write("\n")
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, target)
+            except OSError:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                self.toast("更新诊断无法写入用户目录。", "error")
+                return
+            self.toast("更新诊断已导出到 %s。" % target, "info")
 
         run_capture_async([
-            "ming-transaction-diagnostics", "export",
-            "--state-root", "/var/lib/ming-update",
+            "ming-update", "logs",
             "--transaction", transaction_id,
-            "--output", target,
-        ], timeout=30, on_done=done)
+            "--json",
+        ], timeout=10, on_done=done)
 
     # ---- 5. 显示与无障碍（真实 xrandr 模式 + 独立界面大小） ----
     def build_display(self):
