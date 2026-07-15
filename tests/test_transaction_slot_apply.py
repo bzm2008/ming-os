@@ -152,6 +152,15 @@ class TransactionSlotApplyTests(unittest.TestCase):
         self.assertFalse((candidate / "var" / "lib" / "ming-update").exists())
         self.assertEqual((candidate / "usr" / "share" / "ming-os" / "version").read_bytes(), self.new_content)
 
+    def test_linux_clone_command_preserves_hardlinks_acls_xattrs_and_mount_boundary(self):
+        command = self.slot_module.rsync_clone_command("/active", "/staging")
+        self.assertEqual(command[0], "rsync")
+        for option in ("-aHAX", "--numeric-ids", "--one-file-system", "--delete"):
+            self.assertIn(option, command)
+        for excluded in ("/home", "/boot", "/var/lib/ming-update", "/dev", "/proc", "/sys", "/run"):
+            self.assertIn(f"--exclude={excluded}", command)
+        self.assertEqual(command[-2:], ["/active/", "/staging/"])
+
     def test_success_and_injected_failure_never_modify_active_root_or_home(self):
         active_before = tree_digest(self.active)
         home_before = tree_digest(self.home)

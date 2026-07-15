@@ -7,6 +7,7 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
 
 
 EXCLUDED = (
@@ -130,6 +131,23 @@ def _copy_entry(source, target, active_root):
         raise SlotError("E_CLONE", f"unsupported special file in active root: {relative}")
 
 
+def rsync_clone_command(active_root, staging_root):
+    source = str(active_root).rstrip("/\\") + "/"
+    target = str(staging_root).rstrip("/\\") + "/"
+    return [
+        "rsync",
+        "-aHAX",
+        "--numeric-ids",
+        "--one-file-system",
+        "--delete",
+        "--delete-excluded",
+        *[f"--exclude=/{prefix}" for prefix in EXCLUDED],
+        "--",
+        source,
+        target,
+    ]
+
+
 def clone_active_root(*, active_root, state_root, candidate_slot, transaction_id):
     active_root = pathlib.Path(active_root).resolve()
     state_root = pathlib.Path(state_root).resolve()
@@ -140,8 +158,28 @@ def clone_active_root(*, active_root, state_root, candidate_slot, transaction_id
         raise SlotError("E_BUSY", "inactive slot is not empty")
     staging.mkdir(parents=True, mode=0o700)
     try:
-        for child in active_root.iterdir():
-            _copy_entry(child, staging / child.name, active_root)
+        rsync = shutil.which("rsync")
+        if rsync:
+            command = rsync_clone_command(active_root, staging)
+            command[0] = rsync
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=7200,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise SlotError(
+                    "E_CLONE",
+                    "metadata-safe root clone failed",
+                    {"stderr": (result.stderr or "")[-1024:]},
+                )
+        elif os.name == "nt":
+            for child in active_root.iterdir():
+                _copy_entry(child, staging / child.name, active_root)
+        else:
+            raise SlotError("E_CLONE", "rsync is required for a metadata-safe root clone")
         os.replace(staging, candidate)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
