@@ -31,7 +31,7 @@ DEFAULT_CHECKS = (
     ("services", ["systemctl", "is-active", "dbus.service"]),
     ("services", ["systemctl", "is-active", "systemd-logind.service"]),
     ("services", ["systemctl", "is-active", "NetworkManager.service"]),
-    ("desktop", ["/usr/local/sbin/ming-desktop-healthcheck", "--transaction-probe"]),
+    ("desktop", ["/usr/bin/test", "-x", "/usr/local/bin/ming-desktop-healthcheck"]),
 )
 CHECK_ERRORS = {
     "root": "E_HEALTH_ROOT",
@@ -157,6 +157,23 @@ def _failure(transaction_id, state, code, check, message):
     }
 
 
+def _validate_candidate_mount(state_root, state):
+    path = pathlib.Path(state_root) / "boot" / "mounted.json"
+    if not path.is_file() or path.is_symlink():
+        raise HealthError("E_HEALTH_ROOT", "candidate mount receipt is missing")
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HealthError("E_HEALTH_ROOT", "candidate mount receipt is invalid") from exc
+    if (
+        receipt.get("schema") != "ming.candidate-mount.v1"
+        or receipt.get("transaction_id") != state["transaction_id"]
+        or receipt.get("candidate_slot") != state["candidate_slot"]
+        or receipt.get("generation") != state["generation"]
+    ):
+        raise HealthError("E_HEALTH_ROOT", "candidate mount receipt does not match boot state")
+
+
 def confirm_transaction(
     state_root,
     transaction_id,
@@ -173,6 +190,21 @@ def confirm_transaction(
         raise HealthError("E_STATE_TRANSITION", "health requires a booting candidate")
     transaction_dir = state_root / "transactions" / transaction_id
     log_path = transaction_dir / "health.jsonl"
+    try:
+        _validate_candidate_mount(state_root, state)
+    except HealthError as exc:
+        failure = _failure(transaction_id, state, exc.code, "root", exc.message)
+        _atomic_json(transaction_dir / "failure.json", failure)
+        _append_log(log_path, transaction_id, "check-fail", check="root", error_code=exc.code, reason=exc.message)
+        _set_saved_entry(state["previous_slot"], runner, grubenv)
+        store.transition(
+            transaction_id,
+            "rollback_armed",
+            writer="rollback-service",
+            expected_generation=state["generation"],
+            evidence={"error_code": exc.code, "check": "root"},
+        )
+        raise
     state = store.transition(
         transaction_id,
         "pending_health",
@@ -237,30 +269,117 @@ def confirm_transaction(
         evidence={"health_token_sha256": token_hash, "saved_entry": entry},
     )
     _append_log(log_path, transaction_id, "commit-complete", saved_entry=entry)
+    mounted = state_root / "boot" / "mounted.json"
+    if mounted.exists() and not mounted.is_symlink():
+        mounted.unlink()
     return state
+
+
+def _load_reconcile_object(path, label):
+    path = pathlib.Path(path)
+    if not path.is_file() or path.is_symlink():
+        raise HealthError("E_STATE_SCHEMA", f"{label} is missing or unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HealthError("E_STATE_SCHEMA", f"{label} is invalid") from exc
+    if not isinstance(value, dict):
+        raise HealthError("E_STATE_SCHEMA", f"{label} is not an object")
+    return value
+
+
+def _active_rollback_state(store, state_root):
+    pointer_path = pathlib.Path(state_root) / "active-transaction.json"
+    if not pointer_path.exists():
+        return None
+    pointer = _load_reconcile_object(pointer_path, "active transaction pointer")
+    if pointer.get("schema") != "ming.active-transaction.v1":
+        raise HealthError("E_STATE_SCHEMA", "active transaction pointer schema is invalid")
+    transaction_id = pointer.get("transaction_id")
+    state = store.load(transaction_id)
+    for field in ("transaction_id", "candidate_slot", "previous_slot", "generation", "state"):
+        if pointer.get(field) != state.get(field):
+            raise HealthError("E_STATE_SCHEMA", "active transaction pointer does not match state")
+    if state["state"] in {"rollback_armed", "rolling_back"}:
+        return state
+    return None
+
+
+def _parse_reconcile_timestamp(value, label):
+    if not isinstance(value, str):
+        raise HealthError("E_STATE_SCHEMA", f"{label} timestamp is invalid")
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HealthError("E_STATE_SCHEMA", f"{label} timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise HealthError("E_STATE_SCHEMA", f"{label} timestamp is invalid")
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _receipt_is_superseded(store, state_root, receipt):
+    current_path = pathlib.Path(state_root) / "current.json"
+    if not current_path.exists():
+        return False
+    current = _load_reconcile_object(current_path, "current slot pointer")
+    if current.get("schema") != "ming.current-slot.v1":
+        raise HealthError("E_STATE_SCHEMA", "current slot pointer schema is invalid")
+    current_id = current.get("transaction_id")
+    if current_id == receipt["transaction_id"]:
+        return False
+    current_state = store.load(current_id)
+    if current_state["state"] != "committed" or current.get("slot") != current_state["candidate_slot"]:
+        raise HealthError("E_STATE_SCHEMA", "current slot pointer does not match a committed transaction")
+    receipt_time = _parse_reconcile_timestamp(receipt["timestamp"], "rollback reconciliation receipt")
+    committed_time = _parse_reconcile_timestamp(current_state.get("updated_at"), "current transaction")
+    return committed_time > receipt_time
+
+
+def _remove_rollback_receipt(path):
+    try:
+        pathlib.Path(path).unlink()
+        _fsync_dir(pathlib.Path(path).parent)
+    except OSError as exc:
+        raise HealthError("E_STATE_DURABILITY", "rollback reconciliation receipt could not be removed") from exc
+
+
+def _pending_rollback_state(store, state_root):
+    receipt_path = pathlib.Path(state_root) / "boot" / "rollback-pending.json"
+    if not receipt_path.exists():
+        return None, receipt_path
+    receipt = _load_reconcile_object(receipt_path, "rollback reconciliation receipt")
+    required = {"schema", "transaction_id", "previous_slot", "candidate_slot", "generation", "timestamp"}
+    if set(receipt) != required:
+        raise HealthError("E_STATE_SCHEMA", "rollback reconciliation receipt fields are invalid")
+    if receipt.get("schema") != "ming.rollback-pending.v1":
+        raise HealthError("E_STATE_SCHEMA", "rollback reconciliation receipt schema is invalid")
+    _parse_reconcile_timestamp(receipt["timestamp"], "rollback reconciliation receipt")
+    state = store.load(receipt.get("transaction_id"))
+    if state["state"] != "rolled_back":
+        raise HealthError("E_STATE_SCHEMA", "rollback reconciliation receipt is not terminal")
+    for field in ("transaction_id", "previous_slot", "candidate_slot", "generation"):
+        if receipt.get(field) != state.get(field):
+            raise HealthError("E_STATE_SCHEMA", "rollback reconciliation receipt does not match state")
+    if _receipt_is_superseded(store, state_root, receipt):
+        _remove_rollback_receipt(receipt_path)
+        return None, receipt_path
+    return state, receipt_path
 
 
 def reconcile_rollback(state_root, *, runner=subprocess.run, grubenv="/boot/grub/grubenv"):
     state_root = pathlib.Path(state_root)
-    transactions = state_root / "transactions"
-    candidates = []
-    if transactions.is_dir():
-        for directory in transactions.iterdir():
-            state_path = directory / "state.json"
-            if not state_path.is_file() or state_path.is_symlink():
-                continue
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if state.get("state") in {"rollback_armed", "rolling_back", "rolled_back"}:
-                candidates.append((state_path.stat().st_mtime_ns, state))
-    if not candidates:
+    store = state_module.TransactionStore(state_root)
+    state = _active_rollback_state(store, state_root)
+    receipt_path = None
+    if state is None:
+        state, receipt_path = _pending_rollback_state(store, state_root)
+    if state is None:
         return {"reconciled": False, "reason": "no rollback transaction"}
-    state = max(candidates, key=lambda item: item[0])[1]
     entry = _set_saved_entry(state["previous_slot"], runner, grubenv)
-    log_path = transactions / state["transaction_id"] / "health.jsonl"
+    log_path = state_root / "transactions" / state["transaction_id"] / "health.jsonl"
     _append_log(log_path, state["transaction_id"], "rollback-reconciled", saved_entry=entry)
+    if receipt_path is not None:
+        _remove_rollback_receipt(receipt_path)
     return {"reconciled": True, "transaction_id": state["transaction_id"], "saved_entry": entry}
 
 

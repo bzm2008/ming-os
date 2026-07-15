@@ -193,6 +193,43 @@ class TransactionVerifyTests(unittest.TestCase):
                 kwargs[argument] = value
                 self.assert_error(code, lambda: self.module.verify_release(**kwargs))
 
+    def test_runtime_manifest_validation_matches_frozen_schema_and_refuses_downgrade(self):
+        cases = (
+            ("invalid target version", {"version": "not-a-version"}),
+            ("equal target version", {"version": "26.3.2"}),
+            ("older target version", {"version": "26.3.1"}),
+            ("unsupported channel", {"channel": "preview"}),
+            ("empty source versions", {"from_versions": []}),
+            ("duplicate source versions", {"from_versions": ["26.3.2", "26.3.2"]}),
+            ("invalid source version", {"from_versions": ["not-a-version", "26.3.2"]}),
+            ("zero minimum free space", {"space": {"minimum_free_bytes": 0, "reserve_bytes": 0}}),
+            ("boolean minimum free space", {"space": {"minimum_free_bytes": True, "reserve_bytes": 0}}),
+            ("boolean slot policy", {"slot_policy": {"maximum_uncommitted_boots": True, "retain_previous_committed_slots": 1}}),
+            ("unexpected manifest key", {"unexpected": "accepted"}),
+        )
+        for name, change in cases:
+            with self.subTest(name=name):
+                original = json.loads(json.dumps(self.manifest_data))
+                try:
+                    self.manifest_data.update(change)
+                    self._rewrite_manifest()
+                    self.assert_error("E_MANIFEST_SCHEMA", self._verify)
+                finally:
+                    self.manifest_data = original
+                    self._rewrite_manifest()
+
+        self.manifest_data["payload"]["unexpected"] = True
+        self._rewrite_manifest()
+        self.assert_error("E_MANIFEST_SCHEMA", self._verify)
+        self.manifest_data["payload"].pop("unexpected")
+        self._rewrite_manifest()
+
+        self.manifest_data["payload"]["size"] = True
+        self._rewrite_manifest()
+        self.assert_error("E_MANIFEST_SCHEMA", self._verify)
+        self.manifest_data["payload"]["size"] = self.payload.stat().st_size
+        self._rewrite_manifest()
+
     def test_rejects_payload_and_index_hash_or_size_mismatch(self):
         for section in ("payload", "content_index"):
             with self.subTest(section=section):
@@ -288,10 +325,62 @@ class TransactionVerifyTests(unittest.TestCase):
             runner=runner,
         )
         command, kwargs = calls[0]
-        self.assertEqual(command[:3], ["gpgv", "--keyring", str(self.keyring)])
+        self.assertEqual(command[:4], ["gpgv", "--status-fd=1", "--keyring", str(self.keyring)])
         self.assertEqual(command[-2:], [str(self.signatures[self.payload]), str(self.payload)])
         self.assertEqual(kwargs["timeout"], 15)
         self.assertNotIn("shell", kwargs)
+
+    def test_signature_policy_pins_the_gpgv_primary_and_signing_fingerprints(self):
+        policy = self.root / "key-policy.json"
+        primary = "A" * 40
+        signing = "B" * 40
+        policy.write_text(
+            json.dumps(
+                {
+                    "schema": "ming.ota-key-policy.v1",
+                    "allowed_primary_fingerprints": [primary],
+                    "allowed_signing_fingerprints": [signing],
+                    "channels": ["stable"],
+                    "minimum_bootstrap": "1.0.0",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = "[GNUPG:] VALIDSIG %s 2026-07-15 0 0 0 0 0 0 0 %s\n" % (signing, primary)
+
+        self.module.verify_detached_signature(
+            self.payload,
+            self.signatures[self.payload],
+            self.keyring,
+            key_policy=policy,
+            runner=lambda *_args, **_kwargs: Result(),
+        )
+
+        policy.write_text(
+            json.dumps(
+                {
+                    "schema": "ming.ota-key-policy.v1",
+                    "allowed_primary_fingerprints": [primary],
+                    "allowed_signing_fingerprints": ["C" * 40],
+                    "channels": ["stable"],
+                    "minimum_bootstrap": "1.0.0",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(self.module.TransactionError) as caught:
+            self.module.verify_detached_signature(
+                self.payload,
+                self.signatures[self.payload],
+                self.keyring,
+                key_policy=policy,
+                runner=lambda *_args, **_kwargs: Result(),
+            )
+        self.assertEqual(caught.exception.code, "E_KEY_POLICY")
 
 
 if __name__ == "__main__":
