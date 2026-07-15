@@ -9,6 +9,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "assets" / "ming-transaction-verify.py"
+ALLOWLIST_PATH = ROOT / "assets" / "ming-transaction-allowlist.txt"
 
 
 def load_module():
@@ -218,6 +219,21 @@ class TransactionVerifyTests(unittest.TestCase):
                 self.assert_error("E_CONTENT_POLICY", self._verify)
         self.index_data["entries"][0]["path"] = "usr/share/ming-os/version"
         self._rewrite_index()
+
+    def test_positive_allowlist_rejects_signed_but_unapproved_system_paths(self):
+        self.assertTrue(ALLOWLIST_PATH.is_file(), "transaction allowlist is missing")
+        allowed = [
+            line.strip()
+            for line in ALLOWLIST_PATH.read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertIn("usr/share/ming-os", allowed)
+        self.assertNotIn("home", allowed)
+        self.assertNotIn("boot", allowed)
+
+        self.index_data["entries"][0]["path"] = "var/log/signed-but-unapproved"
+        self._rewrite_index()
+        self.assert_error("E_CONTENT_POLICY", self._verify)
 
     def test_rejects_traversal_absolute_duplicate_and_unsafe_symlink_paths(self):
         for path in ("../etc/shadow", "/etc/shadow", "usr//share/file", "usr/./share/file"):

@@ -29,6 +29,7 @@ FORBIDDEN_PATHS = (
     "var/lib/NetworkManager",
     "var/lib/bluetooth",
 )
+DEFAULT_ALLOWLIST = pathlib.Path(__file__).with_name("ming-transaction-allowlist.txt")
 
 
 class TransactionError(Exception):
@@ -194,6 +195,29 @@ def _normalize_path(value):
     return normalized
 
 
+def _load_allowlist(path=DEFAULT_ALLOWLIST):
+    try:
+        values = [
+            line.strip()
+            for line in pathlib.Path(path).read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    except (OSError, UnicodeError) as exc:
+        raise TransactionError("E_CONTENT_POLICY", f"transaction allowlist is unavailable: {exc}") from exc
+    normalized = []
+    for value in values:
+        if value.startswith("/") or ".." in value.split("/") or "\\" in value:
+            raise TransactionError("E_CONTENT_POLICY", "transaction allowlist contains an unsafe prefix")
+        normalized.append(value.rstrip("/"))
+    _require(bool(normalized), "E_CONTENT_POLICY", "transaction allowlist is empty")
+    return tuple(normalized)
+
+
+def _require_allowlisted(path, allowlist):
+    if not any(path == prefix or path.startswith(prefix + "/") for prefix in allowlist):
+        raise TransactionError("E_CONTENT_POLICY", f"content path is not allowlisted: {path}")
+
+
 def _forbidden_package(name):
     return (
         name.startswith(("linux-image", "linux-headers", "linux-modules", "grub", "initramfs-tools"))
@@ -216,7 +240,7 @@ def _validate_symlink(path, target):
     _normalize_path("/".join(stack))
 
 
-def validate_content_index(index, release_id, architecture="amd64"):
+def validate_content_index(index, release_id, architecture="amd64", allowlist_path=DEFAULT_ALLOWLIST):
     _require(isinstance(index, dict), "E_CONTENT_POLICY", "content index must be an object")
     _require(index.get("schema") == "ming.content-index.v1", "E_CONTENT_POLICY", "content index schema is unsupported")
     _require(index.get("release_id") == release_id, "E_CONTENT_POLICY", "content index release ID differs")
@@ -224,11 +248,13 @@ def validate_content_index(index, release_id, architecture="amd64"):
     deletions = index.get("deletions")
     packages = index.get("packages")
     _require(isinstance(entries, list) and isinstance(deletions, list) and isinstance(packages, list), "E_CONTENT_POLICY", "content index lists are invalid")
+    allowlist = _load_allowlist(allowlist_path)
     seen = set()
     normalized_entries = []
     for item in entries:
         _require(isinstance(item, dict), "E_CONTENT_POLICY", "content entry must be an object")
         path = _normalize_path(item.get("path"))
+        _require_allowlisted(path, allowlist)
         _require(path not in seen, "E_CONTENT_POLICY", "duplicate content path")
         seen.add(path)
         kind = item.get("type")
@@ -248,6 +274,7 @@ def validate_content_index(index, release_id, architecture="amd64"):
     normalized_deletions = []
     for value in deletions:
         path = _normalize_path(value)
+        _require_allowlisted(path, allowlist)
         _require(path not in seen, "E_CONTENT_POLICY", "duplicate content/deletion path")
         seen.add(path)
         normalized_deletions.append(path)

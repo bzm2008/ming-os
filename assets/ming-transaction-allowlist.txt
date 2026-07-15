@@ -1,0 +1,13 @@
+# Ming-owned system surfaces allowed in transactional payload v1.
+etc/ming-os
+etc/xdg/ming-os
+usr/lib/ming-os
+usr/libexec/ming-os
+usr/local/bin
+usr/local/lib/ming-os
+usr/local/sbin
+usr/share/applications
+usr/share/icons
+usr/share/ming-os
+usr/share/pixmaps
+usr/share/themes
