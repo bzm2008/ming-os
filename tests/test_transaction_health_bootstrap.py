@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ STATE_PATH = ROOT / "assets" / "ming-transaction-state.py"
 BOOT_PATH = ROOT / "assets" / "ming-transaction-boot.py"
 HEALTH_UNIT = ROOT / "assets" / "systemd" / "ming-transaction-health.service"
 RECONCILE_UNIT = ROOT / "assets" / "systemd" / "ming-transaction-reconcile.service"
+ROLLBACK_REBOOT_UNIT = ROOT / "assets" / "systemd" / "ming-transaction-rollback-reboot.service"
+DISPLAY_MANAGER_DROPIN = ROOT / "assets" / "systemd" / "display-manager.service.d" / "20-ming-transaction-health.conf"
 
 
 def load_module(path, name):
@@ -49,7 +52,16 @@ class HealthRunner:
 
 class TransactionHealthBootstrapTests(unittest.TestCase):
     def setUp(self):
-        for path in (HEALTH_PATH, BOOTSTRAP_PATH, STATE_PATH, BOOT_PATH, HEALTH_UNIT, RECONCILE_UNIT):
+        for path in (
+            HEALTH_PATH,
+            BOOTSTRAP_PATH,
+            STATE_PATH,
+            BOOT_PATH,
+            HEALTH_UNIT,
+            RECONCILE_UNIT,
+            ROLLBACK_REBOOT_UNIT,
+            DISPLAY_MANAGER_DROPIN,
+        ):
             self.assertTrue(path.exists(), f"health/bootstrap asset is not implemented: {path.name}")
         self.health = load_module(HEALTH_PATH, "ming_transaction_health")
         self.bootstrap = load_module(BOOTSTRAP_PATH, "ming_ota_bootstrap_capability")
@@ -117,6 +129,80 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
         events = [json.loads(line) for line in (self.state_root / "transactions" / "tx-001" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(events[-2]["to_state"], "committing")
         self.assertEqual(events[-1]["to_state"], "committed")
+
+    def test_interrupted_commit_reconciles_the_current_slot_before_candidate_boot(self):
+        self.booting()
+        runner = HealthRunner()
+
+        def power_loss(point):
+            if point == "after-current-pointer":
+                raise RuntimeError("simulated power loss after current pointer")
+
+        with self.assertRaises(RuntimeError):
+            self.health.confirm_transaction(
+                self.state_root,
+                "tx-001",
+                runner=runner,
+                checks=(("packages", ["dpkg", "--audit"]),),
+                fault_hook=power_loss,
+            )
+
+        interrupted = self.store.load("tx-001")
+        self.assertEqual(interrupted["state"], "committing")
+        current = json.loads((self.state_root / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(current["slot"], "B")
+        self.assertEqual(current["generation"], interrupted["generation"] + 1)
+        self.assertTrue((self.state_root / "boot" / "commit-pending.json").is_file())
+
+        selected = self.boot.select_root(
+            state_root=self.state_root,
+            physical_root=self.physical,
+            requested_slot="B",
+        )
+        self.assertEqual(selected["action"], "boot-committed")
+        self.assertEqual(pathlib.Path(selected["selected_root"]), self.state_root / "slots" / "B" / "root")
+        self.assertEqual(self.store.load("tx-001")["state"], "committed")
+        self.assertFalse((self.state_root / "active-transaction.json").exists())
+        self.assertFalse((self.state_root / "boot" / "commit-pending.json").exists())
+
+    def test_health_rejects_a_candidate_that_changed_after_the_boot_seal(self):
+        self.booting()
+        candidate = self.state_root / "slots" / "B" / "root"
+        (candidate / "tampered-after-boot").write_text("changed", encoding="utf-8")
+        runner = HealthRunner()
+
+        with self.assertRaises(self.health.HealthError) as caught:
+            self.health.confirm_transaction(
+                self.state_root,
+                "tx-001",
+                runner=runner,
+                checks=(("packages", ["dpkg", "--audit"]),),
+            )
+
+        self.assertEqual(caught.exception.code, "E_HEALTH_ROOT")
+        self.assertEqual(self.store.load("tx-001")["state"], "rollback_armed")
+
+    def test_health_converts_candidate_seal_io_failure_into_a_rollback(self):
+        self.booting()
+        original_digest = self.health.slot_module.tree_digest
+
+        def unreadable_candidate(_root):
+            raise self.health.slot_module.SlotError("E_CLONE", "simulated candidate seal read failure")
+
+        self.health.slot_module.tree_digest = unreadable_candidate
+        try:
+            with self.assertRaises(self.health.HealthError) as caught:
+                self.health.confirm_transaction(
+                    self.state_root,
+                    "tx-001",
+                    runner=HealthRunner(),
+                    checks=(("packages", ["dpkg", "--audit"]),),
+                )
+        finally:
+            self.health.slot_module.tree_digest = original_digest
+
+        self.assertEqual(caught.exception.code, "E_HEALTH_ROOT")
+        self.assertEqual(self.store.load("tx-001")["state"], "rollback_armed")
 
     def test_health_failure_arms_rollback_and_restores_previous_default(self):
         self.booting()
@@ -314,12 +400,17 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
         self.assertNotIn("/usr/local/sbin/ming-desktop-healthcheck", serialized)
         self.assertNotIn("--transaction-probe", serialized)
 
+    def test_confirm_active_is_a_successful_noop_when_no_transaction_exists(self):
+        result = self.health.confirm_active(self.state_root, runner=HealthRunner())
+        self.assertEqual(result, {"confirmed": False, "reason": "no-active-transaction"})
+
     def test_bootstrap_capability_requires_every_trusted_component(self):
         image = self.root / "image"
         required = self.bootstrap.required_paths(image)
         for path in required:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture\n", encoding="utf-8")
+            path.chmod(0o644)
         (image / "var" / "lib" / "ming-update").mkdir(parents=True, exist_ok=True)
         (image / "var" / "lib" / "ming-update" / "protocol-version").write_text(
             "transactional-slot-v1\n", encoding="utf-8"
@@ -333,8 +424,10 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
             units_root / "multi-user.target.wants" / unit: units_root / unit
             for unit in self.bootstrap.REQUIRED_ENABLED_UNITS
         }
+        fixture_modes = {path: 0o644 for path in required}
         original_is_symlink = pathlib.Path.is_symlink
         original_resolve = pathlib.Path.resolve
+        original_stat = pathlib.Path.stat
 
         def fixture_is_symlink(path):
             return path in enabled_targets or original_is_symlink(path)
@@ -343,6 +436,15 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
             if path in enabled_targets:
                 return enabled_targets[path]
             return original_resolve(path, *args, **kwargs)
+
+        def fixture_stat(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            mode = fixture_modes.get(path)
+            if mode is None:
+                return metadata
+            values = list(metadata)
+            values[0] = (metadata.st_mode & ~0o7777) | mode
+            return os.stat_result(values)
 
         def fixture_grubenv_reader(_path):
             return {"saved_entry": "ming-legacy"}
@@ -357,8 +459,9 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
             )
 
         with mock.patch.object(pathlib.Path, "is_symlink", fixture_is_symlink), \
-             mock.patch.object(pathlib.Path, "resolve", fixture_resolve), \
-             mock.patch.object(self.bootstrap, "detect_capability", fixture_detect):
+              mock.patch.object(pathlib.Path, "resolve", fixture_resolve), \
+              mock.patch.object(pathlib.Path, "stat", fixture_stat), \
+              mock.patch.object(self.bootstrap, "detect_capability", fixture_detect):
             status = original_detect(image, require_marker=False, grubenv_reader=fixture_grubenv_reader)
             self.assertTrue(status["available"])
             self.assertEqual(status["capability"], "transactional-slot-v1")
@@ -368,6 +471,12 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
 
             status = original_detect(image, grubenv_reader=fixture_grubenv_reader)
             self.assertTrue(status["available"])
+
+            fixture_modes[required[1]] = 0o666
+            status = original_detect(image, grubenv_reader=fixture_grubenv_reader)
+            self.assertFalse(status["available"])
+            self.assertTrue(status["unsafe"])
+            fixture_modes[required[1]] = 0o644
 
             required[0].unlink()
             status = original_detect(image, grubenv_reader=fixture_grubenv_reader)
@@ -384,11 +493,19 @@ class TransactionHealthBootstrapTests(unittest.TestCase):
     def test_systemd_health_and_reconcile_units_have_bounded_ordering(self):
         health = HEALTH_UNIT.read_text(encoding="utf-8")
         reconcile = RECONCILE_UNIT.read_text(encoding="utf-8")
+        rollback_reboot = ROLLBACK_REBOOT_UNIT.read_text(encoding="utf-8")
+        dropin = DISPLAY_MANAGER_DROPIN.read_text(encoding="utf-8")
         self.assertIn("Before=display-manager.service", health)
         self.assertIn("TimeoutStartSec=60", health)
         self.assertIn("confirm-active", health)
+        self.assertIn("OnFailure=ming-transaction-rollback-reboot.service", health)
+        self.assertNotIn("ConditionPathExists=/var/lib/ming-update/active-transaction.json", health)
         self.assertIn("reconcile", reconcile)
         self.assertIn("Before=display-manager.service", reconcile)
+        self.assertIn("Requires=ming-transaction-health.service", dropin)
+        self.assertIn("After=ming-transaction-health.service", dropin)
+        self.assertIn("ConditionPathExists=/var/lib/ming-update/active-transaction.json", rollback_reboot)
+        self.assertIn("systemctl --no-block reboot", rollback_reboot)
 
 
 if __name__ == "__main__":

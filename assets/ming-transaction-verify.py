@@ -14,6 +14,9 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FINGERPRINT = re.compile(r"^[A-F0-9]{40,64}$")
 PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]+$")
 VERSION = re.compile(r"^(?P<numeric>[0-9]+(?:\.[0-9]+){1,3})(?P<suffix>[A-Za-z0-9._-]+)?$")
+HTTPS_URL = re.compile(r"^https://[^/?#@]+(?:/[^?#]*)?$")
+RELATIVE_PATH = re.compile(r"^[A-Za-z0-9._+:-]+(?:/[A-Za-z0-9._+:-]+)*$")
+SYMLINK_TARGET = re.compile(r"^(?!/)[A-Za-z0-9._+:-]+(?:/[A-Za-z0-9._+:-]+)*$")
 FORBIDDEN_PATHS = (
     "boot",
     "home",
@@ -29,6 +32,8 @@ FORBIDDEN_PATHS = (
     "etc/ssh",
     "var/lib/NetworkManager",
     "var/lib/bluetooth",
+    "usr/local/bin/ming-update",
+    "usr/local/sbin/ming-transaction-health",
 )
 DEFAULT_ALLOWLIST = pathlib.Path(__file__).with_name("ming-transaction-allowlist.txt")
 
@@ -194,16 +199,22 @@ def _compare_versions(left, right, *, error_code="E_MANIFEST_SCHEMA"):
     return 1 if left_suffix > right_suffix else -1
 
 
-def _require_exact_object(value, expected, label):
-    _require(isinstance(value, dict), "E_MANIFEST_SCHEMA", f"{label} must be an object")
-    _require(set(value) == set(expected), "E_MANIFEST_SCHEMA", f"{label} fields are invalid")
+def _require_exact_object(value, expected, label, code="E_MANIFEST_SCHEMA"):
+    _require(isinstance(value, dict), code, f"{label} must be an object")
+    _require(set(value) == set(expected), code, f"{label} fields are invalid")
+
+
+def _require_object_fields(value, *, required, allowed, label, code):
+    _require(isinstance(value, dict), code, f"{label} must be an object")
+    _require(set(value).issubset(allowed) and required.issubset(value), code, f"{label} fields are invalid")
 
 
 def _validate_https_url(value):
-    _require(isinstance(value, str), "E_MANIFEST_SCHEMA", "artifact URL must be a string")
+    _require(isinstance(value, str) and HTTPS_URL.fullmatch(value) is not None, "E_MANIFEST_SCHEMA", "artifact URL is invalid")
     parsed = urllib.parse.urlsplit(value)
     _require(
-        parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username and not parsed.password,
+        parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username and not parsed.password
+        and not parsed.query and not parsed.fragment,
         "E_MANIFEST_SCHEMA",
         "artifact URL must be credential-free HTTPS",
     )
@@ -294,6 +305,7 @@ def _normalize_path(value):
     _require("//" not in value and "/./" not in f"/{value}/", "E_CONTENT_POLICY", "content path is not canonical")
     parts = value.split("/")
     _require(all(part not in ("", ".", "..") for part in parts), "E_CONTENT_POLICY", "content path escapes root")
+    _require(RELATIVE_PATH.fullmatch(value) is not None, "E_CONTENT_POLICY", "content path characters are invalid")
     normalized = "/".join(parts)
     for forbidden in FORBIDDEN_PATHS:
         if normalized == forbidden or normalized.startswith(forbidden + "/"):
@@ -333,7 +345,7 @@ def _forbidden_package(name):
 
 
 def _validate_symlink(path, target):
-    _require(isinstance(target, str) and target and not target.startswith("/") and "\\" not in target, "E_CONTENT_POLICY", "symlink target is unsafe")
+    _require(isinstance(target, str) and SYMLINK_TARGET.fullmatch(target) is not None, "E_CONTENT_POLICY", "symlink target is unsafe")
     stack = path.split("/")[:-1]
     for part in target.split("/"):
         if part in ("", "."):
@@ -347,33 +359,57 @@ def _validate_symlink(path, target):
 
 
 def validate_content_index(index, release_id, architecture="amd64", allowlist_path=DEFAULT_ALLOWLIST):
-    _require(isinstance(index, dict), "E_CONTENT_POLICY", "content index must be an object")
+    _require_exact_object(
+        index,
+        {"schema", "release_id", "entries", "deletions", "packages"},
+        "content index",
+        "E_CONTENT_POLICY",
+    )
     _require(index.get("schema") == "ming.content-index.v1", "E_CONTENT_POLICY", "content index schema is unsupported")
-    _require(index.get("release_id") == release_id, "E_CONTENT_POLICY", "content index release ID differs")
+    _require(
+        isinstance(index.get("release_id"), str)
+        and re.fullmatch(r"[A-Za-z0-9._-]{8,128}", index["release_id"])
+        and index["release_id"] == release_id,
+        "E_CONTENT_POLICY",
+        "content index release ID differs",
+    )
     entries = index.get("entries")
     deletions = index.get("deletions")
     packages = index.get("packages")
     _require(isinstance(entries, list) and isinstance(deletions, list) and isinstance(packages, list), "E_CONTENT_POLICY", "content index lists are invalid")
+    _require(not packages, "E_CONTENT_POLICY", "offline package entries are not enabled in transaction payload v1")
     allowlist = _load_allowlist(allowlist_path)
     seen = set()
     normalized_entries = []
     for item in entries:
-        _require(isinstance(item, dict), "E_CONTENT_POLICY", "content entry must be an object")
+        _require_object_fields(
+            item,
+            required={"path", "type", "mode", "uid", "gid", "config_policy"},
+            allowed={"path", "type", "blob", "target", "mode", "uid", "gid", "config_policy", "base_sha256"},
+            label="content entry",
+            code="E_CONTENT_POLICY",
+        )
         path = _normalize_path(item.get("path"))
         _require_allowlisted(path, allowlist)
         _require(path not in seen, "E_CONTENT_POLICY", "duplicate content path")
         seen.add(path)
         kind = item.get("type")
         _require(kind in {"file", "directory", "symlink"}, "E_CONTENT_POLICY", "content type is unsafe")
-        _require(isinstance(item.get("mode"), int) and 0 <= item["mode"] <= 0o7777, "E_CONTENT_POLICY", "content mode is invalid")
-        _require(isinstance(item.get("uid"), int) and item["uid"] >= 0, "E_CONTENT_POLICY", "content uid is invalid")
-        _require(isinstance(item.get("gid"), int) and item["gid"] >= 0, "E_CONTENT_POLICY", "content gid is invalid")
+        _require(type(item.get("mode")) is int and 0 <= item["mode"] <= 0o1777, "E_CONTENT_POLICY", "content mode is invalid")
+        _require(type(item.get("uid")) is int and item["uid"] >= 0, "E_CONTENT_POLICY", "content uid is invalid")
+        _require(type(item.get("gid")) is int and item["gid"] >= 0, "E_CONTENT_POLICY", "content gid is invalid")
         _require(item.get("config_policy") in {"replace", "replace-if-unmodified", "preserve"}, "E_CONTENT_POLICY", "config policy is invalid")
+        if "base_sha256" in item:
+            _require(HEX64.fullmatch(item["base_sha256"]) is not None, "E_CONTENT_POLICY", "base SHA256 is invalid")
         if kind == "file":
+            _require("blob" in item and "target" not in item, "E_CONTENT_POLICY", "file entry fields are invalid")
             blob = str(item.get("blob", ""))
             _require(blob.startswith("sha256:") and HEX64.fullmatch(blob[7:]) is not None, "E_CONTENT_POLICY", "file blob is invalid")
         elif kind == "symlink":
+            _require("target" in item and "blob" not in item, "E_CONTENT_POLICY", "symlink entry fields are invalid")
             _validate_symlink(path, item.get("target"))
+        else:
+            _require("blob" not in item and "target" not in item, "E_CONTENT_POLICY", "directory entry fields are invalid")
         normalized = dict(item)
         normalized["path"] = path
         normalized_entries.append(normalized)
@@ -386,12 +422,12 @@ def validate_content_index(index, release_id, architecture="amd64", allowlist_pa
         normalized_deletions.append(path)
     normalized_packages = []
     for package in packages:
-        _require(isinstance(package, dict), "E_CONTENT_POLICY", "package entry must be an object")
+        _require_exact_object(package, {"name", "version", "architecture", "blob"}, "package entry", "E_CONTENT_POLICY")
         name = package.get("name")
         _require(isinstance(name, str) and PACKAGE_NAME.fullmatch(name) is not None, "E_CONTENT_POLICY", "package name is invalid")
         _require(not _forbidden_package(name), "E_CONTENT_POLICY", "kernel, boot, initramfs, and DKMS packages are forbidden")
         _require(package.get("architecture") in {architecture, "all"}, "E_CONTENT_POLICY", "package architecture is invalid")
-        _require(isinstance(package.get("version"), str) and package["version"], "E_CONTENT_POLICY", "package version is invalid")
+        _require(isinstance(package.get("version"), str) and 0 < len(package["version"]) <= 256, "E_CONTENT_POLICY", "package version is invalid")
         blob = str(package.get("blob", ""))
         _require(blob.startswith("sha256:") and HEX64.fullmatch(blob[7:]) is not None, "E_CONTENT_POLICY", "package blob is invalid")
         normalized_packages.append(dict(package))

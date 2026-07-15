@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """Durable state machine for Ming OS directory-slot transactions."""
 
+import contextlib
 import datetime
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shutil
+import stat
+import threading
 import time
 import uuid
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 
 TRANSITIONS = {
@@ -42,6 +57,10 @@ WRITERS = {
     "rolled_back": "rollback-service",
 }
 TERMINAL = {"aborted", "rolled_back", "committed"}
+COMMIT_RECEIPT_SCHEMA = "ming.commit-receipt.v1"
+COMMIT_PENDING_SCHEMA = "ming.commit-pending.v1"
+_PROCESS_LOCKS = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
 
 
 class TransactionStateError(Exception):
@@ -50,6 +69,78 @@ class TransactionStateError(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+@contextlib.contextmanager
+def transaction_lock(root):
+    """Serialize staging after read-only preflight has completed.
+
+    The lock is advisory but mandatory for every transaction writer.  It is
+    retained as a regular file so a process crash releases the kernel lock
+    without leaving an ambiguous staging reservation behind.
+    """
+    root = pathlib.Path(root)
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise TransactionStateError("E_STATE_DURABILITY", "transaction state root is unsafe")
+    try:
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise TransactionStateError("E_LOCK_UNAVAILABLE", "cannot create transaction state root") from exc
+    lock_path = root / ".transaction.lock"
+    if lock_path.is_symlink():
+        raise TransactionStateError("E_STATE_DURABILITY", "transaction lock path is unsafe")
+    with _PROCESS_LOCKS_GUARD:
+        process_lock = _PROCESS_LOCKS.setdefault(str(lock_path.resolve()), threading.Lock())
+    if not process_lock.acquire(blocking=False):
+        raise TransactionStateError("E_BUSY", "another transaction is staging")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        process_lock.release()
+        raise TransactionStateError("E_LOCK_UNAVAILABLE", "cannot open transaction lock") from exc
+    locked = False
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise TransactionStateError("E_STATE_DURABILITY", "transaction lock is not a regular file")
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise TransactionStateError("E_BUSY", "another transaction is staging") from exc
+            locked = True
+        elif msvcrt is not None:
+            if metadata.st_size == 0:
+                os.write(descriptor, b"0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise TransactionStateError("E_BUSY", "another transaction is staging") from exc
+            locked = True
+        else:
+            raise TransactionStateError("E_LOCK_UNAVAILABLE", "platform does not provide file locking")
+        yield
+    finally:
+        try:
+            if locked:
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(descriptor)
+            finally:
+                process_lock.release()
 
 
 def _timestamp():
@@ -91,6 +182,29 @@ def _atomic_json(path, value, mode=0o600):
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _create_json_exclusive(path, value, mode=0o600):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise TransactionStateError("E_STATE_DURABILITY", f"state path is a symlink: {path}")
+    payload = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def _append_jsonl(path, value):
@@ -166,6 +280,157 @@ class TransactionStore:
             "state": state["state"],
         }
 
+    @staticmethod
+    def _current_pointer(state):
+        return {
+            "schema": "ming.current-slot.v1",
+            "slot": state["candidate_slot"],
+            "transaction_id": state["transaction_id"],
+            "release_id": state["release_id"],
+            "generation": state["generation"],
+        }
+
+    def _commit_receipt_path(self, transaction_id):
+        return self._transaction_dir(transaction_id) / "commit-receipt.json"
+
+    def _commit_pending_path(self):
+        return self.root / "boot" / "commit-pending.json"
+
+    def _remove_active_for(self, transaction_id):
+        active = self.root / "active-transaction.json"
+        if not active.exists():
+            return
+        value = self._load_json(active)
+        if value.get("transaction_id") != transaction_id:
+            raise TransactionStateError("E_STATE_RECONCILE", "active transaction pointer changed during commit")
+        self._remove_active()
+
+    def _remove_commit_pending(self):
+        path = self._commit_pending_path()
+        try:
+            if path.is_symlink():
+                raise TransactionStateError("E_STATE_DURABILITY", "commit reconciliation receipt is unsafe")
+            path.unlink()
+            _fsync_directory(path.parent)
+        except FileNotFoundError:
+            return
+
+    def _load_commit_receipt(self, transaction_id):
+        return self._load_json(self._commit_receipt_path(transaction_id), "E_STATE_RECONCILE")
+
+    def _validate_commit_receipt(self, state, receipt):
+        required = {
+            "schema",
+            "transaction_id",
+            "release_id",
+            "previous_slot",
+            "candidate_slot",
+            "generation",
+            "health_token_sha256",
+            "saved_entry",
+            "timestamp",
+        }
+        if set(receipt) != required or receipt.get("schema") != COMMIT_RECEIPT_SCHEMA:
+            raise TransactionStateError("E_STATE_RECONCILE", "commit receipt schema is invalid")
+        for field in ("transaction_id", "release_id", "previous_slot", "candidate_slot", "generation"):
+            if receipt.get(field) != state.get(field):
+                raise TransactionStateError("E_STATE_RECONCILE", "commit receipt does not match transaction state")
+        if not isinstance(receipt.get("health_token_sha256"), str) or re.fullmatch(r"[a-f0-9]{64}", receipt["health_token_sha256"]) is None:
+            raise TransactionStateError("E_STATE_RECONCILE", "commit receipt health token is invalid")
+        expected_entry = {"legacy": "ming-legacy", "A": "ming-slot-a", "B": "ming-slot-b"}[state["candidate_slot"]]
+        if receipt.get("saved_entry") != expected_entry or not isinstance(receipt.get("timestamp"), str):
+            raise TransactionStateError("E_STATE_RECONCILE", "commit receipt boot evidence is invalid")
+
+    def write_commit_receipt(self, transaction_id, *, health_token_sha256, saved_entry):
+        state = self.load(transaction_id)
+        if state["state"] != "committing":
+            raise TransactionStateError("E_STATE_TRANSITION", "commit receipt requires a committing transaction")
+        receipt = {
+            "schema": COMMIT_RECEIPT_SCHEMA,
+            "transaction_id": transaction_id,
+            "release_id": state["release_id"],
+            "previous_slot": state["previous_slot"],
+            "candidate_slot": state["candidate_slot"],
+            "generation": state["generation"],
+            "health_token_sha256": health_token_sha256,
+            "saved_entry": saved_entry,
+            "timestamp": _timestamp(),
+        }
+        self._validate_commit_receipt(state, receipt)
+        _atomic_json(self._commit_receipt_path(transaction_id), receipt)
+        pending = dict(receipt)
+        pending["schema"] = COMMIT_PENDING_SCHEMA
+        _atomic_json(self._commit_pending_path(), pending)
+        return receipt
+
+    def commit_transaction(self, transaction_id, *, expected_generation, fault_hook=None, reconciled=False):
+        state = self.load(transaction_id)
+        if state["state"] == "committed":
+            receipt = self._load_commit_receipt(transaction_id)
+            self._validate_commit_receipt(state, receipt)
+            _atomic_json(self.root / "current.json", self._current_pointer(state))
+            self._remove_active_for(transaction_id)
+            self._remove_commit_pending()
+            return state
+        if state["state"] != "committing" or state["generation"] != expected_generation:
+            raise TransactionStateError("E_STATE_TRANSITION", "transaction is not ready for durable commit")
+        receipt = self._load_commit_receipt(transaction_id)
+        self._validate_commit_receipt(state, receipt)
+        updated = dict(state)
+        updated["state"] = "committed"
+        updated["generation"] += 1
+        updated["updated_at"] = _timestamp()
+        updated["evidence"] = {
+            "health_token_sha256": receipt["health_token_sha256"],
+            "saved_entry": receipt["saved_entry"],
+            "commit_receipt": hashlib.sha256(
+                self._commit_receipt_path(transaction_id).read_bytes()
+            ).hexdigest(),
+        }
+        _atomic_json(self.root / "current.json", self._current_pointer(updated))
+        if fault_hook:
+            fault_hook("after-current-pointer")
+        transaction_dir = self._transaction_dir(transaction_id)
+        _atomic_json(transaction_dir / "state.json", updated)
+        if fault_hook:
+            fault_hook("after-committed-state")
+        _append_jsonl(
+            transaction_dir / "events.jsonl",
+            self._event(updated, state["state"], "commit-coordinator", updated["evidence"], reconciled=reconciled),
+        )
+        self._remove_active_for(transaction_id)
+        self._remove_commit_pending()
+        return updated
+
+    def reconcile_pending_commit(self):
+        pending_path = self._commit_pending_path()
+        if not pending_path.exists():
+            return None
+        pending = self._load_json(pending_path, "E_STATE_RECONCILE")
+        if pending.get("schema") != COMMIT_PENDING_SCHEMA:
+            raise TransactionStateError("E_STATE_RECONCILE", "commit reconciliation receipt schema is invalid")
+        transaction_id = pending.get("transaction_id")
+        state = self.load(transaction_id)
+        receipt = self._load_commit_receipt(transaction_id)
+        expected_pending = dict(receipt)
+        expected_pending["schema"] = COMMIT_PENDING_SCHEMA
+        if pending != expected_pending:
+            raise TransactionStateError("E_STATE_RECONCILE", "commit reconciliation receipt does not match transaction receipt")
+        self._validate_commit_receipt(state, receipt)
+        if state["state"] == "committing":
+            return self.commit_transaction(
+                transaction_id,
+                expected_generation=state["generation"],
+                reconciled=True,
+            )
+        if state["state"] == "committed":
+            self.reconcile(transaction_id)
+            _atomic_json(self.root / "current.json", self._current_pointer(state))
+            self._remove_active_for(transaction_id)
+            self._remove_commit_pending()
+            return state
+        raise TransactionStateError("E_STATE_RECONCILE", "commit receipt points to a non-committing transaction")
+
     def _remove_active(self):
         active = self.root / "active-transaction.json"
         try:
@@ -208,7 +473,11 @@ class TransactionStore:
         }
         _atomic_json(transaction_dir / "state.json", state)
         _append_jsonl(transaction_dir / "events.jsonl", self._event(state, None, "engine"))
-        _atomic_json(active_path, self._active_pointer(state))
+        try:
+            _create_json_exclusive(active_path, self._active_pointer(state))
+        except FileExistsError as exc:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+            raise TransactionStateError("E_BUSY", "another transaction is active") from exc
         return state
 
     def transition(
@@ -242,16 +511,7 @@ class TransactionStore:
             fault_hook("after-state-replace")
         _append_jsonl(transaction_dir / "events.jsonl", self._event(updated, previous, writer, evidence))
         if new_state == "committed":
-            _atomic_json(
-                self.root / "current.json",
-                {
-                    "schema": "ming.current-slot.v1",
-                    "slot": updated["candidate_slot"],
-                    "transaction_id": transaction_id,
-                    "release_id": updated["release_id"],
-                    "generation": updated["generation"],
-                },
-            )
+            _atomic_json(self.root / "current.json", self._current_pointer(updated))
         if new_state in TERMINAL:
             self._remove_active()
         else:
@@ -283,6 +543,12 @@ class TransactionStore:
             )
         if state["state"] not in TERMINAL:
             _atomic_json(self.root / "active-transaction.json", self._active_pointer(state))
+        else:
+            active = self.root / "active-transaction.json"
+            if active.exists():
+                pointer = self._load_json(active)
+                if pointer.get("transaction_id") == transaction_id:
+                    self._remove_active()
         return state
 
 

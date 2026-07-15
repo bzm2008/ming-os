@@ -25,7 +25,17 @@ def _load_state_module():
     return module
 
 
+def _load_slot_module():
+    spec = importlib.util.spec_from_file_location(
+        "ming_transaction_slot_health_runtime", HERE / "ming-transaction-slot.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 state_module = _load_state_module()
+slot_module = _load_slot_module()
 DEFAULT_CHECKS = (
     ("packages", ["dpkg", "--audit"]),
     ("services", ["systemctl", "is-active", "dbus.service"]),
@@ -172,6 +182,26 @@ def _validate_candidate_mount(state_root, state):
         or receipt.get("generation") != state["generation"]
     ):
         raise HealthError("E_HEALTH_ROOT", "candidate mount receipt does not match boot state")
+    candidate = pathlib.Path(state_root) / "slots" / state["candidate_slot"] / "root"
+    seal_path = pathlib.Path(state_root) / "transactions" / state["transaction_id"] / "candidate-seal.json"
+    if candidate.is_symlink() or not candidate.is_dir() or seal_path.is_symlink() or not seal_path.is_file():
+        raise HealthError("E_HEALTH_ROOT", "candidate root or seal is unavailable")
+    try:
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HealthError("E_HEALTH_ROOT", "candidate seal is invalid") from exc
+    if seal.get("schema") != "ming.candidate-seal.v1" or not isinstance(seal.get("sha256"), str):
+        raise HealthError("E_HEALTH_ROOT", "candidate seal is invalid")
+    try:
+        candidate_digest = slot_module.tree_digest(candidate)
+    except (OSError, slot_module.SlotError) as exc:
+        raise HealthError("E_HEALTH_ROOT", "candidate seal cannot be verified") from exc
+    if candidate_digest != seal["sha256"]:
+        raise HealthError("E_HEALTH_ROOT", "candidate changed after its boot seal")
+    home = candidate / "home"
+    if home.is_symlink() or not home.is_dir():
+        raise HealthError("E_HEALTH_ROOT", "shared /home mount is unavailable")
+    return seal
 
 
 def confirm_transaction(
@@ -191,7 +221,7 @@ def confirm_transaction(
     transaction_dir = state_root / "transactions" / transaction_id
     log_path = transaction_dir / "health.jsonl"
     try:
-        _validate_candidate_mount(state_root, state)
+        seal = _validate_candidate_mount(state_root, state)
     except HealthError as exc:
         failure = _failure(transaction_id, state, exc.code, "root", exc.message)
         _atomic_json(transaction_dir / "failure.json", failure)
@@ -237,7 +267,6 @@ def confirm_transaction(
             )
             raise
 
-    seal = json.loads((transaction_dir / "candidate-seal.json").read_text(encoding="utf-8"))
     token = {
         "schema": "ming.health-token.v1",
         "transaction_id": transaction_id,
@@ -261,18 +290,44 @@ def confirm_transaction(
     entry = _set_saved_entry(state["candidate_slot"], runner, grubenv)
     if fault_hook:
         fault_hook("after-saved-entry-readback")
-    state = store.transition(
+    store.write_commit_receipt(
         transaction_id,
-        "committed",
-        writer="commit-coordinator",
+        health_token_sha256=token_hash,
+        saved_entry=entry,
+    )
+    state = store.commit_transaction(
+        transaction_id,
         expected_generation=state["generation"],
-        evidence={"health_token_sha256": token_hash, "saved_entry": entry},
+        fault_hook=fault_hook,
     )
     _append_log(log_path, transaction_id, "commit-complete", saved_entry=entry)
     mounted = state_root / "boot" / "mounted.json"
     if mounted.exists() and not mounted.is_symlink():
         mounted.unlink()
     return state
+
+
+def confirm_active(state_root, *, runner=subprocess.run, checks=DEFAULT_CHECKS, grubenv="/boot/grub/grubenv"):
+    state_root = pathlib.Path(state_root)
+    pointer_path = state_root / "active-transaction.json"
+    if not pointer_path.exists():
+        return {"confirmed": False, "reason": "no-active-transaction"}
+    pointer = _load_reconcile_object(pointer_path, "active transaction pointer")
+    if pointer.get("schema") != "ming.active-transaction.v1":
+        raise HealthError("E_STATE_SCHEMA", "active transaction pointer schema is invalid")
+    transaction_id = pointer.get("transaction_id")
+    store = state_module.TransactionStore(state_root)
+    state = store.load(transaction_id)
+    for field in ("transaction_id", "candidate_slot", "previous_slot", "generation", "state"):
+        if pointer.get(field) != state.get(field):
+            raise HealthError("E_STATE_SCHEMA", "active transaction pointer does not match state")
+    return confirm_transaction(
+        state_root,
+        transaction_id,
+        runner=runner,
+        checks=checks,
+        grubenv=grubenv,
+    )
 
 
 def _load_reconcile_object(path, label):
@@ -369,6 +424,9 @@ def _pending_rollback_state(store, state_root):
 def reconcile_rollback(state_root, *, runner=subprocess.run, grubenv="/boot/grub/grubenv"):
     state_root = pathlib.Path(state_root)
     store = state_module.TransactionStore(state_root)
+    committed = store.reconcile_pending_commit()
+    if committed is not None:
+        return {"reconciled": True, "transaction_id": committed["transaction_id"], "saved_entry": _grub_entry(committed["candidate_slot"])}
     state = _active_rollback_state(store, state_root)
     receipt_path = None
     if state is None:
@@ -392,10 +450,7 @@ def main(argv=None):
         if arguments.command == "reconcile":
             result = reconcile_rollback(arguments.state_root)
         else:
-            pointer = json.loads(
-                (pathlib.Path(arguments.state_root) / "active-transaction.json").read_text(encoding="utf-8")
-            )
-            result = confirm_transaction(arguments.state_root, pointer["transaction_id"])
+            result = confirm_active(arguments.state_root)
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, default=str))
         return 0
     except (HealthError, state_module.TransactionStateError, OSError, ValueError, KeyError) as exc:

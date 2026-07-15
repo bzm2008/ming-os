@@ -805,7 +805,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("find_cached_manifest()", self.ota)
         self.assertIn("/home/*/.cache/ming-update/update_info.json", self.ota)
         major = self.ota[self.ota.index("major_install_with_home_backup()"):
-                         self.ota.index("auto_shutdown_update()")]
+                         self.ota.index('case "${1:-help}" in')]
         self.assertIn("manifest=$(find_cached_manifest)", major)
 
     def test_edge_and_spark_have_vm_safe_wrappers(self):

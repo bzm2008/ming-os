@@ -26,4 +26,9 @@ ${access}
     linux /vmlinuz root=UUID=${uuid} ro ming.slot=B
     initrd /initrd.img
 }
+menuentry 'Ming OS Recovery (previous committed root)' --id 'ming-recovery-manual' {
+${access}
+    linux /vmlinuz root=UUID=${uuid} ro ming.slot=legacy ming.recovery=manual
+    initrd /initrd.img
+}
 EOF

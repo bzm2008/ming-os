@@ -4,6 +4,7 @@
 import datetime
 import contextlib
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -221,12 +222,17 @@ def apply_payload(*, candidate_root, transaction_dir, archive, index, fault_hook
     if index.get("packages"):
         raise ApplyError("E_CONTENT_POLICY", "offline package transactions are not enabled in the minimal engine")
     candidate_root = pathlib.Path(candidate_root)
-    journal = rollback_module.RollbackJournal(transaction_dir, candidate_root)
+    if candidate_root.is_symlink() or not candidate_root.is_dir():
+        raise ApplyError("E_CONTENT_POLICY", "candidate root is unsafe")
+    try:
+        journal = rollback_module.RollbackJournal(transaction_dir, candidate_root)
+    except rollback_module.RollbackError as exc:
+        raise ApplyError(exc.code, exc.message, exc.details) from exc
     mutations = 0
     try:
         for entry in index["entries"]:
             relative = entry["path"]
-            target = candidate_root.joinpath(*relative.split("/"))
+            target = journal.target(relative)
             if entry["config_policy"] == "preserve" and (target.exists() or target.is_symlink()):
                 continue
             if entry["config_policy"] == "replace-if-unmodified":
@@ -234,7 +240,7 @@ def apply_payload(*, candidate_root, transaction_dir, archive, index, fault_hook
                 if not expected or not target.is_file() or _sha256(target) != expected:
                     continue
             journal.capture(relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target = journal.target(relative, create_parents=True)
             kind = entry["type"]
             if kind == "directory":
                 if target.exists() and not target.is_dir():
@@ -254,12 +260,18 @@ def apply_payload(*, candidate_root, transaction_dir, archive, index, fault_hook
             if fault_hook and mutations == 1:
                 fault_hook("after-first-mutation")
         for relative in index["deletions"]:
-            target = candidate_root.joinpath(*relative.split("/"))
             journal.capture(relative)
+            target = journal.target(relative)
             _remove_target(target)
             mutations += 1
             if fault_hook and mutations == 1:
                 fault_hook("after-first-mutation")
+    except rollback_module.RollbackError as exc:
+        try:
+            journal.rollback(reason=str(exc))
+        except rollback_module.RollbackError as rollback_exc:
+            raise ApplyError("E_ROLLBACK_STATE", f"candidate apply and rollback failed: {rollback_exc}") from exc
+        raise ApplyError(exc.code, exc.message, exc.details) from exc
     except Exception as exc:
         try:
             journal.rollback(reason=str(exc))
@@ -268,6 +280,56 @@ def apply_payload(*, candidate_root, transaction_dir, archive, index, fault_hook
         if isinstance(exc, ApplyError):
             raise
         raise ApplyError("E_PACKAGE_APPLY", f"candidate application interrupted: {exc}") from exc
+
+
+def _preflight_slots(*, plan, payload_path, active_root, state_root, available_bytes):
+    previous_slot, candidate_slot = slot_module.select_slots(state_root)
+    reclaimable_bytes = slot_module.inactive_slot_reclaim_bytes(
+        state_root=state_root,
+        previous_slot=previous_slot,
+        candidate_slot=candidate_slot,
+    )
+    if available_bytes is None:
+        probe = pathlib.Path(state_root)
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        available_bytes = shutil.disk_usage(probe).free
+    effective_available_bytes = int(available_bytes) + reclaimable_bytes
+    space = slot_module.validate_space(
+        active_root=active_root,
+        state_root=state_root,
+        payload_size=payload_path.stat().st_size,
+        reserve_bytes=plan["space"]["reserve_bytes"],
+        minimum_free_bytes=plan["space"]["minimum_free_bytes"],
+        available_bytes=effective_available_bytes,
+    )
+    space.update(
+        {
+            "available_bytes": int(available_bytes),
+            "reclaimable_bytes": reclaimable_bytes,
+            "effective_available_bytes": effective_available_bytes,
+        }
+    )
+    return previous_slot, candidate_slot, space
+
+
+def _abort_staging(store, transaction_id, reason):
+    current = store.load(transaction_id)
+    if current["state"] in {"new", "verified", "staging", "staged"}:
+        current = store.transition(
+            transaction_id,
+            "aborting",
+            writer="engine",
+            expected_generation=current["generation"],
+            evidence={"reason": reason[:512]},
+        )
+        store.transition(
+            transaction_id,
+            "aborted",
+            writer="engine",
+            expected_generation=current["generation"],
+            evidence={"reason": reason[:512]},
+        )
 
 
 def prepare_candidate(
@@ -290,79 +352,148 @@ def prepare_candidate(
     if index.get("packages"):
         raise ApplyError("E_CONTENT_POLICY", "offline package transactions are not enabled in the minimal engine")
     archive = PayloadArchive(payload_path, index).validate()
+
+    # This first pass makes no writes. The same checks run again after locking.
     try:
-        space = slot_module.validate_space(
+        _preflight_slots(
+            plan=plan,
+            payload_path=payload_path,
             active_root=active_root,
             state_root=state_root,
-            payload_size=payload_path.stat().st_size,
-            reserve_bytes=plan["space"]["reserve_bytes"],
-            minimum_free_bytes=plan["space"]["minimum_free_bytes"],
             available_bytes=available_bytes,
         )
-        previous_slot, candidate_slot = slot_module.select_slots(state_root)
     except slot_module.SlotError as exc:
         raise ApplyError(exc.code, exc.message, exc.details) from exc
 
-    store = state_module.TransactionStore(state_root)
-    state = store.create_transaction(
-        transaction_id=transaction_id,
-        release_id=plan["release_id"],
-        previous_slot=previous_slot,
-        candidate_slot=candidate_slot,
-    )
-    transaction_dir = pathlib.Path(state_root) / "transactions" / transaction_id
-    engine_log = transaction_dir / "engine.jsonl"
-    _append_log(engine_log, transaction_id, "preflight-complete", space=space)
-    state = store.transition(transaction_id, "verified", writer="verifier", expected_generation=state["generation"], evidence=plan["verified_artifacts"])
-    state = store.transition(transaction_id, "staging", writer="slot-manager", expected_generation=state["generation"], evidence=space)
+    store = None
+    state = None
+    engine_log = None
     try:
-        candidate = slot_module.clone_active_root(
-            active_root=active_root,
-            state_root=state_root,
-            candidate_slot=candidate_slot,
-            transaction_id=transaction_id,
-        )
-        _append_log(engine_log, transaction_id, "clone-complete", candidate_slot=candidate_slot)
-        apply_payload(
-            candidate_root=candidate,
-            transaction_dir=transaction_dir,
-            archive=archive,
-            index=index,
-            fault_hook=fault_hook,
-        )
-        candidate_digest = slot_module.tree_digest(candidate)
-        seal_path = transaction_dir / "candidate-seal.json"
-        seal_path.write_text(
-            json.dumps({"schema": "ming.candidate-seal.v1", "sha256": candidate_digest}, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        state = store.transition(
-            transaction_id,
-            "staged",
-            writer="candidate-applicator",
-            expected_generation=state["generation"],
-            evidence={"candidate_sha256": candidate_digest},
-        )
-        _append_log(engine_log, transaction_id, "candidate-staged", candidate_slot=candidate_slot, candidate_sha256=candidate_digest)
-        return {
-            "transaction_id": transaction_id,
-            "state": state["state"],
-            "previous_slot": previous_slot,
-            "candidate_slot": candidate_slot,
-            "candidate_root": str(candidate),
-            "log_path": str(engine_log),
-        }
-    except Exception as exc:
-        _append_log(engine_log, transaction_id, "staging-failed", error_code=getattr(exc, "code", "E_PACKAGE_APPLY"), reason=str(exc)[:512])
-        current = store.load(transaction_id)
-        if current["state"] in {"new", "verified", "staging", "staged"}:
-            current = store.transition(transaction_id, "aborting", writer="engine", expected_generation=current["generation"], evidence={"reason": str(exc)[:512]})
-            store.transition(transaction_id, "aborted", writer="engine", expected_generation=current["generation"], evidence={"reason": str(exc)[:512]})
-        if isinstance(exc, ApplyError):
-            raise
-        if isinstance(exc, slot_module.SlotError):
-            raise ApplyError(exc.code, exc.message, exc.details) from exc
-        raise ApplyError("E_PACKAGE_APPLY", f"candidate staging failed: {exc}") from exc
+        with state_module.transaction_lock(state_root):
+            try:
+                previous_slot, candidate_slot, space = _preflight_slots(
+                    plan=plan,
+                    payload_path=payload_path,
+                    active_root=active_root,
+                    state_root=state_root,
+                    available_bytes=available_bytes,
+                )
+            except slot_module.SlotError as exc:
+                raise ApplyError(exc.code, exc.message, exc.details) from exc
+
+            store = state_module.TransactionStore(state_root)
+            state = store.create_transaction(
+                transaction_id=transaction_id,
+                release_id=plan["release_id"],
+                previous_slot=previous_slot,
+                candidate_slot=candidate_slot,
+            )
+            transaction_dir = pathlib.Path(state_root) / "transactions" / transaction_id
+            engine_log = transaction_dir / "engine.jsonl"
+            _append_log(engine_log, transaction_id, "preflight-complete", space=space)
+
+            try:
+                slot_module.retire_inactive_slot(
+                    state_root=state_root,
+                    previous_slot=previous_slot,
+                    candidate_slot=candidate_slot,
+                    owner_transaction_id=transaction_id,
+                )
+                state = store.transition(
+                    transaction_id,
+                    "verified",
+                    writer="verifier",
+                    expected_generation=state["generation"],
+                    evidence=plan["verified_artifacts"],
+                )
+                state = store.transition(
+                    transaction_id,
+                    "staging",
+                    writer="slot-manager",
+                    expected_generation=state["generation"],
+                    evidence=space,
+                )
+                with slot_module.dpkg_transaction_lock(active_root):
+                    candidate = slot_module.clone_active_root(
+                        active_root=active_root,
+                        state_root=state_root,
+                        candidate_slot=candidate_slot,
+                        transaction_id=transaction_id,
+                    )
+                    if pathlib.Path(candidate).is_symlink() or not pathlib.Path(candidate).is_dir():
+                        raise ApplyError("E_CONTENT_POLICY", "candidate root is unsafe after cloning")
+                    _append_log(engine_log, transaction_id, "clone-complete", candidate_slot=candidate_slot)
+                    slot_module.final_sync_active_root(active_root, candidate)
+                    _append_log(engine_log, transaction_id, "final-sync-complete", candidate_slot=candidate_slot)
+                    protected_before = slot_module.protected_state_digest(active_root)
+                    apply_payload(
+                        candidate_root=candidate,
+                        transaction_dir=transaction_dir,
+                        archive=archive,
+                        index=index,
+                        fault_hook=fault_hook,
+                    )
+                    protected_after = slot_module.protected_state_digest(active_root)
+                    protected_candidate = slot_module.protected_state_digest(candidate)
+                    if not (
+                        hmac.compare_digest(protected_before, protected_after)
+                        and hmac.compare_digest(protected_before, protected_candidate)
+                    ):
+                        raise ApplyError("E_PROTECTED_PATH_CHANGED", "machine configuration changed during candidate staging")
+                    state_module._atomic_json(
+                        transaction_dir / "protected-seal.json",
+                        {
+                            "schema": "ming.protected-state-seal.v1",
+                            "active_sha256": protected_before,
+                            "candidate_sha256": protected_candidate,
+                        },
+                    )
+                candidate_digest = slot_module.tree_digest(candidate)
+                state_module._atomic_json(
+                    transaction_dir / "candidate-seal.json",
+                    {"schema": "ming.candidate-seal.v1", "sha256": candidate_digest},
+                )
+                state = store.transition(
+                    transaction_id,
+                    "staged",
+                    writer="candidate-applicator",
+                    expected_generation=state["generation"],
+                    evidence={
+                        "candidate_sha256": candidate_digest,
+                        "protected_state_sha256": protected_before,
+                    },
+                )
+                _append_log(
+                    engine_log,
+                    transaction_id,
+                    "candidate-staged",
+                    candidate_slot=candidate_slot,
+                    candidate_sha256=candidate_digest,
+                )
+                return {
+                    "transaction_id": transaction_id,
+                    "state": state["state"],
+                    "previous_slot": previous_slot,
+                    "candidate_slot": candidate_slot,
+                    "candidate_root": str(candidate),
+                    "log_path": str(engine_log),
+                }
+            except Exception as exc:
+                _append_log(
+                    engine_log,
+                    transaction_id,
+                    "staging-failed",
+                    error_code=getattr(exc, "code", "E_PACKAGE_APPLY"),
+                    reason=str(exc)[:512],
+                )
+                _abort_staging(store, transaction_id, str(exc))
+                if isinstance(exc, ApplyError):
+                    raise
+                if isinstance(exc, slot_module.SlotError):
+                    raise ApplyError(exc.code, exc.message, exc.details) from exc
+                raise ApplyError("E_PACKAGE_APPLY", f"candidate staging failed: {exc}") from exc
+    except state_module.TransactionStateError as exc:
+        raise ApplyError(exc.code, exc.message, exc.details) from exc
 
 
 if __name__ == "__main__":

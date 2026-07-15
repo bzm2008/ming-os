@@ -118,9 +118,8 @@ class UpdateCliContractTests(unittest.TestCase):
                 "delivery": "transactional-slot-v1",
                 "minimum_bootstrap": "1.0.0",
                 "manifest_url": "https://updates.example/objects/" + manifest_hash,
-                "manifest_signature_url": "https://updates.example/objects/manifest.sig",
+                "manifest_signature_url": "https://updates.example/objects/" + ("c" * 64),
                 "manifest_sha256": manifest_hash,
-                "release_notes": "transaction fixture",
             },
         )
         value = controller.check()
@@ -133,6 +132,63 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertEqual(value["update"]["manifest_sha256"], manifest_hash)
         self.assertTrue((self.root / "cache" / "discovery.json").is_file())
         self.assert_schema(value)
+
+    def test_discovery_runtime_rejects_fields_and_locators_outside_the_frozen_schema(self):
+        valid = {
+            "schema": "ming.update.discovery.v1",
+            "available": True,
+            "current_version": "26.3.2",
+            "architecture": "amd64",
+            "capability": "transactional-slot-v1",
+            "delivery": "transactional-slot-v1",
+            "release_id": "ming-os-26.3.3-amd64-20260715.1",
+            "version": "26.3.3",
+            "minimum_bootstrap": "1.0.0",
+            "manifest_url": "https://updates.example/objects/" + ("a" * 64),
+            "manifest_signature_url": "https://updates.example/objects/" + ("c" * 64),
+            "manifest_sha256": "a" * 64,
+        }
+        cases = (
+            ("unknown field", lambda value: value.__setitem__("release_notes", "not in v1")),
+            ("query locator", lambda value: value.__setitem__("manifest_url", value["manifest_url"] + "?unsafe=1")),
+            ("mutable detached signature locator", lambda value: value.__setitem__(
+                "manifest_signature_url", "https://updates.example/releases/26.3.3/manifest.sig",
+            )),
+            ("manifest locator hash differs from its declared hash", lambda value: value.__setitem__(
+                "manifest_url", "https://updates.example/objects/" + ("b" * 64),
+            )),
+            ("none has bootstrap", lambda value: value.update({
+                "available": False,
+                "delivery": "none",
+                "bootstrap": {
+                    "url": "https://updates.example/bootstrap.deb",
+                    "sha256": "b" * 64,
+                    "signature_url": "https://updates.example/bootstrap.deb.sig",
+                    "fingerprint": "A" * 40,
+                },
+            })),
+            ("bootstrap uses legacy fingerprint alias", lambda value: value.clear() or value.update({
+                "schema": "ming.update.discovery.v1",
+                "available": True,
+                "current_version": "26.3.2",
+                "architecture": "amd64",
+                "capability": None,
+                "delivery": "bootstrap",
+                "bootstrap": {
+                    "url": "https://updates.example/bootstrap.deb",
+                    "sha256": "b" * 64,
+                    "signature_url": "https://updates.example/bootstrap.deb.sig",
+                    "key_fingerprint": "A" * 40,
+                },
+            })),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                value = json.loads(json.dumps(valid))
+                mutate(value)
+                with self.assertRaises(self.cli.UpdateError) as caught:
+                    self.cli.validate_discovery(value, "amd64", "26.3.2")
+                self.assertEqual("E_PROTOCOL_UNSUPPORTED", caught.exception.code)
 
     def test_bootstrapped_client_accepts_a_signed_contract_no_update_response(self):
         controller = self.controller(
@@ -428,7 +484,7 @@ class UpdateCliContractTests(unittest.TestCase):
                 "version": "26.3.3",
                 "minimum_bootstrap": "1.0.0",
                 "manifest_url": "https://updates.example/objects/" + manifest_hash,
-                "manifest_signature_url": "https://updates.example/objects/manifest.sig",
+                "manifest_signature_url": "https://updates.example/objects/" + ("c" * 64),
                 "manifest_sha256": manifest_hash,
             },
             active_root=active,
@@ -479,7 +535,7 @@ class UpdateCliContractTests(unittest.TestCase):
                 "version": "26.3.3",
                 "minimum_bootstrap": "1.0.0",
                 "manifest_url": "https://updates.example/objects/" + manifest_hash,
-                "manifest_signature_url": "https://updates.example/objects/manifest.sig",
+                "manifest_signature_url": "https://updates.example/objects/" + ("c" * 64),
                 "manifest_sha256": manifest_hash,
             },
         )

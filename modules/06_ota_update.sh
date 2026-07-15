@@ -39,7 +39,8 @@ deploy_transaction_runtime() {
 
     install -d -m 0755 "${runtime}" /usr/share/ming-update/trust \
         /usr/share/polkit-1/actions /etc/initramfs-tools/hooks /etc/grub.d \
-        /etc/systemd/system /var/lib/ming-update /var/cache/ming-update /var/log/ming-update
+        /etc/systemd/system /etc/systemd/system/display-manager.service.d \
+        /var/lib/ming-update /var/cache/ming-update /var/log/ming-update
     for asset in "${runtime_assets[@]}"; do
         [[ -s "${source}/${asset}" ]] || {
             echo "[06_ota_update][ERROR] Missing transaction asset: ${asset}" >&2
@@ -75,6 +76,8 @@ deploy_transaction_runtime() {
     install -m 0755 "${source}/grub/40_ming_transaction" /etc/grub.d/40_ming_transaction
     install -m 0644 "${source}/systemd/ming-transaction-health.service" /etc/systemd/system/ming-transaction-health.service
     install -m 0644 "${source}/systemd/ming-transaction-reconcile.service" /etc/systemd/system/ming-transaction-reconcile.service
+    install -m 0644 "${source}/systemd/ming-transaction-rollback-reboot.service" /etc/systemd/system/ming-transaction-rollback-reboot.service
+    install -m 0644 "${source}/systemd/display-manager.service.d/20-ming-transaction-health.conf" /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
     install -m 0644 "${source}/polkit/org.mingos.update.policy" /usr/share/polkit-1/actions/org.mingos.update.policy
 
     cat > /usr/local/bin/ming-update << 'UPDATECLI'
@@ -1181,7 +1184,7 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|apply|patch|download|install|auto-shutdown|status [--json]|doctor|config|help]
+Usage: ming-recovery-update [check|apply|patch|download|install|status [--json]|doctor|config|help]
 
 Commands:
   check             检查是否有可用更新（含分级：patch/minor/major）。
@@ -1189,7 +1192,6 @@ Commands:
   patch             执行 patch 级小修复（apt 补丁 + 配置脚本，无需重启）。
   download          下载并校验 major ISO 更新包。
   install           将已下载的 ISO 暂存为 GRUB 启动项（major 升级，保留用户文件）。
-  auto-shutdown     自动完成「检查→下载→安装→关机」全流程（major 升级，夜间维护）。
   status            显示当前 OTA 状态。
   doctor            检查 APT、缓存、备份引擎和 major OTA 保留状态。
   config            配置更新源/频道。
@@ -1639,51 +1641,6 @@ apply_update() {
     esac
 }
 
-# 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
-auto_shutdown_update() {
-    log_step "Ming OS 自动更新并关机"
-    local notify_title="Ming OS 自动更新"
-
-    _notify() {
-        local msg="$1"
-        log_info "${msg}"
-        notify-send -i system-software-update "${notify_title}" "${msg}" 2>/dev/null || true
-    }
-
-    _notify "开始检查更新…"
-    if ! MING_UPDATE_BACKGROUND_CHECK=1 check_update; then
-        _notify "检查更新失败，已取消自动关机。"
-        return 1
-    fi
-
-    local manifest; manifest="$(find_cached_manifest 2>/dev/null || true)"
-    if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
-        _notify "当前已是最新版本，无需更新。不执行关机。"
-        return 0
-    fi
-
-    local has_update
-    has_update=$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null)
-    if [[ "${has_update}" != "true" ]]; then
-        _notify "当前已是最新版本，无需更新。不执行关机。"
-        return 0
-    fi
-
-    local new_version
-    new_version=$(jq -r '.version // "unknown"' "${manifest}" 2>/dev/null)
-    _notify "发现新版本 ${new_version}，开始自动更新…"
-    if ! apply_update --checked; then
-        _notify "更新未能完成，已取消自动关机。"
-        return 1
-    fi
-
-    _notify "更新准备完毕！系统将在 60 秒后关机，重启后自动应用新版本。"
-    log_info "Scheduling shutdown in 60 seconds..."
-    # 60 秒倒计时让用户有机会中断（运行 sudo shutdown -c 可取消）
-    sudo shutdown -h +1 "Ming OS 更新完成，系统将在 1 分钟内关机。" 2>/dev/null \
-        || systemctl poweroff --no-wall 2>/dev/null || poweroff 2>/dev/null || true
-}
-
 case "${1:-help}" in
     check) check_update ;;
     apply)
@@ -1693,7 +1650,6 @@ case "${1:-help}" in
     patch) patch_update ;;
     download) download_update ;;
     install) major_install_with_home_backup ;;
-    auto-shutdown) auto_shutdown_update ;;
     status) show_status "${2:-}" ;;
     doctor) ota_doctor ;;
     config) configure_update ;;

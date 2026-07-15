@@ -20,7 +20,7 @@
       "enum": [
         "new", "verified", "staging", "staged", "armed", "booting",
         "pending_health", "committing", "committed", "aborting", "aborted",
-        "rollback_armed", "rolling_back", "rolled_back", "available", "bootstrap-required"
+        "rollback_armed", "rolling_back", "rolled_back", "idle", "failed", "available", "bootstrap-required"
       ]
     },
     "transaction": {
@@ -91,7 +91,8 @@
         "available_version": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/version" }] },
         "release_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/releaseId" }] },
         "delivery": { "enum": ["none", "bootstrap", "transactional-slot-v1", "recovery-iso"] },
-        "manifest_sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] }
+        "manifest_sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "release_notes": { "type": "string" }
       },
       "required": ["current_version", "available_version", "release_id", "delivery", "manifest_sha256"]
     },

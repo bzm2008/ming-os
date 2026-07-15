@@ -59,6 +59,24 @@ class TransactionRuntimeDeploymentTests(unittest.TestCase):
         self.assertIn("ming-recovery-manual", self.build)
         self.assertIn("generate_initramfs", self.build)
 
+    def test_build_gate_requires_the_display_manager_health_and_rollback_guard(self):
+        start = self.build.index("validate_transactional_ota_runtime() {")
+        end = self.build.index("# ======================== ISO", start)
+        runtime_gate = self.build[start:end]
+        for required in (
+            "/etc/systemd/system/ming-transaction-rollback-reboot.service",
+            "/etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf",
+            "ming-transaction-rollback-reboot.service",
+            "display-manager.service.d/20-ming-transaction-health.conf",
+        ):
+            self.assertIn(required, runtime_gate)
+
+    def test_build_gate_treats_grub_entry_ids_as_data_not_grep_options(self):
+        start = self.build.index("validate_transactional_ota_runtime() {")
+        end = self.build.index("# ======================== ISO", start)
+        runtime_gate = self.build[start:end]
+        self.assertIn('grep -Fq -- "--id', runtime_gate)
+
     def test_transaction_regression_gate_covers_deployment_and_bootstrap_contracts(self):
         gate = REGRESSION_GATE.read_text(encoding="utf-8")
         for test_module in (
@@ -77,6 +95,14 @@ class TransactionRuntimeDeploymentTests(unittest.TestCase):
         self.assertIn("ming-ota-backup backup", recovery)
         self.assertNotIn("transactional-slot-v1", recovery)
         self.assertNotIn("ming-transaction-engine", recovery)
+
+    def test_legacy_recovery_helper_has_no_unattended_shutdown_command(self):
+        start = self.ota.index("cat > /usr/local/lib/ming-update/ming-recovery-update << 'OTACLI'")
+        end = self.ota.index("\nOTACLI\n", start)
+        recovery_helper = self.ota[start:end]
+        self.assertNotIn("auto-shutdown", recovery_helper)
+        self.assertNotIn("auto_shutdown_update", recovery_helper)
+        self.assertNotIn("systemctl poweroff", recovery_helper)
 
     def test_rootfs_validator_checks_the_new_public_cli_and_keeps_recovery_helper_separate(self):
         self.assertIn('ota_client = require_file("usr/local/bin/ming-update", "ming-update-cli.py")', self.build)

@@ -43,8 +43,11 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     trap 'rm -rf "${verify_root}"' EXIT
     install -Dm0644 assets/systemd/ming-transaction-health.service "${verify_root}/etc/systemd/system/ming-transaction-health.service"
     install -Dm0644 assets/systemd/ming-transaction-reconcile.service "${verify_root}/etc/systemd/system/ming-transaction-reconcile.service"
+    install -Dm0644 assets/systemd/ming-transaction-rollback-reboot.service "${verify_root}/etc/systemd/system/ming-transaction-rollback-reboot.service"
+    install -Dm0644 assets/systemd/display-manager.service.d/20-ming-transaction-health.conf "${verify_root}/etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf"
     install -Dm0755 /bin/true "${verify_root}/usr/local/sbin/ming-transaction-health"
     install -Dm0755 /bin/true "${verify_root}/usr/local/bin/ming-update"
+    install -Dm0755 /bin/true "${verify_root}/usr/bin/systemctl"
     install -Dm0755 /bin/true "${verify_root}/bin/true"
     cat > "${verify_root}/etc/systemd/system/ming-update-check.service" <<'UNIT'
 [Unit]
@@ -79,6 +82,8 @@ UNIT
     done
     systemd-analyze verify --root="${verify_root}" "${verify_root}/etc/systemd/system/ming-transaction-health.service" \
         "${verify_root}/etc/systemd/system/ming-transaction-reconcile.service" \
+        "${verify_root}/etc/systemd/system/ming-transaction-rollback-reboot.service" \
+        "${verify_root}/etc/systemd/system/display-manager.service" \
         "${verify_root}/etc/systemd/system/ming-update-check.service"
 fi
 

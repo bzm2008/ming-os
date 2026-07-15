@@ -15,8 +15,8 @@
     "release_id": { "$ref": "#/$defs/releaseId" },
     "version": { "$ref": "#/$defs/version" },
     "minimum_bootstrap": { "$ref": "#/$defs/version" },
-    "manifest_url": { "$ref": "#/$defs/httpsUrl" },
-    "manifest_signature_url": { "$ref": "#/$defs/httpsUrl" },
+    "manifest_url": { "$ref": "#/$defs/contentAddressedObjectUrl" },
+    "manifest_signature_url": { "$ref": "#/$defs/contentAddressedSignatureUrl" },
     "manifest_sha256": { "$ref": "#/$defs/sha256" },
     "bootstrap": { "$ref": "#/$defs/bootstrap" }
   },
@@ -88,6 +88,16 @@
       "type": "string",
       "format": "uri",
       "pattern": "^https://[^/?#@]+(?:/[^?#]*)?$"
+    },
+    "contentAddressedObjectUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^/?#@]+(?:/[^?#]*)*/[a-f0-9]{64}$"
+    },
+    "contentAddressedSignatureUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^/?#@]+(?:/[^?#]*)*/[a-f0-9]{64}(?:\\.sig)?$"
     },
     "bootstrap": {
       "type": "object",

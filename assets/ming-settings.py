@@ -267,6 +267,7 @@ def compact_output(text, max_lines=8):
 # The transactional updater owns state and policy.  Settings only translates
 # its stable state/error keys into user-facing text; it never inspects logs.
 OTA_STATE_MESSAGES = {
+    "idle": ("当前已是最新版本", "check"),
     "new": ("准备更新", "check"),
     "verified": ("已完成签名校验，准备暂存", "wait"),
     "staging": ("正在暂存更新", "wait"),
@@ -276,11 +277,12 @@ OTA_STATE_MESSAGES = {
     "pending_health": ("正在启动候选系统，等待健康检查", "wait"),
     "committing": ("正在确认更新结果", "wait"),
     "committed": ("更新已完成", "check"),
+    "available": ("发现可用更新", "apply"),
     "aborting": ("正在取消更新", "wait"),
     "aborted": ("更新已取消", "check"),
-    "rollback_armed": ("健康检查未通过，已安排自动回滚", "wait"),
+    "rollback_armed": ("更新未完成，已安排自动回滚", "wait"),
     "rolling_back": ("正在自动回滚到上一版本", "wait"),
-    "rolled_back": ("更新未通过健康检查，已自动回滚", "check"),
+    "rolled_back": ("更新已回滚到上一版本", "check"),
 }
 
 OTA_MESSAGE_KEYS = {
@@ -298,6 +300,9 @@ OTA_MESSAGE_KEYS = {
     "update.status.rollback_armed": "rollback_armed",
     "update.status.rolling_back": "rolling_back",
     "update.status.rolled_back": "rolled_back",
+    "update.no_update": "idle",
+    "update.available": "available",
+    "update.rollback.completed": "rolled_back",
 }
 
 OTA_ERROR_MESSAGES = {
@@ -328,7 +333,7 @@ OTA_ERROR_MESSAGES = {
     "E_HEALTH_SERVICE": "新系统关键服务检查失败，系统正在回滚。",
     "E_HEALTH_DESKTOP_PROBE": "新系统桌面检查失败，系统正在回滚。",
     "E_ROLLBACK_GRUB": "回滚启动项失败，请保留日志并联系支持人员。",
-    "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
+    "E_ROLLBACK_STATE": "回滚过程未能完整完成，系统已停止后续更新；请导出诊断后再处理。",
     "E_ROLLBACK_SLOT": "更新失败，系统已回滚到上一版本。",
     "E_STATE_SCHEMA": "更新状态格式无效，已停止后续更新操作。",
     "E_STATE_TRANSITION": "更新状态转换无效，已停止后续更新操作。",
@@ -370,9 +375,7 @@ def ota_status_presentation(status):
     message_args = status.get("message_args") if isinstance(status.get("message_args"), dict) else {}
 
     message_key = str(status.get("message_key") or "")
-    state = str(status.get("state") or transaction.get("state") or "")
-    if not state:
-        state = OTA_MESSAGE_KEYS.get(message_key, "")
+    state = OTA_MESSAGE_KEYS.get(message_key) or str(status.get("state") or transaction.get("state") or "")
     error_code = str(status.get("error_code") or "")
     current_version = str(
         status.get("current_version")
@@ -445,10 +448,14 @@ def ota_status_presentation(status):
     available = bool(status.get("available") or status.get("has_update") or update.get("available_version"))
     ready = bool(status.get("ready", True))
     action = str(status.get("action") or "")
-    if not state and available:
+    if action == "cancel" and state == "staged" and transaction.get("id"):
+        default_action = "cancel"
+    elif action == "reboot" and state == "armed":
+        default_action = "reboot"
+    elif not state and available:
         title = "发现新版本：Ming OS %s" % (version or "未知")
         default_action = "apply" if action == "apply" and ready else "check"
-    elif state == "new" and action == "apply" and ready:
+    elif state in {"new", "available"} and action == "apply" and ready:
         default_action = "apply"
 
     if version and state not in {"committed", "rolled_back"}:
@@ -477,7 +484,13 @@ def ota_status_presentation(status):
         "title": title,
         "detail": "\n".join(detail_parts),
         "button_state": default_action,
-        "button_label": {"apply": "立即更新", "wait": "等待完成", "check": "检查更新"}.get(default_action, "检查更新"),
+        "button_label": {
+            "apply": "立即更新",
+            "cancel": "取消更新",
+            "reboot": "立即重启",
+            "wait": "等待完成",
+            "check": "检查更新",
+        }.get(default_action, "检查更新"),
         "severity": severity,
         "progress": percent,
         "progress_phase": str(progress.get("phase") or ""),
@@ -2123,8 +2136,13 @@ class MingSettings(Adw.ApplicationWindow):
             self.cancel_update_poll()
 
     def on_update_action(self, _btn):
-        if getattr(self, "update_action_state", "check") == "apply":
+        action = getattr(self, "update_action_state", "check")
+        if action == "apply":
             self.on_update_apply()
+        elif action == "cancel":
+            self.on_update_cancel()
+        elif action == "reboot":
+            self.on_update_reboot()
         else:
             self.on_update_check()
 
@@ -2177,6 +2195,37 @@ class MingSettings(Adw.ApplicationWindow):
             "--manifest-sha256", self.update_manifest_sha256,
             "--json",
         ], timeout=300, on_done=done)
+
+    def on_update_cancel(self):
+        transaction_id = getattr(self, "update_transaction_id", "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{3,128}", transaction_id or ""):
+            self.toast("更新事务已过期，请重新检查更新。", "warning")
+            self.refresh_update_status()
+            return
+        self.update_action_button.set_sensitive(False)
+
+        def done(rc, output, error):
+            payload = self._update_status_payload(rc, output, error)
+            self.apply_update_status(payload)
+            if rc != 0 or payload.get("ok") is False:
+                presentation = ota_status_presentation(payload)
+                self.toast(presentation["detail"] or "无法取消当前更新。", "error")
+
+        run_capture_async([
+            "pkexec", "ming-update", "cancel",
+            "--transaction", transaction_id,
+            "--json",
+        ], timeout=60, on_done=done)
+
+    def on_update_reboot(self):
+        try:
+            subprocess.Popen(
+                ["pkexec", "/usr/bin/systemctl", "reboot"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            self.toast("无法请求重启，请保存工作后手动重启。", "error")
 
     def export_update_diagnostics(self, _button=None):
         transaction_id = getattr(self, "update_transaction_id", "")

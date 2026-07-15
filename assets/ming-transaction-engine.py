@@ -12,6 +12,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 KEYRING = "/usr/share/ming-update/trust/release-keyring.gpg"
+KEY_POLICY = "/usr/share/ming-update/trust/key-policy.json"
 STATE_ROOT = "/var/lib/ming-update"
 
 
@@ -51,22 +52,28 @@ def stage_release(
     state_root,
     transaction_id,
     available_bytes=None,
+    key_policy=None,
     verifier=verify_module.verify_release,
     applicator=apply_module.prepare_candidate,
 ):
     try:
+        verifier_arguments = {
+            "manifest_path": manifest_path,
+            "manifest_signature": manifest_signature,
+            "index_path": index_path,
+            "index_signature": index_signature,
+            "payload_path": payload_path,
+            "payload_signature": payload_signature,
+            "keyring": keyring,
+            "current_version": current_version,
+            "architecture": architecture,
+            "kernel_release": kernel_release,
+            "bootstrap_version": bootstrap_version,
+        }
+        if key_policy is not None:
+            verifier_arguments["key_policy"] = key_policy
         plan = verifier(
-            manifest_path=manifest_path,
-            manifest_signature=manifest_signature,
-            index_path=index_path,
-            index_signature=index_signature,
-            payload_path=payload_path,
-            payload_signature=payload_signature,
-            keyring=keyring,
-            current_version=current_version,
-            architecture=architecture,
-            kernel_release=kernel_release,
-            bootstrap_version=bootstrap_version,
+            **verifier_arguments,
         )
     except EngineError:
         raise
@@ -148,6 +155,7 @@ def main(argv=None):
             payload_path=arguments.payload,
             payload_signature=arguments.payload_signature,
             keyring=KEYRING,
+            key_policy=KEY_POLICY,
             current_version=_read_version(),
             architecture=_architecture(),
             kernel_release=os.uname().release,

@@ -30,6 +30,11 @@ RELEASE_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._-]{3,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:[A-Za-z0-9._-]+)?$")
+HTTPS_URL = re.compile(r"^https://[^/?#@]+(?:/[^?#]*)?$")
+CONTENT_ADDRESSED_OBJECT = re.compile(r"/([0-9a-f]{64})(\\.sig)?$")
+DISCOVERY_BASE_FIELDS = frozenset({
+    "schema", "available", "current_version", "architecture", "capability", "delivery",
+})
 
 EXIT_CODES = {
     "E_ARGUMENT": 2,
@@ -140,12 +145,30 @@ def _version():
 
 
 def _safe_https(value, field):
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or HTTPS_URL.fullmatch(value) is None:
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", f"{field} is missing")
     parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", f"{field} must be credential-free HTTPS")
     return value
+
+
+def _content_addressed_https(value, field, *, signature=False, expected_sha256=None):
+    url = _safe_https(value, field)
+    parsed = urllib.parse.urlsplit(url)
+    match = CONTENT_ADDRESSED_OBJECT.search(parsed.path)
+    if match is None or (not signature and match.group(2) is not None):
+        raise UpdateError("E_PROTOCOL_UNSUPPORTED", f"{field} must be content-addressed")
+    if expected_sha256 is not None and match.group(1) != expected_sha256:
+        raise UpdateError("E_PROTOCOL_UNSUPPORTED", f"{field} does not match its declared SHA256")
+    return url
 
 
 def _safe_sha256(value, field):
@@ -185,10 +208,10 @@ def _read_json(path):
 
 
 def _discovery_bootstrap(value):
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or set(value) != {"url", "sha256", "signature_url", "fingerprint"}:
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", "bootstrap metadata is missing")
-    fingerprint = value.get("fingerprint") or value.get("key_fingerprint")
-    if not isinstance(fingerprint, str) or re.fullmatch(r"[A-Fa-f0-9]{40,64}", fingerprint) is None:
+    fingerprint = value.get("fingerprint")
+    if not isinstance(fingerprint, str) or re.fullmatch(r"[A-Fa-f0-9]{40}", fingerprint) is None:
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", "bootstrap fingerprint is invalid")
     return {
         "url": _safe_https(value.get("url"), "bootstrap.url"),
@@ -218,15 +241,23 @@ def validate_discovery(value, architecture, current_version=None):
     capability = value.get("capability")
     delivery = value.get("delivery")
     if delivery == "bootstrap":
+        if set(value) != DISCOVERY_BASE_FIELDS | {"bootstrap"}:
+            raise UpdateError("E_PROTOCOL_UNSUPPORTED", "bootstrap discovery fields are invalid")
         if not available or capability is not None:
             raise UpdateError("E_PROTOCOL_UNSUPPORTED", "bootstrap discovery capability is invalid")
         return {"delivery": "bootstrap", "bootstrap": _discovery_bootstrap(value.get("bootstrap"))}
     if delivery == "none":
+        if set(value) != DISCOVERY_BASE_FIELDS:
+            raise UpdateError("E_PROTOCOL_UNSUPPORTED", "no-update discovery fields are invalid")
         if available or capability != "transactional-slot-v1":
             raise UpdateError("E_PROTOCOL_UNSUPPORTED", "no-update discovery capability is invalid")
         return {"delivery": "none", "available": False, "release_notes": ""}
     if delivery != "transactional-slot-v1" or capability != "transactional-slot-v1":
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update delivery is unsupported")
+    if set(value) != DISCOVERY_BASE_FIELDS | {
+        "release_id", "version", "minimum_bootstrap", "manifest_url", "manifest_signature_url", "manifest_sha256",
+    }:
+        raise UpdateError("E_PROTOCOL_UNSUPPORTED", "transactional discovery fields are invalid")
     if not available:
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", "transactional availability is invalid")
     release_id = value.get("release_id")
@@ -240,13 +271,16 @@ def validate_discovery(value, architecture, current_version=None):
         "minimum_bootstrap": _discovery_version(value.get("minimum_bootstrap"), "minimum bootstrap version"),
         "release_notes": value.get("release_notes") if isinstance(value.get("release_notes"), str) else "",
     }
-    result.update(
-        {
-            "manifest_url": _safe_https(value.get("manifest_url"), "manifest_url"),
-            "manifest_signature_url": _safe_https(value.get("manifest_signature_url"), "manifest_signature_url"),
-            "manifest_sha256": _safe_sha256(value.get("manifest_sha256"), "manifest_sha256"),
-        }
-    )
+    manifest_sha256 = _safe_sha256(value.get("manifest_sha256"), "manifest_sha256")
+    result.update({
+        "manifest_url": _content_addressed_https(
+            value.get("manifest_url"), "manifest_url", expected_sha256=manifest_sha256,
+        ),
+        "manifest_signature_url": _content_addressed_https(
+            value.get("manifest_signature_url"), "manifest_signature_url", signature=True,
+        ),
+        "manifest_sha256": manifest_sha256,
+    })
     return result
 
 
@@ -758,7 +792,7 @@ class UpdateController:
                 transaction_id=transaction_id,
                 available_bytes=available_bytes,
             )
-            boot_module.arm_transaction(self.state_root, transaction_id)
+            boot_module.arm_transaction(self.state_root, transaction_id, active_root=self.active_root)
             transaction = self._transaction(transaction_id)
             self._write_engine_log(transaction_id, "armed", candidate_root=str(staged.get("candidate_root", "")))
             return self._response(

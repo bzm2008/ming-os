@@ -222,7 +222,6 @@ SYSTEM_CMDS = [
     ("🧹 清理磁盘缓存",  "sudo apt clean; journalctl --vacuum-time=7d; read -p '按回车关闭'"),
     ("💾 查看内存使用",   "free -h; echo; vmstat -s | head -12; read -p '按回车关闭'"),
     ("🌐 修复网络连接",   "nmcli dev status; echo; nmcli networking off; sleep 1; nmcli networking on; read -p '按回车关闭'"),
-    ("🔄 检查系统更新",   "/usr/local/bin/ming-update-gui"),
     ("📊 进程管理",       "htop"),
     ("ℹ️  系统信息",      "neofetch 2>/dev/null || lsb_release -a; uname -r; read -p '按回车关闭'"),
 ]
@@ -235,7 +234,7 @@ OFFICE_CMDS = [
 ]
 
 def run_cmd(cmd):
-    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad","/usr/local/bin/ming-update-gui"]):
+    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad"]):
         subprocess.Popen(cmd.split(None, 1) if ' ' not in cmd else ["sh","-c",cmd])
     else:
         subprocess.Popen(["xterm", "-fa", "Monospace", "-fs", "11", "-bg", "#0d1117", "-fg", "#c9d1d9",

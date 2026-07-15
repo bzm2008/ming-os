@@ -11,6 +11,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / "assets" / "ming-settings.py"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 OTA = ROOT / "modules" / "06_ota_update.sh"
+DESKTOP = ROOT / "modules" / "03_desktop.sh"
+GARLIC = ROOT / "modules" / "04_garlic_claw.sh"
+FINALIZER = ROOT / "modules" / "07_finalize.sh"
 
 
 def method_block(source, start, end):
@@ -41,6 +44,9 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.phone = PHONE.read_text(encoding="utf-8")
         cls.ota = OTA.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP.read_text(encoding="utf-8")
+        cls.garlic = GARLIC.read_text(encoding="utf-8")
+        cls.finalizer = FINALIZER.read_text(encoding="utf-8")
 
     def test_settings_starts_with_one_check_action_and_promotes_it_after_detection(self):
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
@@ -114,6 +120,42 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
                 "message_key": "update.status.committed",
             })["title"],
         )
+
+    def test_settings_uses_frozen_actions_and_message_keys_without_overclaiming(self):
+        presenter = ota_presenter(self.settings)
+        fixture_root = ROOT / "contracts" / "ota" / "fixtures"
+        available = json.loads((fixture_root / "transactional-available.cli.json").read_text(encoding="utf-8"))
+        no_update = json.loads((fixture_root / "no-update.cli.json").read_text(encoding="utf-8"))
+        rollback = json.loads((fixture_root / "rollback.cli.json").read_text(encoding="utf-8"))
+
+        actionable = presenter(available)
+        self.assertEqual("apply", actionable["button_state"])
+        self.assertEqual("立即更新", actionable["button_label"])
+
+        latest = presenter(no_update)
+        self.assertIn("最新", latest["title"])
+        self.assertNotEqual("更新已完成", latest["title"])
+
+        rollback_state = presenter(rollback)
+        self.assertIn("回滚", rollback_state["title"])
+        self.assertNotIn("健康检查未通过", rollback_state["title"])
+
+        staged = presenter({
+            "schema": "ming.update.cli.v1",
+            "state": "staged",
+            "action": "cancel",
+            "transaction": {"id": "tx-001"},
+        })
+        armed = presenter({
+            "schema": "ming.update.cli.v1",
+            "state": "armed",
+            "action": "reboot",
+            "transaction": {"id": "tx-001"},
+        })
+        self.assertEqual("cancel", staged["button_state"])
+        self.assertEqual("reboot", armed["button_state"])
+        self.assertIn("on_update_cancel", self.settings)
+        self.assertIn("on_update_reboot", self.settings)
 
     def test_settings_maps_frozen_error_codes_without_terminal_text(self):
         presenter = standalone_function(
@@ -282,6 +324,19 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("rm -f -- /usr/share/applications/ming-update.desktop", deployed)
         self.assertIn('rm -f -- "/home/${MING_USER}/Desktop/ming-update.desktop"', deployed)
         self.assertNotIn("cat > /usr/share/applications/ming-update.desktop", deployed)
+
+    def test_retired_update_paths_cannot_dispatch_an_unsupported_public_command(self):
+        """Only the Settings JSON flow may expose transactional OTA actions."""
+        self.assertNotIn("auto-shutdown", self.phone)
+        self.assertNotIn("更新并关机", self.phone)
+        for line in self.desktop.splitlines():
+            if line.startswith("DockItems="):
+                self.assertNotIn("ming-update.dockitem", line)
+        self.assertNotIn('"ming-update:ming-update.desktop"', self.desktop)
+        self.assertNotIn("('ming-update.desktop'", self.desktop)
+        self.assertIn('rm -f -- "${plank_dir}/launchers/ming-update.dockitem"', self.desktop)
+        self.assertNotIn("检查系统更新", self.garlic)
+        self.assertNotIn('"ming-update.desktop"', self.finalizer)
 
 
 if __name__ == "__main__":

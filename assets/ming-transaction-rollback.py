@@ -44,8 +44,14 @@ def _sha256(path):
 
 class RollbackJournal:
     def __init__(self, transaction_dir, candidate_root):
-        self.transaction_dir = pathlib.Path(transaction_dir).resolve()
-        self.candidate_root = pathlib.Path(candidate_root).resolve()
+        transaction_dir = pathlib.Path(transaction_dir)
+        candidate_root = pathlib.Path(candidate_root)
+        if transaction_dir.is_symlink() or not transaction_dir.is_dir():
+            raise RollbackError("E_STATE_DURABILITY", "transaction journal root is unsafe")
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            raise RollbackError("E_CONTENT_POLICY", "candidate root is unsafe")
+        self.transaction_dir = transaction_dir.resolve()
+        self.candidate_root = candidate_root.resolve()
         self.objects = self.transaction_dir / "journal" / "objects"
         self.events = self.transaction_dir / "rollback.jsonl"
         self.objects.mkdir(parents=True, exist_ok=True)
@@ -88,15 +94,33 @@ class RollbackJournal:
         parts = value.split("/")
         if any(part in ("", ".", "..") for part in parts) or parts[0] == "home":
             raise RollbackError("E_CONTENT_POLICY", "journal path escapes or targets /home")
-        current = self.candidate_root
-        for part in parts[:-1]:
-            current = current / part
-            if current.is_symlink():
-                raise RollbackError("E_CONTENT_POLICY", "journal path has a symlink parent")
         return "/".join(parts)
 
-    def _target(self, relative):
-        return self.candidate_root.joinpath(*relative.split("/"))
+    def _target(self, relative, *, create_parents=False):
+        current = self.candidate_root
+        parts = relative.split("/")
+        for part in parts[:-1]:
+            next_path = current / part
+            try:
+                metadata = next_path.lstat()
+            except FileNotFoundError:
+                if not create_parents:
+                    current = next_path
+                    continue
+                try:
+                    next_path.mkdir(mode=0o755)
+                    metadata = next_path.lstat()
+                except OSError as exc:
+                    raise RollbackError("E_CONTENT_POLICY", "journal parent cannot be created safely") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise RollbackError("E_CONTENT_POLICY", "journal path has a symlink parent")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RollbackError("E_CONTENT_POLICY", "journal path has a non-directory parent")
+            current = next_path
+        return current / parts[-1]
+
+    def target(self, path, *, create_parents=False):
+        return self._target(self._relative(path), create_parents=create_parents)
 
     def capture(self, path):
         relative = self._relative(path)
@@ -157,8 +181,7 @@ class RollbackJournal:
 
     def rollback(self, *, reason):
         for relative, record in reversed(list(self._captured.items())):
-            target = self._target(self._relative(relative))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target = self._target(self._relative(relative), create_parents=True)
             self._remove(target)
             kind = record["kind"]
             if kind == "file":

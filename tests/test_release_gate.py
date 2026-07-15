@@ -89,7 +89,6 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_dock_proxies_use_real_window_classes(self):
         expected_fallbacks = {
             "ming-terminal": "Xfce4-terminal",
-            "ming-update": "Zenity",
             "ming-settings": "uno.scallion.MingSettings",
             "ming-files": "org.mingos.Files",
             "ming-edge": "microsoft-edge",
@@ -339,7 +338,7 @@ class ReleaseGateContracts(unittest.TestCase):
         refresh = finalizer.index("refresh_dock_launchers", final_main)
         seed = finalizer.index("seed_skel", final_main)
         self.assertLess(refresh, seed)
-        for launcher in ("ming-update", "ming-settings"):
+        for launcher in ("ming-settings",):
             self.assertIn('"%s:%s.desktop"' % (launcher, launcher), self.desktop)
 
 

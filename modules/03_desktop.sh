@@ -1787,7 +1787,7 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1833,9 +1833,11 @@ if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
     exit 1
 fi
 
-plank_dir="${user_home}/.config/plank/dock1"
-mkdir -p "${plank_dir}/launchers"
-missing=0
+    plank_dir="${user_home}/.config/plank/dock1"
+    mkdir -p "${plank_dir}/launchers"
+    rm -f -- "${plank_dir}/launchers/ming-update.dockitem" \
+        /usr/share/applications/ming-dock-ming-update.desktop
+    missing=0
 
 _plank_launcher() {
         local name="$1" target="$2"
@@ -1863,7 +1865,6 @@ _plank_launcher() {
             ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
             ming-edge) wm_class="${wm_class:-microsoft-edge}" ;;
             ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
-            ming-update) wm_class="${wm_class:-Zenity}" ;;
         esac
         # The running-window helper deliberately has NoDisplay=true so it
         # stays out of the application drawer.  ming-launch correctly rejects
@@ -1900,7 +1901,6 @@ for launcher in \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
     "garlic-claw:garlic-claw.desktop" \
-    "ming-update:ming-update.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
@@ -2001,7 +2001,6 @@ APPS = [
     ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
     ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
-    ('ming-update.desktop', 'ming-update-icon', '系统更新'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -3454,7 +3453,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=40
@@ -4735,9 +4734,6 @@ run_progress() {
 }
 
 case "${1:-}" in
-    update)
-        exec /usr/local/bin/ming-update-gui check
-        ;;
     install-wechat)
         if confirm "将下载安装腾讯官方 Linux 版微信。这个过程需要联网，可能需要几分钟。" "安装微信"; then
             if pkexec /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1 || sudo /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1; then
@@ -4829,7 +4825,6 @@ import subprocess
 import sys
 
 TASKS = [
-    ('检查系统更新', 'ming-update-icon', '下载并安装新版本 Ming OS', 'ming-helper update'),
     ('修复界面显示', 'ming-display', '重新整理壁纸、缩放和 Dock', 'ming-helper repair-display'),
     ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'ming-control-center --page network'),
     ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'ming-helper install-wechat'),

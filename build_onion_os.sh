@@ -356,6 +356,62 @@ generate_initramfs() {
     '
     log_info "initramfs 生成完成"
 }
+
+validate_transactional_ota_runtime() {
+    log_step "验证事务型 OTA 运行时"
+    chroot_exec bash -c '
+        set -euo pipefail
+        required=(
+            /usr/local/bin/ming-update
+            /usr/local/lib/ming-update/ming-update-cli.py
+            /usr/local/lib/ming-update/ming-transaction-verify.py
+            /usr/local/lib/ming-update/ming-transaction-state.py
+            /usr/local/lib/ming-update/ming-transaction-boot.py
+            /usr/local/lib/ming-update/ming-transaction-health.py
+            /usr/local/lib/ming-update/ming-ota-bootstrap-capability.py
+            /usr/share/ming-update/trust/release-keyring.gpg
+            /usr/share/ming-update/trust/key-policy.json
+            /usr/share/polkit-1/actions/org.mingos.update.policy
+            /etc/initramfs-tools/hooks/ming-transaction
+            /etc/grub.d/40_ming_transaction
+            /etc/systemd/system/ming-transaction-health.service
+            /etc/systemd/system/ming-transaction-reconcile.service
+            /etc/systemd/system/ming-transaction-rollback-reboot.service
+            /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
+            /var/lib/ming-update/protocol-version
+            /var/lib/ming-update/capability.json
+        )
+        for path in "${required[@]}"; do
+            test -s "${path}" && test ! -L "${path}"
+        done
+        test -x /usr/local/bin/ming-update
+        test -x /etc/initramfs-tools/hooks/ming-transaction
+        test -x /etc/grub.d/40_ming_transaction
+        /usr/local/lib/ming-update/ming-ota-bootstrap-capability.py --write-marker >/dev/null
+        /usr/local/bin/ming-update status --json >/tmp/ming-update-status.json
+        python3 - /tmp/ming-update-status.json <<"PY"
+import json
+import pathlib
+value = json.loads(pathlib.Path("/tmp/ming-update-status.json").read_text(encoding="utf-8"))
+assert value.get("schema") == "ming.update.cli.v1"
+assert isinstance(value.get("ok"), bool)
+PY
+        update-grub
+        for entry in ming-legacy ming-slot-a ming-slot-b ming-recovery-manual; do
+            grep -Fq -- "--id '\''${entry}'\''" /boot/grub/grub.cfg
+        done
+        grep -Fxq "GRUB_DEFAULT=saved" /etc/default/grub.d/40-ming-transaction.cfg
+        grep -Fxq "saved_entry=ming-legacy" <(grub-editenv /boot/grub/grubenv list)
+        latest="$(ls -1t /boot/initrd.img-* | head -n 1)"
+        lsinitramfs "${latest}" | grep -Fxq scripts/local-bottom/ming-transaction
+        test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-health.service
+        test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service
+        grep -Fxq "OnFailure=ming-transaction-rollback-reboot.service" /etc/systemd/system/ming-transaction-health.service
+        grep -Fxq "Requires=ming-transaction-health.service" /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
+        systemd-analyze verify /etc/systemd/system/ming-transaction-health.service /etc/systemd/system/ming-transaction-reconcile.service /etc/systemd/system/ming-transaction-rollback-reboot.service
+    '
+    log_info "事务型 OTA 运行时验证通过"
+}
 # ======================== ISO 镜像打包 ========================
 select_latest_kernel() {
     find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' \
@@ -1841,26 +1897,45 @@ for marker in ["psmouse synaptics_intertouch=0", "snd_hda_intel power_save=0"]:
     if marker not in old_hw_modprobe:
         errors.append(f"old hardware modprobe policy missing {marker}")
 
-ota_client = require_file("usr/local/bin/ming-update", "https://ming.scallion.uno")
+ota_client = require_file("usr/local/bin/ming-update", "ming-update-cli.py")
+transaction_cli = require_file("usr/local/lib/ming-update/ming-update-cli.py", "ming.update.cli.v1")
 for marker in [
-    "resolve_home()",
-    'HOME="${HOME:-$(resolve_home)}"',
-    "find_cached_manifest()",
-    "/home/*/.cache/ming-update/update_info.json",
-    "ota_doctor",
-    "ming.ota_backup_uuid=",
-    "ming.ota_manifest=",
-    'STAGING_RECORD="/var/lib/ming-update/staging.json"',
-    "validate_staging_inputs",
-    'basename -- "${iso_name}"',
-    "home_is_independent_device",
+    "transactional-slot-v1",
+    "E_BOOTSTRAP_REQUIRED",
+    "manifest_sha256",
+    "release_id",
+    "def apply(self, release_id, manifest_sha256)",
 ]:
-    if marker not in ota_client:
-        errors.append(f"ming-update missing HOME safety marker {marker}")
-if "/api/onion-update" not in ota_client:
-    errors.append("ming-update must use the deployed /api/onion-update endpoint")
-if 'readonly API_ENDPOINT="/api/ming-update"' in ota_client:
-    errors.append("ming-update must not default to the undeployed /api/ming-update endpoint")
+    if marker not in transaction_cli:
+        errors.append(f"transactional ming-update CLI missing {marker}")
+if "ming-recovery-update" in ota_client:
+    errors.append("public ming-update must not dispatch the recovery helper")
+for required in [
+    "usr/local/lib/ming-update/ming-transaction-verify.py",
+    "usr/local/lib/ming-update/ming-transaction-state.py",
+    "usr/local/lib/ming-update/ming-transaction-boot.py",
+    "usr/local/lib/ming-update/ming-transaction-health.py",
+    "usr/local/lib/ming-update/ming-ota-bootstrap-capability.py",
+    "usr/share/ming-update/trust/release-keyring.gpg",
+    "usr/share/ming-update/trust/key-policy.json",
+    "usr/share/polkit-1/actions/org.mingos.update.policy",
+    "etc/initramfs-tools/hooks/ming-transaction",
+    "etc/grub.d/40_ming_transaction",
+    "etc/systemd/system/ming-transaction-health.service",
+    "etc/systemd/system/ming-transaction-reconcile.service",
+    "var/lib/ming-update/protocol-version",
+    "var/lib/ming-update/capability.json",
+]:
+    require_file(required)
+recovery_client = require_file("usr/local/lib/ming-update/ming-recovery-update", "major_install_with_home_backup")
+if "transactional-slot-v1" in recovery_client or "ming-transaction-engine" in recovery_client:
+    errors.append("recovery helper must not share the transactional delivery path")
+for required_link in [
+    "etc/systemd/system/multi-user.target.wants/ming-transaction-health.service",
+    "etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service",
+]:
+    if not (root / required_link).is_symlink():
+        errors.append(f"transaction unit must be enabled: {required_link}")
 
 for retired_path in [
     "usr/local/bin/ming-master",
@@ -2591,6 +2666,7 @@ main() {
     trap 'umount_chroot' EXIT
     run_modules
     generate_initramfs
+    validate_transactional_ota_runtime
     clean_chroot
     umount_chroot
     trap - EXIT

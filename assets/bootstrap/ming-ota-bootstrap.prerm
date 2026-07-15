@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    remove|deconfigure)
+        state_file=/var/lib/ming-update/active-transaction.json
+        if test -f "${state_file}" && ! test -L "${state_file}"; then
+            state="$(python3 - "${state_file}" <<'PY'
+import json
+import pathlib
+import sys
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    print("invalid")
+else:
+    print(value.get("state", "invalid"))
+PY
+)"
+            case "${state}" in
+                armed|booting|pending_health|committing|rollback_armed|rolling_back)
+                    echo "ming-ota-bootstrap cannot be removed while transaction state is ${state}" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        rm -f /var/lib/ming-update/capability.json
+        ;;
+esac

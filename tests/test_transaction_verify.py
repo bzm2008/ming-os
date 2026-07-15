@@ -230,6 +230,88 @@ class TransactionVerifyTests(unittest.TestCase):
         self.manifest_data["payload"]["size"] = self.payload.stat().st_size
         self._rewrite_manifest()
 
+    def test_runtime_content_index_and_artifact_urls_match_the_frozen_schema(self):
+        self.manifest_data["payload"]["url"] = "https://updates.example/objects/payload?cache=unsafe"
+        self._rewrite_manifest()
+        self.assert_error("E_MANIFEST_SCHEMA", self._verify)
+        self.manifest_data["payload"]["url"] = "https://updates.example/objects/payload"
+        self._rewrite_manifest()
+
+        cases = (
+            ("unexpected top-level field", lambda index: index.__setitem__("unexpected", True)),
+            ("unexpected entry field", lambda index: index["entries"][0].__setitem__("unexpected", True)),
+            ("file target", lambda index: index["entries"][0].__setitem__("target", "version")),
+            ("boolean mode", lambda index: index["entries"][0].__setitem__("mode", True)),
+            ("invalid base hash", lambda index: index["entries"][0].__setitem__("base_sha256", "not-a-hash")),
+            ("invalid path characters", lambda index: index["entries"][0].__setitem__("path", "usr/share/ming-os/bad space")),
+            (
+                "directory has blob",
+                lambda index: index.__setitem__(
+                    "entries",
+                    [{
+                        "path": "usr/share/ming-os/directory",
+                        "type": "directory",
+                        "blob": "sha256:" + ("3" * 64),
+                        "mode": 0o755,
+                        "uid": 0,
+                        "gid": 0,
+                        "config_policy": "replace",
+                    }],
+                ),
+            ),
+            (
+                "symlink has blob",
+                lambda index: index.__setitem__(
+                    "entries",
+                    [{
+                        "path": "usr/share/ming-os/link",
+                        "type": "symlink",
+                        "target": "version",
+                        "blob": "sha256:" + ("4" * 64),
+                        "mode": 0o777,
+                        "uid": 0,
+                        "gid": 0,
+                        "config_policy": "replace",
+                    }],
+                ),
+            ),
+            (
+                "package extra field",
+                lambda index: index.__setitem__(
+                    "packages",
+                    [{
+                        "name": "ming-example",
+                        "version": "1.0",
+                        "architecture": "amd64",
+                        "blob": "sha256:" + ("5" * 64),
+                        "unexpected": True,
+                    }],
+                ),
+            ),
+            (
+                "package version too long",
+                lambda index: index.__setitem__(
+                    "packages",
+                    [{
+                        "name": "ming-example",
+                        "version": "x" * 257,
+                        "architecture": "amd64",
+                        "blob": "sha256:" + ("5" * 64),
+                    }],
+                ),
+            ),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                original = json.loads(json.dumps(self.index_data))
+                try:
+                    mutate(self.index_data)
+                    self._rewrite_index()
+                    self.assert_error("E_CONTENT_POLICY", self._verify)
+                finally:
+                    self.index_data = original
+                    self._rewrite_index()
+
     def test_rejects_payload_and_index_hash_or_size_mismatch(self):
         for section in ("payload", "content_index"):
             with self.subTest(section=section):
@@ -250,6 +332,15 @@ class TransactionVerifyTests(unittest.TestCase):
             "etc/NetworkManager/system-connections/secret.nmconnection",
         )
         for path in forbidden:
+            with self.subTest(path=path):
+                self.index_data["entries"][0]["path"] = path
+                self._rewrite_index()
+                self.assert_error("E_CONTENT_POLICY", self._verify)
+        self.index_data["entries"][0]["path"] = "usr/share/ming-os/version"
+        self._rewrite_index()
+
+    def test_rejects_transactional_runtime_wrappers_even_when_their_parent_is_allowlisted(self):
+        for path in ("usr/local/bin/ming-update", "usr/local/sbin/ming-transaction-health"):
             with self.subTest(path=path):
                 self.index_data["entries"][0]["path"] = path
                 self._rewrite_index()
@@ -293,6 +384,15 @@ class TransactionVerifyTests(unittest.TestCase):
         self._rewrite_index()
         self.assert_error("E_CONTENT_POLICY", self._verify)
 
+    def test_rejects_setuid_and_setgid_content_modes(self):
+        for mode in (0o4755, 0o2755, 0o6755):
+            with self.subTest(mode=oct(mode)):
+                self.index_data["entries"][0]["mode"] = mode
+                self._rewrite_index()
+                self.assert_error("E_CONTENT_POLICY", self._verify)
+        self.index_data["entries"][0]["mode"] = 0o644
+        self._rewrite_index()
+
     def test_rejects_kernel_bootloader_and_dkms_packages(self):
         for package in ("linux-image-amd64", "grub-pc", "example-dkms"):
             with self.subTest(package=package):
@@ -306,6 +406,18 @@ class TransactionVerifyTests(unittest.TestCase):
                 ]
                 self._rewrite_index()
                 self.assert_error("E_CONTENT_POLICY", self._verify)
+
+    def test_rejects_all_offline_package_entries_until_package_mode_is_reviewed(self):
+        self.index_data["packages"] = [
+            {
+                "name": "ming-example-runtime",
+                "version": "1.0",
+                "architecture": "amd64",
+                "blob": "sha256:" + ("2" * 64),
+            }
+        ]
+        self._rewrite_index()
+        self.assert_error("E_CONTENT_POLICY", self._verify)
 
     def test_gpgv_uses_pinned_keyring_timeout_and_no_shell(self):
         calls = []

@@ -3,6 +3,7 @@
 
 import argparse
 import datetime
+import hmac
 import importlib.util
 import json
 import os
@@ -23,7 +24,17 @@ def _load_state_module():
     return module
 
 
+def _load_slot_module():
+    spec = importlib.util.spec_from_file_location(
+        "ming_transaction_slot_boot_runtime", HERE / "ming-transaction-slot.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 state_module = _load_state_module()
+slot_module = _load_slot_module()
 
 
 class BootError(Exception):
@@ -85,11 +96,14 @@ def _read_grubenv(runner, grubenv):
     return _parse_grubenv(result.stdout)
 
 
-def arm_transaction(state_root, transaction_id, *, runner=subprocess.run, grubenv="/boot/grub/grubenv"):
+def arm_transaction(state_root, transaction_id, *, active_root="/", runner=subprocess.run, grubenv="/boot/grub/grubenv"):
     store = state_module.TransactionStore(state_root)
     state = store.load(transaction_id)
     if state["state"] != "staged":
         raise BootError("E_STATE_TRANSITION", "only a staged transaction can be armed")
+    if _rollback_receipt_path(state_root).exists():
+        raise BootError("E_ROLLBACK_PENDING", "a previous rollback has not been reconciled")
+    _validate_protected_state(state_root, state, active_root)
     entry = {"A": "ming-slot-a", "B": "ming-slot-b"}[state["candidate_slot"]]
     assignments = [
         f"ming_transaction_id={transaction_id}",
@@ -154,7 +168,45 @@ def _committed_slot(state_root):
     return slot
 
 
+def _previous_committed_slot(store, state_root, committed):
+    if committed == "legacy":
+        return "legacy"
+    current = _load_json(pathlib.Path(state_root) / "current.json")
+    transaction_id = current.get("transaction_id")
+    if current.get("schema") != "ming.current-slot.v1" or current.get("slot") != committed:
+        raise BootError("E_STATE_SCHEMA", "committed slot pointer is invalid for manual recovery")
+    state = store.load(transaction_id)
+    if state["state"] != "committed" or state["candidate_slot"] != committed:
+        raise BootError("E_STATE_SCHEMA", "committed slot has no verified predecessor")
+    return state["previous_slot"]
+
+
+def _validate_protected_state(state_root, state, active_root):
+    seal_path = pathlib.Path(state_root) / "transactions" / state["transaction_id"] / "protected-seal.json"
+    seal = _load_json(seal_path)
+    required = {"schema", "active_sha256", "candidate_sha256"}
+    if set(seal) != required or seal.get("schema") != "ming.protected-state-seal.v1":
+        raise BootError("E_PROTECTED_PATH_CHANGED", "protected state seal is invalid")
+    if not all(isinstance(seal.get(key), str) and len(seal[key]) == 64 for key in ("active_sha256", "candidate_sha256")):
+        raise BootError("E_PROTECTED_PATH_CHANGED", "protected state seal is invalid")
+    try:
+        active_digest = slot_module.protected_state_digest(active_root)
+        candidate_digest = slot_module.protected_state_digest(
+            pathlib.Path(state_root) / "slots" / state["candidate_slot"] / "root"
+        )
+    except (OSError, slot_module.SlotError) as exc:
+        raise BootError("E_PROTECTED_PATH_CHANGED", "protected state cannot be verified") from exc
+    if not (
+        hmac.compare_digest(seal["active_sha256"], active_digest)
+        and hmac.compare_digest(seal["candidate_sha256"], candidate_digest)
+        and hmac.compare_digest(active_digest, candidate_digest)
+    ):
+        raise BootError("E_PROTECTED_PATH_CHANGED", "machine configuration changed after candidate staging")
+
+
 def _rollback(store, state):
+    if state["state"] not in state_module.TERMINAL:
+        clear_candidate_mount_receipt(store.root, state["transaction_id"])
     if state["state"] in {"new", "verified", "staging", "staged"}:
         state = store.transition(
             state["transaction_id"],
@@ -185,13 +237,18 @@ def _rollback(store, state):
             expected_generation=state["generation"],
             evidence={"reason": "previous slot selected"},
         )
-        return store.transition(
+        return _complete_rollback(store, state)
+    if state["state"] == "rollback_armed":
+        state = store.transition(
             state["transaction_id"],
-            "rolled_back",
-            writer="rollback-service",
+            "rolling_back",
+            writer="initramfs",
             expected_generation=state["generation"],
             evidence={"reason": "previous slot selected"},
         )
+        return _complete_rollback(store, state)
+    if state["state"] == "rolling_back":
+        return _complete_rollback(store, state)
     return state
 
 
@@ -206,6 +263,12 @@ def _validate_candidate(state_root, state):
     root = slot_dir / "root"
     if not root.is_dir() or root.is_symlink():
         raise BootError("E_SLOT_MOUNT", "candidate root is unavailable")
+    try:
+        actual_digest = slot_module.tree_digest(root)
+    except (OSError, slot_module.SlotError) as exc:
+        raise BootError("E_CANDIDATE_SEAL", "candidate seal cannot be verified") from exc
+    if not hmac.compare_digest(seal["sha256"], actual_digest):
+        raise BootError("E_CANDIDATE_SEAL", "candidate root differs from its staged seal")
     return root
 
 
@@ -230,18 +293,104 @@ def _record_boot(state_root, event, **fields):
     )
 
 
-def select_root(*, state_root, physical_root, requested_slot):
+def _mount_receipt_path(state_root):
+    return pathlib.Path(state_root) / "boot" / "mounted.json"
+
+
+def _rollback_receipt_path(state_root):
+    return pathlib.Path(state_root) / "boot" / "rollback-pending.json"
+
+
+def _complete_rollback(store, state):
+    if state["state"] != "rolling_back":
+        raise BootError("E_STATE_TRANSITION", "rollback is not ready to become terminal")
+    receipt = {
+        "schema": "ming.rollback-pending.v1",
+        "transaction_id": state["transaction_id"],
+        "previous_slot": state["previous_slot"],
+        "candidate_slot": state["candidate_slot"],
+        "generation": state["generation"] + 1,
+        "timestamp": _timestamp(),
+    }
+    # The receipt reaches stable storage before terminal state removes active.json.
+    state_module._atomic_json(_rollback_receipt_path(store.root), receipt)
+    return store.transition(
+        state["transaction_id"],
+        "rolled_back",
+        writer="rollback-service",
+        expected_generation=state["generation"],
+        evidence={"reason": "previous slot selected"},
+    )
+
+
+def record_candidate_mount(state_root, transaction_id, candidate_slot):
+    if candidate_slot not in {"A", "B"}:
+        raise BootError("E_SLOT_MISMATCH", "candidate mount slot is invalid")
+    store = state_module.TransactionStore(state_root)
+    state = store.load(transaction_id)
+    if state["state"] != "booting" or state["candidate_slot"] != candidate_slot:
+        raise BootError("E_STATE_TRANSITION", "candidate mount receipt does not match boot state")
+    _validate_candidate(state_root, state)
+    receipt = {
+        "schema": "ming.candidate-mount.v1",
+        "transaction_id": transaction_id,
+        "candidate_slot": candidate_slot,
+        "generation": state["generation"],
+        "timestamp": _timestamp(),
+    }
+    state_module._atomic_json(_mount_receipt_path(state_root), receipt)
+    return receipt
+
+
+def clear_candidate_mount_receipt(state_root, transaction_id=None):
+    path = _mount_receipt_path(state_root)
+    if not path.exists():
+        return
+    if path.is_symlink():
+        path.unlink()
+        return
+    if transaction_id and _load_json(path).get("transaction_id") != transaction_id:
+        return
+    path.unlink()
+
+
+def select_root(*, state_root, physical_root, requested_slot, manual_recovery=False):
     if requested_slot not in {"legacy", "A", "B"}:
         raise BootError("E_SLOT_MISMATCH", "requested slot is invalid")
     state_root = pathlib.Path(state_root)
+    store = state_module.TransactionStore(state_root)
+    try:
+        store.reconcile_pending_commit()
+    except state_module.TransactionStateError:
+        # An incomplete or tampered receipt never authorizes a candidate boot;
+        # the existing active-state fallback below restores the prior slot.
+        pass
     committed = _committed_slot(state_root)
     transaction_id = _active_transaction_id(state_root)
-    store = state_module.TransactionStore(state_root)
     state = store.load(transaction_id) if transaction_id else None
+
+    if manual_recovery:
+        previous = _previous_committed_slot(store, state_root, committed)
+        if state and state["state"] not in state_module.TERMINAL:
+            _rollback(store, state)
+        selected = _slot_root(state_root, physical_root, previous)
+        _record_boot(
+            state_root,
+            "boot-manual-recovery",
+            requested_slot=requested_slot,
+            selected_slot=previous,
+            transaction_id=transaction_id,
+        )
+        return {
+            "selected_root": str(selected),
+            "selected_slot": previous,
+            "action": "boot-manual-recovery",
+            "transaction_id": transaction_id,
+        }
 
     if requested_slot == committed:
         action = "boot-committed"
-        if state and state["state"] in {"booting", "pending_health", "committing"}:
+        if state and state["state"] not in state_module.TERMINAL:
             _rollback(store, state)
             action = "rollback-interrupted"
         selected = _slot_root(state_root, physical_root, committed)
@@ -289,13 +438,28 @@ def main(argv=None):
     select.add_argument("--state-root", required=True)
     select.add_argument("--physical-root", required=True)
     select.add_argument("--requested-slot", required=True, choices=("legacy", "A", "B"))
+    select.add_argument("--manual-recovery", action="store_true")
+    mounted = subparsers.add_parser("record-mounted")
+    mounted.add_argument("--state-root", required=True)
+    mounted.add_argument("--transaction", required=True)
+    mounted.add_argument("--slot", required=True, choices=("A", "B"))
+    rollback = subparsers.add_parser("rollback")
+    rollback.add_argument("--state-root", required=True)
+    rollback.add_argument("--transaction", required=True)
     arguments = parser.parse_args(argv)
     try:
-        result = select_root(
-            state_root=arguments.state_root,
-            physical_root=arguments.physical_root,
-            requested_slot=arguments.requested_slot,
-        )
+        if arguments.command == "select":
+            result = select_root(
+                state_root=arguments.state_root,
+                physical_root=arguments.physical_root,
+                requested_slot=arguments.requested_slot,
+                manual_recovery=arguments.manual_recovery,
+            )
+        elif arguments.command == "record-mounted":
+            result = record_candidate_mount(arguments.state_root, arguments.transaction, arguments.slot)
+        else:
+            store = state_module.TransactionStore(arguments.state_root)
+            result = _rollback(store, store.load(arguments.transaction))
         print(json.dumps({"ok": True, **result}, ensure_ascii=True, separators=(",", ":")))
         return 0
     except BootError as exc:

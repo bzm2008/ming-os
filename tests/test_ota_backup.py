@@ -402,7 +402,7 @@ class OtaModuleContracts(unittest.TestCase):
         )
         self.assertEqual(module_check.returncode, 0, module_check.stderr)
 
-        marker = "cat > /usr/local/bin/ming-update << 'OTACLI'\n"
+        marker = "cat > /usr/local/lib/ming-update/ming-recovery-update << 'OTACLI'\n"
         cli = self.module.split(marker, 1)[1].split("\nOTACLI\n", 1)[0]
         with tempfile.NamedTemporaryFile("wb", suffix=".sh", delete=False) as handle:
             handle.write(cli.encode("utf-8"))

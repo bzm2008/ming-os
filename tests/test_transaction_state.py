@@ -1,7 +1,9 @@
+import concurrent.futures
 import importlib.util
 import json
 import pathlib
 import tempfile
+import threading
 import unittest
 
 
@@ -97,6 +99,46 @@ class TransactionStateTests(unittest.TestCase):
         with self.assertRaises(self.module.TransactionStateError) as caught:
             self.create("tx-002")
         self.assertEqual(caught.exception.code, "E_BUSY")
+
+    def test_concurrent_creators_atomically_claim_one_active_transaction(self):
+        original_atomic_json = self.module._atomic_json
+        barrier = threading.Barrier(6)
+
+        def delayed_atomic_json(path, value, mode=0o600):
+            if pathlib.Path(path).name == "active-transaction.json":
+                barrier.wait(timeout=5)
+            return original_atomic_json(path, value, mode)
+
+        self.module._atomic_json = delayed_atomic_json
+
+        def create(index):
+            store = self.module.TransactionStore(self.root)
+            try:
+                return ("ok", store.create_transaction(
+                    transaction_id=f"tx-race-{index}",
+                    release_id="ming-os-26.3.3-amd64-race",
+                    previous_slot="legacy",
+                    candidate_slot="B",
+                )["transaction_id"])
+            except self.module.TransactionStateError as exc:
+                return ("error", exc.code)
+            except OSError as exc:
+                return ("error", type(exc).__name__)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                results = list(pool.map(create, range(6)))
+        finally:
+            self.module._atomic_json = original_atomic_json
+
+        winners = [value for kind, value in results if kind == "ok"]
+        losers = [value for kind, value in results if kind == "error"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(losers, ["E_BUSY"] * 5)
+        active = json.loads((self.root / "active-transaction.json").read_text(encoding="utf-8"))
+        self.assertEqual(active["transaction_id"], winners[0])
+        state_files = list((self.root / "transactions").glob("*/state.json"))
+        self.assertEqual(len(state_files), 1)
 
     def test_pre_arm_cancel_and_post_arm_rollback_paths(self):
         state = self.create()

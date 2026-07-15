@@ -2289,73 +2289,7 @@ class StatusWidget(Gtk.Box):
         self.updating_dnd = False
         return False
 
-    def background_update_available(self):
-        """Trust only the root-owned result written by an automatic check."""
-        try:
-            result = subprocess.run(
-                ["ming-update", "status", "--json"],
-                capture_output=True, text=True, timeout=3,
-            )
-            status = json.loads(result.stdout) if result.returncode == 0 else {}
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            log("power menu update status failed: %s" % exc)
-            return False
-        return bool(isinstance(status, dict) and status.get("background_available"))
-
-    def open_update_and_shutdown_dialog(self, _item=None):
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(), flags=0,
-            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-            text="确认更新并关机？",
-        )
-        dialog.format_secondary_text(
-            "系统会自动完成已确认更新，完成后关机。没有可用更新时不会关机。")
-        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        dialog.add_button("更新并关机", Gtk.ResponseType.OK)
-
-        def respond(current, response):
-            current.destroy()
-            if response != Gtk.ResponseType.OK:
-                return
-            try:
-                subprocess.Popen(
-                    ["pkexec", "ming-update", "auto-shutdown"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except OSError as exc:
-                log("update and shutdown launch failed: %s" % exc)
-
-        dialog.connect("response", respond)
-        dialog.show_all()
-
-    def show_confirmed_update_power_menu(self, button):
-        """Keep the usual session actions while adding the gated update action."""
-        menu = Gtk.Menu()
-
-        def add_item(label, callback):
-            item = Gtk.MenuItem(label=label)
-            item.connect("activate", callback)
-            menu.append(item)
-
-        def launch(command):
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:
-                log("power action failed %s: %s" % (command[0], exc))
-
-        add_item("锁定屏幕", lambda _item: launch(["ming-lock"]))
-        add_item("更新并关机", self.open_update_and_shutdown_dialog)
-        menu.append(Gtk.SeparatorMenuItem())
-        add_item("注销", lambda _item: launch(["xfce4-session-logout", "--logout"]))
-        add_item("重新启动", lambda _item: launch(["xfce4-session-logout", "--reboot"]))
-        add_item("关机", lambda _item: launch(["xfce4-session-logout", "--halt"]))
-        menu.show_all()
-        menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
-
     def open_power_menu(self, _button):
-        if self.background_update_available():
-            self.show_confirmed_update_power_menu(_button)
-            return
         commands = [
             ["xfce4-session-logout"],
             ["gnome-session-quit", "--logout"],

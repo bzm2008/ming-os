@@ -93,6 +93,21 @@ class TransactionEngineTests(unittest.TestCase):
         self.assertNotIn("manifest_path", calls[1][1])
         self.assertNotIn("keyring", calls[1][1])
 
+    def test_stage_passes_the_pinned_key_policy_to_the_verifier_before_staging(self):
+        calls = []
+
+        def verifier(**kwargs):
+            calls.append(kwargs)
+            return {"release_id": "ming-os-26.3.3-amd64-1", "verified_artifacts": {"payload_sha256": "a" * 64}}
+
+        self.module.stage_release(
+            **self.arguments(),
+            key_policy=self.artifact,
+            verifier=verifier,
+            applicator=lambda **_kwargs: {"state": "staged"},
+        )
+        self.assertEqual(calls[0]["key_policy"], self.artifact)
+
     def test_cli_has_fixed_trust_and_state_paths_and_structured_errors(self):
         source = ENGINE_PATH.read_text(encoding="utf-8")
         self.assertIn("/usr/share/ming-update/trust/release-keyring.gpg", source)

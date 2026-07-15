@@ -135,12 +135,35 @@ class TransactionContractTests(unittest.TestCase):
         invalid = dict(value, schema="ming.update.discovery.v2")
         self.assertTrue(list(self.validators["discovery"].iter_errors(invalid)))
 
+    def test_discovery_rejects_mutable_detached_signature_locator(self):
+        value = self.validate("discovery", "transactional-available.discovery.json")
+        invalid = dict(
+            value,
+            manifest_signature_url="https://downloads.example.invalid/releases/26.3.3/manifest.sig",
+        )
+        self.assertTrue(list(self.validators["discovery"].iter_errors(invalid)))
+
     def test_cli_v1_allows_additive_response_fields_only(self):
         cli_value = self.validate("cli", "transactional-available.cli.json")
         self.assertEqual([], list(self.validators["cli"].iter_errors(dict(cli_value, extension={"future": True}))))
 
         manifest_value = self.validate("manifest", "transactional-available.manifest.json")
         self.assertTrue(list(self.validators["manifest"].iter_errors(dict(manifest_value, extension=True))))
+
+    def test_cli_schema_covers_idle_and_failed_states_used_by_the_public_adapter(self):
+        base = self.validate("cli", "no-update.cli.json")
+        idle = dict(base, state="idle")
+        self.assertEqual([], list(self.validators["cli"].iter_errors(idle)))
+        failed = dict(
+            base,
+            ok=False,
+            exit_code=4,
+            error_code="E_MANIFEST_SIGNATURE",
+            state="failed",
+            action="check",
+            progress={"phase": "verifying", "percent": 0},
+        )
+        self.assertEqual([], list(self.validators["cli"].iter_errors(failed)))
 
 
 if __name__ == "__main__":

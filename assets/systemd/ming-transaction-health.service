@@ -1,8 +1,8 @@
 [Unit]
 Description=Ming OS transactional update health confirmation
-After=local-fs.target dbus.service NetworkManager.service
+After=local-fs.target dbus.service NetworkManager.service ming-transaction-reconcile.service
 Before=display-manager.service graphical.target
-ConditionPathExists=/var/lib/ming-update/active-transaction.json
+OnFailure=ming-transaction-rollback-reboot.service
 
 [Service]
 Type=oneshot
