@@ -4,6 +4,7 @@ import pathlib
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -54,6 +55,25 @@ class LaunchResultTests(unittest.TestCase):
         self.assertFalse(broker.launch(request))
         self.assertFalse(broker.launch(request))
         self.assertEqual(["command_missing", "command_missing"], [item[0] for item in events])
+
+    def test_direct_system_desktop_entry_revalidates_ownership_before_spawn(self):
+        """A regular system launcher cannot bypass the broker's final package check."""
+        calls = []
+        desktop = "/usr/share/applications/direct-package.desktop"
+        broker = self.launch.LaunchBroker(
+            spawn=lambda argv: calls.append(("spawn", tuple(argv))) or object(),
+            trusted_verifier=lambda path: calls.append(("verify", path)) or False,
+            animate=lambda *_args: None,
+            reduced_motion=lambda: True,
+            probe=lambda *_args, **_kwargs: None,
+            report_error=lambda *_args: None,
+        )
+        request = self.launch.LaunchRequest(
+            ("direct-package",), desktop_file=desktop,
+        )
+
+        self.assertFalse(broker.launch(request))
+        self.assertEqual([("verify", desktop)], calls)
 
     def test_verified_desktop_wrapper_uses_only_gio_and_retries_after_activation_failure(self):
         events = []
@@ -226,7 +246,9 @@ class LaunchResultTests(unittest.TestCase):
             "accepted": False,
             "error": "system desktop wrapper is not verified",
         }, response)
-        self.assertEqual(1, len(preflighted))
+        # Rejection now happens in the IPC worker before an unnecessary GTK
+        # callback is queued; the correlated response remains fail-closed.
+        self.assertEqual(0, len(preflighted))
 
     def test_accepted_ipc_request_is_dispatched_exactly_once(self):
         """Moving acknowledgement after preflight must not retain the old dispatch."""
@@ -304,6 +326,99 @@ class LaunchResultTests(unittest.TestCase):
 
         self.assertTrue(results[0].accepted)
         self.assertEqual(["preflight", "launch"], [name for name, _value in events])
+
+    def test_slow_preflight_is_not_rejected_by_the_short_activation_ack_window(self):
+        """Package verification may be slow without blocking the GTK acknowledgement phase."""
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(pathlib.Path(tempfile.gettempdir()).resolve() / "store-wrapper.desktop"),
+            mode="desktop_app_info",
+        )
+        events = []
+
+        class Broker:
+            @staticmethod
+            def preflight(_value):
+                events.append("preflight")
+                time.sleep(0.30)
+                return True
+
+            @staticmethod
+            def launch(_value):
+                events.append("launch")
+                return True
+
+        def idle_add(callback, value):
+            threading.Thread(target=callback, args=(value,), daemon=True).start()
+            return 1
+
+        result = self.launch.schedule_launch_after_preflight(
+            idle_add, Broker(), request, timeout=0.25)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(["preflight", "launch"], events)
+
+    def test_gtk_launch_revalidates_after_the_ipc_preflight(self):
+        """The final verifier remains in normal broker.launch immediately before GIO."""
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(pathlib.Path(tempfile.gettempdir()).resolve() / "store-wrapper.desktop"),
+            mode="desktop_app_info",
+        )
+        events = []
+        ipc_thread = threading.get_ident()
+
+        class Broker:
+            @staticmethod
+            def preflight(_value):
+                events.append(("verify", threading.get_ident()))
+                return True
+
+            def launch(self, value):
+                # This mirrors LaunchBroker.launch: its final verifier executes
+                # on the GTK callback before the GIO activation.
+                if not self.preflight(value):
+                    return False
+                events.append(("activate", threading.get_ident()))
+                return True
+
+        def idle_add(callback, value):
+            thread = threading.Thread(target=callback, args=(value,), daemon=True)
+            thread.start()
+            return 1
+
+        result = self.launch.schedule_launch_after_preflight(
+            idle_add, Broker(), request, timeout=0.5)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(["verify", "verify", "activate"], [name for name, _thread in events])
+        self.assertEqual(ipc_thread, events[0][1])
+        self.assertNotEqual(ipc_thread, events[1][1])
+        self.assertEqual(events[1][1], events[2][1])
+
+    def test_gtk_schedule_rejects_when_actual_launch_fails(self):
+        """The correlated response cannot claim success merely because preflight passed."""
+        request = self.launch.LaunchRequest(
+            (), desktop_file=str(pathlib.Path(tempfile.gettempdir()).resolve() / "store-wrapper.desktop"),
+            mode="desktop_app_info",
+        )
+
+        class Broker:
+            @staticmethod
+            def preflight(_value):
+                return True
+
+            @staticmethod
+            def launch(_value):
+                return False
+
+        def idle_add(callback, value):
+            callback(value)
+            return 1
+
+        result = self.launch.schedule_launch_after_preflight(
+            idle_add, Broker(), request, timeout=0.25)
+
+        self.assertTrue(result.rejected)
+        self.assertFalse(result.accepted)
 
     def test_descriptor_revalidation_is_the_last_check_before_desktop_activation(self):
         with tempfile.TemporaryDirectory() as directory:

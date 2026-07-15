@@ -113,6 +113,27 @@ class AppDrawerCoreTests(unittest.TestCase):
             )
             self.assertEqual("User", self.drawer.discover_apps((user, system))[0].name)
 
+    def test_system_catalog_hides_desktop_environment_mismatch_but_user_entry_stays_visible(self):
+        """The drawer must not offer a system app that the broker will reject."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            system = root / "system"
+            user = root / "user"
+            system.mkdir()
+            user.mkdir()
+            source = (
+                "[Desktop Entry]\nType=Application\nName=Desktop Filtered\n"
+                "OnlyShowIn=GNOME;\nExec=filtered-app\n"
+            )
+            (system / "filtered.desktop").write_text(source, encoding="utf-8")
+            (user / "filtered.desktop").write_text(source, encoding="utf-8")
+            with mock.patch.object(self.drawer, "SYSTEM_APPLICATION_DIR", system, create=True):
+                with mock.patch.dict("os.environ", {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+                    self.assertEqual([], self.drawer.discover_apps((system,)))
+                    apps = self.drawer.discover_apps((user,))
+
+        self.assertEqual(["Desktop Filtered"], [app.name for app in apps])
+
     def test_missing_desktop_executable_stays_visible_with_a_readable_diagnostic(self):
         """A broken store launcher must be actionable instead of disappearing."""
         with tempfile.TemporaryDirectory() as tempdir:
@@ -216,7 +237,7 @@ class AppDrawerCoreTests(unittest.TestCase):
         self.assertEqual([("dialog", "无法打开此应用")], events)
 
     def test_drawer_local_fallback_uses_only_the_trusted_broker_argv(self):
-        """A stopped socket may start the broker, but never execute the catalog argv."""
+        """Starting a broker recovery process is not a correlated launch success."""
         app = FakeApp(
             "Store Wrapper",
             path="/usr/share/applications/store-wrapper.desktop",
@@ -224,22 +245,192 @@ class AppDrawerCoreTests(unittest.TestCase):
         )
         app.diagnostic = ""
         events = []
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                events.append(("dialog", kwargs.get("text")))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
         controller = types.SimpleNamespace(
             recent=types.SimpleNamespace(touch=lambda path: events.append(("recent", str(path)))),
             hide=lambda: events.append(("hide",)),
+            window=None,
+            Gtk=types.SimpleNamespace(
+                MessageDialog=Dialog,
+                MessageType=types.SimpleNamespace(ERROR="error"),
+                ButtonsType=types.SimpleNamespace(CLOSE="close"),
+            ),
         )
         expected = (
-            "/usr/local/bin/ming-launch", "--desktop-file", str(app.path), "--source", "drawer",
+            "/usr/local/bin/ming-launch", "--server",
         )
-        with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=False):
+        unavailable = self.drawer.COMMON.LaunchRequestResult("unavailable")
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=unavailable):
             with mock.patch.object(
-                    self.drawer.COMMON, "broker_fallback_argv", return_value=expected, create=True) as fallback:
-                with mock.patch.object(self.drawer.subprocess, "Popen", return_value=object()) as popen:
-                    self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+                    self.drawer.COMMON, "retry_launch_request_after_broker_start",
+                    return_value=unavailable) as retry:
+                with mock.patch.object(
+                        self.drawer.COMMON, "broker_fallback_argv", return_value=expected, create=True) as fallback:
+                    with mock.patch.object(self.drawer.subprocess, "Popen", return_value=object()) as popen:
+                        self.assertFalse(self.drawer.DrawerController.launch(controller, app, None))
 
         fallback.assert_called_once_with(str(app.path), "drawer")
         popen.assert_called_once_with(expected, shell=False)
+        retry.assert_called_once_with(str(app.path), "drawer", None)
+        self.assertEqual([("dialog", "无法打开此应用")], events)
+
+    def test_drawer_waits_for_an_async_correlated_result_before_hiding(self):
+        """A slow trusted-wrapper acknowledgement must not freeze or close the drawer early."""
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        launch = source[source.index("    def launch(self, app, widget):"):source.index("    def show(self):")]
+        self.assertIn("send_launch_request_async", launch)
+        self.assertIn("self._queue_launch_result", launch)
+        self.assertLess(
+            launch.index("send_launch_request_async"),
+            launch.index("self._queue_launch_result"),
+        )
+
+    def test_drawer_ignores_repeat_click_until_accepted_async_result(self):
+        """One slow app launch must create one broker request and remain retryable."""
+        app = FakeApp("Slow Store App", path="/usr/share/applications/slow-store.desktop")
+        callbacks = []
+        calls = []
+        events = []
+
+        class ImmediateGLib:
+            @staticmethod
+            def idle_add(callback):
+                callback()
+                return True
+
+        controller = self.drawer.DrawerController.__new__(self.drawer.DrawerController)
+        controller.GLib = ImmediateGLib()
+        controller._pending_launches = set()
+        controller.recent = types.SimpleNamespace(
+            touch=lambda path: events.append(("recent", str(path))))
+        controller.hide = lambda: events.append(("hide",))
+
+        def send_async(path, source, rect, callback, timeout):
+            calls.append((path, source, rect, timeout))
+            callbacks.append(callback)
+            return True
+
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request_async", send_async):
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+            self.assertEqual(1, len(calls))
+            callbacks.pop()(types.SimpleNamespace(rejected=False, unavailable=False))
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+
+        self.assertEqual(2, len(calls))
         self.assertEqual([("recent", str(app.path)), ("hide",)], events)
+
+    def test_drawer_clears_pending_launch_after_rejected_async_result(self):
+        """A real rejection keeps the drawer open but must not block a later retry."""
+        app = FakeApp("Rejected Store App", path="/usr/share/applications/rejected-store.desktop")
+        callbacks = []
+        calls = []
+        events = []
+
+        class ImmediateGLib:
+            @staticmethod
+            def idle_add(callback):
+                callback()
+                return True
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                events.append(("dialog", kwargs.get("text")))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
+        controller = self.drawer.DrawerController.__new__(self.drawer.DrawerController)
+        controller.GLib = ImmediateGLib()
+        controller.Gtk = types.SimpleNamespace(
+            MessageDialog=Dialog,
+            MessageType=types.SimpleNamespace(ERROR="error"),
+            ButtonsType=types.SimpleNamespace(CLOSE="close"),
+        )
+        controller.window = None
+        controller._pending_launches = set()
+        controller.recent = types.SimpleNamespace(touch=lambda _path: None)
+        controller.hide = lambda: events.append(("hide",))
+
+        def send_async(path, source, rect, callback, timeout):
+            calls.append((path, source, rect, timeout))
+            callbacks.append(callback)
+            return True
+
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request_async", send_async):
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+            self.assertEqual(1, len(calls))
+            callbacks.pop()(types.SimpleNamespace(rejected=True, unavailable=False))
+            self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual([("dialog", "无法打开此应用")], events)
+
+    def test_drawer_worker_does_not_touch_gtk_when_idle_queue_rejects_result(self):
+        """A worker may clear its pending key, but it must not render UI inline."""
+        app = FakeApp("Rejected Store App", path="/usr/share/applications/rejected-store.desktop")
+        events = []
+
+        class RejectedGLib:
+            @staticmethod
+            def idle_add(_callback):
+                return False
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                events.append(("dialog", kwargs.get("text")))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
+        controller = self.drawer.DrawerController.__new__(self.drawer.DrawerController)
+        controller.GLib = RejectedGLib()
+        controller.Gtk = types.SimpleNamespace(
+            MessageDialog=Dialog,
+            MessageType=types.SimpleNamespace(ERROR="error"),
+            ButtonsType=types.SimpleNamespace(CLOSE="close"),
+        )
+        controller.window = None
+        controller._pending_launches = {str(app.path)}
+        controller.recent = types.SimpleNamespace(touch=lambda path: events.append(("recent", str(path))))
+        controller.hide = lambda: events.append(("hide",))
+
+        worker = threading.Thread(
+            target=lambda: self.drawer.DrawerController._queue_launch_result(
+                controller, app, types.SimpleNamespace(rejected=True, unavailable=False)),
+        )
+        worker.start()
+        worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(set(), controller._pending_launches)
+        self.assertEqual([], events)
 
     def test_widget_source_rect_includes_no_window_widget_allocation(self):
         allocation = type("Allocation", (), {"x": 12, "y": 18, "width": 80, "height": 40})()

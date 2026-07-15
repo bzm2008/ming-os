@@ -101,7 +101,8 @@ DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
 MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
-APP_DIRS = [DESKTOP_DIR, Path("/usr/share/applications"), HOME / ".local/share/applications"]
+SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
+APP_DIRS = [DESKTOP_DIR, SYSTEM_APPLICATION_DIR, HOME / ".local/share/applications"]
 APP_CATALOG_FINGERPRINT_VERSION = 1
 CORE_NAMES = {
     "ming-settings.desktop",
@@ -550,7 +551,12 @@ def read_app(path):
             "diagnostic": legacy["diagnostic"],
         }
     try:
-        entry = diagnose(effective_path)
+        system_catalog_dir = globals().get(
+            "SYSTEM_APPLICATION_DIR", Path("/usr/share/applications"))
+        if effective_path.parent == system_catalog_dir:
+            entry = diagnose(effective_path, respect_desktop_environment=True)
+        else:
+            entry = diagnose(effective_path)
     except (OSError, ValueError):
         return None
     if entry is None:
@@ -592,10 +598,76 @@ def launch_item(item, source_rect=None):
     log(f"launch broker unavailable; starting broker fallback for {path} source=desktop")
     try:
         subprocess.Popen(fallback(path, "desktop"), shell=False)
-        return True
+        # The fallback only starts the broker.  It is not a launch result.
+        retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+        if not callable(retry):
+            return False
+        broker_result = retry(path, "desktop", source_rect)
+        if broker_result and not getattr(broker_result, "rejected", False):
+            return True
+        if getattr(broker_result, "rejected", False):
+            log(f"launch broker rejected recovery request for {path} source=desktop")
     except Exception as exc:
         log(f"broker fallback failed for {path} source=desktop: {exc}")
     return False
+
+
+def launch_item_async(item, source_rect=None, on_result=None):
+    """Send one launch request from a worker and report its final broker result."""
+    path = item.get("path")
+    if not path:
+        return False
+    diagnostic = str(item.get("diagnostic") or "")
+    if diagnostic:
+        log(f"async launch blocked for {path}: {diagnostic}")
+        return False
+    sender = getattr(COMMON, "send_launch_request_async", None)
+    fallback = getattr(COMMON, "broker_fallback_argv", None)
+    if not callable(sender) or not callable(fallback):
+        log(f"async launch validation unavailable for {path}")
+        return False
+
+    def complete(broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        unavailable = not rejected and (
+            bool(getattr(broker_result, "unavailable", False))
+            or not bool(broker_result)
+        )
+        started = bool(broker_result) and not rejected
+        if unavailable:
+            try:
+                subprocess.Popen(fallback(path, "desktop"), shell=False)
+                # This worker starts a broker only, then waits for one
+                # correlated reply before it reports a successful launch.
+                retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+                if callable(retry):
+                    broker_result = retry(path, "desktop", source_rect)
+                    started = bool(broker_result) and not bool(
+                        getattr(broker_result, "rejected", False))
+                else:
+                    started = False
+            except Exception as exc:
+                log(f"async broker fallback failed for {path} source=desktop: {exc}")
+                started = False
+        elif rejected:
+            log(f"async launch broker rejected {path} source=desktop")
+        if callable(on_result):
+            try:
+                on_result(started)
+            except Exception as exc:
+                log(f"async launch result handler failed for {path}: {exc}")
+
+    try:
+        return bool(sender(
+            path,
+            "desktop",
+            source_rect,
+            callback=complete,
+            timeout=getattr(COMMON, "ASYNC_LAUNCH_REQUEST_TIMEOUT", 12.0),
+        ))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        log(f"async launch request failed for {path}: {exc}")
+        return False
 
 
 def write_generated_core_launcher(basename):
@@ -981,9 +1053,10 @@ def trusted_wrapper_source_path(path):
     if not callable(checker) or not callable(diagnose):
         return None
     try:
-        source = Path(path).resolve(strict=True)
-        if not checker(source):
+        source = Path(path)
+        if not source.is_absolute() or not checker(source):
             return None
+        source = source.resolve(strict=True)
         entry = diagnose(source)
     except (AttributeError, OSError, TypeError, ValueError):
         return None
@@ -2531,6 +2604,7 @@ class PhoneDesktop(Gtk.Window):
         self.touch_sequences = set()
         self.touch_blocked = False
         self.activation_consumed = {}
+        self._pending_launch_paths = set()
         self.fixed_press_item = None
         self.fixed_press_origin = None
         self.fixed_press_offset = (0, 0)
@@ -3105,6 +3179,15 @@ class PhoneDesktop(Gtk.Window):
         if item.get("type") == "folder":
             self.show_folder(item)
             return
+        pending = getattr(self, "_pending_launch_paths", None)
+        if not isinstance(pending, set):
+            pending = set()
+            self._pending_launch_paths = pending
+        path_key = str(item.get("path") or "")
+        if path_key in pending:
+            log(f"desktop launch already pending for {path_key}")
+            return
+        pending.add(path_key)
         self.launch_feedback.begin(item)
         origin_x, origin_y = self.window_origin
         source_rect = {
@@ -3113,20 +3196,41 @@ class PhoneDesktop(Gtk.Window):
             "width": scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))[0],
             "height": scaled_tile_metrics(self.appearance.get("desktop_icon_scale", 1.0))[1],
         }
-        if not launch_item(item, source_rect):
-            self.launch_feedback.finish()
-            log(f"no launch method worked for {item.get('path')}")
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                flags=0,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.CLOSE,
-                text="无法打开此应用",
-            )
-            detail = str(item.get("diagnostic") or "启动失败，详细信息已写入桌面日志。")
-            dialog.format_secondary_text(detail)
-            dialog.run()
-            dialog.destroy()
+
+        def completed(started):
+            def deliver():
+                try:
+                    if started:
+                        return False
+                    self.launch_feedback.finish()
+                    log(f"no launch method worked for {item.get('path')}")
+                    dialog = Gtk.MessageDialog(
+                        transient_for=self,
+                        flags=0,
+                        message_type=Gtk.MessageType.ERROR,
+                        buttons=Gtk.ButtonsType.CLOSE,
+                        text="无法打开此应用",
+                    )
+                    detail = str(item.get("diagnostic") or "启动失败，详细信息已写入桌面日志。")
+                    dialog.format_secondary_text(detail)
+                    dialog.run()
+                    dialog.destroy()
+                except Exception as exc:
+                    log(f"desktop launch result delivery failed for {path_key}: {exc}")
+                finally:
+                    pending.discard(path_key)
+                return False
+
+            try:
+                if GLib.idle_add(deliver):
+                    return
+                log(f"desktop launch result queue rejected for {path_key}")
+            except Exception as exc:
+                log(f"desktop launch result queue failed for {path_key}: {exc}")
+            pending.discard(path_key)
+
+        if not launch_item_async(item, source_rect, on_result=completed):
+            completed(False)
 
     def show_folder(self, folder):
         dialog = Gtk.Dialog(title=folder.get("name", "文件夹"), transient_for=self, flags=0)

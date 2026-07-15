@@ -19,8 +19,8 @@ ANIMATION_DURATION_MS = 200
 FEEDBACK_TIMEOUT_MS = 4000
 DEDUP_SECONDS = 0.6
 IPC_VERSION = 1
+ACTIVATION_ACK_TIMEOUT = 6.0
 DPKG_QUERY = "/usr/bin/dpkg-query"
-PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*(?::[A-Za-z0-9][A-Za-z0-9+.-]*)?")
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 
 
@@ -221,38 +221,6 @@ def _run_dpkg_query(argv, timeout=2):
     )
 
 
-def _query_package_owner(path, command_runner):
-    result = command_runner(("-S", "--", str(path)), timeout=2)
-    if result.returncode != 0:
-        return ""
-    lines = [line for line in str(result.stdout or "").splitlines() if line]
-    if len(lines) != 1:
-        return ""
-    owner, marker, reported_path = lines[0].rpartition(": ")
-    if (
-            marker != ": "
-            or reported_path != str(path)
-            or owner.strip() != owner
-            or "," in owner
-            or not PACKAGE_NAME.fullmatch(owner)):
-        return ""
-    return owner
-
-
-def _package_is_installed(owner, command_runner):
-    result = command_runner(
-        ("-W", "-f=${db:Status-Abbrev}\\t${binary:Package}\\n", "--", owner),
-        timeout=2,
-    )
-    if result.returncode != 0:
-        return False
-    lines = [line for line in str(result.stdout or "").splitlines() if line]
-    if len(lines) != 1:
-        return False
-    status, marker, installed_owner = lines[0].partition("\t")
-    return marker == "\t" and status == "ii " and installed_owner == owner
-
-
 def verify_package_owned_system_desktop(
         path, system_dir=SYSTEM_APPLICATION_DIR, command_runner=None,
         descriptor_revalidator=None):
@@ -260,14 +228,26 @@ def verify_package_owned_system_desktop(
     try:
         desktop_path, directory_path = _canonical_system_desktop_file(path, system_dir)
         runner = command_runner or _run_dpkg_query
-        owner = _query_package_owner(desktop_path, runner)
-        if not owner or not _package_is_installed(owner, runner):
+        owner_lookup = getattr(COMMON, "installed_package_owner", None)
+        if not callable(owner_lookup):
+            return False
+        if not owner_lookup(desktop_path, command_runner=runner, timeout=2):
             return False
         revalidator = descriptor_revalidator or descriptor_revalidate_system_desktop
         return bool(revalidator(desktop_path, directory_path))
     except (
             AttributeError, OSError, PermissionError, RuntimeError, TypeError,
             ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def _is_system_catalog_desktop_file(path):
+    try:
+        desktop_path = pathlib.PurePosixPath(str(os.fspath(path)).replace("\\", "/"))
+        return (
+            desktop_path.suffix == ".desktop"
+            and desktop_path.parent == pathlib.PurePosixPath(SYSTEM_APPLICATION_DIR.as_posix()))
+    except (TypeError, ValueError):
         return False
 
 
@@ -279,14 +259,25 @@ def request_from_desktop_file(
         desktop_file, source="unknown", rect=None, allowed_dirs=None,
         candidate_verifier=None, trusted_verifier=None, defer_trusted_verification=False):
     path = _allowed_desktop_path(desktop_file, allowed_dirs)
+    system_catalog_entry = _is_system_catalog_desktop_file(path)
     try:
-        entry = COMMON.parse_desktop_file(path)
+        entry = COMMON.parse_desktop_file(
+            path, respect_desktop_environment=system_catalog_entry)
     except ValueError as exc:
         if not _is_shell_wrapper_error(exc):
             raise
         verifier = candidate_verifier or COMMON.is_system_desktop_activation_candidate
         if not verifier(path):
             raise
+        try:
+            visibility_entry = COMMON.parse_desktop_file(
+                path, respect_desktop_environment=True)
+        except ValueError as visibility_error:
+            if not _is_shell_wrapper_error(visibility_error):
+                raise
+        else:
+            if visibility_entry is None:
+                raise ValueError("desktop file is hidden or unavailable")
         final_verifier = trusted_verifier or verify_package_owned_system_desktop
         if not defer_trusted_verification and not final_verifier(path):
             raise ValueError("system desktop wrapper is not verified")
@@ -458,8 +449,10 @@ class LaunchBroker:
         self._recent = {}
 
     def preflight(self, request):
-        """Perform the last trusted-wrapper check before a GIO activation."""
-        if request.mode != "desktop_app_info":
+        """Perform the final package check for protected system launchers."""
+        if (
+                request.mode != "desktop_app_info"
+                and not _is_system_catalog_desktop_file(request.desktop_file)):
             return True
         return bool(self.trusted_verifier(request.desktop_file))
 
@@ -485,6 +478,9 @@ class LaunchBroker:
             self.record_event(request, "activation_failed", error)
             self.report_error(request, error)
             return False
+        return self._activate_desktop_app_info(request, key, moment)
+
+    def _activate_desktop_app_info(self, request, key, moment):
         try:
             activated = self.desktop_activator(request.desktop_file)
         except Exception as exc:
@@ -500,6 +496,18 @@ class LaunchBroker:
         return True
 
     def _launch_argv(self, request, key, moment):
+        if _is_system_catalog_desktop_file(request.desktop_file):
+            try:
+                verified = self.preflight(request)
+            except Exception as exc:
+                self.record_event(request, "spawn_failed", exc)
+                self.report_error(request, exc)
+                return False
+            if not verified:
+                error = RuntimeError("desktop launcher verification failed")
+                self.record_event(request, "spawn_failed", error)
+                self.report_error(request, error)
+                return False
         try:
             process = self.spawn(request.argv)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -650,41 +658,50 @@ def schedule_launch(idle_add, broker, request):
     return idle_add(dispatch, request)
 
 
-def schedule_launch_after_preflight(idle_add, broker, request, timeout=0.25):
+def schedule_launch_after_preflight(
+        idle_add, broker, request, timeout=ACTIVATION_ACK_TIMEOUT):
     """Schedule a launch only after GTK has completed its final preflight.
 
-    The IPC thread waits only for this bounded acknowledgement.  If GTK is
-    unavailable or does not answer, it fails closed rather than claiming the
-    request was accepted and allowing desktop code to run a fallback.
+    One preflight runs in the IPC worker before GTK receives an activation
+    request.  The normal GTK-context broker launch repeats final verification
+    immediately before GIO, then returns the real activation result.  Legacy
+    disks therefore do not block the desktop while the first dpkg checks run.
     """
     try:
         timeout = float(timeout)
     except (TypeError, ValueError):
         return COMMON.LaunchRequestResult("rejected", "invalid launch scheduling timeout")
-    if timeout <= 0 or timeout > 2:
+    if timeout <= 0 or timeout > 8:
         return COMMON.LaunchRequestResult("rejected", "invalid launch scheduling timeout")
+
+    preflight = getattr(broker, "preflight", None)
+    if not callable(preflight):
+        return COMMON.LaunchRequestResult("rejected", "launch preflight is unavailable")
+    try:
+        if not preflight(request):
+            return COMMON.LaunchRequestResult("rejected", "system desktop wrapper is not verified")
+    except Exception as exc:
+        return COMMON.LaunchRequestResult(
+            "rejected", str(exc) or "desktop launcher verification failed")
 
     completed = threading.Event()
     cancelled = threading.Event()
-    state = {"result": COMMON.LaunchRequestResult("rejected", "launch preflight was not run")}
+    state = {"result": COMMON.LaunchRequestResult("rejected", "launch was not run")}
 
     def dispatch(value):
         if cancelled.is_set():
+            completed.set()
             return False
         try:
-            preflight = getattr(broker, "preflight", None)
-            if not callable(preflight):
-                state["result"] = COMMON.LaunchRequestResult("rejected", "launch preflight is unavailable")
-            elif not preflight(value):
-                state["result"] = COMMON.LaunchRequestResult("rejected", "system desktop wrapper is not verified")
-            else:
+            launched = bool(broker.launch(value))
+            if launched and not cancelled.is_set():
                 state["result"] = COMMON.LaunchRequestResult("accepted")
+            else:
+                state["result"] = COMMON.LaunchRequestResult("rejected", "application launch failed")
         except Exception as exc:
-            state["result"] = COMMON.LaunchRequestResult("rejected", str(exc) or "desktop launcher verification failed")
+            state["result"] = COMMON.LaunchRequestResult("rejected", str(exc) or "application launch failed")
         finally:
             completed.set()
-        if state["result"].accepted and not cancelled.is_set():
-            broker.launch(value)
         return False
 
     try:
@@ -784,7 +801,12 @@ class LaunchServer:
 
 def send_to_broker(request):
     rect = request.rect.to_dict() if request.rect else None
-    return COMMON.send_launch_request(request.desktop_file, request.source, rect)
+    return COMMON.send_launch_request(
+        request.desktop_file,
+        request.source,
+        rect,
+        timeout=getattr(COMMON, "ASYNC_LAUNCH_REQUEST_TIMEOUT", 12.0),
+    )
 
 
 def request_from_args(args):

@@ -60,6 +60,136 @@ class TrustedDesktopActivationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.common = load_common()
 
+    def test_user_desktop_parsing_keeps_system_environment_visibility_keys(self):
+        """User catalog parsing retains its historical OnlyShowIn/NotShowIn behavior."""
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / ".local" / "share" / "applications"
+            applications.mkdir(parents=True)
+            for key, value in (("OnlyShowIn", "GNOME;"), ("NotShowIn", "XFCE;")):
+                with self.subTest(key=key):
+                    desktop = applications / (key.lower() + ".desktop")
+                    desktop.write_text(
+                        "[Desktop Entry]\nType=Application\nName=User App\n"
+                        "{}={}\nExec=user-app\n".format(key, value),
+                        encoding="utf-8",
+                    )
+                    with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+                        entry = self.common.parse_desktop_file(desktop)
+                        diagnostic = self.common.diagnose_desktop_file(desktop)
+
+                    self.assertIsNotNone(entry)
+                    self.assertIsNotNone(diagnostic)
+                    self.assertEqual("User App", entry.name)
+
+    def test_broker_recovery_retries_only_unavailable_requests_until_a_correlated_reply(self):
+        """A cold broker may bind late, but a sent request is never duplicated."""
+        helper = getattr(self.common, "retry_launch_request_after_broker_start", None)
+        self.assertTrue(callable(helper), "bounded broker recovery helper is required")
+        unavailable = self.common.LaunchRequestResult("unavailable", "socket missing")
+        accepted = self.common.LaunchRequestResult("accepted")
+        outcomes = [unavailable, unavailable, accepted]
+        calls = []
+        sleeps = []
+
+        def sender(path, source, rect, timeout):
+            calls.append((path, source, rect, timeout))
+            return outcomes.pop(0)
+
+        with mock.patch.object(self.common, "send_launch_request", side_effect=sender):
+            result = helper(
+                "/usr/share/applications/store-wrapper.desktop",
+                "drawer",
+                {"x": 1, "y": 1, "width": 10, "height": 10},
+                request_timeout=4.0,
+                recovery_timeout=1.0,
+                retry_interval=0.05,
+                sleeper=sleeps.append,
+                clock=lambda: 0.0,
+            )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(3, len(calls))
+        self.assertEqual([0.05, 0.05], sleeps)
+
+    def test_recv_json_line_accepts_the_async_launch_reply_timeout(self):
+        """The shared IPC reader must accept the launch client's advertised wait."""
+        client, server = socket.socketpair()
+        try:
+            server.sendall(self.common.encode_json_line({"ready": True}))
+            self.assertEqual(
+                {"ready": True},
+                self.common.recv_json_line(
+                    client, timeout=self.common.ASYNC_LAUNCH_REQUEST_TIMEOUT),
+            )
+        finally:
+            client.close()
+            server.close()
+
+    def test_recv_json_line_uses_one_total_deadline_across_partial_reads(self):
+        """A peer cannot extend a caller's IPC wait by dribbling fragments."""
+        chunks = [b'{"ready":', b'true}\n']
+        timeouts = []
+
+        class Connection:
+            @staticmethod
+            def settimeout(value):
+                timeouts.append(value)
+
+            @staticmethod
+            def recv(_size):
+                return chunks.pop(0)
+
+        with mock.patch.object(self.common.time, "monotonic", side_effect=(0.0, 0.0, 0.4)):
+            result = self.common.recv_json_line(Connection(), timeout=1.0)
+
+        self.assertEqual({"ready": True}, result)
+        self.assertEqual([1.0, 0.6], timeouts)
+
+    def test_shared_installed_package_owner_requires_exact_single_owner_and_state(self):
+        """Shell catalog checks must use the same strict Debian ownership proof as launch."""
+        helper = getattr(self.common, "installed_package_owner", None)
+        self.assertTrue(callable(helper), "shared installed package owner helper is required")
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "store-wrapper.desktop"
+            desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+
+            cases = {
+                "exact": (
+                    "store-wrapper: {}\n".format(desktop),
+                    "ii \tstore-wrapper\n",
+                    "store-wrapper",
+                ),
+                "ambiguous": (
+                    "store-wrapper, other: {}\n".format(desktop),
+                    "ii \tstore-wrapper\n",
+                    "",
+                ),
+                "mismatched-path": (
+                    "store-wrapper: /usr/share/applications/other.desktop\n",
+                    "ii \tstore-wrapper\n",
+                    "",
+                ),
+                "not-installed": (
+                    "store-wrapper: {}\n".format(desktop),
+                    "hi \tstore-wrapper\n",
+                    "",
+                ),
+            }
+            for name, (ownership, installation, expected) in cases.items():
+                with self.subTest(name=name):
+                    def query(argv, timeout, ownership=ownership, installation=installation):
+                        self.assertLessEqual(timeout, 2)
+                        return types.SimpleNamespace(
+                            returncode=0,
+                            stdout=ownership if "-S" in argv else installation,
+                            stderr="",
+                        )
+
+                    self.assertEqual(
+                        expected,
+                        helper(desktop, command_runner=query),
+                    )
+
     def test_accepts_protected_system_desktop_wrapper_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             system_dir = pathlib.Path(directory) / "applications"
@@ -134,7 +264,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
     def test_broker_fallback_argv_allows_only_known_desktop_surfaces(self):
         desktop = "/usr/share/applications/store-wrapper.desktop"
         self.assertEqual(
-            ("/usr/local/bin/ming-launch", "--desktop-file", desktop, "--source", "drawer"),
+            ("/usr/local/bin/ming-launch", "--server"),
             self.common.broker_fallback_argv(desktop, "drawer"),
         )
         for source in ("unknown", "ipc", "desktop-copy", ""):
@@ -147,7 +277,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": "/tmp/ming-launch-shadow"}, clear=False):
             argv = self.common.broker_fallback_argv(desktop, "desktop")
         self.assertEqual("/usr/local/bin/ming-launch", argv[0])
-        self.assertEqual(("--desktop-file", desktop, "--source", "desktop"), argv[1:])
+        self.assertEqual(("--server",), argv[1:])
 
     def test_send_launch_request_returns_false_for_correlated_rejection(self):
         """A response rejection must not be mistaken for a broker outage."""
@@ -266,6 +396,120 @@ class TrustedDesktopActivationTests(unittest.TestCase):
         self.assertFalse(result.unavailable)
         self.assertEqual("invalid broker response", result.error)
 
+    def test_send_launch_request_rejects_post_send_connection_reset(self):
+        """A reset after send is not evidence that no broker received the request."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop = root / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\nExec=store-wrapper\n",
+                encoding="utf-8",
+            )
+
+            class ConnectedClient:
+                def __enter__(self):
+                    return self
+
+                @staticmethod
+                def __exit__(*_args):
+                    return None
+
+                @staticmethod
+                def connect(_path):
+                    return None
+
+                @staticmethod
+                def settimeout(_value):
+                    return None
+
+                @staticmethod
+                def sendall(_payload):
+                    return None
+
+                @staticmethod
+                def recv(_size):
+                    raise ConnectionResetError("peer reset after accepting request")
+
+            with mock.patch.object(self.common, "runtime_socket_path", return_value=root / "launch.sock"):
+                with mock.patch.object(self.common.socket, "AF_UNIX", 0, create=True):
+                    with mock.patch.object(self.common.socket, "socket", return_value=ConnectedClient()):
+                        result = self.common.send_launch_request(desktop, "drawer", timeout=0.5)
+
+        self.assertFalse(result)
+        self.assertTrue(result.rejected)
+        self.assertFalse(result.unavailable)
+        self.assertEqual("invalid broker response", result.error)
+
+    def test_async_launch_request_returns_before_a_slow_broker_reply(self):
+        """GTK callers can wait for a verified result without blocking their event handler."""
+        async_sender = getattr(self.common, "send_launch_request_async", None)
+        self.assertTrue(callable(async_sender), "shared async launch helper is required")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop = root / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\nExec=store-wrapper\n",
+                encoding="utf-8",
+            )
+            client, server = socket.socketpair()
+            completed = threading.Event()
+            received = []
+
+            class ConnectedClient:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    client.close()
+
+                @staticmethod
+                def connect(_path):
+                    return None
+
+                @staticmethod
+                def settimeout(value):
+                    client.settimeout(value)
+
+                @staticmethod
+                def sendall(payload):
+                    client.sendall(payload)
+
+                @staticmethod
+                def recv(size):
+                    return client.recv(size)
+
+            def delayed_reply():
+                try:
+                    message = self.common.recv_json_line(server, timeout=0.5)
+                    time.sleep(0.30)
+                    server.sendall(self.common.encode_json_line({
+                        "version": 1,
+                        "action": "launch-result",
+                        "request_id": message["request_id"],
+                        "accepted": True,
+                    }))
+                finally:
+                    server.close()
+
+            worker = threading.Thread(target=delayed_reply, daemon=True)
+            worker.start()
+            started = time.monotonic()
+            with mock.patch.object(self.common, "runtime_socket_path", return_value=root / "launch.sock"):
+                with mock.patch.object(self.common.socket, "AF_UNIX", 0, create=True):
+                    with mock.patch.object(self.common.socket, "socket", return_value=ConnectedClient()):
+                        self.assertTrue(async_sender(
+                            desktop,
+                            "drawer",
+                            callback=lambda result: (received.append(result), completed.set()),
+                            timeout=1.0,
+                        ))
+                        self.assertLess(time.monotonic() - started, 0.15)
+                        self.assertTrue(completed.wait(1.0))
+            worker.join(1)
+
+        self.assertEqual(1, len(received))
+        self.assertTrue(received[0].accepted)
+
     def test_managed_package_wrapper_copy_retains_its_canonical_broker_source(self):
         """A friendly Desktop filename must not turn a system wrapper into a broken duplicate."""
         source = PHONE_PATH.read_text(encoding="utf-8")
@@ -355,6 +599,54 @@ class TrustedDesktopActivationTests(unittest.TestCase):
             apps = namespace["load_apps"]()
             self.assertEqual([str(system_wrapper.resolve())], [app["path"] for app in apps])
             self.assertEqual([""], [app["diagnostic"] for app in apps])
+
+    def test_managed_proxy_rejects_a_symlink_source_before_resolution(self):
+        """A marker must be checked as written, before canonicalisation erases a link."""
+        source = PHONE_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "trusted_wrapper_source_path"
+        )
+        namespace = {"Path": pathlib.Path}
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                str(PHONE_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            alias = root / "wrapper-link.desktop"
+            target = root / "trusted-wrapper.desktop"
+            alias.write_text("[Desktop Entry]\n", encoding="utf-8")
+            target.write_text("[Desktop Entry]\n", encoding="utf-8")
+            original_resolve = pathlib.Path.resolve
+
+            def resolve_with_alias(path, strict=False):
+                if pathlib.Path(path) == alias:
+                    return target
+                return original_resolve(path, strict=strict)
+
+            class Entry:
+                argv = ()
+                diagnostic = ""
+
+            class Common:
+                @staticmethod
+                def is_system_desktop_activation_candidate(path):
+                    return pathlib.Path(path) == target
+
+                @staticmethod
+                def diagnose_desktop_file(path):
+                    self.assertEqual(target, pathlib.Path(path))
+                    return Entry()
+
+            namespace["COMMON"] = Common()
+            with mock.patch.object(pathlib.Path, "resolve", new=resolve_with_alias):
+                self.assertIsNone(namespace["trusted_wrapper_source_path"](alias))
 
     def test_rejects_candidate_when_resolution_indicates_a_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -651,6 +943,28 @@ class TrustedLaunchRequestTests(unittest.TestCase):
                     trusted_verifier=lambda _path: False,
                 )
 
+    def test_shell_wrapper_hidden_by_desktop_visibility_cannot_select_internal_mode(self):
+        """The broker must match installer visibility before granting GIO activation."""
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            for key, value in (("OnlyShowIn", "GNOME;"), ("NotShowIn", "XFCE;")):
+                with self.subTest(key=key):
+                    desktop = applications / (key.lower() + ".desktop")
+                    desktop.write_text(
+                        "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                        "{}={}\nExec=sh -c 'exec /opt/store-wrapper/run'\n".format(key, value),
+                        encoding="utf-8",
+                    )
+                    with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+                        with self.assertRaises(ValueError):
+                            self.launch.request_from_desktop_file(
+                                desktop,
+                                allowed_dirs=(applications,),
+                                candidate_verifier=lambda _path: True,
+                                trusted_verifier=lambda _path: True,
+                            )
+
     def test_final_verifier_requires_an_exact_installed_package_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             applications = pathlib.Path(directory) / "applications"
@@ -683,6 +997,15 @@ class TrustedLaunchRequestTests(unittest.TestCase):
             ))
             self.assertEqual(2, len(calls))
             self.assertTrue(all(timeout <= 2 for _argv, timeout in calls))
+
+    def test_final_verifier_uses_the_shared_installed_owner_contract(self):
+        source = LAUNCH_PATH.read_text(encoding="utf-8")
+        verifier = source.split("def verify_package_owned_system_desktop(", 1)[1].split(
+            "\ndef _is_shell_wrapper_error", 1
+        )[0]
+
+        self.assertIn('"installed_package_owner"', verifier)
+        self.assertIn("descriptor_revalidate_system_desktop", verifier)
 
     def test_final_verifier_rejects_unowned_ambiguous_mismatched_and_noninstalled_entries(self):
         with tempfile.TemporaryDirectory() as directory:

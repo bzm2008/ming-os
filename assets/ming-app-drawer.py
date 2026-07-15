@@ -14,6 +14,7 @@ import threading
 
 
 ANIMATION_DURATION_MS = 200
+SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 DRAWER_HEIGHT_RATIO = 0.72
 IPC_VERSION = 1
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
@@ -253,12 +254,13 @@ class RecentStore:
                 os.unlink(temporary)
 
 
-def discover_apps(paths=None):
+def discover_apps(paths=None, system_catalog_dir=None):
     paths = paths or (
         pathlib.Path.home() / ".local/share/applications",
         pathlib.Path("/usr/local/share/applications"),
         pathlib.Path("/usr/share/applications"),
     )
+    system_catalog_dir = pathlib.Path(system_catalog_dir or SYSTEM_APPLICATION_DIR)
     found = {}
     seen = set()
     for directory in paths:
@@ -271,7 +273,11 @@ def discover_apps(paths=None):
                 continue
             seen.add(path.name)
             try:
-                entry = COMMON.diagnose_desktop_file(path)
+                if path.parent == system_catalog_dir:
+                    entry = COMMON.diagnose_desktop_file(
+                        path, respect_desktop_environment=True)
+                else:
+                    entry = COMMON.diagnose_desktop_file(path)
             except (OSError, ValueError):
                 continue
             if entry is not None:
@@ -320,6 +326,7 @@ class DrawerController:
         self._animation_source = 0
         self._animation_geometry = None
         self._animation_interval = 16
+        self._pending_launches = set()
 
     def _workarea(self):
         display = self.Gdk.Display.get_default()
@@ -447,6 +454,73 @@ class DrawerController:
         menu.popup_at_pointer(event)
         return True
 
+    def _show_launch_failure(self):
+        dialog = self.Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=self.Gtk.MessageType.ERROR,
+            buttons=self.Gtk.ButtonsType.CLOSE,
+            text="无法打开此应用",
+        )
+        dialog.format_secondary_text("启动命令不可用，请查看桌面启动日志。")
+        dialog.run()
+        dialog.destroy()
+        return False
+
+    @staticmethod
+    def _broker_unavailable(broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        return not rejected and (
+            bool(getattr(broker_result, "unavailable", False))
+            or not bool(broker_result)
+        )
+
+    def _recover_broker_result(self, app, rect, broker_result):
+        if not DrawerController._broker_unavailable(broker_result):
+            return broker_result
+        fallback = COMMON.broker_fallback_argv
+        retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+        if not callable(fallback) or not callable(retry):
+            return broker_result
+        try:
+            subprocess.Popen(fallback(str(app.path), "drawer"), shell=False)
+            # An unavailable result means the initial request was never sent.
+            # The recovery process only owns the socket; this retry owns launch.
+            return retry(str(app.path), "drawer", rect)
+        except (AttributeError, OSError, TypeError, ValueError, subprocess.SubprocessError):
+            return broker_result
+
+    def _complete_launch_result(self, app, broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        started = bool(broker_result) and not rejected
+        if not started:
+            return DrawerController._show_launch_failure(self)
+        self.recent.touch(app.path)
+        self.hide()
+        return True
+
+    def _queue_launch_result(self, app, broker_result):
+        def deliver():
+            try:
+                DrawerController._complete_launch_result(self, app, broker_result)
+            finally:
+                pending = getattr(self, "_pending_launches", None)
+                if hasattr(pending, "discard"):
+                    pending.discard(str(app.path))
+            return False
+
+        idle_add = getattr(getattr(self, "GLib", None), "idle_add", None)
+        if callable(idle_add):
+            try:
+                if idle_add(deliver):
+                    return True
+            except Exception:
+                pass
+        pending = getattr(self, "_pending_launches", None)
+        if hasattr(pending, "discard"):
+            pending.discard(str(app.path))
+        return False
+
     def launch(self, app, widget):
         diagnostic = getattr(app, "diagnostic", "")
         if diagnostic:
@@ -466,31 +540,34 @@ class DrawerController:
             origin = widget.get_window().get_origin()
             allocation = widget.get_allocation()
             rect = widget_source_rect(origin, allocation)
-        broker_result = COMMON.send_launch_request(str(app.path), "drawer", rect)
-        rejected = bool(getattr(broker_result, "rejected", False))
-        started = bool(broker_result) and not rejected
-        if not started and not rejected:
+        async_sender = getattr(COMMON, "send_launch_request_async", None)
+        if callable(async_sender) and getattr(self, "GLib", None) is not None:
+            pending = getattr(self, "_pending_launches", None)
+            if not isinstance(pending, set):
+                pending = set()
+                self._pending_launches = pending
+            path_key = str(app.path)
+            if path_key in pending:
+                return True
+            pending.add(path_key)
             try:
-                fallback_argv = COMMON.broker_fallback_argv(str(app.path), "drawer")
-                subprocess.Popen(fallback_argv, shell=False)
-                started = True
-            except (AttributeError, OSError, TypeError, ValueError, subprocess.SubprocessError):
-                started = False
-        if not started:
-            dialog = self.Gtk.MessageDialog(
-                transient_for=self.window,
-                flags=0,
-                message_type=self.Gtk.MessageType.ERROR,
-                buttons=self.Gtk.ButtonsType.CLOSE,
-                text="无法打开此应用",
-            )
-            dialog.format_secondary_text("启动命令不可用，请查看桌面启动日志。")
-            dialog.run()
-            dialog.destroy()
-            return False
-        self.recent.touch(app.path)
-        self.hide()
-        return True
+                queued = async_sender(
+                    str(app.path),
+                    "drawer",
+                    rect,
+                    callback=lambda result: self._queue_launch_result(
+                        app, self._recover_broker_result(app, rect, result)),
+                    timeout=getattr(COMMON, "ASYNC_LAUNCH_REQUEST_TIMEOUT", 12.0),
+                )
+            except (AttributeError, OSError, TypeError, ValueError, RuntimeError):
+                queued = False
+            if queued:
+                return True
+            pending.discard(path_key)
+            return DrawerController._show_launch_failure(self)
+        broker_result = COMMON.send_launch_request(str(app.path), "drawer", rect)
+        broker_result = DrawerController._recover_broker_result(self, app, rect, broker_result)
+        return DrawerController._complete_launch_result(self, app, broker_result)
 
     def show(self):
         # Always rebuild the catalog before presentation.  This is intentionally

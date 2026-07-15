@@ -15,6 +15,8 @@ import socket
 import stat
 import struct
 import subprocess
+import threading
+import time
 
 
 MAX_DESKTOP_BYTES = 256 * 1024
@@ -24,6 +26,13 @@ ICON_EXTENSIONS = {".png", ".svg"}
 _FIELD_CODE = re.compile(r"%[fFuUdDnNickvm]")
 _SHELL_NAME = {"sh", "bash", "dash", "zsh", "ksh"}
 _LAUNCH_REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
+_DEBIAN_PACKAGE_NAME = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9+.-]*(?::[A-Za-z0-9][A-Za-z0-9+.-]*)?")
+DEFAULT_LAUNCH_REQUEST_TIMEOUT = 0.4
+ASYNC_LAUNCH_REQUEST_TIMEOUT = 12.0
+MAX_LAUNCH_REQUEST_TIMEOUT = 15.0
+BROKER_RECOVERY_TIMEOUT = 3.0
+BROKER_RECOVERY_INTERVAL = 0.05
 
 
 class Rect:
@@ -494,6 +503,108 @@ def _localized(section, key, locale_name):
     return ""
 
 
+def current_desktop_ids(current_desktops=None):
+    """Return normalised desktop identifiers with the Ming Xfce baseline."""
+    if current_desktops is None:
+        current_desktops = (
+            os.environ.get("XDG_CURRENT_DESKTOP", ""),
+            os.environ.get("DESKTOP_SESSION", ""),
+        )
+    if isinstance(current_desktops, str):
+        values = re.split(r"[:;]", current_desktops)
+    else:
+        try:
+            values = tuple(
+                identifier
+                for value in current_desktops
+                for identifier in re.split(r"[:;]", str(value))
+            )
+        except TypeError:
+            values = ()
+    desktop_ids = {
+        str(value).strip().casefold()
+        for value in values
+        if str(value).strip()
+    }
+    return desktop_ids or {"xfce"}
+
+
+def installed_package_owner(path, command_runner, timeout=2, expected_package=None):
+    """Return the exact installed Debian package owning *path*, or an empty string.
+
+    ``command_runner`` receives dpkg-query arguments and returns a completed
+    process-like object.  Callers can adapt their own command execution layer
+    without importing the launch broker or relaxing its ownership contract.
+    """
+    try:
+        requested_path = str(path)
+        ownership = command_runner(("-S", "--", requested_path), timeout=timeout)
+        if getattr(ownership, "returncode", 1) != 0:
+            return ""
+        lines = [line for line in str(getattr(ownership, "stdout", "") or "").splitlines() if line]
+        if len(lines) != 1:
+            return ""
+        owner, marker, reported_path = lines[0].rpartition(": ")
+        if (
+                marker != ": "
+                or reported_path != requested_path
+                or owner.strip() != owner
+                or "," in owner
+                or not _DEBIAN_PACKAGE_NAME.fullmatch(owner)):
+            return ""
+        installation = command_runner(
+            ("-W", "-f=${db:Status-Abbrev}\\t${binary:Package}\\n", "--", owner),
+            timeout=timeout,
+        )
+        if getattr(installation, "returncode", 1) != 0:
+            return ""
+        lines = [line for line in str(getattr(installation, "stdout", "") or "").splitlines() if line]
+        if len(lines) != 1:
+            return ""
+        status, marker, installed_owner = lines[0].partition("\t")
+        if marker != "\t" or status != "ii " or installed_owner != owner:
+            return ""
+        if expected_package is not None:
+            expected = str(expected_package).strip()
+            if not _DEBIAN_PACKAGE_NAME.fullmatch(expected):
+                return ""
+            # dpkg may qualify the installed owner with an architecture while
+            # DEB metadata supplies the binary package name.  This image only
+            # accepts amd64/all DEBs, so the binary portion is the stable
+            # identity for this readiness check.
+            if owner.split(":", 1)[0] != expected.split(":", 1)[0]:
+                return ""
+        return owner
+    except (AttributeError, OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+        return ""
+
+
+def desktop_entry_is_visible(
+        section, current_desktops=None, respect_desktop_environment=False):
+    """Apply catalog visibility rules, optionally including desktop environment keys."""
+    try:
+        if (
+                section.getboolean("Hidden", fallback=False)
+                or section.getboolean("NoDisplay", fallback=False)):
+            return False
+        if not respect_desktop_environment:
+            return True
+        desktops = current_desktop_ids(current_desktops)
+        only = {
+            item.strip().casefold()
+            for item in section.get("OnlyShowIn", "").split(";")
+            if item.strip()
+        }
+        excluded = {
+            item.strip().casefold()
+            for item in section.get("NotShowIn", "").split(";")
+            if item.strip()
+        }
+        return (not only or bool(desktops.intersection(only))) and not bool(desktops.intersection(excluded))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def is_system_desktop_activation_candidate(
         path, system_dir=pathlib.Path("/usr/share/applications"),
         path_resolver=None, stat_reader=None):
@@ -617,7 +728,8 @@ def _diagnostic_message(reason):
     return "启动器配置无效：{}".format(reason or "未知错误")
 
 
-def _diagnostic_entry_from_raw(path, locale_name, reason):
+def _diagnostic_entry_from_raw(
+        path, locale_name, reason, respect_desktop_environment=False):
     """Read only display metadata for an unlaunchable application launcher."""
     path = pathlib.Path(path)
     try:
@@ -634,7 +746,8 @@ def _diagnostic_entry_from_raw(path, locale_name, reason):
     section = parser["Desktop Entry"]
     if section.get("Type", "Application") != "Application":
         return None
-    if section.getboolean("Hidden", fallback=False) or section.getboolean("NoDisplay", fallback=False):
+    if not desktop_entry_is_visible(
+            section, respect_desktop_environment=respect_desktop_environment):
         return None
     name = _localized(section, "Name", locale_name or os.environ.get("LANG", "")) or path.stem
     categories = tuple(item for item in section.get("Categories", "").split(";") if item)
@@ -649,7 +762,7 @@ def _diagnostic_entry_from_raw(path, locale_name, reason):
     )
 
 
-def parse_desktop_file(path, locale_name=None):
+def parse_desktop_file(path, locale_name=None, respect_desktop_environment=False):
     path = pathlib.Path(path)
     if path.suffix != ".desktop" or not path.is_file():
         raise ValueError("not a desktop file")
@@ -667,7 +780,8 @@ def parse_desktop_file(path, locale_name=None):
     section = parser["Desktop Entry"]
     if section.get("Type", "Application") != "Application":
         return None
-    if section.getboolean("Hidden", fallback=False) or section.getboolean("NoDisplay", fallback=False):
+    if not desktop_entry_is_visible(
+            section, respect_desktop_environment=respect_desktop_environment):
         return None
     try_exec = section.get("TryExec", "").strip()
     if try_exec:
@@ -695,7 +809,8 @@ def parse_desktop_file(path, locale_name=None):
     )
 
 
-def diagnose_desktop_file(path, locale_name=None):
+def diagnose_desktop_file(
+        path, locale_name=None, respect_desktop_environment=False):
     """Describe a launcher without ever turning an unsafe Exec into an argv.
 
     A normal catalog should keep a broken third-party launcher visible so the
@@ -703,10 +818,14 @@ def diagnose_desktop_file(path, locale_name=None):
     actual launch paths; only this diagnostic view supplies an empty argv.
     """
     try:
-        entry = parse_desktop_file(path, locale_name=locale_name)
+        entry = parse_desktop_file(
+            path, locale_name=locale_name,
+            respect_desktop_environment=respect_desktop_environment)
     except ValueError as exc:
         reason = str(exc)
-        diagnostic_entry = _diagnostic_entry_from_raw(path, locale_name, reason)
+        diagnostic_entry = _diagnostic_entry_from_raw(
+            path, locale_name, reason,
+            respect_desktop_environment=respect_desktop_environment)
         # This is only a catalog representation.  The broker revalidates the
         # package owner and descriptor before it activates the desktop entry.
         if (
@@ -723,7 +842,9 @@ def diagnose_desktop_file(path, locale_name=None):
             )
         return diagnostic_entry
     if entry is None:
-        return _diagnostic_entry_from_raw(path, locale_name, "TryExec dependency is unavailable")
+        return _diagnostic_entry_from_raw(
+            path, locale_name, "TryExec dependency is unavailable",
+            respect_desktop_environment=respect_desktop_environment)
     diagnostic = desktop_launch_diagnostic(entry.argv)
     if not diagnostic:
         return entry
@@ -762,7 +883,9 @@ def runtime_socket_path(service):
     return runtime_path(service + ".sock")
 
 
-def send_launch_request(desktop_file, source="unknown", rect=None, timeout=0.4):
+def send_launch_request(
+        desktop_file, source="unknown", rect=None,
+        timeout=DEFAULT_LAUNCH_REQUEST_TIMEOUT):
     """Return a bounded accepted, rejected, or unavailable broker result."""
     if source not in {"desktop", "drawer", "dock", "unknown"}:
         source = "unknown"
@@ -771,7 +894,7 @@ def send_launch_request(desktop_file, source="unknown", rect=None, timeout=0.4):
         if not path.is_file() or path.suffix != ".desktop":
             return LaunchRequestResult("rejected", "desktop file is unavailable")
         timeout = float(timeout)
-        if not math.isfinite(timeout) or timeout <= 0 or timeout > 5:
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_LAUNCH_REQUEST_TIMEOUT:
             return LaunchRequestResult("rejected", "invalid launch request")
         request_id = new_launch_request_id()
         message = {
@@ -784,25 +907,110 @@ def send_launch_request(desktop_file, source="unknown", rect=None, timeout=0.4):
         }
     except (AttributeError, TypeError, ValueError):
         return LaunchRequestResult("rejected", "invalid launch request")
+    sent = False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(str(runtime_socket_path("launch")))
             client.sendall(encode_json_line(message))
+            sent = True
             try:
                 response = recv_json_line(client, timeout=timeout)
-            except (TypeError, ValueError):
+            except (AttributeError, OSError, TypeError, ValueError):
                 # The socket was reachable, but the peer did not provide a
                 # valid correlated reply.  Falling back here could execute a
                 # second launch after a compromised or stale broker response.
                 return LaunchRequestResult("rejected", "invalid broker response")
     except (AttributeError, OSError, TypeError, ValueError):
+        if sent:
+            # A peer can reset after consuming the request.  Treat that as a
+            # terminal rejection so desktop surfaces never dispatch a second
+            # broker process for an uncertain request.
+            return LaunchRequestResult("rejected", "invalid broker response")
         return LaunchRequestResult("unavailable", "launch broker is unavailable")
     return parse_launch_result(response, request_id)
 
 
+def send_launch_request_async(
+        desktop_file, source="unknown", rect=None, callback=None,
+        timeout=ASYNC_LAUNCH_REQUEST_TIMEOUT):
+    """Run a bounded correlated broker request away from a GTK event handler."""
+    if not callable(callback):
+        return False
+
+    def request_worker():
+        try:
+            result = send_launch_request(desktop_file, source, rect, timeout=timeout)
+        except Exception as exc:
+            result = LaunchRequestResult("rejected", str(exc) or "launch request failed")
+        try:
+            callback(result)
+        except Exception:
+            pass
+
+    try:
+        threading.Thread(
+            target=request_worker,
+            name="ming-launch-request",
+            daemon=True,
+        ).start()
+    except (RuntimeError, TypeError):
+        return False
+    return True
+
+
+def retry_launch_request_after_broker_start(
+        desktop_file, source="unknown", rect=None,
+        request_timeout=ASYNC_LAUNCH_REQUEST_TIMEOUT,
+        recovery_timeout=BROKER_RECOVERY_TIMEOUT,
+        retry_interval=BROKER_RECOVERY_INTERVAL,
+        sleeper=time.sleep, clock=time.monotonic):
+    """Retry only requests that never reached a newly started launch broker."""
+    try:
+        request_timeout = float(request_timeout)
+        recovery_timeout = float(recovery_timeout)
+        retry_interval = float(retry_interval)
+        if (
+                not math.isfinite(request_timeout)
+                or not math.isfinite(recovery_timeout)
+                or not math.isfinite(retry_interval)
+                or request_timeout <= 0
+                or request_timeout > MAX_LAUNCH_REQUEST_TIMEOUT
+                or recovery_timeout <= 0
+                or recovery_timeout > 5
+                or retry_interval <= 0
+                or retry_interval > 1):
+            return LaunchRequestResult("rejected", "invalid broker recovery timeout")
+        deadline = float(clock()) + recovery_timeout
+    except (AttributeError, TypeError, ValueError):
+        return LaunchRequestResult("rejected", "invalid broker recovery timeout")
+
+    last = LaunchRequestResult("unavailable", "launch broker is unavailable")
+    while True:
+        try:
+            last = send_launch_request(
+                desktop_file, source, rect, timeout=request_timeout)
+        except Exception as exc:
+            return LaunchRequestResult("rejected", str(exc) or "launch broker recovery failed")
+        rejected = bool(getattr(last, "rejected", False))
+        unavailable = not rejected and (
+            bool(getattr(last, "unavailable", False)) or not bool(last))
+        if not unavailable:
+            return last
+        try:
+            remaining = deadline - float(clock())
+        except (TypeError, ValueError):
+            return LaunchRequestResult("rejected", "invalid broker recovery clock")
+        if remaining <= 0:
+            return last
+        try:
+            sleeper(min(retry_interval, remaining))
+        except (AttributeError, OSError, TypeError, ValueError):
+            return last
+
+
 def broker_fallback_argv(desktop_file, source):
-    """Return the sole safe local fallback: start the broker with a path."""
+    """Return the sole safe local fallback: start a broker, never an app."""
     if source not in {"desktop", "drawer", "dock"}:
         raise ValueError("unsupported desktop launch source")
     try:
@@ -811,7 +1019,7 @@ def broker_fallback_argv(desktop_file, source):
         raise ValueError("desktop file path is invalid") from exc
     if not isinstance(path, str) or not path or "\x00" in path:
         raise ValueError("desktop file path is invalid")
-    return ("/usr/local/bin/ming-launch", "--desktop-file", path, "--source", source)
+    return ("/usr/local/bin/ming-launch", "--server")
 
 
 def run_command(argv, timeout=8):
@@ -917,11 +1125,15 @@ def recv_json_line(connection, timeout=0.5):
         timeout = float(timeout)
     except (TypeError, ValueError) as exc:
         raise ValueError("timeout must be numeric") from exc
-    if timeout <= 0 or timeout > 5:
+    if timeout <= 0 or timeout > MAX_LAUNCH_REQUEST_TIMEOUT:
         raise ValueError("IPC timeout is out of range")
-    connection.settimeout(timeout)
+    deadline = time.monotonic() + timeout
     payload = bytearray()
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("IPC line timed out")
+        connection.settimeout(remaining)
         try:
             chunk = connection.recv(min(4096, MAX_JSON_LINE_BYTES + 1 - len(payload)))
         except (socket.timeout, TimeoutError) as exc:

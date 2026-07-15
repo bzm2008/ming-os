@@ -10,15 +10,17 @@ import re
 import stat
 import subprocess
 import os
-import shlex
-import shutil
 import sys
+import types
 from datetime import datetime
 
 
 SUPPORTED_ARCHITECTURES = {"amd64", "all"}
 PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z.+:~\-]+$")
+SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
+SHELL_WRAPPER_REJECTION = "shell command wrappers are not allowed"
+PACKAGE_INSTALLER_PATH = "/usr/local/sbin/ming-package-installer"
 
 
 def _common_paths(program_path=None, install_prefix=None):
@@ -77,6 +79,14 @@ class PackageInstaller:
             or getattr(COMMON, "is_system_desktop_activation_candidate", None)
             or (lambda _path: False)
         )
+        self.application_dir = SYSTEM_APPLICATION_DIR
+        desktop_ids = getattr(COMMON, "current_desktop_ids", None)
+        try:
+            self.current_desktops = set(desktop_ids()) if callable(desktop_ids) else {"xfce"}
+        except (AttributeError, OSError, TypeError, ValueError):
+            self.current_desktops = {"xfce"}
+        if not self.current_desktops:
+            self.current_desktops = {"xfce"}
 
     def _result(self, ok, **values):
         result = {
@@ -92,6 +102,7 @@ class PackageInstaller:
             "launchers": [],
             "launcher_warnings": [],
             "launch_ready": False,
+            "repair_argv": [],
         }
         result.update(values)
         return result
@@ -205,109 +216,156 @@ class PackageInstaller:
             refresh[name] = returncode == 0
         return refresh
 
-    @staticmethod
-    def _desktop_values(argv):
-        values = list(argv or ())
-        if values and pathlib.PurePath(values[0]).name == "env":
-            offset = 1
-            while offset < len(values) and (
-                    values[offset].startswith("-") or "=" in values[offset]):
-                offset += 1
-            values = values[offset:]
-        return values
-
-    @classmethod
-    def _is_shell_wrapper(cls, argv):
-        values = cls._desktop_values(argv)
-        return bool(
-            values
-            and pathlib.PurePath(values[0]).name in {"sh", "bash", "dash", "zsh", "fish"}
-            and "-c" in values[1:]
-        )
-
-    @classmethod
-    def _desktop_program(cls, argv):
-        """Resolve the executable position without interpreting shell syntax."""
-        values = cls._desktop_values(argv)
-        if not values:
-            return "", "启动器没有有效的启动程序。"
-        if cls._is_shell_wrapper(values):
-            return "", "为保护系统安全，不支持通过 shell -c 启动的软件入口。"
-        return values[0], ""
-
-    @staticmethod
-    def _desktop_visible(entry):
-        return not any(
-            str(entry.get(key, "")).strip().casefold() in {"1", "true", "yes"}
-            for key in ("Hidden", "NoDisplay")
-        )
-
-    def _protected_package_wrapper(self, path, package_paths):
+    def _package_owns_launcher(self, path, package_paths, package=""):
         if str(path) not in package_paths:
+            return False
+        owner_lookup = getattr(COMMON, "installed_package_owner", None)
+        if not callable(owner_lookup):
+            return False
+        try:
+            owner = owner_lookup(
+                path,
+                command_runner=self._dpkg_query_runner,
+                expected_package=package or None,
+            )
+            if not owner:
+                return False
+            # Keep the installer fail-closed even if a future shared helper is
+            # replaced by an adapter that returns an unexpected installed owner.
+            if package and str(owner).split(":", 1)[0] != package.split(":", 1)[0]:
+                return False
+            return True
+        except (AttributeError, OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+            return False
+
+    def _protected_package_wrapper(self, path, package_paths, package=""):
+        if not self._package_owns_launcher(path, package_paths, package):
             return False
         try:
             return bool(self.desktop_candidate_verifier(path))
         except Exception:
             return False
 
-    def _launcher_record(self, path, package_paths=()):
+    def _dpkg_query_runner(self, arguments, timeout=2):
+        """Adapt the installer's tuple runner for shared package ownership checks."""
+        returncode, output, error = self._call(
+            ("dpkg-query", *tuple(arguments)), timeout=timeout)
+        return types.SimpleNamespace(
+            returncode=returncode,
+            stdout=output,
+            stderr=error,
+        )
+
+    def _catalog_entry_status(self, path):
+        """Read catalog visibility only; launch validity comes from COMMON."""
+        try:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.optionxform = str
+            with pathlib.Path(path).open("r", encoding="utf-8", errors="replace") as handle:
+                parser.read_file(handle)
+            section = parser["Desktop Entry"]
+            visible = getattr(COMMON, "desktop_entry_is_visible", None)
+            if not callable(visible):
+                return False, "启动器校验组件不可用。"
+            if visible(
+                    section, current_desktops=self.current_desktops,
+                    respect_desktop_environment=True):
+                return True, ""
+            if (
+                section.getboolean("Hidden", fallback=False)
+                or section.getboolean("NoDisplay", fallback=False)
+            ):
+                return False, "启动器已隐藏（Hidden 或 NoDisplay）。"
+            only = {
+                item.strip().casefold()
+                for item in section.get("OnlyShowIn", "").split(";") if item.strip()
+            }
+            excluded = {
+                item.strip().casefold()
+                for item in section.get("NotShowIn", "").split(";") if item.strip()
+            }
+            if only and not self.current_desktops.intersection(only):
+                return False, "启动器不适用于当前桌面（OnlyShowIn）。"
+            if self.current_desktops.intersection(excluded):
+                return False, "启动器已在当前桌面禁用（NotShowIn）。"
+            return False, "启动器不适用于当前桌面。"
+        except (KeyError, OSError, ValueError, configparser.Error):
+            return True, ""
+
+    @staticmethod
+    def _diagnostic_from_common(path, fallback):
+        diagnostic = getattr(COMMON, "diagnose_desktop_file", None)
+        if callable(diagnostic):
+            try:
+                entry = diagnostic(path)
+                message = getattr(entry, "diagnostic", "") if entry is not None else ""
+                if message:
+                    return str(message)
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+        return fallback
+
+    def _parse_error(self, path, error):
+        return self._diagnostic_from_common(
+            path, "启动器配置无效：%s" % (str(error) or "未知错误"))
+
+    def _launcher_record(self, path, package_paths=(), package=""):
         path = pathlib.Path(path)
         record = {
             "path": str(path), "name": path.stem, "ok": False, "error": "",
-            "visible": False, "activation": "",
+            "visible": True, "activation": "",
         }
         try:
+            if path.is_symlink():
+                record["error"] = "启动器路径不能是符号链接。"
+                return record
             if not path.is_file() or path.stat().st_size == 0:
                 raise OSError("启动器文件不存在或为空")
-            parser = configparser.ConfigParser(interpolation=None, strict=False)
-            parser.optionxform = str
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                parser.read_file(handle)
-            if not parser.has_section("Desktop Entry"):
-                record["error"] = "启动器缺少 Desktop Entry 配置。"
+            parser = getattr(COMMON, "parse_desktop_file", None)
+            if not callable(parser):
+                record["error"] = "启动器校验组件不可用。"
                 return record
-            entry = parser["Desktop Entry"]
-            record["name"] = entry.get("Name[zh_CN]") or entry.get("Name") or path.stem
-            record["visible"] = self._desktop_visible(entry)
-            exec_line = entry.get("Exec", "").strip()
-            if not exec_line:
-                record["error"] = "启动器没有 Exec 启动命令。"
+            record["visible"], catalog_error = self._catalog_entry_status(path)
+            if not record["visible"]:
+                record["error"] = catalog_error
                 return record
             try:
-                argv = [item for item in shlex.split(exec_line) if not item.startswith("%")]
-            except ValueError:
-                record["error"] = "启动器的 Exec 格式无法解析。"
-                return record
-            if self._is_shell_wrapper(argv):
-                if self._protected_package_wrapper(path, set(package_paths)):
+                entry = parser(path)
+            except ValueError as exc:
+                if (
+                        str(exc) == SHELL_WRAPPER_REJECTION
+                        and self._protected_package_wrapper(
+                            path, set(package_paths), package)):
                     record.update(ok=True, activation="desktop_app_info")
                     return record
-                record["error"] = "为保护系统安全，不支持通过 shell -c 启动的软件入口。"
+                record["error"] = self._parse_error(path, exc)
                 return record
-            program, error = self._desktop_program(argv)
-            if error:
-                record["error"] = error
+            if entry is None:
+                record["error"] = self._diagnostic_from_common(
+                    path, "启动器不是可用的图形应用，或其 TryExec 依赖不可用。")
                 return record
+            record["name"] = entry.name or path.stem
             record["activation"] = "direct"
+            diagnostic = getattr(COMMON, "desktop_launch_diagnostic", None)
+            program_getter = getattr(COMMON, "desktop_exec_program", None)
+            if not callable(diagnostic) or not callable(program_getter):
+                record["error"] = "启动器校验组件不可用。"
+                return record
+            error = diagnostic(entry.argv)
+            if error:
+                record["error"] = str(error)
+                return record
+            program = program_getter(entry.argv)
             candidate = pathlib.Path(program)
-            if program.startswith("/") or candidate.is_absolute():
-                executable = candidate
-            elif "/" in program or "\\" in program:
-                record["error"] = "启动程序路径无效：%s" % program
-                return record
-            else:
-                found = shutil.which(program)
-                executable = pathlib.Path(found) if found else None
-            if not executable or not executable.is_file():
-                record["error"] = "找不到启动程序：%s" % program
-                return record
-            if not os.access(str(executable), os.X_OK):
-                record["error"] = "启动程序没有执行权限：%s" % executable
-                return record
+            executable = candidate if candidate.is_absolute() else None
             try:
+                if executable is None:
+                    import shutil
+                    found = shutil.which(program)
+                    executable = pathlib.Path(found) if found else None
                 with executable.open("rb") as handle:
                     is_elf = handle.read(4) == b"\x7fELF"
-            except OSError:
+            except (AttributeError, OSError, TypeError, ValueError):
                 is_elf = False
             if is_elf:
                 _rc, output, _error = self._call(("ldd", str(executable)), timeout=20)
@@ -315,27 +373,71 @@ class PackageInstaller:
                 if missing:
                     record["error"] = "缺少运行库：%s" % "; ".join(missing[:3])
                     return record
+            if package and not self._package_owns_launcher(
+                    path, set(package_paths), package):
+                record["error"] = "启动器所有权无法验证。"
+                return record
+            if package:
+                try:
+                    protected = bool(self.desktop_candidate_verifier(path))
+                except Exception:
+                    protected = False
+                if not protected:
+                    record["error"] = "启动器保护状态无法验证。"
+                    return record
             record["ok"] = True
             return record
         except (OSError, configparser.Error) as exc:
             record["error"] = "无法读取启动器：%s" % exc
             return record
 
-    def _package_launchers(self, package):
-        """Validate only the package's own desktop launchers after installation."""
-        returncode, output, _error = self._call(("dpkg-query", "-L", package), timeout=20)
-        if returncode != 0:
-            return []
-        package_paths = {
-            value.strip() for value in output.splitlines()
-            if pathlib.Path(value.strip()).suffix == ".desktop"
-        }
-        return [
-            self._launcher_record(pathlib.Path(value), package_paths=package_paths)
-            for value in sorted(package_paths)
-        ]
+    def _catalog_desktop_path(self, value):
+        try:
+            path = pathlib.Path(str(value).strip())
+            application_dir = pathlib.Path(self.application_dir)
+        except (TypeError, ValueError):
+            return None
+        if (
+                not path.is_absolute()
+                or path.suffix != ".desktop"
+                or path.parent != application_dir):
+            return None
+        return path
 
-    def _launch_readiness(self, launchers, completed_state):
+    def _package_launchers(self, package):
+        """Validate package-owned direct children of the system app catalog."""
+        returncode, output, command_error = self._call(
+            ("dpkg-query", "-L", package), timeout=20)
+        if returncode != 0:
+            detail = command_error.strip() or "dpkg-query -L 失败"
+            return [], "无法枚举软件包图形启动器：%s" % detail
+        package_paths = {
+            str(path) for value in output.splitlines()
+            for path in (self._catalog_desktop_path(value),)
+            if path is not None
+        }
+        return ([
+            self._launcher_record(
+                pathlib.Path(value), package_paths=package_paths, package=package)
+            for value in sorted(package_paths)
+        ], "")
+
+    def _launch_readiness(self, launchers, completed_state, enumeration_error=""):
+        if enumeration_error:
+            return (
+                "%s_with_launch_problem" % completed_state,
+                False,
+                "软件已安装，但无法确认图形启动器：%s。请查看日志：%s" % (
+                    enumeration_error, self.log_path),
+            )
+        if not launchers:
+            return (
+                "%s_with_launch_problem" % completed_state,
+                False,
+                "软件已安装，但未发现可验证的系统图形启动器。请查看日志：%s" % (
+                    self.log_path,
+                ),
+            )
         visible = [record for record in launchers if record.get("visible")]
         visible_problems = [record for record in visible if not record.get("ok")]
         if visible_problems:
@@ -350,9 +452,37 @@ class PackageInstaller:
                 "软件已安装，但以下可见启动器无法启动：%s。请查看日志：%s" % (
                     "；".join(details), self.log_path),
             )
+        if launchers and not visible:
+            details = []
+            for record in launchers[:3]:
+                name = str(record.get("name") or pathlib.Path(record.get("path", "")).stem)
+                reason = str(record.get("error") or "启动器不适用于当前桌面")
+                details.append("%s（%s）" % (
+                    name.replace("\n", " ")[:80], reason.replace("\n", " ")[:120]))
+            return (
+                "%s_with_launch_problem" % completed_state,
+                False,
+                "软件已安装，但没有当前桌面可用的图形启动器：%s。请查看日志：%s" % (
+                    "；".join(details), self.log_path),
+            )
         if any(record.get("activation") == "desktop_app_info" for record in visible):
             return "%s_with_desktop_activation" % completed_state, True, ""
         return completed_state, True, ""
+
+    @staticmethod
+    def _repair_argv(package):
+        return [PACKAGE_INSTALLER_PATH, "repair", package]
+
+    def _log_launch_readiness(self, package, warnings, enumeration_error=""):
+        if enumeration_error:
+            self._log("launcher enumeration failed for %s: %s" % (
+                package, enumeration_error))
+        for warning in warnings:
+            self._log("launcher readiness problem for %s: %s: %s" % (
+                package,
+                warning.get("path") or "<enumeration>",
+                warning.get("error") or "启动器不可用",
+            ))
 
     def install(self, package_file):
         inspected = self.inspect(package_file)
@@ -402,10 +532,18 @@ class PackageInstaller:
                 error="软件包安装后未处于已安装状态。",
             )
         refresh = self._refresh_caches()
-        launchers = self._package_launchers(inspected["package"])
+        launchers, enumeration_error = self._package_launchers(inspected["package"])
         launcher_warnings = [record for record in launchers if not record.get("ok")]
-        state, launch_ready, launch_error = self._launch_readiness(launchers, "installed")
+        if enumeration_error:
+            launcher_warnings.append({
+                "path": "", "name": inspected["package"], "ok": False,
+                "visible": True, "activation": "", "error": enumeration_error,
+            })
+        state, launch_ready, launch_error = self._launch_readiness(
+            launchers, "installed", enumeration_error)
         self._log("installed %s from %s" % (inspected["package"], inspected["file"]))
+        self._log_launch_readiness(
+            inspected["package"], launcher_warnings, enumeration_error)
         return self._result(
             True,
             action="install",
@@ -416,6 +554,8 @@ class PackageInstaller:
             launchers=launchers,
             launcher_warnings=launcher_warnings,
             error=launch_error,
+            repair_argv=(self._repair_argv(inspected["package"])
+                         if not launch_ready else []),
             **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
         )
 
@@ -467,10 +607,17 @@ class PackageInstaller:
                 error="软件包修复后未处于已安装状态。",
             )
         refresh = self._refresh_caches()
-        launchers = self._package_launchers(package)
+        launchers, enumeration_error = self._package_launchers(package)
         launcher_warnings = [record for record in launchers if not record.get("ok")]
-        state, launch_ready, launch_error = self._launch_readiness(launchers, "repaired")
+        if enumeration_error:
+            launcher_warnings.append({
+                "path": "", "name": package, "ok": False,
+                "visible": True, "activation": "", "error": enumeration_error,
+            })
+        state, launch_ready, launch_error = self._launch_readiness(
+            launchers, "repaired", enumeration_error)
         self._log("repaired %s" % package)
+        self._log_launch_readiness(package, launcher_warnings, enumeration_error)
         return self._result(
             True,
             action="repair",
@@ -482,6 +629,7 @@ class PackageInstaller:
             launchers=launchers,
             launcher_warnings=launcher_warnings,
             error=launch_error,
+            repair_argv=self._repair_argv(package) if not launch_ready else [],
         )
 
 

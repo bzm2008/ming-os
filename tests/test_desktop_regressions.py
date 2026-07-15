@@ -167,6 +167,198 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("COMMON.broker_fallback_argv", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
 
+    def test_phone_desktop_uses_async_broker_requests(self):
+        open_item = self.phone[
+            self.phone.index("    def open_item(self, item):"):
+            self.phone.index("    def show_folder", self.phone.index("    def open_item(self, item):"))
+        ]
+        self.assertIn("def launch_item_async", self.phone)
+        self.assertIn("launch_item_async(item, source_rect", open_item)
+
+    def test_phone_async_legacy_false_result_starts_safe_broker_fallback_without_success_ack(self):
+        """A partially updated old broker may recover safely, but has not launched yet."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        launch = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_item_async"
+        )
+        calls = []
+        results = []
+        path = "/usr/share/applications/store-wrapper.desktop"
+        expected = ("ming-launch", "--server")
+
+        class Common:
+            ASYNC_LAUNCH_REQUEST_TIMEOUT = 12.0
+
+            @staticmethod
+            def send_launch_request_async(desktop_file, source_name, rect, callback, timeout):
+                self.assertEqual((path, "desktop", None, 12.0), (
+                    desktop_file, source_name, rect, timeout))
+                callback(False)
+                return True
+
+            @staticmethod
+            def broker_fallback_argv(desktop_file, source_name):
+                self.assertEqual((path, "desktop"), (desktop_file, source_name))
+                return expected
+
+        namespace = {
+            "COMMON": Common(),
+            "log": lambda _message: None,
+            "subprocess": types.SimpleNamespace(
+                Popen=lambda argv, shell=False: calls.append((argv, shell)) or object(),
+            ),
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[launch], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+
+        self.assertTrue(namespace["launch_item_async"](
+            {"path": path, "diagnostic": ""}, on_result=results.append))
+        self.assertEqual([(expected, False)], calls)
+        self.assertEqual([False], results)
+
+    def test_phone_desktop_ignores_repeat_click_until_async_launch_settles(self):
+        """A pending desktop launch must not enqueue a second broker request."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        desktop = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        open_item = next(
+            node for node in desktop.body
+            if isinstance(node, ast.FunctionDef) and node.name == "open_item"
+        )
+        requests = []
+        feedback = []
+
+        class ImmediateGLib:
+            @staticmethod
+            def idle_add(callback):
+                callback()
+                return True
+
+        def launch_async(item, _rect, on_result):
+            requests.append(on_result)
+            return True
+
+        namespace = {
+            "GLib": ImmediateGLib(),
+            "Gtk": types.SimpleNamespace(),
+            "PAD_X": 20,
+            "PAD_Y": 20,
+            "log": lambda _message: None,
+            "scaled_tile_metrics": lambda _scale: (96, 96),
+            "launch_item_async": launch_async,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[open_item], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+        desktop = types.SimpleNamespace(
+            appearance={"desktop_icon_scale": 1.0},
+            window_origin=(0, 0),
+            launch_feedback=types.SimpleNamespace(begin=lambda item: feedback.append(("begin", item["path"]))),
+        )
+        item = {"path": "/usr/share/applications/store.desktop"}
+
+        namespace["open_item"](desktop, item)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(1, len(requests))
+        self.assertEqual([("begin", item["path"])], feedback)
+
+        requests[0](True)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(2, len(requests))
+
+    def test_phone_desktop_does_not_touch_gtk_when_idle_queue_rejects_a_worker_result(self):
+        """A GLib idle scheduling failure may clear state, but cannot render UI on the worker."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        open_item = next(
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "open_item"
+        )
+        requests = []
+        feedback = []
+        dialogs = []
+
+        class RejectedGLib:
+            @staticmethod
+            def idle_add(_callback):
+                return False
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                dialogs.append(kwargs.get("text"))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
+        def launch_async(item, _rect, on_result):
+            requests.append(on_result)
+            return True
+
+        namespace = {
+            "GLib": RejectedGLib(),
+            "Gtk": types.SimpleNamespace(
+                MessageDialog=Dialog,
+                MessageType=types.SimpleNamespace(ERROR="error"),
+                ButtonsType=types.SimpleNamespace(CLOSE="close"),
+            ),
+            "PAD_X": 20,
+            "PAD_Y": 20,
+            "log": lambda _message: None,
+            "scaled_tile_metrics": lambda _scale: (96, 96),
+            "launch_item_async": launch_async,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[open_item], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+        desktop = types.SimpleNamespace(
+            appearance={"desktop_icon_scale": 1.0},
+            window_origin=(0, 0),
+            launch_feedback=types.SimpleNamespace(
+                begin=lambda item: feedback.append(("begin", item["path"])),
+                finish=lambda: feedback.append(("finish",)),
+            ),
+        )
+        item = {"path": "/usr/share/applications/rejected-store.desktop"}
+
+        namespace["open_item"](desktop, item)
+        requests.pop()(False)
+        self.assertEqual([("begin", item["path"])], feedback)
+        self.assertEqual([], dialogs)
+        self.assertEqual(set(), desktop._pending_launch_paths)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(1, len(requests))
+
     def test_phone_fallback_starts_only_the_broker_without_reparsing_exec(self):
         source = PHONE_DESKTOP.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -177,18 +369,25 @@ class DesktopSourceTests(unittest.TestCase):
         calls = []
         logs = []
         path = "/usr/share/applications/store-wrapper.desktop"
-        expected = ("ming-launch", "--desktop-file", path, "--source", "desktop")
+        expected = ("ming-launch", "--server")
+        responses = iter((False, True))
 
         class Common:
             @staticmethod
-            def send_launch_request(desktop_file, source_name, rect):
+            def send_launch_request(desktop_file, source_name, rect, timeout=None):
                 self.assertEqual((path, "desktop", None), (desktop_file, source_name, rect))
-                return False
+                self.assertIn(timeout, (None, 1.0))
+                return next(responses)
 
             @staticmethod
             def broker_fallback_argv(desktop_file, source_name):
                 self.assertEqual((path, "desktop"), (desktop_file, source_name))
                 return expected
+
+            @staticmethod
+            def retry_launch_request_after_broker_start(desktop_file, source_name, rect):
+                self.assertEqual((path, "desktop", None), (desktop_file, source_name, rect))
+                return True
 
         namespace = {
             "COMMON": Common(),

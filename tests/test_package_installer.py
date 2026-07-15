@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -44,14 +45,39 @@ def successful_install_runner(package_file, package_name, desktop_paths=()):
     list_files = ("dpkg-query", "-L", package_name)
     refresh_desktops = ("update-desktop-database", "/usr/share/applications")
     refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
-    return FakeRunner({
+    responses = {
         metadata: (0, "{}\n1.2.3\namd64\n".format(package_name), ""),
         apt_install: (0, "", ""),
         verify: (0, "ii ", ""),
         refresh_desktops: (0, "", ""),
         refresh_icons: (0, "", ""),
         list_files: (0, "".join("{}\n".format(path) for path in desktop_paths), ""),
-    })
+    }
+    for desktop in desktop_paths:
+        responses[("dpkg-query", "-S", "--", str(desktop))] = (
+            0, "{}: {}\n".format(package_name, desktop), "")
+    responses[(
+        "dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${binary:Package}\\n",
+        "--", package_name,
+    )] = (0, "ii \t{}\n".format(package_name), "")
+    return FakeRunner(responses)
+
+
+def package_application_dir(directory):
+    applications = pathlib.Path(directory) / "usr" / "share" / "applications"
+    applications.mkdir(parents=True)
+    return applications
+
+
+def configured_package_installer(module, application_dir, **kwargs):
+    kwargs.setdefault(
+        "desktop_candidate_verifier",
+        lambda candidate: pathlib.Path(candidate).parent == pathlib.Path(application_dir),
+    )
+    service = module.PackageInstaller(**kwargs)
+    service.application_dir = pathlib.Path(application_dir)
+    service.current_desktops = {"xfce"}
+    return service
 
 
 class PackageInstallerInspectTests(unittest.TestCase):
@@ -175,7 +201,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
-            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            applications = package_application_dir(directory)
+            desktop = applications / "sample-app.desktop"
             package.write_bytes(b"local package")
             desktop.write_text(
                 "[Desktop Entry]\nType=Application\nName=Sample App\n"
@@ -202,7 +229,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 list_files: (0, str(desktop) + "\n", ""),
             })
 
-            result = installer.PackageInstaller(
+            result = configured_package_installer(
+                installer, applications,
                 runner=runner, uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
             ).install(package)
@@ -218,7 +246,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
             package = pathlib.Path(directory) / "store-app.deb"
-            desktop = pathlib.Path(directory) / "store-app.desktop"
+            applications = package_application_dir(directory)
+            desktop = applications / "store-app.desktop"
             package.write_bytes(b"local package")
             desktop.write_text(
                 "[Desktop Entry]\nType=Application\nName=Store App\n"
@@ -226,7 +255,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = installer.PackageInstaller(
+            result = configured_package_installer(
+                installer, applications,
                 runner=successful_install_runner(package, "store-app", (desktop,)),
                 uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
@@ -239,11 +269,237 @@ class PackageInstallerInstallTests(unittest.TestCase):
         self.assertTrue(result["launchers"][0]["ok"])
         self.assertEqual("desktop_app_info", result["launchers"][0]["activation"])
 
-    def test_install_ignores_a_hidden_broken_launcher_for_readiness(self):
+    def test_install_requires_exact_owner_for_direct_package_launcher(self):
+        """A regular package launcher is not launch-ready on an ownership mismatch."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "direct-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "direct-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Direct App\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+            runner = successful_install_runner(package, "direct-app", (desktop,))
+            runner.responses[("dpkg-query", "-S", "--", str(desktop))] = (
+                0, "other-package: {}\n".format(desktop), "")
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["ok"])
+        self.assertIn("所有权", result["launchers"][0]["error"])
+
+    def test_install_classifies_protected_ksh_wrapper_using_shared_rejection(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "ksh-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "ksh-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Ksh App\n"
+                "Exec=ksh -c 'exec /opt/ksh-app/run'\n",
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "ksh-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual("installed_with_desktop_activation", result["state"])
+        self.assertEqual("desktop_app_info", result["launchers"][0]["activation"])
+
+    def test_install_rejects_shell_wrapper_when_broker_owner_is_not_installed(self):
+        """A catalog result must not promise a launch the broker will reject."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "store-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "store-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store App\n"
+                "Exec=sh -c 'exec /opt/store-app/run'\n",
+                encoding="utf-8",
+            )
+            runner = successful_install_runner(package, "store-app", (desktop,))
+            runner.responses[(
+                "dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${binary:Package}\\n",
+                "--", "store-app",
+            )] = (0, "hi \tstore-app\n", "")
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertNotEqual("desktop_app_info", result["launchers"][0]["activation"])
+
+    def test_install_rejects_shell_wrapper_replaced_by_a_different_installed_package(self):
+        """`dpkg -L` membership cannot override the broker's exact owner check."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "store-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "store-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store App\n"
+                "Exec=sh -c 'exec /opt/store-app/run'\n",
+                encoding="utf-8",
+            )
+            runner = successful_install_runner(package, "store-app", (desktop,))
+            with mock.patch.object(
+                    installer.COMMON, "installed_package_owner",
+                    return_value="replacement-app") as owner_lookup:
+                result = configured_package_installer(
+                    installer, applications,
+                    runner=runner,
+                    uid_getter=lambda: 0,
+                    log_path=pathlib.Path(directory) / "installer.log",
+                    desktop_candidate_verifier=lambda candidate: candidate == desktop,
+                ).install(package)
+
+        self.assertEqual("store-app", owner_lookup.call_args.kwargs["expected_package"])
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertNotEqual("desktop_app_info", result["launchers"][0]["activation"])
+
+    def test_install_accepts_arch_qualified_exact_owner_for_the_installed_package(self):
+        """A package-qualified owner remains the same Debian binary package."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "store-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "store-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store App\n"
+                "Exec=sh -c 'exec /opt/store-app/run'\n",
+                encoding="utf-8",
+            )
+            runner = successful_install_runner(package, "store-app", (desktop,))
+            with mock.patch.object(
+                    installer.COMMON, "installed_package_owner",
+                    return_value="store-app:amd64") as owner_lookup:
+                result = configured_package_installer(
+                    installer, applications,
+                    runner=runner,
+                    uid_getter=lambda: 0,
+                    log_path=pathlib.Path(directory) / "installer.log",
+                    desktop_candidate_verifier=lambda candidate: candidate == desktop,
+                ).install(package)
+
+        self.assertEqual("store-app", owner_lookup.call_args.kwargs["expected_package"])
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual("installed_with_desktop_activation", result["state"])
+
+    def test_install_rejects_a_direct_launcher_without_protected_descriptor_state(self):
+        """Direct entries need the same protected descriptor proof as the broker."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "store-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "store-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store App\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "store-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda _path: False,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertIn("保护", result["launchers"][0]["error"])
+
+    def test_launcher_visibility_combines_xdg_and_desktop_session_identifiers(self):
+        """Store launchers must see desktop IDs supplied through either standard variable."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "desktop-session-only.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Desktop Session App\n"
+                "OnlyShowIn=GNOME;\nExec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {
+                    "XDG_CURRENT_DESKTOP": "MING:XFCE",
+                    "DESKTOP_SESSION": "GNOME",
+            }, clear=False):
+                record = installer.PackageInstaller(
+                    log_path=pathlib.Path(directory) / "installer.log",
+                )._launcher_record(desktop)
+
+        self.assertTrue(record["visible"])
+        self.assertTrue(record["ok"])
+        self.assertEqual("direct", record["activation"])
+
+    def test_install_does_not_activate_protected_wrapper_with_other_shell_syntax(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "unsafe-wrapper.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "unsafe-wrapper.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Unsafe Wrapper\n"
+                "Exec=sh -c 'exec /opt/unsafe-wrapper/run' ; /bin/true\n",
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "unsafe-wrapper", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertNotEqual("desktop_app_info", result["launchers"][0]["activation"])
+
+    def test_install_reports_a_hidden_only_launcher_as_not_ready(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
             package = pathlib.Path(directory) / "hidden-app.deb"
-            desktop = pathlib.Path(directory) / "hidden-app.desktop"
+            applications = package_application_dir(directory)
+            desktop = applications / "hidden-app.desktop"
             package.write_bytes(b"local package")
             desktop.write_text(
                 "[Desktop Entry]\nType=Application\nNoDisplay=true\n"
@@ -251,15 +507,16 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = installer.PackageInstaller(
+            result = configured_package_installer(
+                installer, applications,
                 runner=successful_install_runner(package, "hidden-app", (desktop,)),
                 uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
             ).install(package)
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["launch_ready"])
-        self.assertEqual("installed", result["state"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
         self.assertFalse(result["launchers"][0]["visible"])
         self.assertEqual(1, len(result["launcher_warnings"]))
 
@@ -289,6 +546,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 verify: (0, "ii ", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
+                list_files: (0, "", ""),
             })
 
             result = installer.PackageInstaller(
@@ -298,8 +556,9 @@ class PackageInstallerInstallTests(unittest.TestCase):
             ).install(package)
 
         self.assertTrue(result["ok"])
-        self.assertEqual("installed", result["state"])
-        self.assertTrue(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launch_ready"])
+        self.assertIn("图形启动器", result["error"])
         self.assertTrue(result["dependency_repair_attempted"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
@@ -358,6 +617,275 @@ class PackageInstallerInstallTests(unittest.TestCase):
         self.assertEqual("verification_failed", result["state"])
         self.assertEqual([metadata, apt_install, verify], runner.commands)
 
+    def test_install_rejects_shared_parser_exec_operator_before_direct_readiness(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "operator-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "operator-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Operator App\n"
+                "Exec='{}' | /bin/true\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "operator-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertIn("shell", result["launchers"][0]["error"])
+
+    def test_install_rejects_non_application_desktop_entry(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "link-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "link-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Link\nName=Link App\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "link-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["ok"])
+
+    def test_install_rejects_missing_required_desktop_name(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "unnamed-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "unnamed-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "unnamed-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["ok"])
+
+    def test_install_rejects_unavailable_tryexec(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "tryexec-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "tryexec-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=TryExec App\n"
+                "Exec='{}' -c pass\nTryExec=missing-ming-test-command\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(package, "tryexec-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["ok"])
+
+    def test_install_reports_catalog_entry_hidden_by_onlyshowin_as_not_ready(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "desktop-filtered-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "desktop-filtered-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Desktop Filtered App\n"
+                "OnlyShowIn=GNOME;\nExec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(
+                    package, "desktop-filtered-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["visible"])
+        self.assertIn("OnlyShowIn", result["launchers"][0]["error"])
+
+    def test_install_does_not_activate_protected_wrapper_hidden_by_onlyshowin(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "onlyshow-wrapper.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "onlyshow-wrapper.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=OnlyShow Wrapper\n"
+                "OnlyShowIn=GNOME;\nExec=sh -c 'exec /opt/onlyshow-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(
+                    package, "onlyshow-wrapper", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["visible"])
+        self.assertNotEqual("desktop_app_info", result["launchers"][0]["activation"])
+        self.assertIn("OnlyShowIn", result["launchers"][0]["error"])
+
+    def test_install_does_not_activate_protected_wrapper_excluded_by_notshowin(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "notshow-wrapper.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "notshow-wrapper.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=NotShow Wrapper\n"
+                "NotShowIn=XFCE;\nExec=sh -c 'exec /opt/notshow-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(
+                    package, "notshow-wrapper", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertFalse(result["launchers"][0]["visible"])
+        self.assertNotEqual("desktop_app_info", result["launchers"][0]["activation"])
+        self.assertIn("NotShowIn", result["launchers"][0]["error"])
+
+    def test_install_ignores_package_desktop_files_outside_system_catalog(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "catalog-app.deb"
+            applications = package_application_dir(directory)
+            desktop = applications / "catalog-app.desktop"
+            documentation = pathlib.Path(directory) / "usr" / "share" / "doc" / "catalog-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Catalog App\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+            documentation.parent.mkdir(parents=True)
+            documentation.write_text(
+                "[Desktop Entry]\nType=Application\nName=Documentation\n"
+                "Exec=/definitely/missing\n",
+                encoding="utf-8",
+            )
+
+            result = configured_package_installer(
+                installer, applications,
+                runner=successful_install_runner(
+                    package, "catalog-app", (desktop, documentation)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual([str(desktop)], [record["path"] for record in result["launchers"]])
+
+    def test_install_reports_launcher_enumeration_failure_with_safe_repair_action(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "enumeration-app.deb"
+            package.write_bytes(b"local package")
+            log_path = pathlib.Path(directory) / "installer.log"
+            runner = successful_install_runner(package, "enumeration-app")
+            runner.responses[("dpkg-query", "-L", "enumeration-app")] = (
+                1, "", "database unavailable")
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=log_path,
+            ).install(package)
+
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertIn("枚举", result["error"])
+        self.assertEqual(
+            ["/usr/local/sbin/ming-package-installer", "repair", "enumeration-app"],
+            result["repair_argv"],
+        )
+        repair_args = installer.build_parser().parse_args(result["repair_argv"][1:])
+        self.assertEqual("repair", repair_args.action)
+        self.assertEqual("enumeration-app", repair_args.package)
+        self.assertIn("database unavailable", log_text)
+
+    def test_install_without_a_system_launcher_is_not_launch_ready(self):
+        """Installed data-only packages need an explicit repair path, not a false ready state."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "data-only-app.deb"
+            package.write_bytes(b"local package")
+            result = installer.PackageInstaller(
+                runner=successful_install_runner(package, "data-only-app"),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
+        self.assertIn("图形启动器", result["error"])
+        self.assertEqual(
+            ["/usr/local/sbin/ming-package-installer", "repair", "data-only-app"],
+            result["repair_argv"],
+        )
+
 
 class PackageInstallerRepairTests(unittest.TestCase):
     def test_repair_reinstalls_package_and_refreshes_desktop_entries(self):
@@ -376,6 +904,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
                 verify: (0, "ii ", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
+                list_files: (0, "", ""),
             })
 
             result = installer.PackageInstaller(
@@ -385,8 +914,9 @@ class PackageInstallerRepairTests(unittest.TestCase):
             ).repair("sample-app")
 
         self.assertTrue(result["ok"])
-        self.assertEqual("repaired", result["state"])
-        self.assertTrue(result["launch_ready"])
+        self.assertEqual("repaired_with_launch_problem", result["state"])
+        self.assertFalse(result["launch_ready"])
+        self.assertIn("图形启动器", result["error"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
             [reinstall, verify, refresh_desktops, refresh_icons, list_files], runner.commands)
@@ -394,7 +924,8 @@ class PackageInstallerRepairTests(unittest.TestCase):
     def test_repair_keeps_an_installed_package_but_reports_a_broken_visible_launcher(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
-            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            applications = package_application_dir(directory)
+            desktop = applications / "sample-app.desktop"
             desktop.write_text(
                 "[Desktop Entry]\nType=Application\nName=Sample App\n"
                 "Exec=/opt/sample-app/missing\n",
@@ -416,7 +947,8 @@ class PackageInstallerRepairTests(unittest.TestCase):
                 list_files: (0, str(desktop) + "\n", ""),
             })
 
-            result = installer.PackageInstaller(
+            result = configured_package_installer(
+                installer, applications,
                 runner=runner,
                 uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
