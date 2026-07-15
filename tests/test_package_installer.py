@@ -1,8 +1,10 @@
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -28,6 +30,28 @@ class FakeRunner:
         self.commands.append(command)
         response = self.responses.get(command, (1, "", "unexpected command"))
         return response.pop(0) if isinstance(response, list) else response
+
+
+def successful_install_runner(package_file, package_name, desktop_paths=()):
+    metadata = (
+        "dpkg-deb", "--field", str(package_file),
+        "Package", "Version", "Architecture",
+    )
+    apt_install = (
+        "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package_file),
+    )
+    verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", package_name)
+    list_files = ("dpkg-query", "-L", package_name)
+    refresh_desktops = ("update-desktop-database", "/usr/share/applications")
+    refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+    return FakeRunner({
+        metadata: (0, "{}\n1.2.3\namd64\n".format(package_name), ""),
+        apt_install: (0, "", ""),
+        verify: (0, "ii ", ""),
+        refresh_desktops: (0, "", ""),
+        refresh_icons: (0, "", ""),
+        list_files: (0, "".join("{}\n".format(path) for path in desktop_paths), ""),
+    })
 
 
 class PackageInstallerInspectTests(unittest.TestCase):
@@ -184,9 +208,60 @@ class PackageInstallerInstallTests(unittest.TestCase):
             ).install(package)
 
         self.assertTrue(result["ok"])
-        self.assertEqual("installed_with_launch_warning", result["state"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("installed_with_launch_problem", result["state"])
         self.assertEqual(1, len(result["launcher_warnings"]))
         self.assertIn("找不到启动程序", result["launcher_warnings"][0]["error"])
+        self.assertIn("无法启动", result["error"])
+
+    def test_install_classifies_a_protected_package_shell_wrapper_for_broker_activation(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "store-app.deb"
+            desktop = pathlib.Path(directory) / "store-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store App\n"
+                "Exec=sh -c 'exec /opt/store-app/run'\n",
+                encoding="utf-8",
+            )
+
+            result = installer.PackageInstaller(
+                runner=successful_install_runner(package, "store-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+                desktop_candidate_verifier=lambda candidate: candidate == desktop,
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual("installed_with_desktop_activation", result["state"])
+        self.assertTrue(result["launchers"][0]["ok"])
+        self.assertEqual("desktop_app_info", result["launchers"][0]["activation"])
+
+    def test_install_ignores_a_hidden_broken_launcher_for_readiness(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "hidden-app.deb"
+            desktop = pathlib.Path(directory) / "hidden-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nNoDisplay=true\n"
+                "Name=Hidden App\nExec=/opt/hidden-app/missing\n",
+                encoding="utf-8",
+            )
+
+            result = installer.PackageInstaller(
+                runner=successful_install_runner(package, "hidden-app", (desktop,)),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual("installed", result["state"])
+        self.assertFalse(result["launchers"][0]["visible"])
+        self.assertEqual(1, len(result["launcher_warnings"]))
 
     def test_install_repairs_dependencies_once_then_verifies_and_refreshes(self):
         installer = load_installer()
@@ -224,6 +299,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual("installed", result["state"])
+        self.assertTrue(result["launch_ready"])
         self.assertTrue(result["dependency_repair_attempted"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
@@ -310,9 +386,108 @@ class PackageInstallerRepairTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual("repaired", result["state"])
+        self.assertTrue(result["launch_ready"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
             [reinstall, verify, refresh_desktops, refresh_icons, list_files], runner.commands)
+
+    def test_repair_keeps_an_installed_package_but_reports_a_broken_visible_launcher(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Sample App\n"
+                "Exec=/opt/sample-app/missing\n",
+                encoding="utf-8",
+            )
+            reinstall = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
+                "install", "sample-app",
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_desktops = ("update-desktop-database", "/usr/share/applications")
+            refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+            runner = FakeRunner({
+                reinstall: (0, "", ""),
+                verify: (0, "ii ", ""),
+                refresh_desktops: (0, "", ""),
+                refresh_icons: (0, "", ""),
+                list_files: (0, str(desktop) + "\n", ""),
+            })
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).repair("sample-app")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("repaired_with_launch_problem", result["state"])
+        self.assertIn("无法启动", result["error"])
+
+
+class PackageInstallerLauncherTests(unittest.TestCase):
+    def test_common_loader_finds_library_copy_for_the_installed_sbin_layout(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = pathlib.Path(directory) / "usr" / "local"
+            program = prefix / "sbin" / "ming-package-installer"
+            common = prefix / "lib" / "ming-os" / "ming-shell-common.py"
+            program.parent.mkdir(parents=True)
+            common.parent.mkdir(parents=True)
+            program.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            common.write_text("loaded_from_installed_library = True\n", encoding="utf-8")
+
+            loaded = installer._load_common(program_path=program, install_prefix=prefix)
+
+        self.assertIsNotNone(loaded)
+        self.assertTrue(loaded.loaded_from_installed_library)
+
+    def test_normal_direct_launcher_is_marked_ready_for_direct_activation(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Sample App\n"
+                "Exec='{}' -c pass\n".format(sys.executable),
+                encoding="utf-8",
+            )
+
+            record = installer.PackageInstaller(
+                log_path=pathlib.Path(directory) / "installer.log",
+            )._launcher_record(desktop)
+
+        self.assertTrue(record["ok"])
+        self.assertTrue(record["visible"])
+        self.assertEqual("direct", record["activation"])
+
+    def test_missing_elf_library_remains_a_launch_problem(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "sample-app"
+            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            executable.write_bytes(b"\x7fELFnot-a-real-elf")
+            executable.chmod(0o755)
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Sample App\n"
+                "Exec='{}'\n".format(executable),
+                encoding="utf-8",
+            )
+            runner = FakeRunner({
+                ("ldd", str(executable)): (0, "libmissing.so => not found\n", ""),
+            })
+
+            record = installer.PackageInstaller(
+                runner=runner,
+                log_path=pathlib.Path(directory) / "installer.log",
+            )._launcher_record(desktop)
+
+        self.assertFalse(record["ok"])
+        self.assertTrue(record["visible"])
+        self.assertEqual("direct", record["activation"])
+        self.assertIn("缺少运行库", record["error"])
 
 
 class PackageInstallerCliTests(unittest.TestCase):
