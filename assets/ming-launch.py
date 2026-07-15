@@ -159,35 +159,43 @@ def _protected_regular_file(metadata):
     )
 
 
-def descriptor_revalidate_system_desktop(path, system_dir=SYSTEM_APPLICATION_DIR):
+def descriptor_revalidate_system_desktop(
+        path, system_dir=SYSTEM_APPLICATION_DIR, fstat_reader=None):
     """Recheck a system desktop entry without following its directory or leaf."""
     try:
         desktop_path, directory_path = _canonical_system_desktop_file(path, system_dir)
         directory_flag = getattr(os, "O_DIRECTORY", None)
         nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+        nonblock_flag = getattr(os, "O_NONBLOCK", None)
+        cloexec_flag = getattr(os, "O_CLOEXEC", None)
         if (
                 not isinstance(directory_flag, int)
                 or not isinstance(nofollow_flag, int)
+                or not isinstance(nonblock_flag, int)
+                or not isinstance(cloexec_flag, int)
                 or directory_flag <= 0
-                or nofollow_flag <= 0):
+                or nofollow_flag <= 0
+                or nonblock_flag <= 0
+                or cloexec_flag <= 0):
             return False
+        metadata_reader = fstat_reader or os.fstat
         directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
         directory_fd = os.open(str(directory_path), directory_flags)
     except (AttributeError, OSError, PermissionError, RuntimeError, TypeError, ValueError):
         return False
     try:
-        if not _protected_directory(os.fstat(directory_fd)):
+        if not _protected_directory(metadata_reader(directory_fd)):
             return False
         try:
             leaf_fd = os.open(
                 desktop_path.name,
-                os.O_RDONLY | os.O_NOFOLLOW,
+                os.O_RDONLY | nofollow_flag | nonblock_flag | cloexec_flag,
                 dir_fd=directory_fd,
             )
         except (AttributeError, OSError, PermissionError, RuntimeError, TypeError, ValueError):
             return False
         try:
-            return _protected_regular_file(os.fstat(leaf_fd))
+            return _protected_regular_file(metadata_reader(leaf_fd))
         finally:
             try:
                 os.close(leaf_fd)

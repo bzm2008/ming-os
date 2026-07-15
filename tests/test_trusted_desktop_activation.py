@@ -1,9 +1,13 @@
 import importlib.util
+import os
 import pathlib
 import stat
 import tempfile
+import threading
+import time
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -541,6 +545,77 @@ class TrustedLaunchRequestTests(unittest.TestCase):
                 command_runner=installed_query,
                 descriptor_revalidator=lambda *_args: False,
             ))
+
+    def test_descriptor_revalidation_accepts_an_injected_metadata_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+
+            result = self.launch.descriptor_revalidate_system_desktop(
+                desktop,
+                system_dir=applications,
+                fstat_reader=lambda _fd: protected_regular_file(),
+            )
+
+            self.assertIsInstance(result, bool)
+
+    @unittest.skipUnless(os.name == "posix", "descriptor-relative open is POSIX-specific")
+    def test_descriptor_revalidation_uses_real_dirfds_without_blocking_on_fifo(self):
+        required_flags = ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")
+        if not all(isinstance(getattr(os, flag, None), int) and getattr(os, flag) > 0 for flag in required_flags):
+            self.skipTest("host lacks required no-follow descriptor flags")
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            regular = applications / "regular.desktop"
+            regular.write_text("[Desktop Entry]\n", encoding="utf-8")
+            linked = applications / "linked.desktop"
+            os.symlink(regular.name, linked)
+            fifo = applications / "fifo.desktop"
+            os.mkfifo(fifo)
+
+            def root_owned_fstat(fd):
+                metadata = os.fstat(fd)
+                return types.SimpleNamespace(st_mode=metadata.st_mode, st_uid=0)
+
+            close_calls = []
+            native_close = os.close
+
+            def observed_close(fd):
+                close_calls.append(fd)
+                native_close(fd)
+
+            with mock.patch.object(self.launch.os, "close", side_effect=observed_close):
+                self.assertTrue(self.launch.descriptor_revalidate_system_desktop(
+                    regular,
+                    system_dir=applications,
+                    fstat_reader=root_owned_fstat,
+                ))
+            self.assertEqual(2, len(close_calls))
+            self.assertFalse(self.launch.descriptor_revalidate_system_desktop(
+                linked,
+                system_dir=applications,
+                fstat_reader=root_owned_fstat,
+            ))
+
+            result = {}
+
+            def verify_fifo():
+                result["accepted"] = self.launch.descriptor_revalidate_system_desktop(
+                    fifo,
+                    system_dir=applications,
+                    fstat_reader=root_owned_fstat,
+                )
+
+            started = time.monotonic()
+            worker = threading.Thread(target=verify_fifo, daemon=True)
+            worker.start()
+            worker.join(0.5)
+            self.assertFalse(worker.is_alive(), "FIFO verification must not block the launch broker")
+            self.assertFalse(result.get("accepted"))
+            self.assertLess(time.monotonic() - started, 1.0)
 
 
 if __name__ == "__main__":
