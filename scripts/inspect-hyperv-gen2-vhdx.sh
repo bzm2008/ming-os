@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly DEFAULT_LABEL="MING_OS_2633"
+readonly DEFAULT_LABEL="MING_OS_2640"
 readonly -a HYPERV_INITRAMFS_MODULES=(
     hv_vmbus
     hv_storvsc

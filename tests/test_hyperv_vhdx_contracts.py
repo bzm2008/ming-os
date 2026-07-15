@@ -52,7 +52,7 @@ class HyperVGen2VhdxContracts(unittest.TestCase):
             "mkfs.vfat",
             "mkfs.ext4",
             "MING_EFI",
-            "MING_OS_2633",
+            "MING_OS_2640",
             "wait_for_partition",
             "partition device did not appear before the timeout",
         ]:
@@ -150,7 +150,7 @@ class HyperVGen2VhdxContracts(unittest.TestCase):
             "ef00",
             "8300",
             "BOOTX64.EFI",
-            "MING_OS_2633",
+            "MING_OS_2640",
             "lsinitramfs",
             "sha256sum -c",
         ]:

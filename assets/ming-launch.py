@@ -22,6 +22,8 @@ IPC_VERSION = 1
 ACTIVATION_ACK_TIMEOUT = 6.0
 DPKG_QUERY = "/usr/bin/dpkg-query"
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
+INTERACTION_BOOST = "/usr/local/bin/ming-interaction-boost"
+PREFETCH_HELPER = "/usr/local/bin/ming-prefetch"
 
 
 def _load_common():
@@ -521,6 +523,8 @@ class LaunchBroker:
     def _after_start(self, request, key, moment, process, status):
         self._recent[key] = moment
         self.record_event(request, status)
+        self._request_interaction_boost(process, request)
+        self._request_prefetch(process)
         origin = resolve_origin(request, self.workarea())
         finish = None
         if not self.reduced_motion():
@@ -558,6 +562,55 @@ class LaunchBroker:
                 on_ready=ready,
                 on_failure=failed,
             )
+
+    @staticmethod
+    def _process_starttime(process):
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or pid <= 1:
+            return None
+        try:
+            text = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            return text.rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError, ValueError):
+            return None
+
+    @classmethod
+    def _request_interaction_boost(cls, process, request):
+        """Ask the bounded policy daemon without delaying launch feedback."""
+        if not process or not pathlib.Path(INTERACTION_BOOST).exists():
+            return
+        pid = getattr(process, "pid", None)
+        starttime = cls._process_starttime(process)
+        if not isinstance(pid, int) or not starttime:
+            return
+        try:
+            subprocess.Popen(
+                [INTERACTION_BOOST, "begin", "--pid", str(pid),
+                 "--starttime", starttime, "--reason", "launch", "--json"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True,
+            )
+        except (OSError, ValueError):
+            # A missing daemon or an unprivileged fallback must never make an
+            # otherwise valid desktop launch fail.
+            return
+
+    @classmethod
+    def _request_prefetch(cls, process):
+        """Warm a bounded dependency list only when the helper detects HDD."""
+        if not process or not pathlib.Path(PREFETCH_HELPER).exists():
+            return
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or pid <= 1:
+            return
+        try:
+            subprocess.Popen(
+                [PREFETCH_HELPER, "warm", "--pid", str(pid), "--json"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True,
+            )
+        except (OSError, ValueError):
+            return
 
 
 def feedback_icon_name(request):

@@ -265,6 +265,7 @@ class DeploymentContractTests(unittest.TestCase):
         setup = desktop[desktop.index("setup_wallpaper() {"):
                         desktop.index("# ======================== Xfce 顶部菜单栏", desktop.index("setup_wallpaper() {"))]
         for name in (
+            "default-2640.png",
             "default-2633.png",
             "default-1366x768.png",
             "default-1920x1080.png",
@@ -277,7 +278,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("def require_png_dimensions", build)
         for dimensions in ("1366, 768", "1920, 1080", "3840, 2160"):
             self.assertIn(dimensions, build)
-        self.assertIn("missing required 26.3.3 default wallpaper", setup)
+        self.assertIn("missing required 26.4.0 default wallpaper", setup)
         self.assertIn("setup_wallpaper || return 1", desktop)
 
     def test_retired_panel_and_whisker_configuration_is_not_generated(self):

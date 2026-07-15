@@ -1,26 +1,26 @@
-# Ming OS 26.3.3 Home Edition
+# Ming OS 26.4.0 Home Edition
 
-Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current candidate release is `26.3.3`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a stable Ming desktop experience.
+Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current release target is `26.4.0`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a stable Ming desktop experience.
 
 ## Current Release
 
 | Item | Value |
 | --- | --- |
-| Version | 26.3.3 Home Edition |
+| Version | 26.4.0 Home Edition |
 | Base | Debian 13 / Trixie |
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
-| ISO | `ming-os-26.3.3-home-amd64.iso` |
-| Size | 1,992,589,312 bytes (1.86 GiB) |
-| SHA256 | `1d71a3d71441ca938fc46551d9d6c3cdfc9b5e9a9f2fb7b4eb4fb611360e5e11` |
-| Release state | Built and ready for website/OTA publication |
+| ISO | `ming-os-26.4.0-home-amd64.iso` |
+| Size | Build pending; fill from the final ISO |
+| SHA256 | Build pending; fill from the final ISO |
+| Release state | Source and OTA metadata prepared; ISO build pending approval |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
 Planned download path after approval and a successful build:
 
 ```text
-https://ming.scallion.uno/iso/ming-os-26.3.3-home-amd64.download
+https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download
 ```
 
 OTA endpoint:
@@ -32,7 +32,7 @@ https://ming.scallion.uno/api/onion-update/check?version=26.3.2&channel=stable
 Planned GitHub release:
 
 ```text
-https://github.com/bzm2008/ming-os/releases/tag/v26.3.3
+https://github.com/bzm2008/ming-os/releases/tag/v26.4.0
 ```
 
 ## What Ming OS Is
@@ -43,12 +43,12 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.3
 - A branded installer and installed system, so users do not feel they installed plain Debian.
 - A system line that prioritizes bootability, installation success, and easy support diagnostics.
 
-## 26.3.3 Highlights
+## 26.4.0 Highlights
 
 - Repaired the ISO boot chain and requires BIOS, UEFI, Rufus, Ventoy, and desktop checks before release.
 - Keeps BIOS/Legacy and UEFI El Torito boot entries in the ISO.
 - Removes problematic GRUB `splash` / `install` kernel parameters while keeping the Ming installer session marker.
-- Uses a stable ISO volume label: `MING_OS_2633`.
+- Uses a stable ISO volume label: `MING_OS_2640`.
 - Points Calamares `unpackfs.conf` at `/run/ming-installer/filesystem.squashfs`.
 - Defaults installer locale/timezone to Chinese usage, including Asia/Shanghai behavior.
 - Uses Microsoft Edge as the default browser through a stable Ming launcher.
@@ -83,7 +83,7 @@ Supported test paths:
 - Direct disk write with `dd`
 
 ```bash
-sudo dd if=ming-os-26.3.3-home-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=ming-os-26.4.0-home-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 Live/installer mode should enter the Ming OS installer without stopping at a Debian-branded desktop or a username/password prompt. If an old machine fails, record whether it stops before GRUB, at GRUB, while loading the kernel, or inside Calamares.
@@ -102,41 +102,42 @@ Expected public OTA response:
 ```json
 {
   "has_update": true,
-  "version": "26.3.3",
+  "version": "26.4.0",
   "ready": true,
   "status": "ready",
   "update_type": "major",
-  "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.3-home-amd64.download",
-  "checksum": "1d71a3d71441ca938fc46551d9d6c3cdfc9b5e9a9f2fb7b4eb4fb611360e5e11",
+  "download_url": "https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download",
+  "checksum": "<FINAL_ISO_SHA256_AFTER_BUILD>",
   "checksum_type": "sha256",
-  "size": 1992589312
+  "size": "<FINAL_ISO_SIZE_AFTER_BUILD>"
 }
 ```
 
 ### 26.3.2 Transition
 
-The 26.3.2 updater can validate, download, stage, and restore a 26.3.3 major
-OTA when an independent `/home` or backup disk is available. Its already
-installed client predates `grub-reboot`, though, so the first transition still
-requires selecting `Ming OS 26.3.3 OTA Installer` once in GRUB. Ming OS 26.3.3
-uses `grub-reboot` for later major updates. A fully hands-free 26.3.2 bridge
-requires a separately signed updater package and is not represented as already
-available here.
+The 26.3.2 client first installs the official signed bootstrap once. After the
+bootstrap is verified, the existing Ming Settings update button can validate,
+download, stage, and commit 26.4.0 through the transactional path. The
+manifest must explicitly contain `from_versions: ["26.3.2"]`; no manual GRUB
+selection or recovery ISO is required for this supported bridge. Internally
+the transaction engine uses a one-time `grub-reboot` entry and restores the
+normal default after health confirmation. Recovery ISO
+updates retain their independent-backup-media safety gate.
 
 ## GitHub Assets
 
 If the ISO is split for GitHub Release assets, merge the parts before writing to USB.
 
 ```bash
-cat ming-os-26.3.3-home-amd64.iso.part* > ming-os-26.3.3-home-amd64.iso
-sha256sum -c ming-os-26.3.3-home-amd64.iso.sha256
+cat ming-os-26.4.0-home-amd64.iso.part* > ming-os-26.4.0-home-amd64.iso
+sha256sum -c ming-os-26.4.0-home-amd64.iso.sha256
 ```
 
 Windows PowerShell:
 
 ```powershell
-cmd /c copy /b ming-os-26.3.3-home-amd64.iso.part01+ming-os-26.3.3-home-amd64.iso.part02 ming-os-26.3.3-home-amd64.iso
-Get-FileHash ming-os-26.3.3-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.4.0-home-amd64.iso.part01+ming-os-26.4.0-home-amd64.iso.part02 ming-os-26.4.0-home-amd64.iso
+Get-FileHash ming-os-26.4.0-home-amd64.iso -Algorithm SHA256
 ```
 
 The merged file must match the SHA256 generated after the final build and
@@ -144,13 +145,13 @@ published alongside the release asset.
 
 ## Verification Status
 
-Required validation for the 26.3.3 ISO:
+Required validation for the 26.4.0 ISO:
 
 - `xorriso -report_el_torito` shows BIOS and UEFI boot images.
 - `/live/vmlinuz` is a valid Linux kernel, not zeroed data.
-- BIOS isolinux and UEFI GRUB menus show Ming OS 26.3.3.
-- VirtualBox BIOS smoke test reaches the Ming OS 26.3.3 installer, installs, and reboots into the hard disk.
-- VirtualBox UEFI smoke test reaches the Ming OS 26.3.3 installer, installs, and reboots into the hard disk.
+- BIOS isolinux and UEFI GRUB menus show Ming OS 26.4.0.
+- VirtualBox BIOS smoke test reaches the Ming OS 26.4.0 installer, installs, and reboots into the hard disk.
+- VirtualBox UEFI smoke test reaches the Ming OS 26.4.0 installer, installs, and reboots into the hard disk.
 
 Recommended remaining field tests:
 
@@ -164,4 +165,4 @@ Recommended remaining field tests:
 - Ming OS can run on low-memory machines, but optional WeChat/WPS installs may become the largest memory consumers.
 - The normal user path should be buttons, Settings, update UI, app folders, and graphical repair tools.
 - Command-line usage is for advanced support, not daily operation.
-- Ming OS 26.3.3 is published only after the ISO, checksum, GitHub tag, and server manifest are all verified.
+- Ming OS 26.4.0 is published only after the ISO, checksum, GitHub tag, and server manifest are all verified.

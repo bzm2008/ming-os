@@ -144,7 +144,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         final_menu = DESKTOP.split("configure_simplified_menus() {", 1)[1].split(
             "\n# ========================", 1)[0]
         self.assertIn("安装 DEB 软件包", final_menu)
-        self.assertIn("<patterns>*.deb</patterns>", final_menu)
+        self.assertIn("<patterns>*.deb;*.DEB</patterns>", final_menu)
         self.assertIn("/usr/local/bin/ming-package-install-gui \"%f\"", final_menu)
         self.assertIn("以管理员身份编辑", final_menu)
         self.assertIn("以管理员身份打开", final_menu)

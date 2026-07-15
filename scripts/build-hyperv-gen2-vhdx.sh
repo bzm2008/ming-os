@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly GEN2_ONLY=1
-readonly DEFAULT_LABEL="MING_OS_2633"
+readonly DEFAULT_LABEL="MING_OS_2640"
 readonly EFI_LABEL="MING_EFI"
 readonly DEFAULT_MIN_DISK_GIB=16
 readonly EFI_SIZE_MIB=512
@@ -54,7 +54,7 @@ Required:
   --output FILE      Destination VHDX path. It must end in .vhdx.
 
 Options:
-  --label LABEL      ext4 root label (default: MING_OS_2633)
+  --label LABEL      ext4 root label (default: MING_OS_2640)
   --size SIZE        Virtual disk size accepted by qemu-img (for example: 24G)
   --force            Replace an existing destination after all checks succeed.
   --help             Show this help.

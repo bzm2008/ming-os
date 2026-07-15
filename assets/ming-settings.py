@@ -2684,6 +2684,29 @@ class MingSettings(Adw.ApplicationWindow):
             "lid_close_action", ["不执行操作", "挂起", "休眠"],
             ["nothing", "suspend", "hibernate"], default_index=1))
 
+        performance_grp = Adw.PreferencesGroup(
+            title="性能策略",
+            description="前台应用短时加速，后台应用在不可见后自动让路；不支持的硬件会安全降级。")
+        box.append(performance_grp)
+        performance_grp.add(self.backend_combo_row(
+            "前台响应策略", "自适应模式仅在启动或激活时短时倾斜资源。",
+            "interaction_policy", ["自适应性能", "兼容模式", "关闭"],
+            ["adaptive", "compat", "off"]))
+        performance_grp.add(self.backend_switch_row(
+            "后台应用节流", "窗口不可见约 10 秒后降低 CPU、IO 和定时器唤醒。",
+            "background_throttle", True))
+        performance_grp.add(self.backend_combo_row(
+            "HDD 应用预读", "仅机械硬盘按需预读受信任系统库，不运行常驻 preload。",
+            "disk_prefetch", ["自动", "关闭"], ["auto", "off"]))
+        self.performance_status_row = Adw.ActionRow(
+            title="当前性能后端", subtitle="正在读取 governor、cgroup 和 OOM 状态...")
+        performance_refresh = Gtk.Button(label="刷新")
+        performance_refresh.set_valign(Gtk.Align.CENTER)
+        performance_refresh.connect("clicked", lambda _button: self.refresh_performance_status())
+        self.performance_status_row.add_suffix(performance_refresh)
+        performance_grp.add(self.performance_status_row)
+        GLib.idle_add(self.refresh_performance_status)
+
         audio_grp = Adw.PreferencesGroup(
             title="声音设备",
             description="选择声音从主板模拟输出、HDMI、蓝牙或 USB 输出；手动选择不会被自动修复覆盖。")
@@ -2796,6 +2819,41 @@ class MingSettings(Adw.ApplicationWindow):
             "兼容性诊断", "查看底层 Xfconf、显卡、输入、音频和网络状态。",
             diagnostics))
         return sc
+
+    def refresh_performance_status(self):
+        if not getattr(self, "performance_status_row", None):
+            return False
+
+        def done(rc, output, error):
+            if self.performance_status_row.get_root() is not self:
+                return False
+            if rc != 0:
+                self.performance_status_row.set_subtitle("性能策略服务不可用：%s" % (error or "已安全降级"))
+                return False
+            try:
+                payload = json.loads(output)
+            except (TypeError, ValueError):
+                self.performance_status_row.set_subtitle("性能状态返回格式无效，已保持当前设置")
+                return False
+            if not isinstance(payload, dict):
+                self.performance_status_row.set_subtitle("性能状态不可用，已保持当前设置")
+                return False
+            cgroup = payload.get("cgroup_v2", payload.get("cgroup", {}).get("version", 0) == 2)
+            leases = payload.get("active_leases", payload.get("policy", {}).get("active_leases", 0))
+            backend = payload.get("oom", {}).get("backend", "未知")
+            degraded = payload.get("degraded", payload.get("policy", {}).get("degraded", []))
+            suffix = "；降级：" + "、".join(str(item) for item in degraded[:2]) if degraded else ""
+            self.performance_status_row.set_subtitle(
+                "cgroup v2 %s；活动租约 %s；OOM：%s%s" % (
+                    "可用" if cgroup else "不可用",
+                    leases,
+                    backend,
+                    suffix,
+                ))
+            return False
+
+        run_capture_async(["ming-performance-policy", "status", "--json"], timeout=4, on_done=done)
+        return False
 
     def on_window_manager_repair(self, _button):
         """Run the X11 repair outside GTK and leave every client application intact."""

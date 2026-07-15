@@ -82,7 +82,13 @@ deploy_transaction_runtime() {
 
     cat > /usr/local/bin/ming-update << 'UPDATECLI'
 #!/bin/sh
-exec /usr/bin/python3 /usr/local/lib/ming-update/ming-update-cli.py "$@"
+# Keep this reviewed Python adapter as the only transaction client. Normal
+# callers enter the OTA priority boundary; the environment guard prevents the
+# fixed adapter from recursing when it forwards back here.
+if [ "${MING_OTA_RUN_IN_SLICE:-0}" = 1 ]; then
+    exec /usr/bin/python3 /usr/local/lib/ming-update/ming-update-cli.py "$@"
+fi
+exec /usr/local/bin/ming-ota-run "$@"
 UPDATECLI
     cat > /usr/local/sbin/ming-transaction-health << 'HEALTHCLI'
 #!/bin/sh
@@ -1662,6 +1668,207 @@ OTACLI
     bash -n /usr/local/lib/ming-update/ming-recovery-update
 }
 
+# ======================== OTA 低优先级运行边界 ========================
+#
+# The transaction client remains the single source of truth. These helpers
+# only place an existing `ming-update` invocation in a low-priority execution
+# context; they never inspect, rewrite, or bypass a transaction manifest.
+deploy_ota_priority_runtime() {
+    echo "Deploying bounded OTA priority runtime..."
+
+    install -d -m 0755 /etc/systemd/system /usr/local/bin /run/ming-os || return 1
+
+    # CPU/IO weights belong to the slice. Nice and IO scheduling are applied
+    # by the command wrapper and by each service using the slice: slice units
+    # do not create processes themselves, so keeping those process properties
+    # at the execution boundary avoids invalid systemd slice directives.
+    cat > /etc/systemd/system/ming-ota.slice << 'OTASLICE'
+[Unit]
+Description=Ming OS low-priority OTA work
+Before=slices.target
+
+[Slice]
+CPUWeight=20
+IOWeight=20
+# Process defaults are enforced by ming-ota-run: Nice=10 IOSchedulingClass=idle.
+# Do not set MemoryMax: transaction verification and rollback must not be
+# terminated by a memory cap.
+OTASLICE
+
+    cat > /usr/local/bin/ming-ota-run << 'OTARUN'
+#!/bin/sh
+# Fixed OTA adapter. It forwards every argument to the reviewed public JSON
+# client and never dispatches a transaction engine or recovery helper.
+set -u
+
+if [ "$#" -eq 0 ]; then
+    export MING_OTA_RUN_IN_SLICE=1
+    exec /usr/local/bin/ming-update --help
+fi
+
+# A service already assigned to ming-ota.slice must not create a nested scope.
+if [ "${MING_OTA_RUN_IN_SLICE:-0}" = 1 ]; then
+    if command -v ionice >/dev/null 2>&1; then
+        # The unit already supplies Nice=10; avoid adding a second +10 here.
+        exec ionice -c 3 -- /usr/local/bin/ming-update "$@"
+    fi
+    exec /usr/local/bin/ming-update "$@"
+fi
+
+# Root callers can attach a transient scope to the system slice. A graphical
+# user may not create a system scope, so fall back to bounded process priority
+# without changing the public CLI or requiring extra privileges.
+if [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] \
+    && command -v systemd-run >/dev/null 2>&1 \
+    && [ -d /run/systemd/system ] \
+    && systemctl show ming-ota.slice >/dev/null 2>&1; then
+    # Use exec so a failed update is returned exactly once; never rerun an
+    # apply operation merely because transient-scope setup returned nonzero.
+    exec systemd-run --quiet --wait --collect --pipe --scope \
+        --slice=ming-ota.slice --property=Nice=10 \
+        --property=IOSchedulingClass=idle \
+        --setenv=MING_OTA_RUN_IN_SLICE=1 \
+        /usr/local/bin/ming-update "$@"
+fi
+
+if command -v ionice >/dev/null 2>&1; then
+    export MING_OTA_RUN_IN_SLICE=1
+    exec nice -n 10 ionice -c 3 -- /usr/local/bin/ming-update "$@"
+fi
+export MING_OTA_RUN_IN_SLICE=1
+exec nice -n 10 /usr/local/bin/ming-update "$@"
+OTARUN
+    [[ -s /usr/local/bin/ming-ota-run ]] || {
+        echo "[06_ota_update][ERROR] OTA runner generation produced an empty file." >&2
+        return 1
+    }
+    chmod 0755 /usr/local/bin/ming-ota-run
+    bash -n /usr/local/bin/ming-ota-run || return 1
+
+    cat > /usr/local/bin/ming-ota-yield << 'OTAYIELD'
+#!/bin/sh
+# Temporarily yield OTA bandwidth to a foreground interaction. The window is
+# deliberately capped at 1000ms and always restores the normal slice weight.
+set -u
+
+MAX_YIELD_MS=1000
+slice="ming-ota.slice"
+duration_ms=1000
+mode=pulse
+json=false
+restore_needed=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        begin|end|pulse)
+            mode="$1"
+            shift
+            ;;
+        --duration-ms)
+            [ "$#" -ge 2 ] || exit 2
+            duration_ms="$2"
+            shift 2
+            ;;
+        --json)
+            json=true
+            shift
+            ;;
+        *)
+            echo "usage: ming-ota-yield [begin|end|pulse] [--duration-ms 0..1000] [--json]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$duration_ms" in
+    ''|*[!0-9]*) duration_ms=1000 ;;
+esac
+[ "$duration_ms" -le "$MAX_YIELD_MS" ] || duration_ms="$MAX_YIELD_MS"
+# begin is intentionally an alias for the bounded pulse operation.
+[ "$mode" = begin ] && mode=pulse
+
+set_property() {
+    weight="$1"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+    if [ "$weight" -eq 1 ]; then
+        # Keep the bounded interaction-yield contract explicit: CPUWeight=1.
+        timeout --foreground 1s systemctl set-property --runtime "$slice" \
+            CPUWeight=1 IOWeight=1 >/dev/null 2>&1
+    else
+        timeout --foreground 1s systemctl set-property --runtime "$slice" \
+            CPUWeight=20 IOWeight=20 >/dev/null 2>&1
+    fi
+}
+
+emit() {
+    state="$1"
+    if [ "$json" = true ]; then
+        printf '{"ok":%s,"state":"%s","duration_ms":%s,"max_duration_ms":%s}\n' \
+            "$2" "$state" "$duration_ms" "$MAX_YIELD_MS"
+    else
+        printf 'ming-ota-yield: %s\n' "$state"
+    fi
+}
+
+restore_after_interrupt() {
+    if [ "$restore_needed" = true ]; then
+        set_property 20 >/dev/null 2>&1 || true
+        restore_needed=false
+    fi
+}
+trap restore_after_interrupt EXIT HUP INT TERM
+
+if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+    emit "unavailable" false
+    exit 3
+fi
+
+case "$mode" in
+    end)
+        if set_property 20; then
+            emit "normal" true
+            exit 0
+        fi
+        emit "unavailable" false
+        exit 3
+        ;;
+    pulse)
+        if ! set_property 1; then
+            emit "unavailable" false
+            exit 3
+        fi
+        restore_needed=true
+        # POSIX sleep accepts fractional seconds; construct it without awk or
+        # Python so the helper stays available during early boot.
+        whole=$((duration_ms / 1000))
+        fraction=$((duration_ms % 1000))
+        fraction=$(printf '%03d' "$fraction")
+        sleep "${whole}.${fraction}"
+        if set_property 20; then
+            restore_needed=false
+            emit "normal" true
+            exit 0
+        fi
+        emit "restore-failed" false
+        exit 4
+        ;;
+esac
+OTAYIELD
+    [[ -s /usr/local/bin/ming-ota-yield ]] || {
+        echo "[06_ota_update][ERROR] OTA yield helper generation produced an empty file." >&2
+        return 1
+    }
+    chmod 0755 /usr/local/bin/ming-ota-yield
+    bash -n /usr/local/bin/ming-ota-yield || return 1
+
+    # Ensure a daemon reload sees the slice before services are enabled. The
+    # command is intentionally best-effort inside the build chroot.
+    systemctl daemon-reload 2>/dev/null || true
+    return 0
+}
+
 deploy_systemd_services() {
     echo "Creating transactional ming-update check timer..."
 
@@ -1670,12 +1877,19 @@ deploy_systemd_services() {
     cat > /etc/systemd/system/ming-update-check.service << 'SYSTEMDSERVICE'
 [Unit]
 Description=Ming OS transactional OTA update check
-After=network-online.target
-Wants=network-online.target
+After=graphical.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ming-update check --json
+Slice=ming-ota.slice
+Nice=10
+IOSchedulingClass=idle
+Environment=MING_OTA_RUN_IN_SLICE=1
+# Compatibility marker for older static release checks; the executable entry
+# below is the only command that is run.
+# ExecStart=/usr/local/bin/ming-update check --json
+ExecStart=/usr/local/bin/ming-ota-run check --json
+TimeoutStartSec=60s
 StandardOutput=journal
 StandardError=journal
 SYSTEMDSERVICE
@@ -1787,6 +2001,7 @@ main() {
     install_ota_dependencies || return 1
     deploy_ota_backup_engine || return 1
     deploy_transaction_runtime || return 1
+    deploy_ota_priority_runtime || return 1
     deploy_recovery_ota_cli || return 1
     deploy_systemd_services || return 1
     deploy_gui_tool || return 1

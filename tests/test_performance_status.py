@@ -100,6 +100,28 @@ class PerformanceStatusTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertIsInstance(json.loads(output.getvalue()), dict)
 
+    def test_metrics_cli_emits_three_display_modes(self):
+        service = self.module.PerformanceStatus(
+            runner=RecordingRunner(self.module),
+            read_text=lambda _path: None,
+            globber=lambda _pattern: [],
+        )
+        output = io.StringIO()
+        exit_code = self.module.main(["metrics", "--json"], service=service, stdout=output)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertEqual({"memory", "cpu", "network"}, set(payload) & {"memory", "cpu", "network"})
+
+    def test_status_reports_policy_cgroup_timer_and_oom_sections(self):
+        service = self.module.PerformanceStatus(
+            runner=RecordingRunner(self.module),
+            read_text=lambda _path: None,
+            globber=lambda _pattern: [],
+        )
+        payload = service.status()
+        for key in ("cgroup", "policy", "timers", "oom"):
+            self.assertIn(key, payload)
+
     def test_cpu_status_classifies_amd_and_zhaoxin_without_intel_assumptions(self):
         values = {
             "/proc/cpuinfo": (
@@ -148,9 +170,34 @@ class PerformanceStatusDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(marker, BUILD)
 
+    def test_rootfs_gate_checks_prefetch_index_contract(self):
+        for marker in ("record_application_index", "load_application_index", "index.json"):
+            self.assertIn(marker, BUILD)
+
     def test_base_main_fails_fast_when_performance_status_cannot_deploy(self):
         main = BASE.split("main() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("deploy_performance_status || return 1", main)
+
+    def test_base_deploys_policy_and_prefetch_without_enabling_preload(self):
+        for marker in (
+            "deploy_performance_policy",
+            "ming-performance-policy.py",
+            "ming-prefetch.py",
+            "ming-resource-policy.service",
+            "ming-oom-profile.service",
+        ):
+            self.assertIn(marker, BASE)
+        self.assertIn("不默认启用 preload", BASE)
+
+    def test_policy_deployment_fails_closed_when_generated_aliases_are_empty(self):
+        for marker in (
+            "[[ -s /usr/local/bin/ming-prefetch ]]",
+            "[[ -s /usr/local/bin/${alias} ]]",
+            "[[ -s /etc/systemd/system/ming-resource-policy.service ]]",
+            "[[ -s /usr/local/sbin/ming-oom-profile ]]",
+            "[[ -s /etc/systemd/system/ming-oom-profile.service ]]",
+        ):
+            self.assertIn(marker, BASE)
 
 
 if __name__ == "__main__":

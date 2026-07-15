@@ -65,6 +65,28 @@ def password_status(user, runner=run_command):
     }
 
 
+def _apply_passwordless_unlock_group(user, passwordless, runner=run_command):
+    """Keep screen-saver authentication aligned with the account password.
+
+    Debian desktop PAM stacks commonly use ``nopasswdlogin`` as an explicit
+    bypass.  Automatic LightDM login remains controlled by the separate
+    ``autologin`` group, so setting a password must remove this bypass while
+    clearing a password may restore it.  A failed group mutation is accepted
+    only when an ``id`` readback proves the requested state already holds.
+    """
+    action = "-a" if passwordless else "-d"
+    rc, _output, error = runner(["gpasswd", action, user, "nopasswdlogin"])
+    if rc == 0:
+        return True, ""
+    membership_rc, membership, membership_error = runner(["id", "-nG", user])
+    if membership_rc == 0:
+        members = set(membership.split())
+        already_applied = ("nopasswdlogin" in members) == passwordless
+        if already_applied:
+            return True, ""
+    return False, error or membership_error or "cannot update screen-saver authentication policy"
+
+
 def oobe_marker_for_user(user):
     if pwd is None:
         return None
@@ -233,6 +255,13 @@ def set_password(user, password, runner=run_command, marker_path=None):
     password = ""
     if rc != 0:
         return {"ok": False, "error": error or "password update failed", "user": user}
+    group_ok, group_error = _apply_passwordless_unlock_group(user, False, runner=runner)
+    if not group_ok:
+        return {
+            "ok": False,
+            "error": "password updated but screen-saver password policy could not be enabled: " + group_error,
+            "user": user,
+        }
     status = password_status(user, runner=runner)
     status["ok"] = status["ok"] and status["password_set"]
     if not status["ok"] and not status["error"]:
@@ -248,6 +277,13 @@ def clear_password(user, runner=run_command):
     rc, _output, error = runner(["passwd", "-d", user])
     if rc != 0:
         return {"ok": False, "error": error or "password clear failed", "user": user}
+    group_ok, group_error = _apply_passwordless_unlock_group(user, True, runner=runner)
+    if not group_ok:
+        return {
+            "ok": False,
+            "error": "password cleared but passwordless screen-saver policy could not be restored: " + group_error,
+            "user": user,
+        }
     status = password_status(user, runner=runner)
     status["ok"] = status["ok"] and not status["password_set"]
     if not status["ok"] and not status["error"]:

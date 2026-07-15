@@ -98,6 +98,17 @@ SETTING_SPECS = {
     "compositor_profile": {
         "kind": "enum", "choices": ("auto", "compat", "off"), "backend": "local",
     },
+    "interaction_policy": {
+        "kind": "enum", "choices": ("adaptive", "compat", "off"), "backend": "local",
+        "default": "adaptive",
+    },
+    "background_throttle": {
+        "kind": "bool", "backend": "local", "default": True,
+    },
+    "disk_prefetch": {
+        "kind": "enum", "choices": ("auto", "off"), "backend": "local",
+        "default": "auto",
+    },
     "lid_close_action": {
         "kind": "enum", "choices": ("nothing", "suspend", "hibernate"),
         "backend": "lid_action",
@@ -521,7 +532,7 @@ class SettingsBackend:
                 else:
                     value = bool(local.get("reduced_motion", False))
                 return self._result(True, key, value)
-            return self._result(True, key, self._read_local().get(key))
+            return self._result(True, key, self._read_local().get(key, spec.get("default")))
         if backend == "plank":
             parser = self._plank_config()
             raw = parser.get("PlankDockPreferences", spec["key"], fallback="0")

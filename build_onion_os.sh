@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
-readonly MING_OS_VERSION="26.3.3"
+readonly MING_OS_VERSION="26.4.0"
 readonly MING_OS_BUILD_SUFFIX=""
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
-readonly ISO_VOLUME_ID="MING_OS_2633"
+readonly ISO_VOLUME_ID="MING_OS_2640"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
@@ -252,7 +252,7 @@ prepare_chroot_scripts() {
             return 1
         }
         local required_asset
-        for required_asset in ming-installer-verify.py wallpaper-ming-2633-abstract.png; do
+        for required_asset in ming-installer-verify.py wallpaper-ming-2640-abstract.png; do
             if [[ ! -s "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${required_asset}" ]]; then
                 log_error "构建资源缺失或未复制: assets/${required_asset}"
                 return 1
@@ -934,6 +934,11 @@ validate_required_desktop_runtime() {
             return 1
         fi
     done
+    if ! chroot_exec dpkg-query -W -f='${Status}' systemd-timesyncd 2>/dev/null \
+        | grep -qx 'install ok installed'; then
+        log_error "required time synchronisation package is not installed: systemd-timesyncd"
+        return 1
+    fi
 
     if ! chroot_exec python3 -c "import runpy; runpy.run_path('/usr/local/bin/ming-settings', run_name='ming_runtime_check')"; then
         log_error "Ming Settings runtime import check failed"
@@ -1165,6 +1170,10 @@ def validate_systemd_unit(relative_path):
         if not re.search(r"^(OnBootSec|OnCalendar|OnUnitActiveSec)=.+$", text, flags=re.MULTILINE):
             errors.append(f"{relative_path} has no timer schedule directive")
         return
+    if "[Slice]" in text:
+        if "[Unit]" not in text:
+            errors.append(f"{relative_path} is not a complete systemd slice unit")
+        return
     if "[Unit]" not in text or "[Service]" not in text:
         errors.append(f"{relative_path} is not a complete systemd service unit")
     if not re.search(r"^ExecStart=.+$", text, flags=re.MULTILINE):
@@ -1197,7 +1206,7 @@ for marker in ["status", "quick-check", "firewall", "profile", "security-updates
     if marker not in security_control:
         errors.append(f"ming-security-control missing interface marker {marker}")
 account_control = require_file("usr/local/sbin/ming-account-control", "set-password")
-for marker in ["status", "clear-password", "passwd", "chpasswd"]:
+for marker in ["status", "clear-password", "passwd", "chpasswd", "nopasswdlogin", "gpasswd"]:
     if marker not in account_control:
         errors.append(f"ming-account-control missing interface marker {marker}")
 require_file("etc/nftables.conf", "table inet ming_filter")
@@ -1352,8 +1361,14 @@ for forbidden_marker in forbidden_drawer_wrapper_markers:
 update_gui = require_file("usr/local/bin/ming-update-gui", "Ming OS 更新管理器")
 if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "System Update" in update_gui:
     errors.append("ming-update-gui must keep user-facing update UI in Chinese")
+current_release_doc = require_file(
+    "usr/share/doc/ming-os/MING_OS_26.4_RELEASE_README.md", "26.4.0")
+for marker in ["26.3.2", "grub-reboot", "Recovery ISO"]:
+    if marker not in current_release_doc:
+        errors.append(f"26.4 release handoff missing marker {marker}")
 
 require_path("usr/share/backgrounds/ming-os/default.png")
+require_path("usr/share/backgrounds/ming-os/default-2640.png")
 require_path("usr/share/backgrounds/ming-os/default-2633.png")
 require_path("usr/share/backgrounds/ming-os/default-light.png")
 require_path("usr/share/backgrounds/ming-os/default-dark.png")
@@ -1459,6 +1474,8 @@ for relative_path in [
 for relative_path in [
     "etc/systemd/system/ming-service-profile.service",
     "etc/systemd/system/ming-power-profile.service",
+    "etc/systemd/system/ming-time-sync.service",
+    "etc/systemd/system/ming-time-sync.timer",
     "etc/systemd/system/ming-appstore-ready.timer",
 ]:
     validate_systemd_unit(relative_path)
@@ -1509,6 +1526,13 @@ time_dispatcher = require_file(
 for marker in ["up|dhcp4-change|dhcp6-change|connectivity-change", "nohup", "&"]:
     if marker not in time_dispatcher:
         errors.append(f"time-sync dispatcher missing event marker {marker}")
+time_service = require_file("etc/systemd/system/ming-time-sync.service", "TimeoutStartSec=60s")
+if "network-online.target" in time_service:
+    errors.append("ming-time-sync.service must not wait for network-online.target")
+time_timer = require_file("etc/systemd/system/ming-time-sync.timer", "OnBootSec=90s")
+for marker in ["OnUnitActiveSec=6h", "RandomizedDelaySec=5m", "Persistent=true"]:
+    if marker not in time_timer:
+        errors.append(f"ming-time-sync.timer missing marker {marker}")
 performance_status = require_file("usr/local/sbin/ming-performance-status", "status --json")
 for marker in [
     "systemd-analyze", "/proc/meminfo", "scaling_governor",
@@ -1517,6 +1541,20 @@ for marker in [
 ]:
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
+performance_policy = require_file("usr/local/lib/ming-os/ming-performance-policy.py", "SO_PEERCRED")
+for marker in ["ming-interaction-boost", "ming-background-policy", "CPUWeight", "CPUQuota", "timer_slack_ns", "cgroup v2"]:
+    if marker not in performance_policy:
+        errors.append(f"ming-performance-policy missing marker {marker}")
+prefetch = require_file("usr/local/lib/ming-os/ming-prefetch.py", "posix_fadvise")
+for marker in [
+    "filter_prefetch_paths", "DEFAULT_MAX_FILES", "DEFAULT_MAX_BYTES", "runtime_should_prefetch",
+    "record_application_index", "load_application_index", "index.json",
+]:
+    if marker not in prefetch:
+        errors.append(f"ming-prefetch missing marker {marker}")
+for marker in ["cgroup", "policy", "timers", "oom", "metrics_snapshot"]:
+    if marker not in performance_status:
+        errors.append(f"ming-performance-status missing extended marker {marker}")
 for relative_path in [
     "usr/local/sbin/ming-time-sync",
     "etc/NetworkManager/dispatcher.d/90-ming-time-sync",
@@ -1525,8 +1563,15 @@ for relative_path in [
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-window-manager-watchdog",
+    "usr/local/sbin/ming-oom-profile",
+    "usr/local/bin/ming-prefetch",
+    "usr/local/bin/ming-interaction-boost",
+    "usr/local/bin/ming-background-policy",
+    "usr/local/bin/ming-performance-policy",
 ]:
     validate_generated_executable(relative_path, "bash")
+validate_generated_executable("usr/local/bin/ming-ota-run", "bash")
+validate_generated_executable("usr/local/bin/ming-ota-yield", "bash")
 for relative_path in [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
@@ -1535,12 +1580,22 @@ for relative_path in [
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
+    "usr/local/bin/ming-thunar-menu-sync",
+    "usr/local/lib/ming-os/ming-performance-policy.py",
+    "usr/local/lib/ming-os/ming-prefetch.py",
 ]:
     validate_generated_executable(relative_path, "python")
+menu_sync = require_file("usr/local/bin/ming-thunar-menu-sync", "sync_menu")
+for marker in ["ACTION_ID", "ET.parse", "os.replace", "never replaced"]:
+    if marker not in menu_sync:
+        errors.append(f"Thunar menu sync missing safe merge marker {marker}")
 for relative_path in [
     "etc/systemd/system/ming-intel-xorg-migration.service",
     "etc/systemd/system/ming-regdom.service",
     "etc/systemd/system/ming-hardware-preload.service",
+    "etc/systemd/system/ming-resource-policy.service",
+    "etc/systemd/system/ming-oom-profile.service",
+    "etc/systemd/system/ming-ota.slice",
 ]:
     validate_systemd_unit(relative_path)
 if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():
@@ -2204,7 +2259,10 @@ PY
     for unit in \
         /etc/systemd/system/ming-intel-xorg-migration.service \
         /etc/systemd/system/ming-regdom.service \
-        /etc/systemd/system/ming-hardware-preload.service; do
+        /etc/systemd/system/ming-hardware-preload.service \
+        /etc/systemd/system/ming-resource-policy.service \
+        /etc/systemd/system/ming-oom-profile.service \
+        /etc/systemd/system/ming-ota.slice; do
         if ! chroot_exec /usr/bin/systemd-analyze verify "${unit}"; then
             log_error "systemd-analyze verify failed for ${unit}"
             return 1

@@ -221,7 +221,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-thunar-menu-sync.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -243,6 +243,7 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
@@ -644,7 +645,7 @@ MINGSCALE
 
     chmod +x /usr/local/bin/ming-scale
 
-    # Do not auto-run this legacy scaler.  26.3.3 stores user-selected font,
+    # Do not auto-run this legacy scaler.  26.4.0 stores user-selected font,
     # desktop icon and Dock sizes in appearance.json; automatic Xfce/Plank
     # writes would overwrite those choices after every login.
     mkdir -p "/home/${MING_USER}/.config/autostart"
@@ -662,7 +663,7 @@ SCALEAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-scale.desktop"
 }
 
-# 26.3.3 retires the old resolution-driven scaler.  Retain a harmless command
+# 26.4.0 retires the old resolution-driven scaler.  Retain a harmless command
 # at the historic path so an upgrade hook or user shortcut cannot overwrite
 # appearance.json preferences, while directing users to the supported controls.
 configure_hidpi_autoscale() {
@@ -1585,14 +1586,14 @@ setup_wallpaper() {
     local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
     local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
     local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
-    local asset_2633="/tmp/ming-build/assets/wallpaper-ming-2633-abstract.png"
+    local asset_2640="/tmp/ming-build/assets/wallpaper-ming-2640-abstract.png"
     local asset_png="/tmp/ming-build/assets/wallpaper-default.png"
 
     # The release wallpaper is a versioned product asset, not an optional
     # decoration.  Failing here prevents a build from silently falling back to
     # an older image when the generated bitmap was forgotten at commit time.
-    if [[ ! -s "${asset_2633}" ]]; then
-        echo "[03_desktop][ERROR] missing required 26.3.3 default wallpaper: ${asset_2633}" >&2
+    if [[ ! -s "${asset_2640}" ]]; then
+        echo "[03_desktop][ERROR] missing required 26.4.0 default wallpaper: ${asset_2640}" >&2
         return 1
     fi
 
@@ -1614,13 +1615,15 @@ setup_wallpaper() {
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 26.3.3's generated abstract asset takes precedence once staged.  The
-    # older images remain selectable fallbacks for an interrupted asset build.
+    # 26.4.0's generated abstract asset takes precedence once staged.  Keep a
+    # default-2633 alias so an in-place upgrade never loses a saved wallpaper
+    # path from the preview build.
     local primary=""
-    if [[ -f "${asset_2633}" ]]; then
-        primary="${asset_2633}"
-        cp "${asset_2633}" /usr/share/backgrounds/ming-os/default-2633.png
-        cp "${asset_2633}" /usr/share/backgrounds/ming-os/default.png
+    if [[ -f "${asset_2640}" ]]; then
+        primary="${asset_2640}"
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2640.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2633.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
     elif [[ -f "${asset_light}" ]]; then
@@ -3931,6 +3934,56 @@ ensure_audio_session() {
         >>"${health_log}" 2>&1 &) || true
 }
 
+# ming-resource-supervisor is intentionally owned by the unified session
+# coordinator.  It samples EWMH windows with a two-second ceiling and delegates
+# every PID change to the validated resource-policy daemon.
+ming-resource-supervisor() {
+    command -v xprop >/dev/null 2>&1 || return 0
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    command -v ming-interaction-boost >/dev/null 2>&1 || return 0
+    local active active_id active_pid active_start line window_id desktop pid state hidden_file now hidden_since
+    local hidden_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-resource-hidden"
+    mkdir -p "${hidden_dir}" 2>/dev/null || true
+    active="$(x11_call xprop -root _NET_ACTIVE_WINDOW 2>/dev/null || true)"
+    active_id="$(grep -oE '0x[0-9a-fA-F]+' <<<"${active}" | head -n1 || true)"
+    active_pid=""
+    if [[ -n "${active_id}" ]]; then
+        active_pid="$(x11_call xprop -id "${active_id}" _NET_WM_PID 2>/dev/null | awk -F' = ' '{print $2}' | tr -dc '0-9' || true)"
+    fi
+    if [[ "${active_pid}" =~ ^[0-9]+$ && -r "/proc/${active_pid}/stat" ]]; then
+        active_start="$(awk -F') ' '{print $2}' "/proc/${active_pid}/stat" 2>/dev/null | awk '{print $20}' || true)"
+        if [[ "${active_start}" =~ ^[0-9]+$ ]]; then
+            (timeout --foreground 2s ming-interaction-boost begin --pid "${active_pid}" \
+                --starttime "${active_start}" --reason activate --json >/dev/null 2>&1 &) || true
+        fi
+    fi
+    now="$(date +%s 2>/dev/null || echo 0)"
+    while read -r window_id desktop pid _rest; do
+        [[ "${pid}" =~ ^[0-9]+$ && "${pid}" != "${active_pid}" ]] || continue
+        [[ -r "/proc/${pid}/stat" ]] || continue
+        state="$(x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null || true)"
+        hidden_file="${hidden_dir}/${pid}"
+        if grep -q '_NET_WM_STATE_HIDDEN' <<<"${state}"; then
+            if [[ ! -s "${hidden_file}" ]]; then
+                printf '%s\n' "${now}" >"${hidden_file}" 2>/dev/null || true
+                continue
+            fi
+            hidden_since="$(cat "${hidden_file}" 2>/dev/null || echo "${now}")"
+            [[ "${hidden_since}" =~ ^[0-9]+$ && "${now}" =~ ^[0-9]+$ ]] || continue
+            (( now - hidden_since >= 10 )) || continue
+            visible=false
+        else
+            rm -f "${hidden_file}" 2>/dev/null || true
+            visible=true
+        fi
+        starttime="$(awk -F') ' '{print $2}' "/proc/${pid}/stat" 2>/dev/null | awk '{print $20}' || true)"
+        [[ "${starttime}" =~ ^[0-9]+$ ]] || continue
+        (timeout --foreground 2s ming-background-policy apply --pid "${pid}" \
+            --starttime "${starttime}" --desktop-file /usr/share/applications/ming-running-apps.desktop \
+            --visible "${visible}" --json >/dev/null 2>&1 &) || true
+    done < <(x11_call wmctrl -lp 2>/dev/null || true)
+}
+
 phone_desktop_running() {
     probe_timeout pgrep -u "$(id -u)" -f \
         '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' \
@@ -4275,6 +4328,7 @@ startup_once() {
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
     ensure_audio_session
+    ming-resource-supervisor
     write_metrics startup "${phone_fallback}"
     log 'session startup check complete'
 }
@@ -4288,6 +4342,7 @@ supervise_once() {
     fi
     start_plank_dock || log 'Plank Dock repair did not recover a visible window'
     ensure_audio_session
+    ming-resource-supervisor
     write_metrics supervisor "${phone_fallback}"
     log 'session supervisor check complete'
 }
@@ -4932,7 +4987,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Ming OS 26.3.2 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.4.0 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -5052,7 +5107,7 @@ ensure_wps_office() {
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.3 Picom configuration: fixed shell surfaces only.
+# Ming OS 26.4.0 Picom configuration: fixed shell surfaces only.
 # Normal applications stay completely opaque; no background sampling or blur.
 backend = "glx";
 vsync = false;
@@ -5439,8 +5494,10 @@ deploy_release_readme() {
     local doc_dir="/usr/share/doc/ming-os"
     mkdir -p "${doc_dir}"
 
-    cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Ming OS 26.3.2 Release And Website Handoff
+    # Preserve the old handoff as historical migration context; the current
+    # release document is emitted below as MING_OS_26.4_RELEASE_README.md.
+    cat > "${doc_dir}/MING_OS_26.3.2_RELEASE_README.md" << 'RELEASEREADME'
+# Ming OS 26.3.2 Historical Release And Website Handoff
 
 This document is the current website and AI handoff source for Ming OS. Use `26.3.2` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
@@ -5582,6 +5639,66 @@ Design direction:
 - keep the system branded as Ming OS after installation;
 - protect low-memory machines from heavy optional apps.
 RELEASEREADME
+
+    # Give installed users a local, version-specific handoff for the only
+    # supported 26.3.2 -> 26.4.0 path.  It intentionally points at the signed
+    # bootstrap and the existing JSON update entry point instead of teaching
+    # users to bypass the transaction and recovery safety gates.
+    local upgrade_doc="/home/${MING_USER}/Desktop/Ming OS 26.3.2 到 26.4.0 升级说明.md"
+    cat > "${upgrade_doc}" << 'UPGRADEDOC'
+# Ming OS 26.3.2 -> 26.4.0 升级说明
+
+## 推荐路径
+
+1. 在 Ming 设置的“系统更新”页点击“检查更新”。
+2. 如果页面提示缺少 bootstrap，只从 Ming OS 官方发布页下载一次性签名 bootstrap，并同时核对 SHA256、detached signature 和公钥指纹。
+3. 安装 bootstrap 后重新点击“检查更新”。26.3.2 会直接发现 26.4.0 的事务型 OTA，不需要先安装 26.3.3。
+4. 点击唯一的“立即更新”按钮。系统会按事务状态自动下载、校验、备份用户数据、暂存、设置一次性启动项并在启动健康检查后完成或自动回滚。
+
+## 安全边界
+
+- 不要关闭签名、版本、架构、路径、空间或 /home 保留检查。
+- 单分区系统可以使用事务型 OTA，不需要外接硬盘；系统会在根分区内建立受保护的事务备份并拒绝空间不足的操作。
+- recovery ISO 仍然要求独立备份介质，不能用 recovery ISO 绕过该限制。
+- 未安装官方 bootstrap 时，系统只显示“需要官方签名 bootstrap”，不会进入危险的同盘 recovery 更新。
+
+## 失败与恢复
+
+更新页显示的“暂存”“待重启”“健康检查”“已完成”或“已回滚”来自事务状态机，不代表仅下载完成。断电、校验失败、空间不足或健康检查失败时，系统保留 /home 和机器配置，并从上一次可启动系统恢复。
+
+## 检查结果
+
+升级完成后确认：
+
+- 设置 > 系统更新显示当前版本 `26.4.0`；
+- 桌面、无线网络、已安装软件和用户文件均可用；
+- `ming-update status --json` 的状态为 `committed` 或 `idle`；
+- `/var/log/ming-update/` 与 `~/.cache/ming-os/` 中没有未处理的错误。
+
+遇到问题时，在设置的诊断入口导出日志，并保留错误代码；不要删除 `/var/lib/ming-update` 事务目录。
+UPGRADEDOC
+    chown "${MING_USER}:${MING_USER}" "${upgrade_doc}"
+
+    cat > "${doc_dir}/MING_OS_26.4_RELEASE_README.md" << 'CURRENTRELEASEREADME'
+# Ming OS 26.4.0 Release Handoff
+
+Ming OS 26.4.0 skips the 26.3.3 preview. It is based on Debian 13/Trixie and
+retains the signed 26.3.2 bootstrap bridge. The ISO and public download
+metadata remain pending the final installation and hardware regression pass.
+
+## Supported 26.3.2 upgrade
+
+Install the official signed bootstrap once, verify its SHA256, detached
+signature and public-key fingerprint, then use Ming Settings to check and
+apply the signed 26.4.0 manifest. The manifest must declare
+`from_versions: ["26.3.2"]` and `version: "26.4.0"`. The transaction engine
+preserves `/home`, uses a one-time `grub-reboot` entry, and automatically
+confirms or rolls back after health checks. It does not call Calamares,
+partition tools, mkfs or resize operations.
+
+Recovery ISO updates keep their separate-backup-media gate. Never disable
+signature, space, path, `/home` or rollback checks.
+CURRENTRELEASEREADME
 }
 
 # ======================== Xfce 会话自启动 ========================
@@ -5590,8 +5707,21 @@ configure_autostart() {
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
 
+    # Merge the DEB installer action into a preserved user's Thunar menu
+    # without replacing custom actions from an older release.
+    cat > "${autostart_dir}/ming-thunar-menu-sync.desktop" << 'THUNARMENUSYNC'
+[Desktop Entry]
+Type=Application
+Name=Ming Thunar menu compatibility
+Exec=/usr/local/bin/ming-thunar-menu-sync --json
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+THUNARMENUSYNC
+
     # Override the 26.3.2 scaler on both fresh installs and in-place updates.
-    # It used to rewrite fonts, panel and Dock settings after login; 26.3.3
+    # It used to rewrite fonts, panel and Dock settings after login; 26.4.0
     # keeps those preferences in appearance.json instead.
     cat > "${autostart_dir}/ming-scale.desktop" << 'SCALEMIGRATION'
 [Desktop Entry]
@@ -6113,7 +6243,7 @@ configure_simplified_menus() {
     <command>/usr/local/bin/ming-package-install-gui "%f"</command>
     <description>验证并安装本地 Debian 软件包</description>
     <range>*</range>
-    <patterns>*.deb</patterns>
+    <patterns>*.deb;*.DEB</patterns>
     <other-files/>
 </action>
 <action>
@@ -6185,6 +6315,26 @@ configure_simplified_menus() {
 </actions>
 UCACFG
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/Thunar/uca.xml"
+
+    # Keep a MIME fallback for file managers that do not reload Thunar custom
+    # actions until the next session.  The same wrapper performs validation,
+    # authorization and application refresh for both entry points.
+    mkdir -p /usr/share/applications
+    cat > /usr/share/applications/ming-deb-installer.desktop << 'DEBINSTALLER'
+[Desktop Entry]
+Type=Application
+Name=安装 DEB 软件包
+Name[zh_CN]=安装 DEB 软件包
+Comment=验证并安装本地 Debian 软件包
+Exec=/usr/local/bin/ming-package-install-gui %f
+Icon=package-x-generic
+Terminal=false
+NoDisplay=true
+MimeType=application/vnd.debian.binary-package;application/x-deb;
+Categories=System;PackageManager;
+DEBINSTALLER
+    chmod 0644 /usr/share/applications/ming-deb-installer.desktop
+    update-desktop-database /usr/share/applications 2>/dev/null || true
 
     # 桌面采用安卓式文件夹分组，不再清空应用入口。
     runuser -u "${MING_USER}" -- /usr/local/bin/ming-desktop-organizer >/tmp/ming-desktop-organizer.log 2>&1 || true
@@ -7372,7 +7522,7 @@ TOUCHEGGAUTO
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.4.0 Dock 桌面定制 <====="
 
     generate_ming_icons
     configure_hidpi_autoscale   # Retire legacy automatic scaler without touching preferences.
@@ -7400,7 +7550,7 @@ main() {
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.3.2 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.4.0 Dock 桌面定制完成 <====="
 }
 
 main

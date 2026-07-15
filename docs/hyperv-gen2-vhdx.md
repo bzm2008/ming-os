@@ -40,11 +40,11 @@ installed, directly bootable disk rather than a Live installer disk.
 ```bash
 sudo scripts/build-hyperv-gen2-vhdx.sh \
   --rootfs /path/to/chroot \
-  --output output/ming-os-26.3.3-hyperv-gen2.vhdx \
+  --output output/ming-os-26.4.0-hyperv-gen2.vhdx \
   --size 24G
 ```
 
-The root volume label defaults to `MING_OS_2633`; override it only when a
+The root volume label defaults to `MING_OS_2640`; override it only when a
 release uses a different documented label.
 
 ## Build From an ISO
@@ -54,8 +54,8 @@ preview or recovery artifact:
 
 ```bash
 sudo scripts/build-hyperv-gen2-vhdx.sh \
-  --iso output/ming-os-26.3.3-home-amd64.iso \
-  --output output/ming-os-26.3.3-hyperv-gen2.vhdx
+  --iso output/ming-os-26.4.0-home-amd64.iso \
+  --output output/ming-os-26.4.0-hyperv-gen2.vhdx
 ```
 
 The generator converts the copied Live persona to an installed Xfce/LightDM
@@ -70,16 +70,16 @@ reboot check.
 Each output has adjacent checksum and manifest files:
 
 ```text
-ming-os-26.3.3-hyperv-gen2.vhdx
-ming-os-26.3.3-hyperv-gen2.vhdx.sha256
-ming-os-26.3.3-hyperv-gen2.vhdx.manifest.json
+ming-os-26.4.0-hyperv-gen2.vhdx
+ming-os-26.4.0-hyperv-gen2.vhdx.sha256
+ming-os-26.4.0-hyperv-gen2.vhdx.manifest.json
 ```
 
 Run the inspector on Linux before publishing to a cloud firmware service:
 
 ```bash
 sudo scripts/inspect-hyperv-gen2-vhdx.sh \
-  --image output/ming-os-26.3.3-hyperv-gen2.vhdx
+  --image output/ming-os-26.4.0-hyperv-gen2.vhdx
 ```
 
 It validates the VHDX format, GPT layout, FAT32 ESP, ext4 root label,

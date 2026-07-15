@@ -20,6 +20,9 @@ def widget_state_path():
     return Path.home() / ".config" / "ming-os" / "status-widget.json"
 
 
+METRIC_MODES = ("memory", "cpu", "network")
+
+
 def load_widget_state(path=None):
     """Load only the compact-widget preference; corrupt data means expanded."""
     target = Path(path) if path else widget_state_path()
@@ -32,15 +35,34 @@ def load_widget_state(path=None):
     return {"collapsed": data["collapsed"]}
 
 
-def save_widget_state(collapsed, path=None):
-    """Atomically persist the one status-widget setting without touching layouts."""
+def load_metric_mode(path=None):
+    target = Path(path) if path else widget_state_path()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        mode = data.get("metric_mode") if isinstance(data, dict) else None
+        return mode if mode in METRIC_MODES else METRIC_MODES[0]
+    except (OSError, ValueError, AttributeError):
+        return METRIC_MODES[0]
+
+
+def save_widget_state(collapsed, path=None, metric_mode=None):
+    """Atomically persist widget state while preserving older file shapes."""
     target = Path(path) if path else widget_state_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    state = {"collapsed": bool(collapsed)}
+    try:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if isinstance(existing, dict) and existing.get("metric_mode") in METRIC_MODES:
+            state["metric_mode"] = existing["metric_mode"]
+    except (OSError, ValueError):
+        pass
+    if metric_mode in METRIC_MODES:
+        state["metric_mode"] = metric_mode
     temporary = target.with_name(".%s.%s.tmp" % (target.name, os.getpid()))
     descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"collapsed": bool(collapsed)}, handle, ensure_ascii=False)
+            json.dump(state, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
@@ -141,6 +163,11 @@ DEVICE_CONTROL_PATHS = [
     Path("/usr/local/lib/ming-os/ming-device-control.py"),
     Path("/usr/local/bin/ming-device-control"),
     Path(__file__).resolve().with_name("ming-device-control.py"),
+]
+PERFORMANCE_STATUS_PATHS = [
+    Path("/usr/local/lib/ming-os/ming-performance-status.py"),
+    Path("/usr/local/sbin/ming-performance-status"),
+    Path(__file__).resolve().with_name("ming-performance-status.py"),
 ]
 NOTIFICATION_LOG_PATHS = [
     HOME / ".cache" / "xfce4" / "notifyd" / "log.sqlite",
@@ -375,6 +402,20 @@ def load_device_control():
             return module
         except Exception as exc:
             log(f"device control helper load failed: {exc}")
+    return None
+
+
+def load_performance_status():
+    for path in PERFORMANCE_STATUS_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("ming_performance_status_for_desktop", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            log(f"performance status helper load failed: {exc}")
     return None
 
 
@@ -1790,10 +1831,16 @@ class StatusWidget(Gtk.Box):
         # which prevents GtkRange's native drag handling from seeing motion.
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.collapsed = load_widget_state()["collapsed"]
+        self.metric_mode = load_metric_mode()
         self.refreshing = False
         self.notifications = load_notifications_helper()
         device_module = load_device_control()
         self.device_controller = device_module.DeviceController() if device_module else None
+        self.performance_module = load_performance_status()
+        self.metric_previous = None
+        self.metric_result = None
+        self.metric_worker_active = False
+        self.metric_timer = None
         self.volume_timer = None
         self.volume_sink_id = ""
         self.volume_sink_name = ""
@@ -1851,22 +1898,28 @@ class StatusWidget(Gtk.Box):
         self.action_commands[self.wifi_button] = ["ming-control-center", "--page", "network"]
         self.bluetooth_button = self.action_button("蓝牙 --", "ming-control-center")
         self.action_commands[self.bluetooth_button] = ["ming-control-center", "--page", "network"]
-        self.battery_button = self.action_button("电量 --", "ming-control-center")
-        self.action_commands[self.battery_button] = ["ming-control-center", "--page", "advanced"]
+        # The resource button occupies the intentionally empty second-row-left
+        # slot on desktop/VM sessions.  Its persistent label cycles memory,
+        # CPU and network without replacing the Gtk.Button child.
+        self.metric_button = self.action_button("内存 --", callback=self.cycle_metric)
         self.notification_button = self.action_button("通知", callback=self.open_notifications)
         self.settings_button = self.action_button("设置", "ming-control-center")
         self.action_commands[self.settings_button] = ["ming-control-center", "--page", "advanced"]
         self.power_button = self.action_button("电源", callback=self.open_power_menu)
         self.wifi_label = self.wifi_button.ming_label
         self.bluetooth_label = self.bluetooth_button.ming_label
-        self.battery_label = self.battery_button.ming_label
+        self.metric_label = self.metric_button.ming_label
+        # Compatibility handle for older integrations.  Battery text now
+        # lives in the resource label and this private label is never added
+        # to the layout, so battery-less machines cannot create a blank tile.
+        self.battery_label = Gtk.Label()
+        self.battery_label.set_no_show_all(True)
         self.notification_label = self.notification_button.ming_label
         self.settings_label = self.settings_button.ming_label
         self.power_label = self.power_button.ming_label
-        self.battery_button.set_no_show_all(True)
         actions.attach(self.wifi_button, 0, 0, 1, 1)
         actions.attach(self.bluetooth_button, 1, 0, 1, 1)
-        actions.attach(self.battery_button, 0, 1, 1, 1)
+        actions.attach(self.metric_button, 0, 1, 1, 1)
         actions.attach(self.notification_button, 1, 1, 1, 1)
         actions.attach(self.settings_button, 0, 2, 1, 1)
         actions.attach(self.power_button, 1, 2, 1, 1)
@@ -1919,6 +1972,7 @@ class StatusWidget(Gtk.Box):
         self.add(box)
         self.apply_collapsed_state(animate=False)
         self.refresh()
+        self.metric_timer = GLib.timeout_add_seconds(5, self.refresh_metrics)
         GLib.timeout_add_seconds(15, self.refresh)
 
     def preferred_height(self):
@@ -1927,10 +1981,12 @@ class StatusWidget(Gtk.Box):
     def set_collapsed(self, collapsed):
         self.collapsed = bool(collapsed)
         try:
-            save_widget_state(self.collapsed)
+            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
         except OSError as exc:
             log("could not save status widget state: %s" % exc)
         self.apply_collapsed_state(animate=True)
+        if not self.collapsed:
+            self.refresh_metrics()
 
     def apply_collapsed_state(self, animate=False):
         timing = COMMON.shell_animation_timing(load_appearance())
@@ -2014,6 +2070,71 @@ class StatusWidget(Gtk.Box):
                 lambda clicked: self.open_command(
                     self.action_commands.get(clicked, command)))
         return button
+
+    def cycle_metric(self, _button):
+        current = METRIC_MODES.index(self.metric_mode) if self.metric_mode in METRIC_MODES else 0
+        # memory -> cpu -> network -> memory
+        self.metric_mode = METRIC_MODES[(current + 1) % len(METRIC_MODES)]
+        try:
+            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
+        except OSError as exc:
+            log("could not save metric mode: %s" % exc)
+        self.update_metric_label()
+        if not self.collapsed:
+            self.refresh_metrics()
+
+    @staticmethod
+    def format_metric_value(result):
+        if not isinstance(result, dict) or not result.get("available"):
+            return "不可用"
+        value = result.get("value")
+        mode = result.get("mode")
+        if mode == "network":
+            try:
+                value = float(value)
+                if value >= 1024 * 1024:
+                    return "%.1f MB/s" % (value / (1024 * 1024))
+                if value >= 1024:
+                    return "%.1f KB/s" % (value / 1024)
+                return "%.0f B/s" % value
+            except (TypeError, ValueError):
+                return "不可用"
+        try:
+            return "%.0f%%" % float(value)
+        except (TypeError, ValueError):
+            return "不可用"
+
+    def update_metric_label(self):
+        labels = {"memory": "内存", "cpu": "CPU", "network": "网速"}
+        result = self.metric_result.get(self.metric_mode, {}) if isinstance(self.metric_result, dict) else {}
+        text = "%s %s" % (labels.get(self.metric_mode, "内存"), self.format_metric_value(result))
+        battery = getattr(self, "battery_summary", "")
+        self.metric_label.set_text("%s · %s" % (text, battery) if battery else text)
+
+    def refresh_metrics(self):
+        if self.collapsed or self.metric_worker_active or not self.performance_module:
+            return True
+        self.metric_worker_active = True
+        previous = self.metric_result
+
+        def worker():
+            try:
+                service = self.performance_module.PerformanceStatus()
+                result = service.metrics_snapshot(previous=previous, interval_seconds=5.0)
+            except Exception as exc:
+                result = {"memory": {}, "cpu": {}, "network": {}, "error": str(exc)}
+            GLib.idle_add(self.apply_metric_result, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def apply_metric_result(self, result):
+        self.metric_worker_active = False
+        if isinstance(result, dict):
+            self.metric_result = result
+            self.metric_previous = result.get("sample")
+        self.update_metric_label()
+        return False
 
     def open_command(self, command):
         argv = list(command) if isinstance(command, (list, tuple)) else [command]
@@ -2353,8 +2474,9 @@ class StatusWidget(Gtk.Box):
         brightness = status.get("brightness", {})
         self.wifi_label.set_text("Wi-Fi %s" % wifi_text)
         self.bluetooth_label.set_text("蓝牙 %s" % bluetooth.get("text", "不可用"))
-        self.battery_label.set_text("电量 %s" % battery.get("text", "--"))
-        self.battery_button.set_visible(bool(battery.get("available")))
+        self.battery_summary = "电量 %s" % battery.get("text", "--") if battery.get("available") else ""
+        self.battery_label.set_text(self.battery_summary)
+        self.update_metric_label()
         self.notification_label.set_text(
             "通知 %d" % notification_count if notification_count else "通知")
         self.updating_controls = True

@@ -49,6 +49,7 @@ install_base_packages() {
         dkms \
         systemd \
         systemd-sysv \
+        systemd-timesyncd \
         dbus \
         dbus-x11 \
         at-spi2-core \
@@ -125,6 +126,7 @@ install_base_packages() {
         mbpfan \
         smartmontools \
         earlyoom \
+        systemd-oomd \
         irqbalance \
         tlp \
         tlp-rdw \
@@ -1258,6 +1260,42 @@ esac
 exit 0
 MINGTIMEDISPATCH
     chmod 0755 /etc/NetworkManager/dispatcher.d/90-ming-time-sync
+
+    # Keep a bounded retry path for systems that boot with an already-active
+    # connection (where NetworkManager may not emit a fresh dispatcher event).
+    # The timer is deliberately independent of network-online.target so a
+    # missing network can never hold the graphical login hostage.
+    cat > /etc/systemd/system/ming-time-sync.service << 'MINGTIMESYNCSVC'
+[Unit]
+Description=Ming OS bounded network time synchronisation
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-time-sync sync
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=multi-user.target
+MINGTIMESYNCSVC
+
+    cat > /etc/systemd/system/ming-time-sync.timer << 'MINGTIMESYNCTIMER'
+[Unit]
+Description=Ming OS periodic time synchronisation retry
+After=graphical.target
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=6h
+RandomizedDelaySec=5m
+Persistent=true
+Unit=ming-time-sync.service
+
+[Install]
+WantedBy=timers.target
+MINGTIMESYNCTIMER
+    systemctl enable ming-time-sync.timer 2>/dev/null || true
 }
 
 deploy_performance_status() {
@@ -1283,6 +1321,73 @@ PY
         echo "[ERROR] ming-performance-status failed Python syntax validation" >&2
         return 1
     fi
+}
+
+deploy_performance_policy() {
+    # The policy daemon is a narrow root boundary.  The desktop talks to the
+    # installed aliases, never to sysfs/cgroup files or pkexec directly.
+    local asset="/tmp/ming-build/assets/ming-performance-policy.py"
+    local prefetch_asset="/tmp/ming-build/assets/ming-prefetch.py"
+    local lib_dir="/usr/local/lib/ming-os"
+    local uid
+    [[ -s "${asset}" ]] || {
+        echo "[ERROR] missing performance policy asset: ${asset}" >&2
+        return 1
+    }
+    [[ -s "${prefetch_asset}" ]] || {
+        echo "[ERROR] missing prefetch asset: ${prefetch_asset}" >&2
+        return 1
+    }
+    install -d -m 0755 "${lib_dir}" /usr/local/bin /run/ming-os
+    install -m 0755 "${asset}" "${lib_dir}/ming-performance-policy.py" || return 1
+    install -m 0755 "${prefetch_asset}" "${lib_dir}/ming-prefetch.py" || return 1
+    cat > /usr/local/bin/ming-prefetch << 'PREFETCHALIAS'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/ming-os/ming-prefetch.py "$@"
+PREFETCHALIAS
+    [[ -s /usr/local/bin/ming-prefetch ]] || {
+        echo "[ERROR] failed to generate ming-prefetch alias" >&2
+        return 1
+    }
+    chmod 0755 /usr/local/bin/ming-prefetch
+    for alias in ming-interaction-boost ming-background-policy ming-performance-policy; do
+        cat > "/usr/local/bin/${alias}" << POLICYALIAS
+#!/bin/sh
+exec /usr/bin/python3 ${lib_dir}/ming-performance-policy.py "\$@"
+POLICYALIAS
+        [[ -s /usr/local/bin/${alias} ]] || {
+            echo "[ERROR] failed to generate ${alias} alias" >&2
+            return 1
+        }
+        chmod 0755 "/usr/local/bin/${alias}"
+    done
+    uid="$(id -u "${MING_USER}" 2>/dev/null || echo 1000)"
+    cat > /etc/systemd/system/ming-resource-policy.service << POLICYUNIT
+[Unit]
+Description=Ming adaptive foreground and background resource policy
+After=graphical.target
+ConditionPathExists=${lib_dir}/ming-performance-policy.py
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ming-performance-policy daemon --uid ${uid}
+Restart=always
+RestartSec=1s
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/${MING_USER}/.cache/ming-os
+
+[Install]
+WantedBy=graphical.target
+POLICYUNIT
+    [[ -s /etc/systemd/system/ming-resource-policy.service ]] || {
+        echo "[ERROR] failed to generate resource policy unit" >&2
+        return 1
+    }
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ming-resource-policy.service 2>/dev/null || true
 }
 
 deploy_hardware_diagnostics() {
@@ -1947,7 +2052,7 @@ MINGOTAPREFLIGHT
 set -uo pipefail
 
 target="${1:-}"
-version="${MING_OS_VERSION:-26.3.3}"
+version="${MING_OS_VERSION:-26.4.0}"
 
 find_target_root() {
     local candidate
@@ -3138,7 +3243,7 @@ mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo
 profile="balanced"
 zram_percent=50
 swappiness=25
-vfs_cache_pressure=80
+    vfs_cache_pressure=60
 dirty_ratio=12
 dirty_background_ratio=4
 
@@ -3146,14 +3251,14 @@ if [[ "${mem_mb}" -le 2600 ]]; then
     profile="low-memory"
     zram_percent=100
     swappiness=80
-    vfs_cache_pressure=120
+    vfs_cache_pressure=100
     dirty_ratio=8
     dirty_background_ratio=2
 elif [[ "${mem_mb}" -le 4200 ]]; then
     profile="compact"
     zram_percent=75
     swappiness=50
-    vfs_cache_pressure=100
+    vfs_cache_pressure=80
     dirty_ratio=10
     dirty_background_ratio=3
 fi
@@ -3244,6 +3349,8 @@ fs.inotify.max_user_instances=512
 # 禁用 NMI watchdog 减少 CPU 中断开销
 kernel.nmi_watchdog=0
 kernel.randomize_va_space=2
+# Timer coalescing: unsupported kernels are skipped by ming-sysctl-apply.
+kernel.timer_migration=1
 # 减少 printk 刷屏（老机器串口不快）
 kernel.printk=3 4 1 3
 SYSCTLCONF
@@ -3308,13 +3415,56 @@ JOURNALCFG
     # 启用 zram 与低内存保护
     systemctl enable ming-memory-profile.service 2>/dev/null || true
     systemctl enable zramswap 2>/dev/null || true
-    systemctl enable earlyoom 2>/dev/null || true
     systemctl enable irqbalance 2>/dev/null || true
 
     mkdir -p /etc/default
     cat > /etc/default/earlyoom << EARLYOOMCFG
-EARLYOOM_ARGS="-m 4 -s 8 -r 60 --prefer '^(firefox|chromium|code)$' --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager)$'"
+EARLYOOM_ARGS="-m 4 -s 8 -r 60 --avoid '^(Xorg|xfwm4|xfce4-session|lightdm|NetworkManager|pulseaudio|fcitx5|ming-phone-desktop|plank|picom|ming-update)$'"
 EARLYOOMCFG
+
+    cat > /usr/local/sbin/ming-oom-profile << 'MINGOOMPROFILE'
+#!/usr/bin/env bash
+set -u
+
+log_file=/var/log/ming-oom-profile.log
+mkdir -p "$(dirname "${log_file}")" 2>/dev/null || true
+mkdir -p /run/ming-os 2>/dev/null || true
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true; }
+
+if [[ -e /sys/fs/cgroup/cgroup.controllers ]] && command -v systemd-oomd >/dev/null 2>&1; then
+    systemctl disable --now earlyoom.service 2>/dev/null || true
+    systemctl enable --now systemd-oomd.service 2>/dev/null || log 'systemd-oomd unavailable at runtime'
+    printf 'backend=systemd-oomd\n' >/run/ming-os/oom-profile 2>/dev/null || true
+else
+    systemctl disable --now systemd-oomd.service 2>/dev/null || true
+    systemctl enable --now earlyoom.service 2>/dev/null || log 'earlyoom unavailable at runtime'
+    printf 'backend=earlyoom\n' >/run/ming-os/oom-profile 2>/dev/null || true
+fi
+MINGOOMPROFILE
+    [[ -s /usr/local/sbin/ming-oom-profile ]] || {
+        echo "[ERROR] failed to generate OOM profile helper" >&2
+        return 1
+    }
+    chmod 0755 /usr/local/sbin/ming-oom-profile
+    cat > /etc/systemd/system/ming-oom-profile.service << 'MINGOOMPROFILESVC'
+[Unit]
+Description=Ming hardware-aware OOM backend selection
+After=local-fs.target
+Before=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-oom-profile
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+MINGOOMPROFILESVC
+    [[ -s /etc/systemd/system/ming-oom-profile.service ]] || {
+        echo "[ERROR] failed to generate OOM profile unit" >&2
+        return 1
+    }
+    systemctl enable ming-oom-profile.service 2>/dev/null || true
 
     # 配置 I/O 调度器（针对 SSD 和 HDD 的优化）
     cat > /etc/udev/rules.d/60-ioscheduler.rules << IOSCHEDRULE
@@ -3946,6 +4096,7 @@ main() {
     deploy_service_profile || return 1
     deploy_time_sync || return 1
     deploy_performance_status || return 1
+    deploy_performance_policy || return 1
     deploy_hardware_diagnostics || return 1
     configure_os_identity
     configure_installer_identity

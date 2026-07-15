@@ -226,14 +226,14 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, smoke)
 
-    def test_release_identity_is_2633_and_smoke_is_a_tracked_fixture(self):
+    def test_release_identity_is_2640_and_smoke_is_a_tracked_fixture(self):
         """Release-critical checks cannot depend on ignored local scratch files."""
         self.assertTrue(SMOKE.is_file())
-        self.assertIn('readonly MING_OS_VERSION="26.3.3"', self.build)
-        self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2633"', self.build)
+        self.assertIn('readonly MING_OS_VERSION="26.4.0"', self.build)
+        self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2640"', self.build)
         readme = README.read_text(encoding="utf-8")
-        self.assertIn("# Ming OS 26.3.3 Home Edition", readme)
-        self.assertIn("ming-os-26.3.3-home-amd64.iso", readme)
+        self.assertIn("# Ming OS 26.4.0 Home Edition", readme)
+        self.assertIn("ming-os-26.4.0-home-amd64.iso", readme)
 
     def test_readme_ota_example_is_actionable_and_declares_the_2632_transition_limit(self):
         readme = README.read_text(encoding="utf-8")

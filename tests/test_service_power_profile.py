@@ -24,6 +24,15 @@ class ServiceProfileContracts(unittest.TestCase):
         ):
             self.assertIn(marker, BASE)
 
+    def test_build_gate_verifies_resource_and_ota_units_with_systemd_analyze(self):
+        for marker in (
+            "/etc/systemd/system/ming-resource-policy.service",
+            "/etc/systemd/system/ming-oom-profile.service",
+            "/etc/systemd/system/ming-ota.slice",
+            'chroot_exec /usr/bin/systemd-analyze verify "${unit}"',
+        ):
+            self.assertIn(marker, BUILD)
+
     def test_service_profile_unit_is_local_fs_ordered_and_non_network_blocking(self):
         unit = BASE.split(
             "cat > /etc/systemd/system/ming-service-profile.service << 'MINGSERVICEPROFILESVC'",
@@ -120,6 +129,20 @@ class ServiceProfileContracts(unittest.TestCase):
 
 
 class PowerProfileContracts(unittest.TestCase):
+    def test_oom_backend_is_selected_once_and_memory_cache_pressure_is_bounded(self):
+        for marker in (
+            "systemd-oomd",
+            "ming-oom-profile",
+            "systemctl disable --now earlyoom.service",
+            "systemctl disable --now systemd-oomd.service",
+            "backend=systemd-oomd",
+            "backend=earlyoom",
+        ):
+            self.assertIn(marker, BASE)
+        self.assertNotIn("vfs_cache_pressure=120", BASE)
+        self.assertIn("vfs_cache_pressure=80", BASE)
+        self.assertIn("vfs_cache_pressure=100", BASE)
+
     def test_radio_power_tuning_does_not_break_bluetooth_or_wifi(self):
         self.assertNotIn("USB_BLACKLIST_BTUSB=1", BASE)
         self.assertNotIn("options iwlwifi power_save=0", BASE)

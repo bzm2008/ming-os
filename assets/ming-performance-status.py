@@ -191,6 +191,137 @@ class PerformanceStatus:
             "swap_free_bytes": values.get("SwapFree", 0) if available else None,
         }
 
+    def _metric_raw_sample(self) -> dict[str, Any]:
+        """Read the three cheap counters used by the desktop status pill."""
+        mem_text = self._read("/proc/meminfo") or ""
+        memory: dict[str, int] = {}
+        for line in mem_text.splitlines():
+            match = re.match(r"^(MemTotal|MemAvailable|MemFree):\s+(\d+)", line)
+            if match:
+                memory[match.group(1)] = int(match.group(2)) * 1024
+
+        cpu_line = ""
+        stat_text = self._read("/proc/stat") or ""
+        for line in stat_text.splitlines():
+            if line.startswith("cpu "):
+                cpu_line = line
+                break
+        cpu_values = []
+        if cpu_line:
+            try:
+                cpu_values = [int(value) for value in cpu_line.split()[1:]
+                              if value.isdigit()]
+            except ValueError:
+                cpu_values = []
+        cpu = {
+            "total": sum(cpu_values),
+            "idle": (cpu_values[3] + cpu_values[4]) if len(cpu_values) > 4 else (
+                cpu_values[3] if len(cpu_values) > 3 else 0),
+        }
+
+        network: dict[str, dict[str, int]] = {}
+        net_text = self._read("/proc/net/dev") or ""
+        for line in net_text.splitlines():
+            if ":" not in line:
+                continue
+            name, values = line.split(":", 1)
+            name = name.strip()
+            if not name or name == "lo":
+                continue
+            columns = values.split()
+            if len(columns) < 9:
+                continue
+            try:
+                network[name] = {
+                    "rx": int(columns[0]),
+                    "tx": int(columns[8]),
+                    "bytes": int(columns[0]) + int(columns[8]),
+                }
+            except ValueError:
+                continue
+        return {"memory": memory, "cpu": cpu, "network": network}
+
+    def _metric_result(self, mode: str, value: float | None, unit: str,
+                       available: bool, reason: str = "", **extra: Any) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "mode": mode,
+            "value": round(value, 1) if isinstance(value, (int, float)) else None,
+            "unit": unit,
+            "available": bool(available),
+            "sample_time": int(self.clock()),
+            "reason": str(reason or ""),
+        }
+        result.update(extra)
+        return result
+
+    def metrics_snapshot(self, previous: Mapping[str, Any] | None = None,
+                         interval_seconds: float = 1.0) -> dict[str, Any]:
+        """Return bounded memory, CPU and network samples for shell widgets.
+
+        ``previous`` may contain the private ``sample`` mapping returned by a
+        prior call.  The raw counters are intentionally kept separate from the
+        display values so a caller can sample off the GTK thread without
+        scraping formatted text.
+        """
+        try:
+            interval = max(0.1, float(interval_seconds))
+        except (TypeError, ValueError):
+            interval = 1.0
+        raw = self._metric_raw_sample()
+        prior = previous.get("sample", previous) if isinstance(previous, Mapping) else {}
+
+        total = raw["memory"].get("MemTotal", 0)
+        available = raw["memory"].get("MemAvailable", raw["memory"].get("MemFree", 0))
+        used = max(0, total - available)
+        memory_result = self._metric_result(
+            "memory", (used * 100.0 / total) if total else None, "%",
+            bool(total), "读取 /proc/meminfo 失败" if not total else "",
+        )
+
+        cpu_now = raw["cpu"]
+        cpu_old = prior.get("cpu", {}) if isinstance(prior, Mapping) else {}
+        total_delta = cpu_now.get("total", 0) - int(cpu_old.get("total", cpu_now.get("total", 0)))
+        idle_delta = cpu_now.get("idle", 0) - int(cpu_old.get("idle", cpu_now.get("idle", 0)))
+        cpu_available = total_delta > 0 and 0 <= idle_delta <= total_delta
+        cpu_value = (100.0 * (total_delta - idle_delta) / total_delta) if cpu_available else None
+        cpu_result = self._metric_result(
+            "cpu", cpu_value, "%", cpu_available,
+            "等待下一次 CPU 采样" if not cpu_available else "",
+        )
+
+        old_network = prior.get("network", {}) if isinstance(prior, Mapping) else {}
+        deltas = []
+        selected_interface = ""
+        route = self._probe(("ip", "route", "show", "default"), timeout=1.0)
+        route_match = re.search(r"\bdev\s+(\S+)", route.stdout or "")
+        preferred = route_match.group(1) if route_match else ""
+        for interface, counters in raw["network"].items():
+            old = old_network.get(interface, {}) if isinstance(old_network, Mapping) else {}
+            delta = counters["bytes"] - int(old.get("bytes", counters["bytes"]))
+            if delta >= 0:
+                deltas.append((interface, delta))
+        if deltas:
+            selected_interface, byte_delta = next(
+                ((name, delta) for name, delta in deltas if name == preferred),
+                max(deltas, key=lambda item: item[1]),
+            )
+            network_result = self._metric_result(
+                "network", byte_delta / interval, "B/s", True, interface=selected_interface,
+            )
+        else:
+            network_result = self._metric_result(
+                "network", None, "B/s", False, "未检测到可用网络接口", interface="",
+            )
+
+        return {
+            "schema_version": 1,
+            "generated_at": int(self.clock()),
+            "memory": memory_result,
+            "cpu": cpu_result,
+            "network": network_result,
+            "sample": raw,
+        }
+
     def cpu_status(self) -> dict[str, Any]:
         cpuinfo = self._read("/proc/cpuinfo") or ""
         vendor_match = re.search(r"^vendor_id\s*:\s*(.+)$", cpuinfo, re.MULTILINE)
@@ -377,6 +508,65 @@ class PerformanceStatus:
             "fallback": "software" if not render_nodes else "hardware-or-modesetting",
         }
 
+    def cgroup_status(self) -> dict[str, Any]:
+        controllers = self._read("/sys/fs/cgroup/cgroup.controllers")
+        available = bool(controllers)
+        return {
+            "version": 2 if available else 0,
+            "foreground": "available" if available else "degraded",
+            "background": "available" if available else "degraded",
+            "ota": "available" if available else "degraded",
+            "controllers": controllers.split() if controllers else [],
+        }
+
+    def policy_status(self) -> dict[str, Any]:
+        result = self._probe(("ming-performance-policy", "status", "--json"), timeout=1.0)
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                value = json.loads(result.stdout)
+                if isinstance(value, dict):
+                    return value
+            except (TypeError, ValueError):
+                self.diagnostics.append("ming-performance-policy: invalid JSON")
+        return {
+            "mode": "adaptive",
+            "active_leases": 0,
+            "background_throttled": 0,
+            "degraded": ["policy-daemon-unavailable"],
+        }
+
+    def timer_status(self) -> dict[str, Any]:
+        migration = self._read("/proc/sys/kernel/timer_migration")
+        nohz = False
+        for path in self._paths("/boot/config-*"):
+            text = self._read(path) or ""
+            if "CONFIG_NO_HZ_IDLE=y" in text:
+                nohz = True
+                break
+        return {
+            "no_hz_idle": nohz,
+            "timer_migration": migration == "1" if migration else None,
+            "state": "available" if migration or nohz else "unavailable",
+        }
+
+    def oom_status(self) -> dict[str, Any]:
+        systemd_oomd = self._service("systemd-oomd", "systemd-oomd.service")
+        earlyoom = self._service("earlyoom", "earlyoom.service")
+        if systemd_oomd["active"]:
+            backend = "systemd-oomd"
+        elif earlyoom["active"]:
+            backend = "earlyoom"
+        else:
+            backend = "unavailable"
+        if systemd_oomd["active"] and earlyoom["active"]:
+            self.diagnostics.append("OOM: systemd-oomd and earlyoom are both active")
+        return {
+            "backend": backend,
+            "foreground_protected": backend != "unavailable",
+            "systemd_oomd": systemd_oomd,
+            "earlyoom": earlyoom,
+        }
+
     def status(self) -> dict[str, Any]:
         self.diagnostics = []
         payload = {
@@ -391,6 +581,10 @@ class PerformanceStatus:
             "temperatures": self.temperatures_status(),
             "services": self.service_status(),
             "graphics": self.graphics_status(),
+            "cgroup": self.cgroup_status(),
+            "policy": self.policy_status(),
+            "timers": self.timer_status(),
+            "oom": self.oom_status(),
         }
         payload["diagnostics"] = list(dict.fromkeys(self.diagnostics))
         return payload
@@ -405,10 +599,11 @@ def main(
     """CLI entry point. Supported interface: ``status --json``."""
 
     args = list(argv if argv is not None else sys.argv[1:])
-    if args != ["status", "--json"]:
-        print("Usage: ming-performance-status status --json", file=sys.stderr)
+    if args not in (["status", "--json"], ["metrics", "--json"]):
+        print("Usage: ming-performance-status status --json|metrics --json", file=sys.stderr)
         return 2
-    output = (service or PerformanceStatus()).status()
+    instance = service or PerformanceStatus()
+    output = instance.status() if args[0] == "status" else instance.metrics_snapshot()
     print(json.dumps(output, ensure_ascii=False, sort_keys=True), file=stdout or sys.stdout)
     return 0
 
