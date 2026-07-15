@@ -4,6 +4,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import types
 import unittest
 
 
@@ -154,13 +155,62 @@ class DesktopSourceTests(unittest.TestCase):
             self.phone,
         )
 
-    def test_shell_launches_use_socket_ack_and_direct_fallback(self):
+    def test_shell_launches_use_socket_ack_and_broker_fallback(self):
         common = (ROOT / "assets" / "ming-shell-common.py").read_text(encoding="utf-8")
         self.assertIn("def send_launch_request", common)
+        self.assertIn("def broker_fallback_argv", common)
         self.assertIn("COMMON = load_shell_common()", self.phone)
-        self.assertIn("COMMON.send_launch_request", self.phone)
+        self.assertIn('sender(path, "desktop", source_rect)', self.phone)
+        self.assertIn('fallback(path, "desktop")', self.phone)
         self.assertIn("COMMON.send_launch_request", self.drawer)
+        self.assertIn("COMMON.broker_fallback_argv", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
+
+    def test_phone_fallback_starts_only_the_broker_without_reparsing_exec(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        launch = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_item"
+        )
+        calls = []
+        logs = []
+        path = "/usr/share/applications/store-wrapper.desktop"
+        expected = ("ming-launch", "--desktop-file", path, "--source", "desktop")
+
+        class Common:
+            @staticmethod
+            def send_launch_request(desktop_file, source_name, rect):
+                self.assertEqual((path, "desktop", None), (desktop_file, source_name, rect))
+                return False
+
+            @staticmethod
+            def broker_fallback_argv(desktop_file, source_name):
+                self.assertEqual((path, "desktop"), (desktop_file, source_name))
+                return expected
+
+        namespace = {
+            "COMMON": Common(),
+            "log": logs.append,
+            "subprocess": types.SimpleNamespace(
+                Popen=lambda argv, shell=False: calls.append((argv, shell)) or object(),
+            ),
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[launch], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+
+        self.assertTrue(namespace["launch_item"]({"path": path, "diagnostic": ""}))
+        self.assertEqual([(expected, False)], calls)
+        self.assertTrue(any("source=desktop" in message for message in logs))
+        function_source = ast.get_source_segment(source, launch)
+        self.assertNotIn("parse_desktop_file", function_source)
+        self.assertNotIn("entry.argv", function_source)
 
     def test_status_panel_fills_its_allocated_width(self):
         self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)

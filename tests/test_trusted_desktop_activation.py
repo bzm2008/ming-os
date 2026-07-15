@@ -90,6 +90,53 @@ class TrustedDesktopActivationTests(unittest.TestCase):
                 }),
             ))
 
+    def test_protected_system_shell_wrapper_has_a_broker_only_catalog_entry(self):
+        """The catalog may surface a protected wrapper without exposing argv."""
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                    self.common, "is_system_desktop_activation_candidate", return_value=True):
+                entry = self.common.diagnose_desktop_file(desktop)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual((), entry.argv)
+        self.assertEqual("", entry.diagnostic)
+
+    def test_user_shell_wrapper_remains_a_diagnostic_catalog_entry(self):
+        """A non-system copy must never inherit the protected wrapper exception."""
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = pathlib.Path(directory) / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                    self.common, "is_system_desktop_activation_candidate", return_value=False):
+                entry = self.common.diagnose_desktop_file(desktop)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual((), entry.argv)
+        self.assertIn("不支持", entry.diagnostic)
+
+    def test_broker_fallback_argv_allows_only_known_desktop_surfaces(self):
+        desktop = "/usr/share/applications/store-wrapper.desktop"
+        self.assertEqual(
+            ("ming-launch", "--desktop-file", desktop, "--source", "drawer"),
+            self.common.broker_fallback_argv(desktop, "drawer"),
+        )
+        for source in ("unknown", "ipc", "desktop-copy", ""):
+            with self.subTest(source=source):
+                with self.assertRaises(ValueError):
+                    self.common.broker_fallback_argv(desktop, source)
+
     def test_rejects_candidate_when_resolution_indicates_a_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             system_dir = pathlib.Path(directory) / "applications"

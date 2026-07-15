@@ -635,7 +635,23 @@ def diagnose_desktop_file(path, locale_name=None):
     try:
         entry = parse_desktop_file(path, locale_name=locale_name)
     except ValueError as exc:
-        return _diagnostic_entry_from_raw(path, locale_name, str(exc))
+        reason = str(exc)
+        diagnostic_entry = _diagnostic_entry_from_raw(path, locale_name, reason)
+        # This is only a catalog representation.  The broker revalidates the
+        # package owner and descriptor before it activates the desktop entry.
+        if (
+                reason == "shell command wrappers are not allowed"
+                and diagnostic_entry is not None
+                and is_system_desktop_activation_candidate(path)):
+            return DesktopEntry(
+                path=diagnostic_entry.path,
+                name=diagnostic_entry.name,
+                comment=diagnostic_entry.comment,
+                icon=diagnostic_entry.icon,
+                argv=(),
+                categories=diagnostic_entry.categories,
+            )
+        return diagnostic_entry
     if entry is None:
         return _diagnostic_entry_from_raw(path, locale_name, "TryExec dependency is unavailable")
     diagnostic = desktop_launch_diagnostic(entry.argv)
@@ -698,6 +714,19 @@ def send_launch_request(desktop_file, source="unknown", rect=None, timeout=0.4):
         return True
     except (AttributeError, OSError, TypeError, ValueError):
         return False
+
+
+def broker_fallback_argv(desktop_file, source):
+    """Return the sole safe local fallback: start the broker with a path."""
+    if source not in {"desktop", "drawer", "dock"}:
+        raise ValueError("unsupported desktop launch source")
+    try:
+        path = os.fspath(desktop_file)
+    except TypeError as exc:
+        raise ValueError("desktop file path is invalid") from exc
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ValueError("desktop file path is invalid")
+    return ("ming-launch", "--desktop-file", path, "--source", source)
 
 
 def run_command(argv, timeout=8):

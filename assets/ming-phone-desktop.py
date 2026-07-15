@@ -475,9 +475,9 @@ def legacy_desktop_entry(path):
     """Parse a launcher safely when an older shared runtime is still loaded.
 
     This is deliberately a narrow compatibility path for an interrupted hot
-    deployment or an older recovery image.  It never invokes a shell: field
-    codes are removed, the executable is resolved first, and the returned
-    argv is passed directly to ``subprocess.Popen``.
+    deployment or an older recovery image.  It never invokes a shell; callers
+    may use the returned metadata for catalog display, but launch still goes
+    through the trusted broker.
     """
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
@@ -572,39 +572,20 @@ def launch_item(item, source_rect=None):
         return False
     legacy_argv = item.get("legacy_argv")
     if legacy_argv:
-        log(f"shared launcher validation unavailable; using safe legacy argv for {path}")
-        try:
-            subprocess.Popen(list(legacy_argv), shell=False)
-            return True
-        except Exception as exc:
-            log(f"legacy exec fallback failed for {path}: {exc}")
-            return False
-    parser = getattr(COMMON, "parse_desktop_file", None)
-    validator = getattr(COMMON, "desktop_launch_diagnostic", None)
+        log(f"legacy launcher metadata present; routing through broker only for {path} source=desktop")
     sender = getattr(COMMON, "send_launch_request", None)
-    if not callable(parser) or not callable(validator) or not callable(sender):
+    fallback = getattr(COMMON, "broker_fallback_argv", None)
+    if not callable(sender) or not callable(fallback):
         log(f"launch validation unavailable for {path}")
         return False
-    try:
-        entry = parser(path)
-    except (OSError, ValueError) as exc:
-        log(f"launch validation failed for {path}: {exc}")
-        return False
-    if entry is None:
-        log(f"launch validation failed for {path}: hidden or unavailable entry")
-        return False
-    diagnostic = validator(entry.argv)
-    if diagnostic:
-        log(f"launch validation failed for {path}: {diagnostic}")
-        return False
-    if COMMON.send_launch_request(path, "desktop", source_rect):
+    if sender(path, "desktop", source_rect):
         return True
-    log(f"launch broker unavailable; using direct fallback for {path}")
+    log(f"launch broker unavailable; starting broker fallback for {path} source=desktop")
     try:
-        subprocess.Popen(list(entry.argv), shell=False)
+        subprocess.Popen(fallback(path, "desktop"), shell=False)
         return True
     except Exception as exc:
-        log(f"exec fallback failed for {path}: {exc}")
+        log(f"broker fallback failed for {path} source=desktop: {exc}")
     return False
 
 

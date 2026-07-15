@@ -469,9 +469,10 @@ class DrawerController:
         started = COMMON.send_launch_request(str(app.path), "drawer", rect)
         if not started:
             try:
-                subprocess.Popen(list(app.argv), shell=False)
+                fallback_argv = COMMON.broker_fallback_argv(str(app.path), "drawer")
+                subprocess.Popen(fallback_argv, shell=False)
                 started = True
-            except (OSError, ValueError, subprocess.SubprocessError):
+            except (AttributeError, OSError, TypeError, ValueError, subprocess.SubprocessError):
                 started = False
         if not started:
             dialog = self.Gtk.MessageDialog(

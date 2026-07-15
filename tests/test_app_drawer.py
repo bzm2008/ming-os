@@ -145,6 +145,63 @@ class AppDrawerCoreTests(unittest.TestCase):
             self.assertEqual((), apps[0].argv)
             self.assertIn("不支持", apps[0].diagnostic)
 
+    def test_protected_system_wrapper_catalog_entry_routes_only_to_broker(self):
+        """The drawer must let the broker make the final wrapper trust decision."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            applications = pathlib.Path(tempdir) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                    self.drawer.COMMON, "is_system_desktop_activation_candidate", return_value=True):
+                apps = self.drawer.discover_apps((applications,))
+
+        self.assertEqual(1, len(apps))
+        self.assertEqual((), apps[0].argv)
+        self.assertEqual("", apps[0].diagnostic)
+        events = []
+        controller = types.SimpleNamespace(
+            recent=types.SimpleNamespace(touch=lambda path: events.append(("recent", str(path)))),
+            hide=lambda: events.append(("hide",)),
+        )
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=True) as send:
+            with mock.patch.object(self.drawer.subprocess, "Popen") as popen:
+                self.assertTrue(self.drawer.DrawerController.launch(controller, apps[0], None))
+
+        send.assert_called_once_with(str(desktop), "drawer", None)
+        popen.assert_not_called()
+        self.assertEqual([("recent", str(desktop)), ("hide",)], events)
+
+    def test_drawer_local_fallback_uses_only_the_trusted_broker_argv(self):
+        """A stopped socket may start the broker, but never execute the catalog argv."""
+        app = FakeApp(
+            "Store Wrapper",
+            path="/usr/share/applications/store-wrapper.desktop",
+            argv=("untrusted-direct-app", "--should-not-run"),
+        )
+        app.diagnostic = ""
+        events = []
+        controller = types.SimpleNamespace(
+            recent=types.SimpleNamespace(touch=lambda path: events.append(("recent", str(path)))),
+            hide=lambda: events.append(("hide",)),
+        )
+        expected = (
+            "ming-launch", "--desktop-file", str(app.path), "--source", "drawer",
+        )
+        with mock.patch.object(self.drawer.COMMON, "send_launch_request", return_value=False):
+            with mock.patch.object(
+                    self.drawer.COMMON, "broker_fallback_argv", return_value=expected, create=True) as fallback:
+                with mock.patch.object(self.drawer.subprocess, "Popen", return_value=object()) as popen:
+                    self.assertTrue(self.drawer.DrawerController.launch(controller, app, None))
+
+        fallback.assert_called_once_with(str(app.path), "drawer")
+        popen.assert_called_once_with(expected, shell=False)
+        self.assertEqual([("recent", str(app.path)), ("hide",)], events)
+
     def test_widget_source_rect_includes_no_window_widget_allocation(self):
         allocation = type("Allocation", (), {"x": 12, "y": 18, "width": 80, "height": 40})()
         rect = self.drawer.widget_source_rect((True, 100, 200), allocation)
