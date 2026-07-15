@@ -3,3 +3,5 @@
 *.conf text eol=lf
 *.service text eol=lf
 *.timer text eol=lf
+/assets/initramfs/ming-transaction-* text eol=lf
+/assets/grub/40_ming_transaction text eol=lf

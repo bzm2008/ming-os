@@ -7,6 +7,12 @@ SCRIPT = ROOT / "tools" / "run-transaction-ota-regression.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "transaction-ota-regression.yml"
 HEALTH_UNIT = ROOT / "assets" / "systemd" / "ming-transaction-health.service"
 RECONCILE_UNIT = ROOT / "assets" / "systemd" / "ming-transaction-reconcile.service"
+GIT_ATTRIBUTES = ROOT / ".gitattributes"
+TRANSACTION_SHELL_ASSETS = (
+    ROOT / "assets" / "initramfs" / "ming-transaction-hook",
+    ROOT / "assets" / "initramfs" / "ming-transaction-local-premount",
+    ROOT / "assets" / "grub" / "40_ming_transaction",
+)
 
 
 class TransactionRegressionGateTests(unittest.TestCase):
@@ -52,6 +58,17 @@ class TransactionRegressionGateTests(unittest.TestCase):
             self.assertIn("Before=display-manager.service", content)
             self.assertRegex(content, r"TimeoutStartSec=(?:[1-9][0-9]?|[1-9][0-9]?s)")
             self.assertNotIn("Restart=always", content)
+
+    def test_transaction_shell_assets_use_posix_lf_line_endings(self):
+        for asset in TRANSACTION_SHELL_ASSETS:
+            with self.subTest(asset=asset.name):
+                self.assertTrue(asset.is_file(), f"missing transaction shell asset: {asset.name}")
+                self.assertNotIn(b"\r\n", asset.read_bytes())
+
+    def test_transaction_extensionless_shell_assets_are_pinned_to_lf(self):
+        attributes = GIT_ATTRIBUTES.read_text(encoding="utf-8")
+        self.assertIn("/assets/initramfs/ming-transaction-* text eol=lf", attributes)
+        self.assertIn("/assets/grub/40_ming_transaction text eol=lf", attributes)
 
 
 if __name__ == "__main__":
