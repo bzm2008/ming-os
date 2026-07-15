@@ -8,10 +8,18 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMMON_PATH = ROOT / "assets" / "ming-shell-common.py"
+LAUNCH_PATH = ROOT / "assets" / "ming-launch.py"
 
 
 def load_common():
     spec = importlib.util.spec_from_file_location("ming_shell_common", COMMON_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_launch():
+    spec = importlib.util.spec_from_file_location("ming_launch_trusted", LAUNCH_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -324,6 +332,214 @@ class TrustedDesktopActivationTests(unittest.TestCase):
                     system_dir: protected_directory(),
                     desktop: protected_regular_file(),
                 }),
+            ))
+
+
+class TrustedLaunchRequestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.launch = load_launch()
+
+    def test_protected_system_shell_wrapper_selects_internal_app_info_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            request = self.launch.request_from_desktop_file(
+                desktop,
+                allowed_dirs=(applications,),
+                candidate_verifier=lambda path: path == desktop.resolve(),
+                trusted_verifier=lambda path: path == desktop.resolve(),
+            )
+
+            self.assertEqual("desktop_app_info", request.mode)
+            self.assertEqual((), request.argv)
+            self.assertEqual(str(desktop.resolve()), request.desktop_file)
+
+    def test_shell_wrapper_does_not_select_internal_mode_without_final_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                self.launch.request_from_desktop_file(
+                    desktop,
+                    allowed_dirs=(applications,),
+                    candidate_verifier=lambda _path: True,
+                    trusted_verifier=lambda _path: False,
+                )
+
+    def test_final_verifier_requires_an_exact_installed_package_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+            calls = []
+
+            def query(argv, timeout):
+                calls.append((tuple(argv), timeout))
+                if "-S" in argv:
+                    return types.SimpleNamespace(
+                        returncode=0,
+                        stdout="store-wrapper: {}\n".format(desktop.resolve()),
+                        stderr="",
+                    )
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="ii \tstore-wrapper\n",
+                    stderr="",
+                )
+
+            self.assertTrue(self.launch.verify_package_owned_system_desktop(
+                desktop,
+                system_dir=applications,
+                command_runner=query,
+                descriptor_revalidator=lambda path, parent: (
+                    path == desktop.resolve() and parent == applications.resolve()
+                ),
+            ))
+            self.assertEqual(2, len(calls))
+            self.assertTrue(all(timeout <= 2 for _argv, timeout in calls))
+
+    def test_final_verifier_rejects_unowned_ambiguous_mismatched_and_noninstalled_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+
+            cases = {
+                "unowned": (
+                    types.SimpleNamespace(returncode=1, stdout="", stderr="not found"),
+                    None,
+                ),
+                "ambiguous": (
+                    types.SimpleNamespace(
+                        returncode=0,
+                        stdout="first, second: {}\n".format(desktop.resolve()),
+                        stderr="",
+                    ),
+                    None,
+                ),
+                "mismatched": (
+                    types.SimpleNamespace(
+                        returncode=0,
+                        stdout="store-wrapper: /usr/share/applications/other.desktop\n",
+                        stderr="",
+                    ),
+                    None,
+                ),
+                "not-installed": (
+                    types.SimpleNamespace(
+                        returncode=0,
+                        stdout="store-wrapper: {}\n".format(desktop.resolve()),
+                        stderr="",
+                    ),
+                    types.SimpleNamespace(returncode=0, stdout="hi \tstore-wrapper\n", stderr=""),
+                ),
+            }
+            for name, (ownership, installation) in cases.items():
+                with self.subTest(name=name):
+                    def query(argv, timeout, ownership=ownership, installation=installation):
+                        del timeout
+                        return ownership if "-S" in argv else installation
+
+                    self.assertFalse(self.launch.verify_package_owned_system_desktop(
+                        desktop,
+                        system_dir=applications,
+                        command_runner=query,
+                        descriptor_revalidator=lambda *_args: True,
+                    ))
+
+    def test_shell_wrapper_ipc_cannot_select_an_internal_launch_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=sh -c 'exec /opt/store-wrapper/run'\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                self.launch.request_from_message({
+                    "version": 1,
+                    "action": "launch",
+                    "desktop_file": str(desktop),
+                    "source": "drawer",
+                    "rect": None,
+                    "mode": "desktop_app_info",
+                }, allowed_dirs=(applications,))
+
+    def test_non_shell_parse_failure_never_selects_desktop_app_info_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "broken-wrapper.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Broken Wrapper\n"
+                "Exec=sh -c 'unterminated\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                self.launch.request_from_desktop_file(
+                    desktop,
+                    allowed_dirs=(applications,),
+                    candidate_verifier=lambda _path: True,
+                )
+
+    def test_final_verifier_rejects_query_timeouts_and_descriptor_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            desktop = applications / "store-wrapper.desktop"
+            desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+
+            def timeout(_argv, timeout):
+                self.assertLessEqual(timeout, 2)
+                raise self.launch.subprocess.TimeoutExpired("dpkg-query", timeout)
+
+            self.assertFalse(self.launch.verify_package_owned_system_desktop(
+                desktop,
+                system_dir=applications,
+                command_runner=timeout,
+                descriptor_revalidator=lambda *_args: self.fail("must not revalidate"),
+            ))
+
+            def installed_query(argv, timeout):
+                del timeout
+                if "-S" in argv:
+                    return types.SimpleNamespace(
+                        returncode=0,
+                        stdout="store-wrapper: {}\n".format(desktop.resolve()),
+                        stderr="",
+                    )
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="ii \tstore-wrapper\n",
+                    stderr="",
+                )
+
+            self.assertFalse(self.launch.verify_package_owned_system_desktop(
+                desktop,
+                system_dir=applications,
+                command_runner=installed_query,
+                descriptor_revalidator=lambda *_args: False,
             ))
 
 

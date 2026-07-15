@@ -6,7 +6,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -17,6 +19,9 @@ ANIMATION_DURATION_MS = 200
 FEEDBACK_TIMEOUT_MS = 4000
 DEDUP_SECONDS = 0.6
 IPC_VERSION = 1
+DPKG_QUERY = "/usr/bin/dpkg-query"
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*(?::[A-Za-z0-9][A-Za-z0-9+.-]*)?")
+SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 
 
 def _load_common():
@@ -38,7 +43,7 @@ def record_launch_event(request, status, detail="", path=None):
         "status": str(status),
         "source": request.source,
         "desktop_file": request.desktop_file,
-        "command": request.argv[0],
+        "command": request.argv[0] if request.argv else request.desktop_file,
         "detail": str(detail)[:1024],
     }
     try:
@@ -50,17 +55,28 @@ def record_launch_event(request, status, detail="", path=None):
 
 
 class LaunchRequest:
-    __slots__ = ("argv", "source", "rect", "desktop_file")
+    __slots__ = ("argv", "source", "rect", "desktop_file", "mode")
 
-    def __init__(self, argv, source="unknown", rect=None, desktop_file=""):
-        if not isinstance(argv, (list, tuple)) or not argv or not all(
-            isinstance(item, str) and item and "\x00" not in item for item in argv
-        ):
-            raise ValueError("launch argv must be a non-empty string list")
+    def __init__(self, argv, source="unknown", rect=None, desktop_file="", mode="argv"):
+        if mode == "argv":
+            if not isinstance(argv, (list, tuple)) or not argv or not all(
+                isinstance(item, str) and item and "\x00" not in item for item in argv
+            ):
+                raise ValueError("launch argv must be a non-empty string list")
+        elif mode == "desktop_app_info":
+            if argv not in ((), []):
+                raise ValueError("desktop app info launch must not carry argv")
+            path = os.fspath(desktop_file)
+            if not os.path.isabs(path) or any(
+                    part in {".", ".."} for part in pathlib.PurePath(path).parts):
+                raise ValueError("desktop app info requires a canonical desktop file")
+        else:
+            raise ValueError("unsupported launch mode")
         self.argv = tuple(argv)
         self.source = source if source in {"desktop", "drawer", "dock", "unknown"} else "unknown"
         self.rect = COMMON.Rect.from_mapping(rect) if rect is not None else None
         self.desktop_file = str(desktop_file or "")
+        self.mode = mode
 
     def to_message(self):
         return {
@@ -109,6 +125,169 @@ def _allowed_desktop_path(path, allowed_dirs=None):
     raise ValueError("desktop file is outside application directories")
 
 
+def _canonical_system_desktop_file(path, system_dir=SYSTEM_APPLICATION_DIR):
+    raw_path = os.fspath(path)
+    raw_directory = os.fspath(system_dir)
+    if not isinstance(raw_path, str) or not isinstance(raw_directory, str):
+        raise ValueError("desktop path is invalid")
+    if not os.path.isabs(raw_path) or not os.path.isabs(raw_directory):
+        raise ValueError("desktop path must be absolute")
+    if (
+            any(part in {".", ".."} for part in pathlib.PurePath(raw_path).parts)
+            or any(part in {".", ".."} for part in pathlib.PurePath(raw_directory).parts)):
+        raise ValueError("desktop path must be canonical")
+    desktop_path = pathlib.Path(raw_path)
+    directory_path = pathlib.Path(raw_directory)
+    if desktop_path.parent != directory_path or desktop_path.suffix != ".desktop":
+        raise ValueError("desktop path is outside the system directory")
+    return desktop_path, directory_path
+
+
+def _protected_directory(metadata):
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == 0
+        and not (metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    )
+
+
+def _protected_regular_file(metadata):
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and not (metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    )
+
+
+def descriptor_revalidate_system_desktop(path, system_dir=SYSTEM_APPLICATION_DIR):
+    """Recheck a system desktop entry without following its directory or leaf."""
+    try:
+        desktop_path, directory_path = _canonical_system_desktop_file(path, system_dir)
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+        if (
+                not isinstance(directory_flag, int)
+                or not isinstance(nofollow_flag, int)
+                or directory_flag <= 0
+                or nofollow_flag <= 0):
+            return False
+        directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
+        directory_fd = os.open(str(directory_path), directory_flags)
+    except (AttributeError, OSError, PermissionError, RuntimeError, TypeError, ValueError):
+        return False
+    try:
+        if not _protected_directory(os.fstat(directory_fd)):
+            return False
+        try:
+            leaf_fd = os.open(
+                desktop_path.name,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except (AttributeError, OSError, PermissionError, RuntimeError, TypeError, ValueError):
+            return False
+        try:
+            return _protected_regular_file(os.fstat(leaf_fd))
+        finally:
+            try:
+                os.close(leaf_fd)
+            except OSError:
+                pass
+    except (AttributeError, OSError, PermissionError, RuntimeError, TypeError, ValueError):
+        return False
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
+
+
+def _run_dpkg_query(argv, timeout=2):
+    return subprocess.run(
+        [DPKG_QUERY, *argv],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        shell=False,
+    )
+
+
+def _query_package_owner(path, command_runner):
+    result = command_runner(("-S", "--", str(path)), timeout=2)
+    if result.returncode != 0:
+        return ""
+    lines = [line for line in str(result.stdout or "").splitlines() if line]
+    if len(lines) != 1:
+        return ""
+    owner, marker, reported_path = lines[0].rpartition(": ")
+    if (
+            marker != ": "
+            or reported_path != str(path)
+            or owner.strip() != owner
+            or "," in owner
+            or not PACKAGE_NAME.fullmatch(owner)):
+        return ""
+    return owner
+
+
+def _package_is_installed(owner, command_runner):
+    result = command_runner(
+        ("-W", "-f=${db:Status-Abbrev}\\t${binary:Package}\\n", "--", owner),
+        timeout=2,
+    )
+    if result.returncode != 0:
+        return False
+    lines = [line for line in str(result.stdout or "").splitlines() if line]
+    if len(lines) != 1:
+        return False
+    status, marker, installed_owner = lines[0].partition("\t")
+    return marker == "\t" and status == "ii " and installed_owner == owner
+
+
+def verify_package_owned_system_desktop(
+        path, system_dir=SYSTEM_APPLICATION_DIR, command_runner=None,
+        descriptor_revalidator=None):
+    """Verify package ownership and protected descriptors immediately before GIO."""
+    try:
+        desktop_path, directory_path = _canonical_system_desktop_file(path, system_dir)
+        runner = command_runner or _run_dpkg_query
+        owner = _query_package_owner(desktop_path, runner)
+        if not owner or not _package_is_installed(owner, runner):
+            return False
+        revalidator = descriptor_revalidator or descriptor_revalidate_system_desktop
+        return bool(revalidator(desktop_path, directory_path))
+    except (
+            AttributeError, OSError, PermissionError, RuntimeError, TypeError,
+            ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def _is_shell_wrapper_error(error):
+    return str(error) == "shell command wrappers are not allowed"
+
+
+def request_from_desktop_file(
+        desktop_file, source="unknown", rect=None, allowed_dirs=None,
+        candidate_verifier=None, trusted_verifier=None):
+    path = _allowed_desktop_path(desktop_file, allowed_dirs)
+    try:
+        entry = COMMON.parse_desktop_file(path)
+    except ValueError as exc:
+        if not _is_shell_wrapper_error(exc):
+            raise
+        verifier = candidate_verifier or COMMON.is_system_desktop_activation_candidate
+        if not verifier(path):
+            raise
+        final_verifier = trusted_verifier or verify_package_owned_system_desktop
+        if not final_verifier(path):
+            raise ValueError("system desktop wrapper is not verified")
+        return LaunchRequest((), source, rect, str(path), mode="desktop_app_info")
+    if entry is None:
+        raise ValueError("desktop file is hidden or unavailable")
+    return LaunchRequest(entry.argv, source, rect, str(path))
+
+
 def request_from_message(message, allowed_dirs=None):
     allowed_keys = {"version", "action", "desktop_file", "source", "rect"}
     if (
@@ -118,11 +297,12 @@ def request_from_message(message, allowed_dirs=None):
         or not set(message).issubset(allowed_keys)
     ):
         raise ValueError("invalid launch message")
-    path = _allowed_desktop_path(message.get("desktop_file"), allowed_dirs)
-    entry = COMMON.parse_desktop_file(path)
-    if entry is None:
-        raise ValueError("desktop file is hidden or unavailable")
-    return LaunchRequest(entry.argv, message.get("source", "unknown"), message.get("rect"), str(path))
+    return request_from_desktop_file(
+        message.get("desktop_file"),
+        source=message.get("source", "unknown"),
+        rect=message.get("rect"),
+        allowed_dirs=allowed_dirs,
+    )
 
 
 def resolve_origin(request, workarea):
@@ -238,11 +418,24 @@ def report_launch_error(request, error):
     )
 
 
+def activate_desktop_app_info(desktop_file):
+    """Activate a final-verified package desktop file in the user session."""
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio
+
+    app_info = Gio.DesktopAppInfo.new_from_filename(str(desktop_file))
+    return bool(app_info and app_info.launch([], None))
+
+
 class LaunchBroker:
     def __init__(
             self, spawn=None, animate=None, now=None, reduced_motion=None,
-            workarea=None, probe=None, report_error=None, record_event=None):
+            workarea=None, probe=None, report_error=None, record_event=None,
+            desktop_activator=None, trusted_verifier=None):
         self.spawn = spawn or (lambda argv: subprocess.Popen(list(argv), shell=False))
+        self.desktop_activator = desktop_activator or activate_desktop_app_info
+        self.trusted_verifier = trusted_verifier or verify_package_owned_system_desktop
         self.animate = animate or animate_launch
         self.now = now or time.monotonic
         self.reduced_motion = reduced_motion or reduced_motion_enabled
@@ -258,6 +451,37 @@ class LaunchBroker:
         previous = self._recent.get(key)
         if previous is not None and moment - previous < DEDUP_SECONDS:
             return False
+        if request.mode == "desktop_app_info":
+            return self._launch_desktop_app_info(request, key, moment)
+        return self._launch_argv(request, key, moment)
+
+    def _launch_desktop_app_info(self, request, key, moment):
+        try:
+            verified = self.trusted_verifier(request.desktop_file)
+        except Exception as exc:
+            self.record_event(request, "activation_failed", exc)
+            self.report_error(request, exc)
+            return False
+        if not verified:
+            error = RuntimeError("desktop launcher verification failed")
+            self.record_event(request, "activation_rejected", error)
+            self.report_error(request, error)
+            return False
+        try:
+            activated = self.desktop_activator(request.desktop_file)
+        except Exception as exc:
+            self.record_event(request, "activation_failed", exc)
+            self.report_error(request, exc)
+            return False
+        if not activated:
+            error = RuntimeError("desktop launcher activation failed")
+            self.record_event(request, "activation_failed", error)
+            self.report_error(request, error)
+            return False
+        self._after_start(request, key, moment, None, "activated")
+        return True
+
+    def _launch_argv(self, request, key, moment):
         try:
             process = self.spawn(request.argv)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -265,8 +489,12 @@ class LaunchBroker:
             self.record_event(request, status, exc)
             self.report_error(request, exc)
             return False
+        self._after_start(request, key, moment, process, "spawned")
+        return True
+
+    def _after_start(self, request, key, moment, process, status):
         self._recent[key] = moment
-        self.record_event(request, "spawned")
+        self.record_event(request, status)
         origin = resolve_origin(request, self.workarea())
         finish = None
         if not self.reduced_motion():
@@ -304,7 +532,6 @@ class LaunchBroker:
                 on_ready=ready,
                 on_failure=failed,
             )
-        return True
 
 
 def animate_launch(request, origin):
@@ -450,11 +677,7 @@ def send_to_broker(request):
 def request_from_args(args):
     rect = json.loads(args.rect) if args.rect else None
     if args.desktop_file:
-        path = _allowed_desktop_path(args.desktop_file)
-        entry = COMMON.parse_desktop_file(path)
-        if entry is None:
-            raise ValueError("desktop file is hidden")
-        return LaunchRequest(entry.argv, args.source, rect, str(path))
+        return request_from_desktop_file(args.desktop_file, args.source, rect)
     raise ValueError("an allowlisted desktop file is required")
 
 
