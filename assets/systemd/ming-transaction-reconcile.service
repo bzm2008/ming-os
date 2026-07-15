@@ -1,0 +1,13 @@
+[Unit]
+Description=Ming OS transactional update rollback reconciliation
+After=local-fs.target
+Before=display-manager.service
+Before=ming-transaction-health.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-transaction-health reconcile
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
