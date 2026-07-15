@@ -424,6 +424,39 @@ def _localized(section, key, locale_name):
     return ""
 
 
+def is_system_desktop_activation_candidate(
+        path, system_dir=pathlib.Path("/usr/share/applications"),
+        path_resolver=None, stat_reader=None):
+    """Return whether a package-owned system desktop file may be considered later.
+
+    This is deliberately a static filesystem policy only.  It does not parse
+    ``Exec`` or perform activation; ordinary desktop entries must continue to
+    pass through ``desktop_exec_argv`` unchanged.
+    """
+    resolver = path_resolver or (lambda value: pathlib.Path(value).resolve(strict=True))
+    reader = stat_reader or os.stat
+    try:
+        requested = pathlib.Path(path)
+        requested_dir = pathlib.Path(system_dir)
+        lexical_path = pathlib.Path(os.path.abspath(os.fspath(requested)))
+        lexical_dir = pathlib.Path(os.path.abspath(os.fspath(requested_dir)))
+        resolved_path = pathlib.Path(resolver(requested))
+        resolved_dir = pathlib.Path(resolver(requested_dir))
+        # A difference means an entry or one of its parents traversed a link.
+        if resolved_path != lexical_path or resolved_dir != lexical_dir:
+            return False
+        if resolved_path.parent != resolved_dir or resolved_path.suffix != ".desktop":
+            return False
+        metadata = reader(resolved_path)
+    except (OSError, TypeError, ValueError):
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and not (metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    )
+
+
 def desktop_exec_argv(command):
     if not isinstance(command, str) or not command.strip() or "\x00" in command:
         raise ValueError("desktop Exec is empty or invalid")

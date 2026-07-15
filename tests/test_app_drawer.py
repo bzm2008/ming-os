@@ -129,11 +129,11 @@ class AppDrawerCoreTests(unittest.TestCase):
             self.assertEqual((), apps[0].argv)
             self.assertIn("找不到启动程序", apps[0].diagnostic)
 
-    def test_shell_wrapper_desktop_entry_is_reported_without_becoming_executable(self):
-        """The catalog may explain unsafe launchers, but must never run sh -c."""
+    def test_user_shell_wrapper_is_reported_without_becoming_executable(self):
+        """A user launcher remains diagnostic-only even after system trust work."""
         with tempfile.TemporaryDirectory() as tempdir:
-            applications = pathlib.Path(tempdir) / "applications"
-            applications.mkdir()
+            applications = pathlib.Path(tempdir) / ".local" / "share" / "applications"
+            applications.mkdir(parents=True)
             (applications / "unsafe-store-app.desktop").write_text(
                 "[Desktop Entry]\nType=Application\nName=Unsafe Store App\n"
                 "Exec=sh -c 'touch /tmp/ming-unsafe'\n",
