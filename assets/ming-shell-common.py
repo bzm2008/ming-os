@@ -427,11 +427,12 @@ def _localized(section, key, locale_name):
 def is_system_desktop_activation_candidate(
         path, system_dir=pathlib.Path("/usr/share/applications"),
         path_resolver=None, stat_reader=None):
-    """Return whether a package-owned system desktop file may be considered later.
+    """Return whether a package-owned system desktop file may be considered.
 
-    This is deliberately a static filesystem policy only.  It does not parse
-    ``Exec`` or perform activation; ordinary desktop entries must continue to
-    pass through ``desktop_exec_argv`` unchanged.
+    This is deliberately a static candidate filter only.  It does not parse
+    ``Exec`` or perform activation; the broker must revalidate this boundary
+    immediately before activation and ordinary entries still pass through
+    ``desktop_exec_argv`` unchanged.
     """
     resolver = path_resolver or (lambda value: pathlib.Path(value).resolve(strict=True))
     reader = stat_reader or os.stat
@@ -445,15 +446,24 @@ def is_system_desktop_activation_candidate(
         # A difference means an entry or one of its parents traversed a link.
         if resolved_path != lexical_path or resolved_dir != lexical_dir:
             return False
-        if resolved_path.parent != resolved_dir or resolved_path.suffix != ".desktop":
+        if (
+                lexical_path.parent != lexical_dir
+                or resolved_path.parent != resolved_dir
+                or resolved_path.suffix != ".desktop"):
             return False
-        metadata = reader(resolved_path)
-    except (OSError, TypeError, ValueError):
+        directory_metadata = reader(resolved_dir)
+        if not (
+                stat.S_ISDIR(directory_metadata.st_mode)
+                and directory_metadata.st_uid == 0
+                and not (directory_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))):
+            return False
+        leaf_metadata = reader(resolved_path)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False
     return (
-        stat.S_ISREG(metadata.st_mode)
-        and metadata.st_uid == 0
-        and not (metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        stat.S_ISREG(leaf_metadata.st_mode)
+        and leaf_metadata.st_uid == 0
+        and not (leaf_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
     )
 
 
