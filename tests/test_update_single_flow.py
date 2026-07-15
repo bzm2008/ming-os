@@ -102,6 +102,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
                     "E_SPACE": "可用空间不足，更新已安全拒绝。",
                     "E_MANIFEST_SIGNATURE": "更新清单签名校验失败，更新已安全拒绝。",
                     "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
+                    "E_HEALTH_ROOT": "新系统健康检查失败，系统正在回滚。",
                 },
             },
         )
@@ -112,6 +113,9 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
             ("E_ROLLBACK_STATE", "更新失败，系统已回滚到上一版本。"),
         ):
             self.assertIn(expected, presenter({"ok": False, "error_code": code})["detail"])
+        rollback = presenter({"state": "rolled_back", "error_code": "E_HEALTH_ROOT"})["detail"]
+        self.assertIn("已自动回滚", rollback)
+        self.assertNotIn("正在回滚", rollback)
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
         self.assertNotIn('run_async(["ming-update", "check"]', update)
         self.assertIn('["ming-update", "check", "--json"]', update)

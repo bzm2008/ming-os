@@ -375,7 +375,10 @@ def ota_status_presentation(status):
         if bootstrap.get("fingerprint"):
             detail_parts.append("公钥指纹：%s" % bootstrap["fingerprint"])
 
-    if state == "rolled_back" and not error_detail:
+    if state == "rolled_back" and error_code.startswith("E_HEALTH_"):
+        detail_parts = ["更新未通过健康检查，系统已自动回滚。"]
+        severity = "warning"
+    elif state == "rolled_back" and not error_detail:
         severity = "warning"
     if state in {"staged", "armed", "booting", "pending_health", "committing", "rollback_armed", "rolling_back"}:
         severity = "info" if state not in {"rollback_armed", "rolling_back"} else "warning"
