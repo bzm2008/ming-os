@@ -1,0 +1,23 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": true,
+  "command": "check",
+  "exit_code": 0,
+  "error_code": null,
+  "state": "committed",
+  "transaction": null,
+  "update": {
+    "current_version": "26.3.3",
+    "available_version": null,
+    "release_id": null,
+    "delivery": "none",
+    "manifest_sha256": null
+  },
+  "action": "none",
+  "progress": { "phase": "idle", "percent": 100 },
+  "requires_reboot": false,
+  "message_key": "update.no_update",
+  "message_args": {},
+  "log_path": null,
+  "timestamp": "2026-07-15T12:00:00Z"
+}

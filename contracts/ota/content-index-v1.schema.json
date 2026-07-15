@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ming.scallion.uno/contracts/ota/content-index-v1.schema.json",
+  "title": "Ming OS transaction content index v1",
+  "x-ming-schema-name": "ming.content-index.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ming.content-index.v1" },
+    "release_id": { "$ref": "#/$defs/releaseId" },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "deletions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/relativePath" }
+    },
+    "packages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/package" }
+    }
+  },
+  "required": ["schema", "release_id", "entries", "deletions", "packages"],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "releaseId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$" },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._+:-]+(?:/[A-Za-z0-9._+:-]+)*$"
+    },
+    "symlinkTarget": {
+      "$comment": "Runtime validation resolves relative targets against the entry path and rejects targets that escape the candidate root.",
+      "type": "string",
+      "pattern": "^(?!/)[A-Za-z0-9._+:-]+(?:/[A-Za-z0-9._+:-]+)*$"
+    },
+    "blob": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "type": { "enum": ["file", "directory", "symlink"] },
+        "blob": { "$ref": "#/$defs/blob" },
+        "target": { "$ref": "#/$defs/symlinkTarget" },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "uid": { "type": "integer", "minimum": 0 },
+        "gid": { "type": "integer", "minimum": 0 },
+        "config_policy": { "enum": ["replace", "replace-if-unmodified", "preserve"] },
+        "base_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "required": ["path", "type", "mode", "uid", "gid", "config_policy"],
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "file" } } },
+          "then": { "required": ["blob"], "not": { "required": ["target"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "symlink" } } },
+          "then": { "required": ["target"], "not": { "required": ["blob"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "directory" } } },
+          "then": { "not": { "anyOf": [{ "required": ["blob"] }, { "required": ["target"] }] } }
+        }
+      ]
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "architecture": { "enum": ["amd64", "all"] },
+        "blob": { "$ref": "#/$defs/blob" }
+      },
+      "required": ["name", "version", "architecture", "blob"]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": false,
+  "command": "apply",
+  "exit_code": 10,
+  "error_code": "E_PROTOCOL_UNSUPPORTED",
+  "state": "available",
+  "transaction": null,
+  "update": {
+    "current_version": "26.3.2",
+    "available_version": "26.3.3",
+    "release_id": "ming-os-26.3.3-amd64-20260715.1",
+    "delivery": "recovery-iso",
+    "manifest_sha256": null
+  },
+  "action": "none",
+  "progress": { "phase": "discovery", "percent": 100 },
+  "requires_reboot": false,
+  "message_key": "update.error.protocol_unsupported",
+  "message_args": {},
+  "log_path": "/var/log/ming-update/ming-update.log",
+  "timestamp": "2026-07-15T12:06:00Z"
+}

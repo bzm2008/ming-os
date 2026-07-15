@@ -1,0 +1,23 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": false,
+  "command": "apply",
+  "exit_code": 3,
+  "error_code": "E_SPACE",
+  "state": "verified",
+  "transaction": null,
+  "update": {
+    "current_version": "26.3.2",
+    "available_version": "26.3.3",
+    "release_id": "ming-os-26.3.3-amd64-20260715.1",
+    "delivery": "transactional-slot-v1",
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "action": "none",
+  "progress": { "phase": "staging", "percent": 0 },
+  "requires_reboot": false,
+  "message_key": "update.error.space",
+  "message_args": { "required_bytes": 8589934592 },
+  "log_path": "/var/log/ming-update/transactions/tx-20260715-0001/engine.log",
+  "timestamp": "2026-07-15T12:02:00Z"
+}

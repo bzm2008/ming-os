@@ -1,0 +1,29 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": false,
+  "command": "check",
+  "exit_code": 3,
+  "error_code": "E_BOOTSTRAP_REQUIRED",
+  "state": "bootstrap-required",
+  "transaction": null,
+  "update": {
+    "current_version": "26.3.2",
+    "available_version": "26.3.3",
+    "release_id": null,
+    "delivery": "bootstrap",
+    "manifest_sha256": null
+  },
+  "action": "bootstrap",
+  "progress": { "phase": "discovery", "percent": 100 },
+  "requires_reboot": false,
+  "message_key": "update.bootstrap.required",
+  "message_args": {},
+  "log_path": null,
+  "timestamp": "2026-07-15T12:00:00Z",
+  "bootstrap": {
+    "url": "https://downloads.example.invalid/objects/ming-ota-bootstrap_1.0.0_amd64.deb",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "signature_url": "https://downloads.example.invalid/objects/ming-ota-bootstrap_1.0.0_amd64.deb.sig",
+    "fingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

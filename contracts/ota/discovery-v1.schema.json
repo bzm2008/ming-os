@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ming.scallion.uno/contracts/ota/discovery-v1.schema.json",
+  "title": "Ming OS OTA discovery v1",
+  "x-ming-schema-name": "ming.update.discovery.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ming.update.discovery.v1" },
+    "available": { "type": "boolean" },
+    "current_version": { "$ref": "#/$defs/version" },
+    "architecture": { "const": "amd64" },
+    "capability": { "enum": [null, "transactional-slot-v1"] },
+    "delivery": { "enum": ["none", "bootstrap", "transactional-slot-v1"] },
+    "release_id": { "$ref": "#/$defs/releaseId" },
+    "version": { "$ref": "#/$defs/version" },
+    "minimum_bootstrap": { "$ref": "#/$defs/version" },
+    "manifest_url": { "$ref": "#/$defs/httpsUrl" },
+    "manifest_signature_url": { "$ref": "#/$defs/httpsUrl" },
+    "manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "bootstrap": { "$ref": "#/$defs/bootstrap" }
+  },
+  "required": ["schema", "available", "current_version", "architecture", "capability", "delivery"],
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "available": { "const": false },
+            "delivery": { "const": "none" }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["release_id"] },
+              { "required": ["version"] },
+              { "required": ["manifest_url"] },
+              { "required": ["bootstrap"] }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "available": { "const": true },
+            "capability": { "const": "transactional-slot-v1" },
+            "delivery": { "const": "transactional-slot-v1" }
+          },
+          "required": [
+            "release_id",
+            "version",
+            "minimum_bootstrap",
+            "manifest_url",
+            "manifest_signature_url",
+            "manifest_sha256"
+          ],
+          "not": { "required": ["bootstrap"] }
+        },
+        {
+          "properties": {
+            "available": { "const": true },
+            "capability": { "const": null },
+            "delivery": { "const": "bootstrap" }
+          },
+          "required": ["bootstrap"],
+          "not": {
+            "anyOf": [
+              { "required": ["release_id"] },
+              { "required": ["manifest_url"] }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "releaseId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[A-Za-z0-9._-]+)?$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^/?#@]+(?:/[^?#]*)?$"
+    },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "$ref": "#/$defs/httpsUrl" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "signature_url": { "$ref": "#/$defs/httpsUrl" },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[A-F0-9]{40}$"
+        }
+      },
+      "required": ["url", "sha256", "signature_url", "fingerprint"]
+    }
+  }
+}
