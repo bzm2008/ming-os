@@ -1,0 +1,27 @@
+name: Transactional OTA Regression
+
+on:
+  pull_request:
+    paths:
+      - 'assets/ming-transaction-*'
+      - 'assets/ming-ota-bootstrap-capability.py'
+      - 'assets/initramfs/ming-transaction-*'
+      - 'assets/grub/40_ming_transaction'
+      - 'assets/systemd/ming-transaction-*'
+      - 'tests/test_transaction_*'
+      - 'tests/fixtures/transaction_fault_matrix.json'
+      - 'tools/run-transaction-ota-regression.sh'
+      - '.github/workflows/transaction-ota-regression.yml'
+  push:
+    branches:
+      - feature/ming-os-26.3.3
+
+jobs:
+  transaction-regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install regression dependencies
+        run: sudo apt-get update && sudo apt-get install -y rsync zstd
+      - name: Run transactional OTA regression gate
+        run: bash tools/run-transaction-ota-regression.sh
