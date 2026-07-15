@@ -264,6 +264,169 @@ def compact_output(text, max_lines=8):
     return " · ".join(lines[:max_lines]) if lines else "未检测到"
 
 
+# The transactional updater owns state and policy.  Settings only translates
+# its stable state/error keys into user-facing text; it never inspects logs.
+OTA_STATE_MESSAGES = {
+    "new": ("准备更新", "check"),
+    "verified": ("已完成签名校验，准备暂存", "wait"),
+    "staging": ("正在暂存更新", "wait"),
+    "staged": ("已下载并完成校验，等待重启确认", "wait"),
+    "armed": ("已安排下一次启动应用更新", "wait"),
+    "booting": ("正在启动候选系统，等待健康检查", "wait"),
+    "pending_health": ("正在启动候选系统，等待健康检查", "wait"),
+    "committing": ("正在确认更新结果", "wait"),
+    "committed": ("更新已完成", "check"),
+    "aborting": ("正在取消更新", "wait"),
+    "aborted": ("更新已取消", "check"),
+    "rollback_armed": ("健康检查未通过，已安排自动回滚", "wait"),
+    "rolling_back": ("正在自动回滚到上一版本", "wait"),
+    "rolled_back": ("更新未通过健康检查，已自动回滚", "check"),
+}
+
+OTA_ERROR_MESSAGES = {
+    "E_BOOTSTRAP_REQUIRED": "此系统需要先安装官方 OTA 更新组件。请使用受信任的 26.3.2 bootstrap，完成校验后再检查更新。",
+    "E_SPACE": "可用空间不足，更新已安全拒绝。请释放空间后重新检查；不要绕过空间门禁。",
+    "E_MANIFEST_SIGNATURE": "更新清单签名校验失败，更新已安全拒绝。请重新获取官方清单，不要跳过签名校验。",
+    "E_MANIFEST_SCHEMA": "更新清单格式不受支持，更新已安全拒绝。",
+    "E_ARTIFACT_SIGNATURE": "更新包签名校验失败，更新已安全拒绝。",
+    "E_ARTIFACT_HASH": "更新包完整性校验失败，更新已安全拒绝。",
+    "E_CONTENT_POLICY": "更新内容不在受信任范围内，更新已安全拒绝。",
+    "E_HEALTH_TIMEOUT": "新系统健康检查超时，系统正在回滚。",
+    "E_HEALTH_ROOT": "新系统健康检查失败，系统正在回滚。",
+    "E_HEALTH_PACKAGES": "新系统软件包检查失败，系统正在回滚。",
+    "E_HEALTH_SERVICE": "新系统关键服务检查失败，系统正在回滚。",
+    "E_HEALTH_DESKTOP_PROBE": "新系统桌面检查失败，系统正在回滚。",
+    "E_ROLLBACK_GRUB": "回滚启动项失败，请保留日志并联系支持人员。",
+    "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
+    "E_ROLLBACK_SLOT": "更新失败，系统已回滚到上一版本。",
+    "E_BOOTSTRAP_SIGNATURE": "bootstrap 签名校验失败，未执行安装。",
+    "E_BOOTSTRAP_VERSION": "bootstrap 版本不兼容，未执行安装。",
+    "E_PROTOCOL_UNSUPPORTED": "当前系统不支持事务型 OTA，请先完成官方 bootstrap。",
+    "E_BUSY": "已有更新事务正在运行，请等待当前事务结束。",
+    "E_NOT_CANCELABLE": "当前更新已经进入不可取消阶段。",
+}
+
+
+def ota_status_presentation(status):
+    """Return a stable presentation model for one frozen CLI JSON response."""
+    status = status if isinstance(status, dict) else {}
+    transaction = status.get("transaction") if isinstance(status.get("transaction"), dict) else {}
+    update = status.get("update") if isinstance(status.get("update"), dict) else {}
+    progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+    message_args = status.get("message_args") if isinstance(status.get("message_args"), dict) else {}
+
+    state = str(status.get("state") or transaction.get("state") or "")
+    error_code = str(status.get("error_code") or "")
+    current_version = str(
+        status.get("current_version")
+        or update.get("current_version")
+        or ""
+    )
+    version = str(
+        status.get("available_version")
+        or status.get("new_version")
+        or update.get("available_version")
+        or update.get("new_version")
+        or message_args.get("available_version")
+        or message_args.get("version")
+        or ""
+    )
+    release_id = str(
+        status.get("release_id")
+        or transaction.get("release_id")
+        or update.get("release_id")
+        or ""
+    )
+    manifest_sha256 = str(
+        status.get("manifest_sha256")
+        or update.get("manifest_sha256")
+        or ""
+    ).lower()
+    notes = str(
+        status.get("release_notes")
+        or update.get("release_notes")
+        or message_args.get("release_notes")
+        or ""
+    )
+    log_path = str(status.get("log_path") or "")
+    bootstrap = status.get("bootstrap") if isinstance(status.get("bootstrap"), dict) else {}
+
+    title, default_action = OTA_STATE_MESSAGES.get(
+        state, ("正在读取更新状态", "check"))
+    detail_parts = []
+    severity = "info"
+    error_detail = OTA_ERROR_MESSAGES.get(error_code)
+    if error_detail:
+        detail_parts.append(error_detail)
+        severity = "error" if not error_code.startswith("E_HEALTH_") and not error_code.startswith("E_ROLLBACK_") else "warning"
+    elif status.get("ok") is False:
+        detail_parts.append("更新状态读取失败，请稍后重试。")
+        severity = "error"
+
+    if error_code == "E_BOOTSTRAP_REQUIRED" or status.get("bootstrap_required"):
+        title = "需要安装官方 OTA 更新组件"
+        default_action = "check"
+        if bootstrap.get("url"):
+            detail_parts.append("bootstrap 下载：%s" % bootstrap["url"])
+        if bootstrap.get("sha256"):
+            detail_parts.append("SHA256：%s" % bootstrap["sha256"])
+        if bootstrap.get("signature_url"):
+            detail_parts.append("签名文件：%s" % bootstrap["signature_url"])
+        if bootstrap.get("fingerprint"):
+            detail_parts.append("公钥指纹：%s" % bootstrap["fingerprint"])
+
+    if state == "rolled_back" and not error_detail:
+        severity = "warning"
+    if state in {"staged", "armed", "booting", "pending_health", "committing", "rollback_armed", "rolling_back"}:
+        severity = "info" if state not in {"rollback_armed", "rolling_back"} else "warning"
+
+    # Legacy discovery fields are accepted only as a compatibility read path;
+    # they never override the frozen transaction state or error code.
+    available = bool(status.get("available") or status.get("has_update") or update.get("available_version"))
+    ready = bool(status.get("ready", True))
+    action = str(status.get("action") or "")
+    if not state and available:
+        title = "发现新版本：Ming OS %s" % (version or "未知")
+        default_action = "apply" if action == "apply" and ready else "check"
+    elif state == "new" and action == "apply" and ready:
+        default_action = "apply"
+
+    if version and state not in {"committed", "rolled_back"}:
+        detail_parts.insert(0, "目标版本：Ming OS %s" % version)
+    if current_version:
+        detail_parts.append("当前版本：Ming OS %s" % current_version)
+    if notes and (default_action == "apply" or available):
+        detail_parts.append("更新说明：\n%s" % notes)
+    if log_path:
+        detail_parts.append("日志：%s" % log_path)
+
+    try:
+        percent = max(0, min(100, int(progress.get("percent", 0))))
+    except (TypeError, ValueError):
+        percent = 0
+    if progress.get("phase") and state not in {"", "committed"}:
+        detail_parts.append("进度：%s%s" % (progress.get("phase"), "（%d%%）" % percent if percent else ""))
+
+    if default_action == "apply" and (not release_id or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)):
+        default_action = "check"
+        detail_parts.append("更新清单尚未准备好，请重新检查更新。")
+
+    return {
+        "state": state,
+        "error_code": error_code,
+        "title": title,
+        "detail": "\n".join(detail_parts),
+        "button_state": default_action,
+        "button_label": {"apply": "立即更新", "wait": "等待完成", "check": "检查更新"}.get(default_action, "检查更新"),
+        "severity": severity,
+        "progress": percent,
+        "transaction_id": str(transaction.get("id") or status.get("transaction_id") or ""),
+        "release_id": release_id,
+        "manifest_sha256": manifest_sha256,
+        "log_path": log_path,
+    }
+
+
 def pci_driver_summary(device_pattern):
     """Summarize lspci blocks, including each Kernel driver in use."""
     command = (
@@ -1783,6 +1946,8 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_action_state = "check"
         self.update_manifest_path = ""
         self.update_manifest_sha256 = ""
+        self.update_release_id = ""
+        self.update_transaction_id = ""
 
         self.update_status = Gtk.Label(label="点击“检查更新”了解是否有新版本。", xalign=0, wrap=True)
         self.update_status.set_margin_top(6)
@@ -1803,6 +1968,13 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_action_button.set_margin_top(12)
         self.update_action_button.connect("clicked", self.on_update_action)
         grp.add(self.update_action_button)
+
+        self.update_diagnostics_button = Gtk.Button(label="导出更新诊断")
+        self.update_diagnostics_button.set_sensitive(False)
+        self.update_diagnostics_button.connect("clicked", self.export_update_diagnostics)
+        grp.add(self.button_row(
+            "排障信息", "仅导出脱敏的事务状态和日志摘要，不包含用户文件内容。",
+            self.update_diagnostics_button))
         GLib.idle_add(self.refresh_update_status)
         return sc
 
@@ -1815,7 +1987,14 @@ class MingSettings(Adw.ApplicationWindow):
         if not isinstance(payload, dict):
             payload = {}
         if rc != 0 and not payload:
-            payload["error"] = error or output or "无法读取更新状态。"
+            # The CLI promises JSON on stdout.  Do not surface a terminal
+            # progress line or stderr as if it were a stable protocol field.
+            payload = {
+                "schema": "ming.update.cli.v1",
+                "ok": False,
+                "error_code": "E_COMMAND",
+                "message_key": "update.command_failed",
+            }
         return payload
 
     def refresh_update_status(self):
@@ -1830,56 +2009,25 @@ class MingSettings(Adw.ApplicationWindow):
         return False
 
     def apply_update_status(self, status):
-        status = status or {}
-        action = str(status.get("action") or "check")
-        available = bool(status.get("available"))
-        ready = bool(status.get("ready"))
-        version = str(status.get("new_version") or "")
-        notes = str(status.get("release_notes") or "")
-        error = str(status.get("error") or "")
-        manifest_path = str(status.get("manifest_path") or "")
-        manifest_sha256 = str(status.get("manifest_sha256") or "")
-
-        # A privileged process must apply the exact update that this page
-        # presents.  Empty fields deliberately make the action unavailable:
-        # the user can check again instead of silently installing a stale
-        # system/background cache.
+        presentation = ota_status_presentation(status)
+        self.update_action_state = presentation["button_state"]
+        self.update_release_id = presentation["release_id"]
+        self.update_manifest_sha256 = presentation["manifest_sha256"]
+        self.update_transaction_id = presentation["transaction_id"]
         self.update_manifest_path = ""
-        self.update_manifest_sha256 = ""
-
-        self.update_detail.set_visible(False)
-        self.update_action_button.set_sensitive(True)
-        if action == "reboot":
-            self.update_action_state = "reboot"
-            self.update_action_button.set_label("已安排重启")
-            self.update_action_button.set_sensitive(False)
-            self.update_status.set_label("新版本 %s 已准备完成，将在下一次重启时继续安装。" % (version or ""))
-            return
-        if available and ready and action == "apply":
-            if not manifest_path or not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest_sha256):
-                self.update_action_state = "check"
-                self.update_action_button.set_label("检查更新")
-                self.update_status.set_label("更新清单已失效，请重新检查更新。")
-                return
-            self.update_manifest_path = manifest_path
-            self.update_manifest_sha256 = manifest_sha256.lower()
-            self.update_action_state = "apply"
-            self.update_action_button.set_label("立即更新")
-            self.update_status.set_label("发现新版本：Ming OS %s" % (version or "未知"))
-            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
-            self.update_detail.set_visible(True)
-            return
-
-        self.update_action_state = "check"
-        self.update_action_button.set_label("检查更新")
-        if available and not ready:
-            self.update_status.set_label("发现版本 %s，但更新包仍在准备中，请稍后再检查。" % (version or ""))
-            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
-            self.update_detail.set_visible(True)
-        elif error:
-            self.update_status.set_label("无法读取更新状态：%s" % error)
-        else:
-            self.update_status.set_label("当前已是最新版本。")
+        self.update_action_button.set_label(presentation["button_label"])
+        self.update_action_button.set_sensitive(presentation["button_state"] != "wait")
+        self.update_status.set_label(presentation["title"])
+        self.update_detail.set_label(presentation["detail"])
+        self.update_detail.set_visible(bool(presentation["detail"]))
+        self.update_diagnostics_button.set_sensitive(bool(self.update_transaction_id))
+        if presentation["progress"]:
+            self.update_bar.set_fraction(presentation["progress"] / 100.0)
+            self.update_bar.set_text("%d%%" % presentation["progress"])
+        if presentation["severity"] in {"error", "warning"} and presentation["detail"]:
+            # Status refreshes are not actionable failures, so keep the
+            # visible card readable without opening a modal every time.
+            self.update_status.add_css_class("error" if presentation["severity"] == "error" else "warning")
 
     def on_update_action(self, _btn):
         if getattr(self, "update_action_state", "check") == "apply":
@@ -1894,53 +2042,76 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_text("正在检查…")
         self.update_status.set_label("正在检查更新…")
 
-        def line(message):
-            if message:
-                self.update_status.set_label(message)
-
-        def done(rc):
+        def done(rc, output, error):
             self.update_bar.set_visible(False)
-            self.update_action_button.set_sensitive(True)
-            if rc != 0:
-                self.update_status.set_label("检查更新失败，请确认网络后重试。")
-                return
-            self.update_status.set_label("检查完成，正在读取结果…")
-            self.refresh_update_status()
+            self.apply_update_status(self._update_status_payload(rc, output, error))
 
-        run_async(["ming-update", "check"], on_line=line, on_done=done)
+        run_capture_async(["ming-update", "check", "--json"], timeout=60, on_done=done)
 
     def on_update_apply(self):
-        if not self.update_manifest_path or not self.update_manifest_sha256:
+        if not self.update_release_id or not re.fullmatch(r"[0-9A-Za-z._:-]+", self.update_release_id):
             self.update_action_state = "check"
             self.update_action_button.set_label("检查更新")
-            self.update_status.set_label("更新清单已过期，请先重新检查更新。")
+            self.update_status.set_label("更新事务已过期，请先重新检查更新。")
+            return
+        if not re.fullmatch(r"[0-9a-f]{64}", self.update_manifest_sha256):
+            self.update_action_state = "check"
+            self.update_action_button.set_label("检查更新")
+            self.update_status.set_label("更新清单校验值无效，请先重新检查更新。")
             return
         self.update_action_button.set_sensitive(False)
         self.update_bar.set_visible(True)
         self.update_bar.set_fraction(0.1)
         self.update_bar.set_text("正在更新…")
-        self.update_status.set_label("正在自动选择更新方式并执行…")
+        self.update_status.set_label("正在执行已校验的更新事务…")
 
-        def line(message):
-            if message:
-                self.update_status.set_label(message)
-
-        def done(rc):
-            self.update_bar.set_fraction(1.0)
-            if rc == 0:
-                self.update_bar.set_text("完成")
-                self.update_status.set_label("更新操作已完成，正在刷新状态…")
-                self.refresh_update_status()
+        def done(rc, output, error):
+            self.update_bar.set_visible(False)
+            payload = self._update_status_payload(rc, output, error)
+            self.apply_update_status(payload)
+            if rc != 0 or payload.get("ok") is False:
+                presentation = ota_status_presentation(payload)
+                self.toast(presentation["detail"] or "更新未执行，系统已安全拒绝。", "error")
             else:
-                self.update_bar.set_text("失败")
-                self.update_status.set_label("更新未完成，请查看系统更新日志后重试。")
-                self.update_action_button.set_sensitive(True)
+                self.update_bar.set_fraction(1.0)
+                self.update_bar.set_text("已提交")
 
-        run_async([
+        run_capture_async([
             "pkexec", "ming-update", "apply",
-            "--manifest", self.update_manifest_path,
-            "--sha256", self.update_manifest_sha256,
-        ], on_line=line, on_done=done)
+            "--release-id", self.update_release_id,
+            "--manifest-sha256", self.update_manifest_sha256,
+            "--json",
+        ], timeout=300, on_done=done)
+
+    def export_update_diagnostics(self, _button=None):
+        transaction_id = getattr(self, "update_transaction_id", "")
+        if not transaction_id or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}", transaction_id):
+            self.toast("当前没有可导出的事务诊断。请先检查或执行一次更新。", "warning")
+            return
+        target_dir = os.path.join(HOME, "Desktop")
+        if not os.path.isdir(target_dir):
+            target_dir = HOME
+        safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", transaction_id)
+        target = os.path.join(target_dir, "ming-ota-diagnostic-%s.json" % safe_id)
+        self.update_diagnostics_button.set_sensitive(False)
+
+        def done(rc, output, error):
+            self.update_diagnostics_button.set_sensitive(True)
+            try:
+                payload = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                payload = {}
+            if rc == 0 and payload.get("ok"):
+                self.toast("更新诊断已导出到 %s。" % target, "info")
+            else:
+                self.toast("更新诊断导出失败。请保留事务日志并联系支持人员。", "error")
+
+        run_capture_async([
+            "ming-transaction-diagnostics", "export",
+            "--state-root", "/var/lib/ming-update",
+            "--transaction", transaction_id,
+            "--output", target,
+        ], timeout=30, on_done=done)
 
     # ---- 5. 显示与无障碍（真实 xrandr 模式 + 独立界面大小） ----
     def build_display(self):

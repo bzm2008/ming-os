@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,16 @@ def method_block(source, start, end):
     return source[source.index(start):source.index(end, source.index(start))]
 
 
+def standalone_function(source, name, namespace=None):
+    namespace = {} if namespace is None else namespace
+    start = source.index("def %s(" % name)
+    next_function = source.find("\ndef ", start + 1)
+    if next_function < 0:
+        next_function = len(source)
+    exec(source[start:next_function], namespace)
+    return namespace[name]
+
+
 class UpdateSingleFlowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -28,21 +39,124 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
 
         self.assertIn('Gtk.Button(label="检查更新")', update)
         self.assertIn("self.update_action_button", update)
-        self.assertIn('set_label("立即更新")', update)
+        self.assertIn('"立即更新"', self.settings)
+        self.assertIn('"已下载并完成校验，等待重启确认"', self.settings)
         self.assertIn('["ming-update", "status", "--json"]', update)
         self.assertIn('"pkexec", "ming-update", "apply"', update)
         for retired_label in ("应用小修复", "大版本升级", "更新并关机"):
             self.assertNotIn(retired_label, update)
+
+    def test_frozen_transaction_states_have_truthful_chinese_presentation(self):
+        presenter = standalone_function(
+            self.settings,
+            "ota_status_presentation",
+            {
+                "OTA_STATE_MESSAGES": {
+                    "new": ("准备更新", "check"),
+                    "verified": ("已完成签名校验，准备暂存", "wait"),
+                    "staging": ("正在暂存更新", "wait"),
+                    "staged": ("已下载并完成校验，等待重启确认", "wait"),
+                    "armed": ("已安排下一次启动应用更新", "wait"),
+                    "booting": ("正在启动候选系统，等待健康检查", "wait"),
+                    "pending_health": ("正在启动候选系统，等待健康检查", "wait"),
+                    "committing": ("正在确认更新结果", "wait"),
+                    "committed": ("更新已完成", "check"),
+                    "aborting": ("正在取消更新", "wait"),
+                    "aborted": ("更新已取消", "check"),
+                    "rollback_armed": ("健康检查未通过，已安排自动回滚", "wait"),
+                    "rolling_back": ("正在自动回滚到上一版本", "wait"),
+                    "rolled_back": ("更新未通过健康检查，已自动回滚", "check"),
+                },
+                "OTA_ERROR_MESSAGES": {},
+            },
+        )
+        for state, expected in {
+            "new": "准备更新",
+            "verified": "已完成签名校验，准备暂存",
+            "staging": "正在暂存更新",
+            "staged": "已下载并完成校验，等待重启确认",
+            "armed": "已安排下一次启动应用更新",
+            "booting": "正在启动候选系统，等待健康检查",
+            "pending_health": "正在启动候选系统，等待健康检查",
+            "committing": "正在确认更新结果",
+            "committed": "更新已完成",
+            "aborting": "正在取消更新",
+            "aborted": "更新已取消",
+            "rollback_armed": "健康检查未通过，已安排自动回滚",
+            "rolling_back": "正在自动回滚到上一版本",
+            "rolled_back": "更新未通过健康检查，已自动回滚",
+        }.items():
+            result = presenter({"state": state})
+            self.assertEqual(expected, result["title"])
+        self.assertNotEqual("更新已完成", presenter({"state": "staged"})["title"])
+        self.assertNotEqual("更新已完成", presenter({"state": "pending_health"})["title"])
+
+    def test_settings_maps_frozen_error_codes_without_terminal_text(self):
+        presenter = standalone_function(
+            self.settings,
+            "ota_status_presentation",
+            {
+                "OTA_STATE_MESSAGES": {},
+                "OTA_ERROR_MESSAGES": {
+                    "E_BOOTSTRAP_REQUIRED": "此系统需要先安装官方 OTA 更新组件。",
+                    "E_SPACE": "可用空间不足，更新已安全拒绝。",
+                    "E_MANIFEST_SIGNATURE": "更新清单签名校验失败，更新已安全拒绝。",
+                    "E_ROLLBACK_STATE": "更新失败，系统已回滚到上一版本。",
+                },
+            },
+        )
+        for code, expected in (
+            ("E_BOOTSTRAP_REQUIRED", "此系统需要先安装官方 OTA 更新组件。"),
+            ("E_SPACE", "可用空间不足，更新已安全拒绝。"),
+            ("E_MANIFEST_SIGNATURE", "更新清单签名校验失败，更新已安全拒绝。"),
+            ("E_ROLLBACK_STATE", "更新失败，系统已回滚到上一版本。"),
+        ):
+            self.assertIn(expected, presenter({"ok": False, "error_code": code})["detail"])
+        update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
+        self.assertNotIn('run_async(["ming-update", "check"]', update)
+        self.assertIn('["ming-update", "check", "--json"]', update)
+        self.assertIn('"ming-transaction-diagnostics"', update)
+
+    def test_settings_exposes_sanitized_transaction_diagnostics_export(self):
+        update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
+        self.assertIn("导出更新诊断", update)
+        self.assertIn("self.update_diagnostics_button", update)
+        export = method_block(self.settings, "    def export_update_diagnostics", "    # ---- 5. 显示与无障碍")
+        self.assertIn("ming-transaction-diagnostics", export)
+        self.assertIn('"export"', export)
+        self.assertIn('"--state-root", "/var/lib/ming-update"', export)
+        self.assertIn('"--transaction"', export)
+        self.assertIn('"--output"', export)
 
     def test_settings_binds_the_shown_update_to_the_privileged_apply_request(self):
         """A root-side cache must not silently replace the version shown in Settings."""
         status = method_block(self.settings, "    def apply_update_status(self, status):", "    def on_update_action(self, _btn):")
         apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")
 
-        self.assertIn('status.get("manifest_path")', status)
-        self.assertIn('status.get("manifest_sha256")', status)
-        self.assertIn('"--manifest", self.update_manifest_path', apply)
-        self.assertIn('"--sha256", self.update_manifest_sha256', apply)
+        self.assertIn('self.update_release_id', status)
+        self.assertIn('self.update_manifest_sha256', status)
+        self.assertIn('"--release-id", self.update_release_id', apply)
+        self.assertIn('"--manifest-sha256", self.update_manifest_sha256', apply)
+        self.assertNotIn('"--manifest", self.update_manifest_path', apply)
+
+    def test_settings_preserves_the_actionable_ota_failure_reason(self):
+        presenter = standalone_function(
+            self.settings,
+            "ota_status_presentation",
+            {"OTA_STATE_MESSAGES": {}, "OTA_ERROR_MESSAGES": {
+                "E_SPACE": "可用空间不足，更新已安全拒绝。",
+            }},
+        )
+        message = presenter({"ok": False, "error_code": "E_SPACE"})["detail"]
+        apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")
+
+        self.assertIn("可用空间不足", message)
+        self.assertNotIn("update_output", apply)
+        self.assertNotIn("on_line", apply)
+
+    def test_ota_cli_persists_a_readable_system_failure_log_for_settings(self):
+        self.assertIn('readonly SYSTEM_LOG_FILE="/var/log/ming-update.log"', self.ota)
+        self.assertIn("append_log", self.ota)
 
     def test_cli_exposes_machine_readable_status_and_a_single_type_aware_apply(self):
         self.assertIn("show_status_json()", self.ota)
