@@ -26,6 +26,10 @@ DEFAULT_CACHE_ROOT = pathlib.Path("/var/cache/ming-update")
 DEFAULT_KEYRING = pathlib.Path("/usr/share/ming-update/trust/release-keyring.gpg")
 DEFAULT_KEY_POLICY = pathlib.Path("/usr/share/ming-update/trust/key-policy.json")
 DEFAULT_DISCOVERY_URL = "https://ming.scallion.uno/api/onion-update/check"
+# Kept disabled until the replacement domain is registered/production ready.  The
+# signed discovery response remains the source of truth when this is enabled.
+FALLBACK_DISCOVERY_URL = "https://ming.sca-hun.cn/api/onion-update/check"
+DISCOVERY_FALLBACK_ENV = "MING_UPDATE_ENABLE_FALLBACK_DOMAIN"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._-]{3,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -297,6 +301,7 @@ class UpdateController:
         kernel_release=None,
         capability_loader=None,
         discovery_fetcher=None,
+        discovery_fallback_enabled=None,
         artifact_fetcher=None,
         active_root="/",
         log_root=None,
@@ -310,6 +315,11 @@ class UpdateController:
         self.kernel_release = kernel_release or os.uname().release
         self.capability_loader = capability_loader or (lambda: bootstrap_module.detect_capability("/"))
         self.discovery_fetcher = discovery_fetcher or self._fetch_discovery
+        if discovery_fallback_enabled is None:
+            discovery_fallback_enabled = os.environ.get(DISCOVERY_FALLBACK_ENV, "0").strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        self.discovery_fallback_enabled = bool(discovery_fallback_enabled)
         self.artifact_fetcher = artifact_fetcher or self._download_artifact
         self.active_root = pathlib.Path(active_root)
         self.log_root = pathlib.Path(log_root) if log_root else (
@@ -494,7 +504,6 @@ class UpdateController:
         return value
 
     def _fetch_discovery(self):
-        parsed = urllib.parse.urlsplit(DEFAULT_DISCOVERY_URL)
         query_values = {
             "version": self.current_version,
             "arch": self.architecture,
@@ -511,19 +520,35 @@ class UpdateController:
             query_values["capabilities"] = "transactional-slot-v1"
             query_values["bootstrap_version"] = bootstrap_version
         query = urllib.parse.urlencode(query_values)
-        url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
-        try:
-            with urllib.request.urlopen(url, timeout=15) as response:
-                body = response.read(1024 * 1024 + 1)
-        except (OSError, urllib.error.URLError) as exc:
-            raise UpdateError("E_NETWORK", "update discovery is unavailable") from exc
-        if len(body) > 1024 * 1024:
-            raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update discovery is too large")
-        try:
-            value = json.loads(body.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update discovery is invalid") from exc
-        return value
+        urls = [DEFAULT_DISCOVERY_URL]
+        if self.discovery_fallback_enabled:
+            urls.append(FALLBACK_DISCOVERY_URL)
+
+        for index, base_url in enumerate(urls):
+            # Keep the endpoint fixed and credential-free even when the
+            # fallback is explicitly enabled by an administrator.
+            parsed = urllib.parse.urlsplit(_safe_https(base_url, "discovery URL"))
+            url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+            try:
+                with urllib.request.urlopen(url, timeout=15) as response:
+                    body = response.read(1024 * 1024 + 1)
+            except (OSError, urllib.error.URLError) as exc:
+                # A fallback is only for an unavailable endpoint.  Do not
+                # hide malformed or otherwise invalid primary responses.
+                if index + 1 < len(urls):
+                    continue
+                raise UpdateError("E_NETWORK", "update discovery is unavailable") from exc
+            if len(body) > 1024 * 1024:
+                raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update discovery is too large")
+            try:
+                value = json.loads(body.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update discovery is invalid") from exc
+            return value
+
+        # The URL list always contains the primary endpoint; this is only a
+        # defensive guard for future changes to that list.
+        raise UpdateError("E_NETWORK", "update discovery is unavailable")
 
     def _read_cached_discovery(self):
         try:

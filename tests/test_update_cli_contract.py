@@ -259,6 +259,126 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertNotIn("capabilities", unbootstrapped_query)
         self.assertNotIn("bootstrap_version", unbootstrapped_query)
 
+    def test_discovery_fallback_domain_is_disabled_by_default(self):
+        calls = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b'{"schema":"ming.update.discovery.v1"}'
+
+        original_urlopen = self.cli.urllib.request.urlopen
+
+        def urlopen(url, timeout):
+            calls.append(url)
+            raise self.cli.urllib.error.URLError("primary unavailable")
+
+        self.cli.urllib.request.urlopen = urlopen
+        try:
+            controller = self.cli.UpdateController(
+                current_version="26.3.2",
+                architecture="amd64",
+                kernel_release="6.12.0-amd64",
+                capability_loader=lambda: {
+                    "available": True,
+                    "capability": "transactional-slot-v1",
+                    "bootstrap_version": "1.0.0",
+                },
+            )
+            with self.assertRaises(self.cli.UpdateError) as caught:
+                controller._fetch_discovery()
+        finally:
+            self.cli.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual("E_NETWORK", caught.exception.code)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
+
+    def test_enabled_discovery_fallback_is_used_only_after_primary_network_failure(self):
+        calls = []
+        response_body = b'{"schema":"ming.update.discovery.v1"}'
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return response_body
+
+        original_urlopen = self.cli.urllib.request.urlopen
+
+        def urlopen(url, timeout):
+            calls.append(url)
+            if urllib.parse.urlsplit(url).netloc == "ming.scallion.uno":
+                raise self.cli.urllib.error.URLError("primary unavailable")
+            return Response()
+
+        self.cli.urllib.request.urlopen = urlopen
+        try:
+            controller = self.cli.UpdateController(
+                current_version="26.3.2",
+                architecture="amd64",
+                kernel_release="6.12.0-amd64",
+                capability_loader=lambda: {
+                    "available": True,
+                    "capability": "transactional-slot-v1",
+                    "bootstrap_version": "1.0.0",
+                },
+                discovery_fallback_enabled=True,
+            )
+            value = controller._fetch_discovery()
+        finally:
+            self.cli.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual({"schema": "ming.update.discovery.v1"}, value)
+        self.assertEqual(2, len(calls))
+        self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
+        self.assertEqual("ming.sca-hun.cn", urllib.parse.urlsplit(calls[1]).netloc)
+        self.assertTrue(all(urllib.parse.urlsplit(url).scheme == "https" for url in calls))
+
+    def test_discovery_fallback_is_not_used_for_primary_protocol_failure(self):
+        calls = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"not-json"
+
+        original_urlopen = self.cli.urllib.request.urlopen
+        self.cli.urllib.request.urlopen = lambda url, timeout: (calls.append(url) or Response())
+        try:
+            controller = self.cli.UpdateController(
+                current_version="26.3.2",
+                architecture="amd64",
+                kernel_release="6.12.0-amd64",
+                capability_loader=lambda: {
+                    "available": True,
+                    "capability": "transactional-slot-v1",
+                    "bootstrap_version": "1.0.0",
+                },
+                discovery_fallback_enabled=True,
+            )
+            with self.assertRaises(self.cli.UpdateError) as caught:
+                controller._fetch_discovery()
+        finally:
+            self.cli.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual("E_PROTOCOL_UNSUPPORTED", caught.exception.code)
+        self.assertEqual(1, len(calls))
+
     def test_status_returns_most_recent_terminal_transaction_without_active_pointer(self):
         controller = self.controller(
             capability={"available": True, "capability": "transactional-slot-v1", "bootstrap_version": "1.0.0"},
