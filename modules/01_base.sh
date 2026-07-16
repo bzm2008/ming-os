@@ -2976,7 +2976,7 @@ availableFileSystemTypes:
 initialPartitioningChoice: none
 initialSwapChoice: none
 requiredStorage: 12
-# 关闭手动分区入口——普通用户不需要也不会用，只显示"清空整个磁盘"
+# 保留手动分区入口，同时让全盘安装选项保持可见。
 allowManualPartitioning: true
 PARTITIONCONF
 

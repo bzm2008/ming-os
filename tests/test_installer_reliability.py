@@ -106,6 +106,16 @@ class InstallerReliabilityContracts(unittest.TestCase):
         self.assertIn("settings.conf missing ming-installed-desktop-gate instance", build)
         self.assertIn("ming-installer-verify", build)
 
+    def test_base_and_live_partition_configs_keep_both_install_modes(self):
+        base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
+        desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        for source in (base, desktop):
+            partition = source.split("cat > /etc/calamares/modules/partition.conf", 1)[1]
+            self.assertIn("initialPartitioningChoice: none", partition)
+            self.assertIn("allowManualPartitioning: true", partition)
+            self.assertNotIn("initialPartitioningChoice: erase", partition)
+        self.assertNotIn("关闭手动分区入口", base)
+
     def test_live_validation_reports_both_manual_and_full_disk_choices(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
