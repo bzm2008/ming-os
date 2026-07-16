@@ -29,6 +29,22 @@ OTA endpoint:
 https://ming.scallion.uno/api/onion-update/check?version=26.3.2&channel=stable
 ```
 
+### OTA discovery domain failover
+
+The current discovery endpoint remains `ming.scallion.uno`. A reserved backup
+endpoint is recorded for the day the primary domain is retired:
+
+```text
+https://ming.sca-hun.cn/api/onion-update/check
+```
+
+The backup is intentionally **disabled** in this release because the domain is
+not yet备案 and must not receive production requests. The client only enables
+it after the release owner has verified备案, HTTPS certificate coverage, API
+parity, and signed discovery responses. Enabling a transport fallback does not
+change manifest, payload, content-index, version, architecture, or signature
+checks; the OTA schema identifiers continue to use the primary contract name.
+
 Planned GitHub release:
 
 ```text

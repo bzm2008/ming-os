@@ -5521,6 +5521,7 @@ This is the version to use when producing:
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- Reserved OTA discovery fallback: `https://ming.sca-hun.cn/api/onion-update/check` (disabled until备案 and release-owner verification)
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 
@@ -5596,6 +5597,7 @@ Required links:
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- Reserved OTA discovery fallback: `https://ming.sca-hun.cn/api/onion-update/check` (disabled until备案 and release-owner verification)
 
 Page goals:
 
