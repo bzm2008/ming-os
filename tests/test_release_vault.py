@@ -995,19 +995,19 @@ class ReleaseVaultBundleTests(unittest.TestCase):
             os.symlink(outside, self.root / "parent-link", target_is_directory=True)
         except (OSError, NotImplementedError) as exc:
             self.skipTest("symlink support is unavailable: %s" % exc)
-        real_replace = self.tool.os.replace
+        real_link = self.tool.os.link
         swapped = False
 
-        def racing_replace(source, destination, *args, **kwargs):
+        def racing_link(source, destination, *args, **kwargs):
             nonlocal swapped
             if not swapped:
                 parent.rename(parent_real)
                 os.symlink(outside, parent, target_is_directory=True)
                 swapped = True
-            return real_replace(source, destination, *args, **kwargs)
+            return real_link(source, destination, *args, **kwargs)
 
         try:
-            with mock.patch.object(self.tool.os, "replace", side_effect=racing_replace):
+            with mock.patch.object(self.tool.os, "link", side_effect=racing_link):
                 with self.assertRaises(self.tool.ReleaseVaultError) as caught:
                     self.tool._atomic_write(target, b"race", "output")
             self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
@@ -1017,6 +1017,20 @@ class ReleaseVaultBundleTests(unittest.TestCase):
                 parent.unlink()
             if parent_real.exists():
                 parent_real.rename(parent)
+
+    def test_atomic_write_rejects_destination_inserted_after_precheck(self):
+        target = self.vault / "encrypted" / "inserted.txt"
+        real_link = self.tool.os.link
+
+        def insert_then_link(source, destination, *args, **kwargs):
+            target.write_bytes(b"attacker-original\n")
+            return real_link(source, destination, *args, **kwargs)
+
+        with mock.patch.object(self.tool.os, "link", side_effect=insert_then_link):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._atomic_write(target, b"trusted\n", "output")
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        self.assertEqual(target.read_bytes(), b"attacker-original\n")
 
     def test_create_bundle_cleans_new_artifacts_when_sidecar_write_fails(self):
         original_atomic_write = self.tool._atomic_write
@@ -1038,6 +1052,59 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
         self.assertFalse(self.output.exists())
         self.assertFalse(self.output.with_suffix(".sha256").exists())
+
+    def test_create_bundle_cleanup_preserves_replaced_bundle(self):
+        original_atomic_write = self.tool._atomic_write
+
+        def replace_then_fail(path, data, field):
+            if field == "sidecar":
+                attacker = self.root / "attacker.age"
+                attacker.write_bytes(b"attacker-bundle\n")
+                os.replace(attacker, self.output)
+                raise self.tool.ReleaseVaultError("E_VAULT_PERMISSION", "sidecar write failed")
+            return original_atomic_write(path, data, field)
+
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool, "_atomic_write", side_effect=replace_then_fail):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.create_bundle(
+                        self.private_input,
+                        self.output,
+                        self.recipient,
+                        age_runner=self.fake_age_runner(),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        self.assertEqual(self.output.read_bytes(), b"attacker-bundle\n")
+
+    def test_write_receipt_readback_cleanup_preserves_replaced_receipt(self):
+        bundle = self.vault / "encrypted" / "recovery-bundle-1.age"
+        sidecar = bundle.with_suffix(".sha256")
+        bundle.write_bytes(b"encrypted\n")
+        digest = __import__("hashlib").sha256(bundle.read_bytes()).hexdigest()
+        sidecar.write_text(f"{digest}  {bundle.name}\n", encoding="ascii")
+        receipt = self.vault / "receipts" / "recovery-bundle-1.json"
+        original_atomic_write = self.tool._atomic_write
+
+        def replace_receipt_after_write(path, data, field):
+            identity = original_atomic_write(path, data, field)
+            if field == "receipt":
+                path.write_text('{"attacker":true}\n', encoding="ascii")
+            return identity
+
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool, "_atomic_write", side_effect=replace_receipt_after_write):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.write_receipt(
+                        bundle,
+                        sidecar,
+                        self.keyring,
+                        self.policy,
+                        "recovery-bundle-1",
+                        1,
+                        ("A" * 40, "B" * 40),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertEqual(receipt.read_text(encoding="ascii"), '{"attacker":true}\n')
 
     def test_receipt_metadata_is_prevalidated_before_bundle_commit(self):
         missing_keyring = self.root / "missing-keyring.gpg"
@@ -1087,9 +1154,7 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         digest = __import__("hashlib").sha256(target.read_bytes()).hexdigest()
         sidecar.write_text(f"{digest}  {target.name}\n", encoding="ascii")
         with mock.patch.object(pathlib.Path, "read_text", side_effect=AssertionError("unbounded read")):
-            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
-                self.tool._read_sidecar(sidecar, target.name)
-        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+            self.assertEqual(self.tool._read_sidecar(sidecar, target.name), digest)
 
     def test_sidecar_read_rejects_open_to_final_metadata_change(self):
         target = self.root / "bundle.age"

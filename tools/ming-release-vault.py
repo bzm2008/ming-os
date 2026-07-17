@@ -9,7 +9,8 @@ is local trust material, and scan deadlines are cooperative between bounded
 system calls rather than hard interruption of a blocking OS call. Bundle
 replacement uses POSIX directory descriptors when available; Windows uses a
 validated path fallback and fails closed when a parent swap is observed, but
-cannot eliminate every race between path checks and the OS rename primitive.
+cannot eliminate every race between path checks and the OS file-commit
+primitive.
 """
 
 from __future__ import annotations
@@ -1091,6 +1092,39 @@ def _mkstemp_in_parent(parent: pathlib.Path, prefix: str, suffix: str, field: st
         raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary file unavailable") from exc
 
 
+def _file_identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        getattr(info, "st_birthtime_ns", None),
+    )
+
+
+def _path_identity(path: pathlib.Path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return _file_identity(info)
+
+
+def _artifact_token(path: pathlib.Path, digest=None):
+    identity = _path_identity(path)
+    if identity is None:
+        return None
+    if digest is None:
+        try:
+            digest, _ = _hash_regular_file(path)
+        except ReleaseVaultError:
+            return None
+    return identity, digest
+
+
 def _atomic_write(path: pathlib.Path, data: bytes, field: str):
     path = _absolute_path(path, field)
     if _symlink_component(path) is not None:
@@ -1117,7 +1151,7 @@ def _atomic_write(path: pathlib.Path, data: bytes, field: str):
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        _atomic_replace(temporary, path, field)
+        committed_identity = _atomic_replace(temporary, path, field)
         temporary = None
         try:
             directory_fd = os.open(os.fspath(parent), os.O_RDONLY)
@@ -1130,6 +1164,7 @@ def _atomic_write(path: pathlib.Path, data: bytes, field: str):
                 pass
             finally:
                 os.close(directory_fd)
+        return committed_identity, hashlib.sha256(data).hexdigest()
     except OSError as exc:
         raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} could not be written") from exc
     finally:
@@ -1168,12 +1203,26 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
             before_fd = os.fstat(directory_fd)
             if not _bundle_directory_snapshot(before_path, before_fd):
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
-            os.replace(
-                source.name,
-                destination.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
+            try:
+                os.link(
+                    source.name,
+                    destination.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination appeared") from exc
+            except OSError as exc:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} no-overwrite commit unavailable") from exc
+            try:
+                os.unlink(source.name, dir_fd=directory_fd)
+            except OSError as exc:
+                try:
+                    os.unlink(destination.name, dir_fd=directory_fd)
+                except OSError:
+                    pass
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary cleanup failed") from exc
             after_path = os.lstat(parent)
             after_fd = os.fstat(directory_fd)
             if (
@@ -1190,15 +1239,32 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
                 os.fsync(directory_fd)
             except OSError:
                 pass
-            return
+            destination_info = os.lstat(destination)
+            if stat.S_ISLNK(destination_info.st_mode) or not stat.S_ISREG(destination_info.st_mode):
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination is unsafe")
+            return _file_identity(destination_info)
 
-        # Windows does not expose directory handles for renameat-style calls.
+        # Windows does not expose directory handles for descriptor-relative
+        # hardlink calls.
         # Validate immediately before and after the path-based replacement;
         # any detected parent swap is a release failure.
         before_again = os.lstat(parent)
         if stat.S_ISLNK(before_again.st_mode) or not _bundle_directory_snapshot(before_path, before_again):
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
-        os.replace(source, destination)
+        try:
+            os.link(source, destination, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination appeared") from exc
+        except OSError as exc:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} no-overwrite commit unavailable") from exc
+        try:
+            source.unlink()
+        except OSError as exc:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary cleanup failed") from exc
         after_path = os.lstat(parent)
         if stat.S_ISLNK(after_path.st_mode) or not _same_directory_identity(before_again, after_path):
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
@@ -1211,6 +1277,10 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
                 os.fsync(directory_fd)
             except OSError:
                 pass
+        destination_info = os.lstat(destination)
+        if stat.S_ISLNK(destination_info.st_mode) or not stat.S_ISREG(destination_info.st_mode):
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination is unsafe")
+        return _file_identity(destination_info)
     except ReleaseVaultError:
         raise
     except OSError as exc:
@@ -1241,14 +1311,13 @@ def _reject_existing_artifact(path: pathlib.Path, field: str) -> bool:
     raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} already exists")
 
 
-def _remove_new_artifact(path: pathlib.Path, was_absent: bool):
-    if not was_absent:
+def _remove_new_artifact(path: pathlib.Path, was_absent: bool, expected_token=None):
+    if not was_absent or expected_token is None:
         return
     try:
         if _symlink_component(path.parent) is not None:
             return
-        info = os.lstat(path)
-        if stat.S_ISREG(info.st_mode):
+        if _artifact_token(path) == expected_token:
             path.unlink()
     except (FileNotFoundError, OSError, ReleaseVaultError):
         pass
@@ -1315,7 +1384,7 @@ def _read_sidecar(path: pathlib.Path, bundle_name: str) -> str:
             os.close(descriptor)
         except OSError:
             pass
-    expected = re.fullmatch(r"([a-f0-9]{64})  ([^\r\n]+)\n?", text)
+    expected = re.fullmatch(r"([a-f0-9]{64})  ([^\r\n]+)\r?\n?", text)
     if expected is None or expected.group(2) != bundle_name:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is invalid")
     return expected.group(1)
@@ -1420,6 +1489,8 @@ def write_receipt(
     generation,
     fingerprints,
     receipt_path=None,
+    *,
+    return_identity=False,
 ):
     """Write a public receipt atomically and validate the bytes read back."""
 
@@ -1465,17 +1536,16 @@ def write_receipt(
         destination = _absolute_path(destination, "receipt")
         _reject_repository_path(destination, "receipt")
     encoded = (json.dumps(validated, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode("ascii")
-    _atomic_write(destination, encoded, "receipt")
+    receipt_identity = _atomic_write(destination, encoded, "receipt")
     try:
         read_back = validate_receipt(_load_json(destination))
     except ReleaseVaultError:
-        try:
-            destination.unlink()
-        except OSError:
-            pass
+        _remove_new_artifact(destination, True, receipt_identity)
         raise
     if read_back != validated:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt read-back validation failed")
+    if return_identity:
+        return read_back, receipt_identity
     return read_back
 
 
@@ -1571,6 +1641,9 @@ def create_bundle(
     environment = _child_environment()
     temporary = None
     invocation = None
+    output_identity = None
+    sidecar_identity = None
+    receipt_identity = None
     try:
         try:
             descriptor, temporary = _mkstemp_in_parent(
@@ -1589,11 +1662,18 @@ def create_bundle(
             invocation = _invoke_age(runner, argv, tar_bytes, temporary, environment)
             encrypted = _require_regular_file(temporary, "age output")
             encrypted_hash, encrypted_bytes = _hash_regular_file(encrypted)
-            _atomic_replace(encrypted, output_path, "output")
+            committed_identity = _atomic_replace(encrypted, output_path, "output")
+            committed_before_mode = _path_identity(output_path)
+            if committed_before_mode is None or committed_before_mode != committed_identity:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle identity could not be verified")
             try:
                 os.chmod(output_path, 0o600)
             except OSError as exc:
                 raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle permissions could not be set") from exc
+            committed_path_identity = _path_identity(output_path)
+            if committed_path_identity is None:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle identity could not be verified")
+            output_identity = (committed_path_identity, encrypted_hash)
             temporary = None
         except ReleaseVaultError:
             raise
@@ -1612,7 +1692,9 @@ def create_bundle(
         if committed_hash != encrypted_hash or committed_bytes != encrypted_bytes:
             raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "bundle changed after commit")
         encrypted_hash, encrypted_bytes = committed_hash, committed_bytes
-        _atomic_write(sidecar_path, f"{encrypted_hash}  {output_path.name}\n".encode("ascii"), "sidecar")
+        sidecar_identity = _atomic_write(
+            sidecar_path, f"{encrypted_hash}  {output_path.name}\n".encode("ascii"), "sidecar"
+        )
         if _read_sidecar(sidecar_path, output_path.name) != encrypted_hash:
             raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar read-back validation failed")
 
@@ -1623,7 +1705,7 @@ def create_bundle(
             "sidecar": sidecar_path.name,
         }
         if metadata_requested:
-            receipt_value = write_receipt(
+            receipt_value, receipt_identity = write_receipt(
                 output_path,
                 sidecar_path,
                 public_keyring,
@@ -1632,6 +1714,7 @@ def create_bundle(
                 generation,
                 fingerprints,
                 receipt_path=receipt_candidate,
+                return_identity=True,
             )
             if (
                 receipt_value["public_keyring_sha256"] != public_keyring_hash_before
@@ -1643,10 +1726,10 @@ def create_bundle(
             result["test_invocation"] = invocation
         return result
     except Exception:
-        _remove_new_artifact(output_path, output_absent)
-        _remove_new_artifact(sidecar_path, sidecar_absent)
+        _remove_new_artifact(output_path, output_absent, output_identity)
+        _remove_new_artifact(sidecar_path, sidecar_absent, sidecar_identity)
         if receipt_candidate is not None:
-            _remove_new_artifact(receipt_candidate, True)
+            _remove_new_artifact(receipt_candidate, True, receipt_identity)
         raise
 
 
