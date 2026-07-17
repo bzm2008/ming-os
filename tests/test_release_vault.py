@@ -581,6 +581,22 @@ class ReleaseVaultBundleTests(unittest.TestCase):
             child_env.update(env)
         return run_cli(*args, env=child_env)
 
+    def fake_age_runner(self, calls=None):
+        if calls is None:
+            calls = []
+
+        def runner(*, argv, input_bytes, output_path, environment):
+            calls.append(
+                {
+                    "argv": list(argv),
+                    "input": bytes(input_bytes),
+                    "environment": dict(environment),
+                }
+            )
+            output_path.write_bytes(b"age-test-v1\n" + input_bytes)
+
+        return runner
+
     def test_create_bundle_requires_explicit_vault_and_rejects_output_outside_it(self):
         missing = run_cli(
             "create-bundle",
@@ -608,7 +624,7 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(outside.returncode, self.tool.EXIT_NOT_READY)
         self.assertEqual(json.loads(outside.stdout)["error_code"], "E_VAULT_PERMISSION")
 
-    def test_create_bundle_rejects_input_symlink_and_repository_output(self):
+    def test_create_bundle_rejects_input_symlink(self):
         try:
             os.symlink(self.private_input / "secret.key", self.private_input / "link.key")
         except (OSError, NotImplementedError) as exc:
@@ -626,6 +642,7 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
         self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
 
+    def test_create_bundle_rejects_repository_output(self):
         repository_output = self.cli(
             "create-bundle",
             "--input",
@@ -638,6 +655,27 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         )
         self.assertEqual(repository_output.returncode, self.tool.EXIT_NOT_READY)
         self.assertEqual(json.loads(repository_output.stdout)["error_code"], "E_VAULT_PERMISSION")
+
+    def test_cli_test_age_environment_never_creates_a_bundle(self):
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            env={
+                "MING_RELEASE_TEST_AGE": "1",
+                "MING_RELEASE_AGE": "age-does-not-exist",
+                "PATH": "",
+            },
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_suffix(".sha256").exists())
+        self.assertFalse((self.vault / "receipts" / "recovery-bundle-1.json").exists())
 
     def test_create_bundle_rejects_password_option_and_environment(self):
         option = self.cli(
@@ -667,6 +705,35 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(password_env.returncode, self.tool.EXIT_NOT_READY)
         self.assertNotIn("do-not-echo-this", password_env.stdout)
 
+    def test_create_bundle_password_tty_requires_a_tty(self):
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--password-tty",
+            env={"MING_RELEASE_AGE": "age-does-not-exist", "PATH": ""},
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+
+    def test_create_bundle_password_tty_uses_only_tty_prompt_mode(self):
+        calls = []
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool.sys.stdin, "isatty", return_value=True):
+                self.tool.create_bundle(
+                    self.private_input,
+                    self.output,
+                    None,
+                    age_runner=self.fake_age_runner(calls),
+                    password_tty=True,
+                )
+        self.assertEqual(calls[0]["argv"][0:2], ["age", "-p"])
+        self.assertNotIn("password", " ".join(calls[0]["argv"]).lower())
+        self.assertNotIn("MING_RELEASE_PASSWORD", calls[0]["environment"])
+
     def test_create_bundle_rejects_absent_age(self):
         result = self.cli(
             "create-bundle",
@@ -682,27 +749,18 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
 
     def test_create_bundle_uses_recipient_file_and_deterministic_tar_stream(self):
-        result = self.cli(
-            "create-bundle",
-            "--input",
-            str(self.private_input),
-            "--output",
-            str(self.output),
-            "--recipient-file",
-            str(self.recipient),
-            "--public-keyring",
-            str(self.keyring),
-            "--policy",
-            str(self.policy),
-            "--primary-fingerprint",
-            "A" * 40,
-            "--signing-fingerprint",
-            "B" * 40,
-            env={"MING_RELEASE_TEST_AGE": "1"},
-        )
-        self.assertEqual(result.returncode, self.tool.EXIT_OK, result.stderr)
-        payload = json.loads(result.stdout)
-        invocation = payload["test_invocation"]
+        calls = []
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            payload = self.tool.create_bundle(
+                self.private_input,
+                self.output,
+                self.recipient,
+                age_runner=self.fake_age_runner(calls),
+                public_keyring=self.keyring,
+                policy=self.policy,
+                fingerprints=("A" * 40, "B" * 40),
+            )
+        invocation = calls[0]
         self.assertIn("-R", invocation["argv"])
         self.assertNotIn("password", " ".join(invocation["argv"]).lower())
         self.assertNotIn("MING_RELEASE_PASSWORD", invocation["environment"])
@@ -715,39 +773,26 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(payload["bundle_sha256"], expected_hash)
 
         second = self.vault / "encrypted" / "recovery-bundle-2.age"
-        result2 = self.cli(
-            "create-bundle",
-            "--input",
-            str(self.private_input),
-            "--output",
-            str(second),
-            "--recipient-file",
-            str(self.recipient),
-            env={"MING_RELEASE_TEST_AGE": "1"},
-        )
-        self.assertEqual(result2.returncode, self.tool.EXIT_OK, result2.stderr)
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            self.tool.create_bundle(
+                self.private_input,
+                second,
+                self.recipient,
+                age_runner=self.fake_age_runner(),
+            )
         self.assertEqual(self.output.read_bytes(), second.read_bytes())
 
     def test_create_bundle_receipt_is_atomic_validated_and_public_only(self):
-        result = self.cli(
-            "create-bundle",
-            "--input",
-            str(self.private_input),
-            "--output",
-            str(self.output),
-            "--recipient-file",
-            str(self.recipient),
-            "--public-keyring",
-            str(self.keyring),
-            "--policy",
-            str(self.policy),
-            "--primary-fingerprint",
-            "A" * 40,
-            "--signing-fingerprint",
-            "B" * 40,
-            env={"MING_RELEASE_TEST_AGE": "1"},
-        )
-        self.assertEqual(result.returncode, self.tool.EXIT_OK, result.stderr)
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            self.tool.create_bundle(
+                self.private_input,
+                self.output,
+                self.recipient,
+                age_runner=self.fake_age_runner(),
+                public_keyring=self.keyring,
+                policy=self.policy,
+                fingerprints=("A" * 40, "B" * 40),
+            )
         receipt_path = self.vault / "receipts" / "recovery-bundle-1.json"
         self.assertTrue(receipt_path.is_file())
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -755,6 +800,223 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         serialized = json.dumps(receipt)
         for forbidden in (str(self.vault), str(self.private_input), "ming.sca-hub.cn", "ssh://"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_create_bundle_rejects_input_symlink_race_after_open(self):
+        target = self.private_input / "secret.key"
+        regular = self.tool.os.lstat(target)
+        values = list(regular)
+        values[0] = stat.S_IFLNK | 0o777
+        symlink_stat = os.stat_result(values)
+        calls = 0
+        real_lstat = self.tool.os.lstat
+
+        def race_lstat(candidate, *args, **kwargs):
+            nonlocal calls
+            result = real_lstat(candidate, *args, **kwargs)
+            if pathlib.Path(candidate) == target:
+                calls += 1
+                if calls >= 2:
+                    return symlink_stat
+            return result
+
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool.os, "lstat", side_effect=race_lstat):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.create_bundle(
+                        self.private_input,
+                        self.output,
+                        self.recipient,
+                        age_runner=self.fake_age_runner(),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+
+    def test_create_bundle_rejects_queued_directory_symlink_race(self):
+        nested = self.private_input / "nested"
+        outside = self.root / "outside-input"
+        outside.mkdir()
+        (outside / "escaped.key").write_bytes(b"outside tree\n")
+        try:
+            probe = self.root / "symlink-probe"
+            os.symlink(outside, probe, target_is_directory=True)
+            probe.unlink()
+            real_nested = self.root / "nested-real"
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink support is unavailable: %s" % exc)
+        real_scandir = self.tool.os.scandir
+        swapped = False
+
+        # Replace the queued directory immediately before scandir opens it.
+        def replacing_scandir(candidate):
+            nonlocal swapped
+            if pathlib.Path(candidate) == nested and not swapped:
+                nested.rename(real_nested)
+                os.symlink(outside, nested, target_is_directory=True)
+                swapped = True
+            return real_scandir(candidate)
+
+        try:
+            with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+                with mock.patch.object(self.tool.os, "scandir", side_effect=replacing_scandir):
+                    with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                        self.tool.create_bundle(
+                            self.private_input,
+                            self.output,
+                            self.recipient,
+                            age_runner=self.fake_age_runner(),
+                        )
+            self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+            self.assertFalse(self.output.exists())
+        finally:
+            if nested.is_symlink():
+                nested.unlink()
+            if real_nested.exists():
+                real_nested.rename(nested)
+
+    def test_create_bundle_rejects_unbounded_bundle_enumeration(self):
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool, "MAX_BUNDLE_ENTRIES", 1):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.create_bundle(
+                        self.private_input,
+                        self.output,
+                        self.recipient,
+                        age_runner=self.fake_age_runner(),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+
+    def test_atomic_write_fails_closed_when_output_parent_is_replaced(self):
+        parent = self.vault / "encrypted"
+        parent_real = self.vault / "encrypted-real"
+        outside = self.root / "outside-output"
+        outside.mkdir()
+        target = parent / "race.txt"
+        try:
+            os.symlink(outside, self.root / "parent-link", target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink support is unavailable: %s" % exc)
+        real_replace = self.tool.os.replace
+        swapped = False
+
+        def racing_replace(source, destination, *args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                parent.rename(parent_real)
+                os.symlink(outside, parent, target_is_directory=True)
+                swapped = True
+            return real_replace(source, destination, *args, **kwargs)
+
+        try:
+            with mock.patch.object(self.tool.os, "replace", side_effect=racing_replace):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool._atomic_write(target, b"race", "output")
+            self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+            self.assertFalse(outside.joinpath("race.txt").exists())
+        finally:
+            if parent.is_symlink():
+                parent.unlink()
+            if parent_real.exists():
+                parent_real.rename(parent)
+
+    def test_create_bundle_cleans_new_artifacts_when_sidecar_write_fails(self):
+        original_atomic_write = self.tool._atomic_write
+
+        def fail_sidecar(path, data, field):
+            if field == "sidecar":
+                raise self.tool.ReleaseVaultError("E_VAULT_PERMISSION", "sidecar write failed")
+            return original_atomic_write(path, data, field)
+
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool, "_atomic_write", side_effect=fail_sidecar):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.create_bundle(
+                        self.private_input,
+                        self.output,
+                        self.recipient,
+                        age_runner=self.fake_age_runner(),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_suffix(".sha256").exists())
+
+    def test_receipt_metadata_is_prevalidated_before_bundle_commit(self):
+        missing_keyring = self.root / "missing-keyring.gpg"
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.create_bundle(
+                    self.private_input,
+                    self.output,
+                    self.recipient,
+                    age_runner=self.fake_age_runner(),
+                    public_keyring=missing_keyring,
+                    policy=self.policy,
+                    fingerprints=("A" * 40, "B" * 40),
+                )
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_suffix(".sha256").exists())
+
+    def test_hash_regular_file_rejects_initial_path_replacement(self):
+        target = self.root / "hash-target.bin"
+        target.write_bytes(b"hash me\n")
+        regular = self.tool.os.lstat(target)
+        values = list(regular)
+        values[0] = stat.S_IFLNK | 0o777
+        symlink_stat = os.stat_result(values)
+        calls = 0
+        real_lstat = self.tool.os.lstat
+
+        def race_lstat(candidate, *args, **kwargs):
+            nonlocal calls
+            result = real_lstat(candidate, *args, **kwargs)
+            if pathlib.Path(candidate) == target:
+                calls += 1
+                if calls >= 3:
+                    return symlink_stat
+            return result
+
+        with mock.patch.object(self.tool.os, "lstat", side_effect=race_lstat):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._hash_regular_file(target)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_sidecar_read_is_bounded_and_rechecks_file_identity(self):
+        target = self.root / "bundle.age"
+        sidecar = target.with_suffix(".sha256")
+        target.write_bytes(b"bundle\n")
+        digest = __import__("hashlib").sha256(target.read_bytes()).hexdigest()
+        sidecar.write_text(f"{digest}  {target.name}\n", encoding="ascii")
+        with mock.patch.object(pathlib.Path, "read_text", side_effect=AssertionError("unbounded read")):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._read_sidecar(sidecar, target.name)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_sidecar_read_rejects_open_to_final_metadata_change(self):
+        target = self.root / "bundle.age"
+        sidecar = target.with_suffix(".sha256")
+        target.write_bytes(b"bundle\n")
+        digest = __import__("hashlib").sha256(target.read_bytes()).hexdigest()
+        sidecar.write_text(f"{digest}  {target.name}\n", encoding="ascii")
+        real_fstat = self.tool.os.fstat
+        calls = 0
+
+        def changed_fstat(descriptor):
+            nonlocal calls
+            calls += 1
+            result = real_fstat(descriptor)
+            if calls < 2:
+                return result
+            changed = mock.Mock(wraps=result)
+            for field in ("st_mode", "st_ino", "st_dev", "st_size", "st_ctime_ns"):
+                setattr(changed, field, getattr(result, field))
+            changed.st_mtime_ns = result.st_mtime_ns + 1
+            return changed
+
+        with mock.patch.object(self.tool.os, "fstat", side_effect=changed_fstat):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._read_sidecar(sidecar, target.name)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
 
 
 class ReleaseVaultReceiptSchemaTests(unittest.TestCase):

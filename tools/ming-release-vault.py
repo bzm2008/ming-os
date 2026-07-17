@@ -72,9 +72,12 @@ MAX_SCAN_ENTRIES = 10_000
 MAX_SCAN_DEPTH = 32
 MAX_RECEIPT_BYTES = 1 * 1024 * 1024
 MAX_RECEIPT_READ_SECONDS = 5.0
+MAX_SIDECAR_BYTES = 4 * 1024
 MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_ENTRIES = 10_000
+MAX_BUNDLE_DEPTH = 32
+MAX_BUNDLE_SECONDS = 30.0
 AGE_RUN_TIMEOUT_SECONDS = 60
 
 # Passwords are intentionally not an input channel for this command.  These
@@ -761,25 +764,71 @@ def _prepare_output_path(value, vault: pathlib.Path, field: str) -> pathlib.Path
     return path
 
 
-def _bundle_entries(root: pathlib.Path):
+def _check_bundle_deadline(deadline: float | None):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "input enumeration deadline exceeded")
+
+
+def _bundle_directory_snapshot(before, after) -> bool:
+    return _same_file_metadata(before, after)
+
+
+def _same_directory_identity(before, after) -> bool:
+    """Compare directory identity without treating our rename's mtime as a race."""
+
+    if not os.path.samestat(before, after):
+        return False
+    before_birth = getattr(before, "st_birthtime_ns", None)
+    after_birth = getattr(after, "st_birthtime_ns", None)
+    if before_birth is not None and after_birth is not None:
+        return before_birth == after_birth
+    return True
+
+
+def _bundle_entries(root: pathlib.Path, *, deadline=None, budget=None):
     """Collect regular files/directories with deterministic relative names."""
 
     root = _require_directory(root, "input")
+    if deadline is None:
+        deadline = time.monotonic() + MAX_BUNDLE_SECONDS
+    if budget is None:
+        budget = {"entries": 0}
     entries = []
-    count = 0
     pending = [(root, pathlib.PurePosixPath())]
     while pending:
+        _check_bundle_deadline(deadline)
         directory, relative_prefix = pending.pop()
         try:
-            children = list(os.scandir(directory))
+            before = os.lstat(directory)
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input directory changed during enumeration")
+            children = []
+            with os.scandir(directory) as iterator:
+                while True:
+                    _check_bundle_deadline(deadline)
+                    try:
+                        entry = next(iterator)
+                    except StopIteration:
+                        break
+                    except OSError as exc:
+                        raise ReleaseVaultError(
+                            "E_RELEASE_NOT_READY", "input could not be enumerated"
+                        ) from exc
+                    budget["entries"] += 1
+                    if budget["entries"] > MAX_BUNDLE_ENTRIES:
+                        raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains too many entries")
+                    children.append(entry)
+            after = os.lstat(directory)
+            if not _bundle_directory_snapshot(before, after):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input directory changed during enumeration")
         except OSError as exc:
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "input could not be enumerated") from exc
         children.sort(key=lambda entry: (entry.name.casefold(), entry.name))
         for entry in children:
-            count += 1
-            if count > MAX_BUNDLE_ENTRIES:
-                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains too many entries")
+            _check_bundle_deadline(deadline)
             relative = relative_prefix / entry.name
+            if len(relative.parts) > MAX_BUNDLE_DEPTH:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input exceeds depth limit")
             if any(part in ("", ".", "..") for part in relative.parts):
                 raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains an unsafe path")
             path = pathlib.Path(entry.path)
@@ -798,6 +847,12 @@ def _bundle_entries(root: pathlib.Path):
             if info.st_size > MAX_BUNDLE_FILE_BYTES:
                 raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file is too large")
             entries.append((relative, path, "file", info))
+        try:
+            final = os.lstat(directory)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "input could not be enumerated") from exc
+        if not _bundle_directory_snapshot(before, final):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "input directory changed during enumeration")
     entries.sort(key=lambda item: (item[0].as_posix().casefold(), item[0].as_posix()))
     return root, entries
 
@@ -852,6 +907,9 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
                 opened = os.fstat(descriptor)
                 if not stat.S_ISREG(opened.st_mode) or not _same_file_metadata(initial, opened):
                     raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
+                path_opened = os.lstat(path)
+                if stat.S_ISLNK(path_opened.st_mode) or not _same_file_metadata(initial, path_opened):
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
                 if opened.st_size > MAX_BUNDLE_FILE_BYTES:
                     raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file is too large")
                 info.size = opened.st_size
@@ -861,7 +919,12 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
                 with os.fdopen(descriptor, "rb", closefd=False) as source:
                     archive.addfile(info, source)
                 final = os.fstat(descriptor)
-                if not _same_file_metadata(opened, final):
+                path_final = os.lstat(path)
+                if (
+                    not _same_file_metadata(opened, final)
+                    or stat.S_ISLNK(path_final.st_mode)
+                    or not _same_file_metadata(final, path_final)
+                ):
                     raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
             except ReleaseVaultError:
                 raise
@@ -882,6 +945,12 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
 
 def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
     path = _require_regular_file(path, "file")
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file could not be read") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file is not a regular file")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(os.fspath(path), flags)
@@ -891,6 +960,13 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
     total = 0
     try:
         initial = os.fstat(descriptor)
+        path_opened = os.lstat(path)
+        if (
+            stat.S_ISLNK(path_opened.st_mode)
+            or not _same_file_metadata(before, initial)
+            or not _same_file_metadata(before, path_opened)
+        ):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "file changed during read")
         while True:
             try:
                 chunk = os.read(descriptor, READ_CHUNK_BYTES)
@@ -901,7 +977,13 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
             total += len(chunk)
             digest.update(chunk)
         final = os.fstat(descriptor)
-        if not _same_file_metadata(initial, final) or final.st_size != total:
+        path_final = os.lstat(path)
+        if (
+            not _same_file_metadata(initial, final)
+            or final.st_size != total
+            or stat.S_ISLNK(path_final.st_mode)
+            or not _same_file_metadata(final, path_final)
+        ):
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "file changed during read")
     finally:
         try:
@@ -909,6 +991,52 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
         except OSError:
             pass
     return digest.hexdigest(), total
+
+
+def _mkstemp_in_parent(parent: pathlib.Path, prefix: str, suffix: str, field: str):
+    """Create a mode-0600 temp file and fail if its parent was replaced."""
+
+    try:
+        before = os.lstat(parent)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unsafe")
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=prefix, suffix=suffix, dir=os.fspath(parent)
+        )
+        temporary = pathlib.Path(temporary_name)
+        after = os.lstat(parent)
+        if stat.S_ISLNK(after.st_mode) or not _same_directory_identity(before, after):
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+        return descriptor, temporary
+    except ReleaseVaultError:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None and _symlink_component(parent) is None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None and _symlink_component(parent) is None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary file unavailable") from exc
 
 
 def _atomic_write(path: pathlib.Path, data: bytes, field: str):
@@ -925,17 +1053,19 @@ def _atomic_write(path: pathlib.Path, data: bytes, field: str):
     descriptor = None
     temporary = None
     try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=os.fspath(parent)
+        descriptor, temporary = _mkstemp_in_parent(
+            parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            field=field,
         )
-        temporary = pathlib.Path(temporary_name)
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             descriptor = None
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _atomic_replace(temporary, path, field)
         temporary = None
         try:
             directory_fd = os.open(os.fspath(parent), os.O_RDONLY)
@@ -963,16 +1093,163 @@ def _atomic_write(path: pathlib.Path, data: bytes, field: str):
                 pass
 
 
+def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str):
+    """Replace within a validated parent directory, failing closed on swaps."""
+
+    parent = destination.parent
+    try:
+        before_path = os.lstat(parent)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed") from exc
+    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISDIR(before_path.st_mode):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unsafe")
+    directory_fd = None
+    try:
+        try:
+            directory_fd = os.open(
+                os.fspath(parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            before_fd = os.fstat(directory_fd)
+            if not _bundle_directory_snapshot(before_path, before_fd):
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+            os.replace(
+                source.name,
+                destination.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            after_path = os.lstat(parent)
+            after_fd = os.fstat(directory_fd)
+            if (
+                stat.S_ISLNK(after_path.st_mode)
+                or not _same_directory_identity(before_path, after_path)
+                or not _same_directory_identity(before_fd, after_fd)
+            ):
+                try:
+                    os.unlink(destination.name, dir_fd=directory_fd)
+                except OSError:
+                    pass
+                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+            return
+
+        # Windows does not expose directory handles for renameat-style calls.
+        # Validate immediately before and after the path-based replacement;
+        # any detected parent swap is a release failure.
+        before_again = os.lstat(parent)
+        if stat.S_ISLNK(before_again.st_mode) or not _bundle_directory_snapshot(before_path, before_again):
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+        os.replace(source, destination)
+        after_path = os.lstat(parent)
+        if stat.S_ISLNK(after_path.st_mode) or not _same_directory_identity(before_again, after_path):
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+    except ReleaseVaultError:
+        raise
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} could not be committed") from exc
+    finally:
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
 def _sidecar_path(bundle: pathlib.Path) -> pathlib.Path:
     return bundle.with_suffix(".sha256")
+
+
+def _reject_existing_artifact(path: pathlib.Path, field: str) -> bool:
+    """Refuse replacement of an existing artifact and report that it is absent."""
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} could not be checked") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} is not a regular artifact")
+    raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} already exists")
+
+
+def _remove_new_artifact(path: pathlib.Path, was_absent: bool):
+    if not was_absent:
+        return
+    try:
+        if _symlink_component(path.parent) is not None:
+            return
+        info = os.lstat(path)
+        if stat.S_ISREG(info.st_mode):
+            path.unlink()
+    except (FileNotFoundError, OSError, ReleaseVaultError):
+        pass
 
 
 def _read_sidecar(path: pathlib.Path, bundle_name: str) -> str:
     path = _require_regular_file(path, "sidecar")
     try:
-        text = path.read_text(encoding="ascii")
-    except (OSError, UnicodeError) as exc:
+        before = os.lstat(path)
+    except OSError as exc:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar could not be read") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar could not be read") from exc
+    chunks = []
+    total = 0
+    try:
+        opened = os.fstat(descriptor)
+        path_opened = os.lstat(path)
+        if (
+            stat.S_ISLNK(opened.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(path_opened.st_mode)
+            or not _same_file_metadata(before, opened)
+            or not _same_file_metadata(before, path_opened)
+            or opened.st_size > MAX_SIDECAR_BYTES
+        ):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar changed during read")
+        started = time.monotonic()
+        while True:
+            if time.monotonic() - started > MAX_READ_SECONDS:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar read timed out")
+            try:
+                chunk = os.read(descriptor, READ_CHUNK_BYTES)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar could not be read") from exc
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SIDECAR_BYTES:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is too large")
+            chunks.append(chunk)
+        final = os.fstat(descriptor)
+        path_final = os.lstat(path)
+        if (
+            stat.S_ISLNK(final.st_mode)
+            or not stat.S_ISREG(final.st_mode)
+            or stat.S_ISLNK(path_final.st_mode)
+            or not _same_file_metadata(opened, final)
+            or not _same_file_metadata(final, path_final)
+            or final.st_size != total
+        ):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar changed during read")
+        try:
+            text = b"".join(chunks).decode("ascii")
+        except UnicodeError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is invalid") from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
     expected = re.fullmatch(r"([a-f0-9]{64})  ([^\r\n]+)\n?", text)
     if expected is None or expected.group(2) != bundle_name:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is invalid")
@@ -987,14 +1264,15 @@ def _child_environment() -> dict[str, str]:
     for name in list(environment):
         if name in _PASSWORD_ENV_NAMES or "PASSWORD" in name.upper() or "PASSPHRASE" in name.upper():
             environment.pop(name, None)
+    # This is never a production age control channel. Tests inject a callable
+    # directly into create_bundle instead of changing a subprocess environment.
+    environment.pop("MING_RELEASE_TEST_AGE", None)
     return environment
 
 
 def _resolve_age_runner(age_runner=None):
     if callable(age_runner):
         return age_runner, None
-    if os.environ.get("MING_RELEASE_TEST_AGE"):
-        return "__test_age_runner__", None
     configured = age_runner or os.environ.get("MING_RELEASE_AGE", "age")
     candidate = os.fspath(configured)
     if any(separator in candidate for separator in (os.sep, os.altsep) if separator):
@@ -1015,21 +1293,6 @@ def _resolve_age_runner(age_runner=None):
 
 
 def _invoke_age(runner, argv, tar_bytes: bytes, output: pathlib.Path, environment):
-    if runner == "__test_age_runner__":
-        # This deterministic runner exists only for contract tests.  It still
-        # receives the exact argv/env boundary used by a real age process.
-        try:
-            output.write_bytes(b"age-test-v1\n" + tar_bytes)
-        except OSError as exc:
-            raise ReleaseVaultError("E_RELEASE_NOT_READY", "age output could not be written") from exc
-        return {
-            "argv": list(argv),
-            "environment": {
-                key: environment[key]
-                for key in ("MING_RELEASE_TEST_AGE",)
-                if key in environment
-            },
-        }
     if callable(runner):
         try:
             result = runner(argv=tuple(argv), input_bytes=tar_bytes, output_path=output, environment=environment)
@@ -1157,6 +1420,7 @@ def create_bundle(
     recipient_file,
     age_runner=None,
     *,
+    password_tty=False,
     sidecar=None,
     receipt=None,
     public_keyring=None,
@@ -1168,16 +1432,24 @@ def create_bundle(
     """Create an age-encrypted deterministic recovery bundle."""
 
     vault = _configured_vault()
+    if password_tty and recipient_file is not None:
+        raise ReleaseVaultError("E_USAGE", "recipient-file and password-tty are mutually exclusive")
+    if not password_tty and recipient_file is None:
+        raise ReleaseVaultError("E_USAGE", "recipient-file or password-tty is required")
+    if password_tty and not sys.stdin.isatty():
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "password-tty requires an interactive TTY")
     input_path = _require_directory(input_dir, "input")
     output_path = _prepare_output_path(output, vault, "output")
     if _path_within(output_path, input_path):
         raise ReleaseVaultError("E_VAULT_PERMISSION", "output must not be inside input")
-    recipient_path = _require_regular_file(recipient_file, "recipient file")
-    try:
-        if os.stat(recipient_path, follow_symlinks=False).st_size > MAX_RECEIPT_BYTES:
-            raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is too large")
-    except OSError as exc:
-        raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is unavailable") from exc
+    recipient_path = None
+    if recipient_file is not None:
+        recipient_path = _require_regular_file(recipient_file, "recipient file")
+        try:
+            if os.stat(recipient_path, follow_symlinks=False).st_size > MAX_RECEIPT_BYTES:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is too large")
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is unavailable") from exc
     if any(name in os.environ for name in _PASSWORD_ENV_NAMES):
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "password environment is not accepted")
     if output_path.suffix.lower() != ".age":
@@ -1187,83 +1459,126 @@ def create_bundle(
         # object. Private input belongs in the explicitly configured vault.
         raise ReleaseVaultError("E_VAULT_PERMISSION", "input must be outside the Git worktree")
     runner, _ = _resolve_age_runner(age_runner)
-    tar_bytes = _build_deterministic_tar(input_path)
-    environment = _child_environment()
     sidecar_path = _prepare_output_path(sidecar, vault, "sidecar") if sidecar else _sidecar_path(output_path)
     sidecar_path = _prepare_output_path(sidecar_path, vault, "sidecar")
-    if receipt is not None:
-        receipt_candidate = _prepare_output_path(receipt, vault, "receipt")
-    else:
-        receipt_candidate = None
-    temporary = None
-    invocation = None
-    try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{output_path.name}.", suffix=".age.tmp", dir=os.fspath(output_path.parent)
-        )
-        os.close(descriptor)
-        temporary = pathlib.Path(temporary_name)
-        temporary.unlink()
-        argv = [os.fspath(runner), "-R", os.fspath(recipient_path), "-o", os.fspath(temporary)]
-        invocation = _invoke_age(runner, argv, tar_bytes, temporary, environment)
-        encrypted = _require_regular_file(temporary, "age output")
-        encrypted_hash, encrypted_bytes = _hash_regular_file(encrypted)
-        os.replace(encrypted, output_path)
-        try:
-            os.chmod(output_path, 0o600)
-        except OSError as exc:
-            raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle permissions could not be set") from exc
-        temporary = None
-    except ReleaseVaultError:
-        raise
-    except OSError as exc:
-        raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle output could not be committed") from exc
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+    output_absent = _reject_existing_artifact(output_path, "output")
+    sidecar_absent = _reject_existing_artifact(sidecar_path, "sidecar")
 
-    _atomic_write(sidecar_path, f"{encrypted_hash}  {output_path.name}\n".encode("ascii"), "sidecar")
-    if _read_sidecar(sidecar_path, output_path.name) != encrypted_hash:
-        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar read-back validation failed")
-
-    result = {
-        "bundle_id": bundle_id or output_path.stem,
-        "bundle_sha256": encrypted_hash,
-        "bundle_bytes": encrypted_bytes,
-        "sidecar": sidecar_path.name,
-    }
     metadata_requested = any(
         item is not None for item in (receipt, public_keyring, policy, generation, fingerprints)
     )
+    receipt_candidate = None
+    bundle_id_value = bundle_id or output_path.stem
+    public_keyring_hash_before = None
+    policy_hash_before = None
     if metadata_requested:
         if public_keyring is None:
             public_keyring = vault / "public" / "release-keyring.gpg"
         if policy is None:
             policy = vault / "public" / "key-policy.json"
+        public_keyring = _require_regular_file(public_keyring, "public keyring")
+        policy = _require_regular_file(policy, "policy")
+        # Read and fingerprint public metadata before any encrypted output is
+        # produced. write_receipt hashes again after commit to catch changes.
+        public_keyring_hash_before, _ = _hash_regular_file(public_keyring)
+        policy_hash_before, _ = _hash_regular_file(policy)
+        bundle_id_value = _require_opaque_id(bundle_id_value, "bundle_id")
         if generation is None:
             match = re.fullmatch(r"recovery-bundle-([0-9]+)", output_path.stem)
             if match is None:
                 raise ReleaseVaultError("E_RELEASE_NOT_READY", "generation is required")
             generation = int(match.group(1))
-        if fingerprints is None:
-            raise ReleaseVaultError("E_RELEASE_NOT_READY", "fingerprints are required")
-        receipt_value = write_receipt(
-            output_path,
-            sidecar_path,
-            public_keyring,
-            policy,
-            bundle_id or output_path.stem,
-            generation,
-            fingerprints,
-            receipt_path=receipt_candidate,
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "generation is invalid")
+        fingerprints = _coerce_fingerprints(fingerprints)
+        receipt_candidate = _prepare_output_path(
+            receipt if receipt is not None else _receipt_destination(output_path),
+            vault,
+            "receipt",
         )
-        result["receipt"] = receipt_value
-    if invocation is not None:
-        result["test_invocation"] = invocation
-    return result
+        _reject_existing_artifact(receipt_candidate, "receipt")
+
+    tar_bytes = _build_deterministic_tar(input_path)
+    environment = _child_environment()
+    temporary = None
+    invocation = None
+    try:
+        try:
+            descriptor, temporary = _mkstemp_in_parent(
+                output_path.parent,
+                prefix=f".{output_path.name}.",
+                suffix=".age.tmp",
+                field="output",
+            )
+            os.close(descriptor)
+            temporary.unlink()
+            runner_argv = "age" if callable(runner) else os.fspath(runner)
+            if password_tty:
+                argv = [runner_argv, "-p", "-o", os.fspath(temporary)]
+            else:
+                argv = [runner_argv, "-R", os.fspath(recipient_path), "-o", os.fspath(temporary)]
+            invocation = _invoke_age(runner, argv, tar_bytes, temporary, environment)
+            encrypted = _require_regular_file(temporary, "age output")
+            encrypted_hash, encrypted_bytes = _hash_regular_file(encrypted)
+            _atomic_replace(encrypted, output_path, "output")
+            try:
+                os.chmod(output_path, 0o600)
+            except OSError as exc:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle permissions could not be set") from exc
+            temporary = None
+        except ReleaseVaultError:
+            raise
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle output could not be committed") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+        # Hash the committed path, not only the temporary path, before making
+        # a public sidecar. This closes a replacement race at os.replace.
+        committed_hash, committed_bytes = _hash_regular_file(output_path)
+        if committed_hash != encrypted_hash or committed_bytes != encrypted_bytes:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "bundle changed after commit")
+        encrypted_hash, encrypted_bytes = committed_hash, committed_bytes
+        _atomic_write(sidecar_path, f"{encrypted_hash}  {output_path.name}\n".encode("ascii"), "sidecar")
+        if _read_sidecar(sidecar_path, output_path.name) != encrypted_hash:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar read-back validation failed")
+
+        result = {
+            "bundle_id": bundle_id_value,
+            "bundle_sha256": encrypted_hash,
+            "bundle_bytes": encrypted_bytes,
+            "sidecar": sidecar_path.name,
+        }
+        if metadata_requested:
+            receipt_value = write_receipt(
+                output_path,
+                sidecar_path,
+                public_keyring,
+                policy,
+                bundle_id_value,
+                generation,
+                fingerprints,
+                receipt_path=receipt_candidate,
+            )
+            if (
+                receipt_value["public_keyring_sha256"] != public_keyring_hash_before
+                or receipt_value["key_policy_sha256"] != policy_hash_before
+            ):
+                raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "public metadata changed during bundle creation")
+            result["receipt"] = receipt_value
+        if invocation is not None:
+            result["test_invocation"] = invocation
+        return result
+    except Exception:
+        _remove_new_artifact(output_path, output_absent)
+        _remove_new_artifact(sidecar_path, sidecar_absent)
+        if receipt_candidate is not None:
+            _remove_new_artifact(receipt_candidate, True)
+        raise
 
 
 class ArgumentParseError(ValueError):
@@ -1322,10 +1637,19 @@ def _build_parser() -> argparse.ArgumentParser:
     receipt = commands.add_parser("verify-receipt", help="validate a public receipt")
     receipt.add_argument("--receipt", required=True, type=pathlib.Path)
 
-    bundle = commands.add_parser("create-bundle", help="encrypt a local recovery bundle")
+    bundle = commands.add_parser(
+        "create-bundle",
+        help="encrypt a local recovery bundle",
+        description=(
+            "Encrypt a deterministic recovery bundle with age recipient-file mode or an interactive TTY prompt. "
+            "Password options, password environment variables, and redirected password stdin are rejected."
+        ),
+    )
     bundle.add_argument("--input", required=True, type=pathlib.Path)
     bundle.add_argument("--output", required=True, type=pathlib.Path)
-    bundle.add_argument("--recipient-file", required=True, type=pathlib.Path)
+    credentials = bundle.add_mutually_exclusive_group(required=True)
+    credentials.add_argument("--recipient-file", type=pathlib.Path)
+    credentials.add_argument("--password-tty", action="store_true")
     bundle.add_argument("--sidecar", type=pathlib.Path)
     bundle.add_argument("--receipt", type=pathlib.Path)
     bundle.add_argument("--public-keyring", type=pathlib.Path)
@@ -1360,6 +1684,7 @@ def main(argv=None) -> int:
                     args.input,
                     args.output,
                     args.recipient_file,
+                    password_tty=args.password_tty,
                     sidecar=args.sidecar,
                     receipt=args.receipt,
                     public_keyring=args.public_keyring,
