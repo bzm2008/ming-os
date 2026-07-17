@@ -1125,48 +1125,6 @@ def _artifact_token(path: pathlib.Path, digest=None):
     return identity, digest
 
 
-def _artifact_token_at_dirfd(directory_fd, name):
-    """Hash a regular entry through the already-validated parent descriptor."""
-
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(name, flags, dir_fd=directory_fd)
-    except (OSError, NotImplementedError, TypeError):
-        return None
-    digest = hashlib.sha256()
-    total = 0
-    try:
-        initial = os.fstat(descriptor)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_size > MAX_BUNDLE_BYTES:
-            return None
-        while True:
-            try:
-                chunk = os.read(descriptor, READ_CHUNK_BYTES)
-            except OSError:
-                return None
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_BUNDLE_BYTES:
-                return None
-            digest.update(chunk)
-        final = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(final.st_mode)
-            or not _same_file_metadata(initial, final)
-            or final.st_size != total
-        ):
-            return None
-        return _file_identity(final), digest.hexdigest()
-    except OSError:
-        return None
-    finally:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-
 def _atomic_write(path: pathlib.Path, data: bytes, field: str):
     path = _absolute_path(path, field)
     if _symlink_component(path) is not None:
@@ -1257,17 +1215,9 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination appeared") from exc
             except OSError as exc:
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} no-overwrite commit unavailable") from exc
-            destination_token = _artifact_token_at_dirfd(directory_fd, destination.name)
-            if destination_token is None:
-                raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination could not be verified")
             try:
                 os.unlink(source.name, dir_fd=directory_fd)
             except OSError as exc:
-                if _artifact_token_at_dirfd(directory_fd, destination.name) == destination_token:
-                    try:
-                        os.unlink(destination.name, dir_fd=directory_fd)
-                    except OSError:
-                        pass
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary cleanup failed") from exc
             after_path = os.lstat(parent)
             after_fd = os.fstat(directory_fd)
@@ -1276,11 +1226,6 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
                 or not _same_directory_identity(before_path, after_path)
                 or not _same_directory_identity(before_fd, after_fd)
             ):
-                if _artifact_token_at_dirfd(directory_fd, destination.name) == destination_token:
-                    try:
-                        os.unlink(destination.name, dir_fd=directory_fd)
-                    except OSError:
-                        pass
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
             try:
                 os.fsync(directory_fd)
@@ -1304,17 +1249,9 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination appeared") from exc
         except OSError as exc:
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} no-overwrite commit unavailable") from exc
-        destination_token = _artifact_token(destination)
-        if destination_token is None:
-            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} destination could not be verified")
         try:
             source.unlink()
         except OSError as exc:
-            if _artifact_token(destination) == destination_token:
-                try:
-                    destination.unlink()
-                except OSError:
-                    pass
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} temporary cleanup failed") from exc
         after_path = os.lstat(parent)
         if stat.S_ISLNK(after_path.st_mode) or not _same_directory_identity(before_again, after_path):
