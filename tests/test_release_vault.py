@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -106,6 +107,37 @@ class ReleaseVaultReceiptTests(unittest.TestCase):
                     result = run_cli("verify-receipt", "--receipt", str(receipt))
                 self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
                 self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+
+    def test_receipt_rejects_oversized_json(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "receipt.json"
+            path.write_text(
+                json.dumps(self.receipt)
+                + " " * (getattr(self.tool, "MAX_RECEIPT_BYTES", 1024 * 1024) + 1),
+                encoding="utf-8",
+            )
+            result = run_cli("verify-receipt", "--receipt", str(path))
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+
+    def test_receipt_rejects_symlink_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.write_receipt(temp, self.receipt)
+            real_stat = self.tool.os.stat
+            regular = real_stat(path, follow_symlinks=False)
+            values = list(regular)
+            values[0] = stat.S_IFLNK | 0o777
+            symlink_stat = os.stat_result(values)
+
+            def pretend_symlink(candidate, *args, **kwargs):
+                if pathlib.Path(candidate) == path:
+                    return symlink_stat
+                return real_stat(candidate, *args, **kwargs)
+
+            with mock.patch.object(self.tool.os, "stat", side_effect=pretend_symlink):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool._load_json(path)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
 
     def test_direct_validator_returns_a_sanitized_copy(self):
         validated = self.tool.validate_receipt(self.receipt)
@@ -335,6 +367,28 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
                         self.tool.scan_public_tree(public)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
         self.assertEqual(state["count"], 3)
+
+    def test_public_scan_rechecks_directory_after_children_finish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            target = public / "release.json"
+            target.write_text("{}", encoding="utf-8")
+            changed = {"value": False}
+
+            def mutate_directory(entry, **kwargs):
+                if not changed["value"]:
+                    changed["value"] = True
+                    (public / "late.json").write_text("{}", encoding="utf-8")
+                return None
+
+            with mock.patch.object(
+                self.tool, "_scan_public_file", side_effect=mutate_directory
+            ):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertTrue(changed["value"])
 
     def test_public_scan_enforces_depth_cap(self):
         with tempfile.TemporaryDirectory() as temp:

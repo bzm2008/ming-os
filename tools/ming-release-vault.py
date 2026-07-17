@@ -62,6 +62,8 @@ MAX_READ_SECONDS = 5.0
 MAX_SCAN_SECONDS = 30.0
 MAX_SCAN_ENTRIES = 10_000
 MAX_SCAN_DEPTH = 32
+MAX_RECEIPT_BYTES = 1 * 1024 * 1024
+MAX_RECEIPT_READ_SECONDS = 5.0
 
 _PATH_MARKERS = (
     "secret",
@@ -263,10 +265,76 @@ def _strict_object_pairs(pairs):
 
 
 def _load_json(path: pathlib.Path) -> dict:
+    path = pathlib.Path(path)
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        before = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt could not be read") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt path is unsafe")
+    if before.st_size > MAX_RECEIPT_BYTES:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt is too large")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt could not be read") from exc
+    try:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt could not be read") from exc
+        if (
+            stat.S_ISLNK(opened.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not os.path.samestat(before, opened)
+            or opened.st_size != before.st_size
+            or opened.st_size > MAX_RECEIPT_BYTES
+            or opened.st_mtime_ns != before.st_mtime_ns
+        ):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt changed during read")
+
+        started = time.monotonic()
+        chunks = []
+        total = 0
+        while True:
+            if time.monotonic() - started > MAX_RECEIPT_READ_SECONDS:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt read timed out")
+            try:
+                chunk = os.read(descriptor, READ_CHUNK_BYTES)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt could not be read") from exc
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_RECEIPT_BYTES:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt is too large")
+            chunks.append(chunk)
+
+        try:
+            final = os.fstat(descriptor)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt could not be read") from exc
+        if (
+            stat.S_ISLNK(final.st_mode)
+            or not stat.S_ISREG(final.st_mode)
+            or not os.path.samestat(opened, final)
+            or final.st_size != opened.st_size
+            or final.st_size != total
+            or final.st_mtime_ns != opened.st_mtime_ns
+            or final.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt changed during read")
+        try:
+            text = b"".join(chunks).decode("utf-8")
+        except UnicodeError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt JSON is invalid") from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
     try:
         value = json.loads(
             text,
@@ -321,6 +389,15 @@ def _check_deadline(deadline: float | None):
         _not_ready("public scan deadline exceeded")
 
 
+def _same_directory_snapshot(before, after) -> bool:
+    return (
+        os.path.samestat(before, after)
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+    )
+
+
 def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
     """Yield regular-file entries without following symlinked directories."""
 
@@ -358,7 +435,7 @@ def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
                         _not_ready("public tree has too many entries")
                     entries.append(entry)
             after = os.stat(directory, follow_symlinks=False)
-            if not os.path.samestat(before, after):
+            if not _same_directory_snapshot(before, after):
                 _not_ready("public tree changed during scan")
         except ReleaseVaultError:
             raise
@@ -387,6 +464,16 @@ def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
                     "E_RELEASE_NOT_READY", "public tree could not be enumerated"
                 ) from exc
             _not_ready("public tree contains unsupported file")
+
+        _check_deadline(deadline)
+        try:
+            final = os.stat(directory, follow_symlinks=False)
+        except OSError as exc:
+            raise ReleaseVaultError(
+                "E_RELEASE_NOT_READY", "public tree could not be enumerated"
+            ) from exc
+        if not _same_directory_snapshot(before, final):
+            _not_ready("public tree changed during scan")
 
     yield from walk(root_path, pathlib.Path())
 
