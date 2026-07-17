@@ -279,14 +279,11 @@ def _sensitive_component(component: str) -> str | None:
 
 
 def _sensitive_content(content: bytes) -> str | None:
-    # Detached signatures and binary public keyrings are allowed public
-    # material; only inspect their text-like bytes for generic word markers.
-    is_binary = b"\x00" in content
+    # Binary public keyrings and signatures remain allowed when they contain no
+    # sensitive marker; marker checks apply to their raw bytes as well.
     lowered = content.lower()
     if _PRIVATE_KEY_HEADER_RE.search(content):
         return "private-key marker"
-    if is_binary:
-        return None
     if _PRIVATE_KEY_TEXT_RE.search(content):
         return "private-key marker"
     if _SSH_PRIVATE_NAME_RE.search(content):

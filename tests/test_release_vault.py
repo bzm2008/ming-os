@@ -179,6 +179,27 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
         self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
         self.assertEqual(json.loads(result.stdout)["error_code"], "E_SECRET_EXPOSURE")
 
+    def test_public_scan_rejects_sensitive_binary_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release-material.bin").write_bytes(
+                b"\x00binary secret password token material"
+            )
+            result = run_cli("scan-public", "--root", str(public))
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_SECRET_EXPOSURE")
+
+    def test_public_scan_accepts_marker_free_binary_keyring_and_signature(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release-keyring.gpg").write_bytes(b"\x00\x01public-key-packet")
+            (public / "manifest.sig").write_bytes(b"\x00\x01detached-signature")
+            result = run_cli("scan-public", "--root", str(public))
+        self.assertEqual(result.returncode, self.tool.EXIT_OK)
+        self.assertEqual(json.loads(result.stdout)["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
