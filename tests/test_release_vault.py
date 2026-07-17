@@ -1551,23 +1551,85 @@ class ReleaseVaultNasTests(unittest.TestCase):
             self.known_hosts.write_text(original, encoding="ascii")
 
     def test_verify_nas_rejects_oversized_remote_output(self):
-        def oversized_runner(argv, **kwargs):
-            stream = kwargs["stdout"]
-            stream.write(b"x" * (self.tool.MAX_REMOTE_OUTPUT_BYTES + 1))
-            stream.flush()
-            return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
+        oversized_output = b"x" * (self.tool.MAX_REMOTE_OUTPUT_BYTES + 1)
 
-        with mock.patch.object(self.tool.subprocess, "run", side_effect=oversized_runner):
+        class OversizedProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(oversized_output)
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        with mock.patch.object(self.tool.subprocess, "Popen", return_value=OversizedProcess()):
             with self.assertRaises(self.tool.ReleaseVaultError) as caught:
                 self.tool.verify_nas(self.config)
         self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+
+    def test_nas_bounded_runner_does_not_wait_unbounded_for_reader_after_timeout(self):
+        joins = []
+
+        class FakeReader:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, *args, **kwargs):
+                joins.append(kwargs.get("timeout", args[0] if args else None))
+
+            def is_alive(self):
+                return False
+
+        class FakeProcess:
+            stdout = io.BytesIO()
+            pid = 31337
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(["ssh"], timeout)
+
+            def kill(self):
+                pass
+
+            def poll(self):
+                return None
+
+        def fake_popen(*args, **kwargs):
+            return FakeProcess()
+
+        with mock.patch.object(self.tool.threading, "Thread", FakeReader):
+            with mock.patch.object(self.tool.subprocess, "Popen", side_effect=fake_popen):
+                with self.assertRaises(self.tool._NasRemoteFailure) as caught:
+                    self.tool._nas_run_bounded(("ssh",), 0.01)
+        self.assertEqual(caught.exception.error_code, "E_VAULT_UNREACHABLE")
+        self.assertTrue(joins)
+        self.assertIsNotNone(joins[0])
+        self.assertLessEqual(joins[0], 0.01)
 
     def test_test_ssh_environment_does_not_bypass_real_runner(self):
         calls = []
         receipt_bytes = self.receipt.read_bytes()
 
-        def subprocess_runner(argv, **kwargs):
-            calls.append(list(argv))
+        class FakeProcess:
+            def __init__(self, output):
+                self.stdout = io.BytesIO(output)
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, **kwargs):
             command = argv[argv.index(self.config["host_alias"]) + 1 :]
             if command[0] == "stat":
                 target = command[-1]
@@ -1586,14 +1648,11 @@ class ReleaseVaultNasTests(unittest.TestCase):
                 output = self.sidecar.read_bytes()
             else:
                 output = receipt_bytes
-            stream = kwargs.get("stdout")
-            if stream is not None:
-                stream.write(output)
-                stream.flush()
-            return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
+            calls.append(list(argv))
+            return FakeProcess(output)
 
         with mock.patch.dict(os.environ, {"MING_RELEASE_TEST_SSH": "1"}, clear=False):
-            with mock.patch.object(self.tool.subprocess, "run", side_effect=subprocess_runner):
+            with mock.patch.object(self.tool.subprocess, "Popen", side_effect=fake_popen):
                 result = self.tool.verify_nas(self.config)
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("test_commands", result)

@@ -27,6 +27,7 @@ import pathlib
 import posixpath
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -99,6 +100,19 @@ NAS_CONFIG_FIELDS = frozenset(
         "receipt",
     }
 )
+PREFLIGHT_FIELDS = frozenset(
+    {
+        "public_root",
+        "public_keyring",
+        "policy",
+        "receipt",
+        "bundle",
+        "sidecar",
+        "nas_config",
+        "max_receipt_age_seconds",
+    }
+)
+PREFLIGHT_DEFAULT_MAX_RECEIPT_AGE_SECONDS = 90 * 24 * 60 * 60
 NAS_REMOTE_DIR = "/srv/ming-os/release-vault/v1"
 NAS_VERIFY_TIMEOUT_SECONDS = 25.0
 _NAS_OBJECT_RE = re.compile(r"recovery-bundle-[0-9]+\.(?:age|sha256|json)\Z")
@@ -1921,10 +1935,44 @@ def _nas_decode_output(value):
     return value
 
 
-def _nas_run_bounded(argv, timeout):
-    """Run one SSH command while retaining at most MAX_REMOTE_OUTPUT_BYTES."""
+def _nas_terminate_process_group(process):
+    """Terminate the SSH child and descendants without waiting indefinitely."""
 
-    read_fd, write_fd = os.pipe()
+    if os.name == "nt":
+        ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+        if ctrl_break is not None:
+            try:
+                process.send_signal(ctrl_break)
+            except (OSError, AttributeError):
+                pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            pass
+    try:
+        process.kill()
+    except (OSError, AttributeError):
+        pass
+
+
+def _nas_run_bounded(argv, timeout):
+    """Run one SSH command with bounded output and cleanup."""
+
+    deadline = time.monotonic() + timeout
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+        "shell": False,
+    }
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flags:
+            popen_kwargs["creationflags"] = creation_flags
+    else:
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(list(argv), **popen_kwargs)
     output = bytearray()
     overflow = False
     reader_error = []
@@ -1932,46 +1980,66 @@ def _nas_run_bounded(argv, timeout):
     def drain_output():
         nonlocal overflow
         try:
-            with os.fdopen(read_fd, "rb", closefd=True) as stream:
-                while True:
-                    chunk = stream.read(READ_CHUNK_BYTES)
-                    if not chunk:
-                        return
-                    available = MAX_REMOTE_OUTPUT_BYTES - len(output)
-                    if available <= 0:
-                        overflow = True
-                        continue
-                    if len(chunk) > available:
-                        output.extend(chunk[:available])
-                        overflow = True
-                    else:
-                        output.extend(chunk)
-        except OSError as exc:
+            stream = process.stdout
+            while True:
+                chunk = stream.read(READ_CHUNK_BYTES)
+                if not chunk:
+                    return
+                available = MAX_REMOTE_OUTPUT_BYTES - len(output)
+                if available <= 0:
+                    overflow = True
+                    continue
+                if len(chunk) > available:
+                    output.extend(chunk[:available])
+                    overflow = True
+                else:
+                    output.extend(chunk)
+        except (OSError, ValueError, AttributeError) as exc:
             reader_error.append(exc)
 
     reader = threading.Thread(target=drain_output, daemon=True)
     reader.start()
+    timed_out = False
+    reader_stuck = False
+    returncode = None
     try:
-        with os.fdopen(write_fd, "wb", closefd=True) as stream:
-            completed = subprocess.run(
-                list(argv),
-                stdout=stream,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                check=False,
-                shell=False,
-                timeout=timeout,
-            )
+        remaining = max(0.0, deadline - time.monotonic())
+        returncode = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _nas_terminate_process_group(process)
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining > 0:
+            try:
+                process.wait(timeout=remaining)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
     finally:
-        # Closing the write end lets the bounded reader finish even when the
-        # subprocess wrapper was replaced by a test runner.
-        reader.join()
+        remaining = max(0.0, deadline - time.monotonic())
+        reader.join(timeout=remaining)
+        if reader.is_alive():
+            reader_stuck = True
+            try:
+                process.stdout.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+            remaining = max(0.0, deadline - time.monotonic())
+            reader.join(timeout=remaining)
+            if reader.is_alive():
+                reader_stuck = True
+        else:
+            try:
+                process.stdout.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+    if timed_out or reader_stuck:
+        raise _NasRemoteFailure("E_VAULT_UNREACHABLE")
     if reader_error:
         raise _NasRemoteFailure("E_VAULT_PERMISSION") from reader_error[0]
     if overflow:
         raise _NasRemoteFailure("E_VAULT_PERMISSION")
-    if completed.returncode:
-        code = "E_VAULT_PERMISSION" if completed.returncode == 2 else "E_VAULT_UNREACHABLE"
+    if returncode:
+        code = "E_VAULT_PERMISSION" if returncode == 2 else "E_VAULT_UNREACHABLE"
         raise _NasRemoteFailure(code)
     return bytes(output)
 
