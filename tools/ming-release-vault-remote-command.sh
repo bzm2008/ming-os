@@ -72,7 +72,7 @@ esac
 
 case "$op" in
     stat)
-        LC_ALL=C stat --format='%F:%s' -- "$vault_fd_path"
+        LC_ALL=C stat -L --format='%F:%s' -- "$vault_fd_path"
         ;;
     sha256sum)
         LC_ALL=C sha256sum -- "$vault_fd_path"
