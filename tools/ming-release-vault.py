@@ -6,7 +6,10 @@ surface.  It is the small public-boundary checker used before a release is
 published. Unknown regular binaries are accepted only when they are
 marker-free; payload and ISO blobs do not belong under the scan root. The root
 is local trust material, and scan deadlines are cooperative between bounded
-system calls rather than hard interruption of a blocking OS call.
+system calls rather than hard interruption of a blocking OS call. Bundle
+replacement uses POSIX directory descriptors when available; Windows uses a
+validated path fallback and fails closed when a parent swap is observed, but
+cannot eliminate every race between path checks and the OS rename primitive.
 """
 
 from __future__ import annotations
@@ -871,10 +874,28 @@ def _same_file_metadata(before, after) -> bool:
     )
 
 
+class _DeadlineReader:
+    def __init__(self, source, deadline, state, limit):
+        self.source = source
+        self.deadline = deadline
+        self.state = state
+        self.limit = limit
+
+    def read(self, size=-1):
+        _check_bundle_deadline(self.deadline)
+        data = self.source.read(size)
+        self.state["bytes"] += len(data)
+        if self.state["bytes"] > self.limit:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
+        _check_bundle_deadline(self.deadline)
+        return data
+
+
 def _build_deterministic_tar(root: pathlib.Path) -> bytes:
     """Build a normalized tar stream; no source metadata leaks into it."""
 
-    root, entries = _bundle_entries(root)
+    deadline = time.monotonic() + MAX_BUNDLE_SECONDS
+    root, entries = _bundle_entries(root, deadline=deadline)
     stream = io.BytesIO()
     total_bytes = 0
     try:
@@ -883,6 +904,7 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle archive could not be created") from exc
     try:
         for relative, path, kind, initial in entries:
+            _check_bundle_deadline(deadline)
             name = relative.as_posix()
             info = tarfile.TarInfo(name)
             info.uid = 0
@@ -918,8 +940,10 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
                 total_bytes += opened.st_size
                 if total_bytes > MAX_BUNDLE_BYTES:
                     raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
+                state = {"bytes": 0}
                 with os.fdopen(descriptor, "rb", closefd=False) as source:
-                    archive.addfile(info, source)
+                    archive.addfile(info, _DeadlineReader(source, deadline, state, MAX_BUNDLE_BYTES))
+                _check_bundle_deadline(deadline)
                 final = os.fstat(descriptor)
                 path_final = os.lstat(path)
                 if (
@@ -945,7 +969,18 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
     return stream.getvalue()
 
 
-def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
+def _hash_regular_file(
+    path: pathlib.Path,
+    *,
+    deadline: float | None = None,
+    max_bytes: int | None = None,
+) -> tuple[str, int]:
+    if max_bytes is None:
+        max_bytes = MAX_BUNDLE_BYTES
+    if max_bytes <= 0:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file size limit is invalid")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file hash deadline exceeded")
     path = _require_regular_file(path, "file")
     try:
         before = os.lstat(path)
@@ -953,6 +988,8 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "file could not be read") from exc
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "file is not a regular file")
+    if before.st_size > max_bytes:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file is too large")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(os.fspath(path), flags)
@@ -970,6 +1007,8 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
         ):
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "file changed during read")
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "file hash deadline exceeded")
             try:
                 chunk = os.read(descriptor, READ_CHUNK_BYTES)
             except OSError as exc:
@@ -977,7 +1016,11 @@ def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
             if not chunk:
                 break
             total += len(chunk)
+            if total > max_bytes:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "file is too large")
             digest.update(chunk)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "file hash deadline exceeded")
         final = os.fstat(descriptor)
         path_final = os.lstat(path)
         if (
@@ -1136,6 +1179,10 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
                 except OSError:
                     pass
                 raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
             return
 
         # Windows does not expose directory handles for renameat-style calls.
@@ -1148,6 +1195,15 @@ def _atomic_replace(source: pathlib.Path, destination: pathlib.Path, field: str)
         after_path = os.lstat(parent)
         if stat.S_ISLNK(after_path.st_mode) or not _same_directory_identity(before_again, after_path):
             raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory changed")
+        try:
+            directory_fd = os.open(os.fspath(parent), os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
     except ReleaseVaultError:
         raise
     except OSError as exc:
@@ -1368,12 +1424,12 @@ def write_receipt(
     if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
         raise ReleaseVaultError("E_RELEASE_NOT_READY", "generation is invalid")
     primary, signing = _coerce_fingerprints(fingerprints)
-    bundle_hash, bundle_bytes = _hash_regular_file(bundle)
+    bundle_hash, bundle_bytes = _hash_regular_file(bundle, max_bytes=MAX_BUNDLE_BYTES)
     sidecar_hash = _read_sidecar(sidecar, bundle.name)
     if sidecar_hash != bundle_hash:
         raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar does not match bundle")
-    keyring_hash, _ = _hash_regular_file(public_keyring)
-    policy_hash, _ = _hash_regular_file(policy)
+    keyring_hash, _ = _hash_regular_file(public_keyring, max_bytes=MAX_RECEIPT_BYTES)
+    policy_hash, _ = _hash_regular_file(policy, max_bytes=MAX_RECEIPT_BYTES)
     receipt = {
         "format": RECEIPT_FORMAT,
         "bundle_id": bundle_id,
@@ -1460,6 +1516,9 @@ def create_bundle(
         # A repository-local source could accidentally archive an ignored .age
         # object. Private input belongs in the explicitly configured vault.
         raise ReleaseVaultError("E_VAULT_PERMISSION", "input must be outside the Git worktree")
+    bundle_id_value = bundle_id or output_path.stem
+    if bundle_id is not None:
+        bundle_id_value = _require_opaque_id(bundle_id, "bundle_id")
     runner, _ = _resolve_age_runner(age_runner)
     sidecar_path = _prepare_output_path(sidecar, vault, "sidecar") if sidecar else _sidecar_path(output_path)
     sidecar_path = _prepare_output_path(sidecar_path, vault, "sidecar")
@@ -1470,7 +1529,6 @@ def create_bundle(
         item is not None for item in (receipt, public_keyring, policy, generation, fingerprints)
     )
     receipt_candidate = None
-    bundle_id_value = bundle_id or output_path.stem
     public_keyring_hash_before = None
     policy_hash_before = None
     if metadata_requested:
@@ -1482,8 +1540,10 @@ def create_bundle(
         policy = _require_regular_file(policy, "policy")
         # Read and fingerprint public metadata before any encrypted output is
         # produced. write_receipt hashes again after commit to catch changes.
-        public_keyring_hash_before, _ = _hash_regular_file(public_keyring)
-        policy_hash_before, _ = _hash_regular_file(policy)
+        public_keyring_hash_before, _ = _hash_regular_file(
+            public_keyring, max_bytes=MAX_RECEIPT_BYTES
+        )
+        policy_hash_before, _ = _hash_regular_file(policy, max_bytes=MAX_RECEIPT_BYTES)
         bundle_id_value = _require_opaque_id(bundle_id_value, "bundle_id")
         if generation is None:
             match = re.fullmatch(r"recovery-bundle-([0-9]+)", output_path.stem)

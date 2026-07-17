@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 
@@ -931,6 +933,49 @@ class ReleaseVaultBundleTests(unittest.TestCase):
                     )
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
         self.assertFalse(self.output.exists())
+
+    def test_cli_rejects_invalid_bundle_id_without_receipt_metadata(self):
+        output = io.StringIO()
+        fake = self.fake_age_runner()
+        arguments = [
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            "--bundle-id",
+            "C:/Users/secret/recovery",
+        ]
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool, "_resolve_age_runner", return_value=(fake, None)):
+                with redirect_stdout(output):
+                    code = self.tool.main(arguments)
+        self.assertEqual(code, self.tool.EXIT_NOT_READY)
+        emitted = json.loads(output.getvalue())
+        self.assertEqual(emitted["error_code"], "E_RELEASE_NOT_READY")
+        self.assertNotIn("C:/Users/secret/recovery", output.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_hash_regular_file_enforces_deadline_and_size_limit(self):
+        target = self.root / "bounded.bin"
+        target.write_bytes(b"0123456789")
+        with self.assertRaises(self.tool.ReleaseVaultError) as size_error:
+            self.tool._hash_regular_file(target, max_bytes=4)
+        self.assertEqual(size_error.exception.error_code, "E_RELEASE_NOT_READY")
+        with self.assertRaises(self.tool.ReleaseVaultError) as deadline_error:
+            self.tool._hash_regular_file(target, deadline=0)
+        self.assertEqual(deadline_error.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_tar_copy_checks_global_deadline_after_enumeration(self):
+        root, entries = self.tool._bundle_entries(self.private_input)
+        failure = self.tool.ReleaseVaultError("E_RELEASE_NOT_READY", "bundle deadline exceeded")
+        with mock.patch.object(self.tool, "_bundle_entries", return_value=(root, entries)):
+            with mock.patch.object(self.tool, "_check_bundle_deadline", side_effect=failure):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool._build_deterministic_tar(self.private_input)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
 
     def test_atomic_write_fails_closed_when_output_parent_is_replaced(self):
         parent = self.vault / "encrypted"
