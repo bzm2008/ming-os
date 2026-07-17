@@ -918,6 +918,8 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
                 info.mode = 0o700
                 info.size = 0
                 archive.addfile(info)
+                if stream.tell() > MAX_BUNDLE_BYTES:
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
                 continue
 
             info.type = tarfile.REGTYPE
@@ -952,6 +954,8 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
                     or not _same_file_metadata(final, path_final)
                 ):
                     raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
+                if stream.tell() > MAX_BUNDLE_BYTES:
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
             except ReleaseVaultError:
                 raise
             except (OSError, tarfile.TarError) as exc:
@@ -966,7 +970,10 @@ def _build_deterministic_tar(root: pathlib.Path) -> bytes:
             archive.close()
         except (OSError, tarfile.TarError) as exc:
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle archive could not be finalized") from exc
-    return stream.getvalue()
+    result = stream.getvalue()
+    if len(result) > MAX_BUNDLE_BYTES:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
+    return result
 
 
 def _hash_regular_file(

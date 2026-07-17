@@ -977,6 +977,14 @@ class ReleaseVaultBundleTests(unittest.TestCase):
                     self.tool._build_deterministic_tar(self.private_input)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
 
+    def test_tar_stream_enforces_total_archive_size_limit(self):
+        empty = self.root / "empty-input"
+        empty.mkdir()
+        with mock.patch.object(self.tool, "MAX_BUNDLE_BYTES", 1):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._build_deterministic_tar(empty)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
     def test_atomic_write_fails_closed_when_output_parent_is_replaced(self):
         parent = self.vault / "encrypted"
         parent_real = self.vault / "encrypted-real"
