@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -1616,6 +1617,55 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self.assertTrue(joins)
         self.assertIsNotNone(joins[0])
         self.assertLessEqual(joins[0], 0.01)
+
+    def test_nas_bounded_runner_does_not_block_on_windows_pipe_close(self):
+        class FakeReader:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, *args, **kwargs):
+                pass
+
+            def is_alive(self):
+                return True
+
+        class BlockingStream:
+            def read(self, size):
+                return b""
+
+            def close(self):
+                time.sleep(0.5)
+
+        class FakeProcess:
+            stdout = BlockingStream()
+            pid = 31338
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(["ssh"], timeout)
+
+            def kill(self):
+                pass
+
+            def send_signal(self, signal_number):
+                pass
+
+        started = time.monotonic()
+        with mock.patch.object(self.tool.os, "name", "nt"):
+            with mock.patch.object(self.tool.threading, "Thread", FakeReader):
+                with mock.patch.object(self.tool.subprocess, "Popen", return_value=FakeProcess()):
+                    with mock.patch.object(
+                        self.tool.subprocess,
+                        "run",
+                        return_value=subprocess.CompletedProcess(["taskkill"], 0),
+                    ):
+                        with self.assertRaises(self.tool._NasRemoteFailure) as caught:
+                            self.tool._nas_run_bounded(("ssh",), 0.01)
+        elapsed = time.monotonic() - started
+        self.assertEqual(caught.exception.error_code, "E_VAULT_UNREACHABLE")
+        self.assertLess(elapsed, 0.2)
 
     def test_test_ssh_environment_does_not_bypass_real_runner(self):
         calls = []
