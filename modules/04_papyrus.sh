@@ -150,7 +150,10 @@ install_papyrus_asset() {
     fi
     if [[ -f "${PAPYRUS_ROOT}/usr/share/icons/hicolor/128x128/apps/papyrus.png" ]]; then
         install -Dm644 "${PAPYRUS_ROOT}/usr/share/icons/hicolor/128x128/apps/papyrus.png" \
-            /usr/share/icons/hicolor/128x128/apps/papyrus.png || return 1
+            /usr/share/icons/hicolor/128x128/apps/papyrus.png || {
+                rollback_papyrus "${backup}" "${artifact_backup}"
+                return 1
+            }
     fi
     rm -rf "${artifact_backup}"
     rm -rf "${backup}"

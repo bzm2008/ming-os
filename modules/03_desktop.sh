@@ -1906,6 +1906,12 @@ for launcher in \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
+if [[ -f /usr/share/applications/papyrus.desktop ]]; then
+    _plank_launcher "papyrus" "papyrus.desktop" || missing=1
+    if ! grep -Fq 'papyrus.dockitem' "${plank_dir}/settings"; then
+        sed -i 's#DockItems=#DockItems=papyrus.dockitem;;#' "${plank_dir}/settings"
+    fi
+fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true

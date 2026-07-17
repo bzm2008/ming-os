@@ -57,10 +57,11 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn('rollback_papyrus', self.papyrus)
 
     def test_optional_ui_entries_are_gated_on_installed_desktop(self):
-        self.assertNotIn("papyrus.dockitem", self.desktop)
-        self.assertNotIn("papyrus.desktop", self.desktop)
+        self.assertIn("papyrus.dockitem", self.desktop)
+        self.assertIn("papyrus.desktop", self.desktop)
         self.assertIn("ming-refresh-dock-launchers", self.papyrus)
         self.assertIn("uca.xml", self.papyrus)
+        self.assertIn("papyrus.dockitem", self.desktop)
 
     def test_phone_desktop_knows_papyrus_without_fallback_generation(self):
         self.assertIn('"papyrus.desktop"', self.phone)
