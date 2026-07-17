@@ -19,7 +19,13 @@ install_ota_dependencies() {
 
 deploy_transaction_runtime() {
     echo "Deploying transactional OTA runtime..."
-    local source="/tmp/ming-build/assets"
+    # Package maintainer scripts may clean /tmp after dependencies are
+    # installed. Keep build inputs on the persistent chroot staging path and
+    # retain the historical /tmp path only for older resume environments.
+    local source="/var/lib/ming-os-build/assets"
+    if [[ ! -d "${source}" ]]; then
+        source="/tmp/ming-build/assets"
+    fi
     local runtime="/usr/local/lib/ming-update"
     local asset
     local -a runtime_assets=(
@@ -116,7 +122,10 @@ GRUBTRANSACTION
 }
 
 deploy_ota_backup_engine() {
-    local source="/tmp/ming-build/assets/ming-ota-backup.sh"
+    local source="/var/lib/ming-os-build/assets/ming-ota-backup.sh"
+    if [[ ! -s "${source}" ]]; then
+        source="/tmp/ming-build/assets/ming-ota-backup.sh"
+    fi
     if [[ ! -s "${source}" ]]; then
         echo "[06_ota_update][ERROR] Missing OTA backup engine: ${source}" >&2
         return 1

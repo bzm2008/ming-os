@@ -324,7 +324,10 @@ run_modules() {
     for mod in "${modules[@]}"; do
         local mod_path="/tmp/ming-build/modules/${mod}"
         ensure_chroot_build_link
-        if [[ -f "${CHROOT_DIR}${mod_path}" ]]; then
+        # The compatibility link is absolute inside the target root.  A host
+        # shell test follows it from the host root and falsely reports the
+        # module as missing; validate the path from the chroot namespace.
+        if chroot_exec test -f "${mod_path}"; then
             log_step "执行模块: ${mod}"
             chroot_exec bash "${mod_path}"
             settle_chroot_dpkg "${mod}"
@@ -401,7 +404,11 @@ validate_transactional_ota_runtime() {
         test -x /etc/initramfs-tools/hooks/ming-transaction
         test -x /etc/grub.d/40_ming_transaction
         /usr/local/lib/ming-update/ming-ota-bootstrap-capability.py --write-marker >/dev/null
-        /usr/local/bin/ming-update status --json >/tmp/ming-update-status.json
+        # The build chroot shares the host /run tree, which can make the OTA
+        # priority wrapper attempt a transient systemd scope. Validate the
+        # reviewed JSON client directly so the gate is deterministic and does
+        # not require a live user/session manager in the chroot.
+        MING_OTA_RUN_IN_SLICE=1 /usr/local/bin/ming-update status --json >/tmp/ming-update-status.json
         python3 - /tmp/ming-update-status.json <<"PY"
 import json
 import pathlib

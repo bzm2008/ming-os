@@ -1,0 +1,16 @@
+{
+  "allowed_primary_fingerprints": [
+    "A4D1FF5B61B7F60719B48E0D4B2F5E67062F7388"
+  ],
+  "allowed_signing_fingerprints": [
+    "6795AD6F55D7BF1520250160A1D1418E98494F3D"
+  ],
+  "authority_uid": "Ming OS Release Team",
+  "channels": [
+    "stable"
+  ],
+  "created_at": "2026-07-17T16:16:47Z",
+  "generation": 2,
+  "minimum_bootstrap": "1.0.0",
+  "schema": "ming.ota-key-policy.v1"
+}
