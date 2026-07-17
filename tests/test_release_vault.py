@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -151,22 +152,22 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
 
     def test_public_scan_rejects_secret_key_dotenv_private_path_and_age_bundle(self):
         malicious = [
-            "private-key-marker.txt",
-            "dotenv-marker.txt",
-            "age-bundle-marker.txt",
-            "secret-marker.txt",
-            "password-marker.txt",
-            "token-marker.txt",
-            "known-hosts-marker.txt",
-            "private-path-marker.txt",
-            "id_rsa",
-            "id_ed25519",
+            ("private-key.txt", "private-key.txt"),
+            (".env", ".env"),
+            ("recovery-bundle-1.age", "recovery-bundle-1.age"),
+            ("secret-marker.txt", "secret-marker.txt"),
+            ("password-marker.txt", "password-marker.txt"),
+            ("token-marker.txt", "token-marker.txt"),
+            ("known-hosts-marker.txt", "known-hosts-marker.txt"),
+            ("private-path-log.txt", "private-path-log.txt"),
+            ("id_rsa", "id_rsa"),
+            ("id_ed25519", "id_ed25519"),
         ]
-        for name in malicious:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+        for destination, source in malicious:
+            with self.subTest(name=destination), tempfile.TemporaryDirectory() as temp:
                 public = pathlib.Path(temp) / "public"
                 public.mkdir()
-                shutil.copy2(FIXTURES / name, public / name)
+                shutil.copy2(FIXTURES / source, public / destination)
                 result = run_cli("scan-public", "--root", str(public))
             self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
             self.assertEqual(json.loads(result.stdout)["error_code"], "E_SECRET_EXPOSURE")
@@ -201,22 +202,24 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
         self.assertEqual(result.returncode, self.tool.EXIT_OK)
         self.assertEqual(json.loads(result.stdout)["status"], "ok")
 
-    def test_public_scan_allows_incidental_markers_in_allowlisted_binary_signature(self):
+    def test_public_scan_rejects_sensitive_markers_in_binary_signature(self):
         with tempfile.TemporaryDirectory() as temp:
             public = pathlib.Path(temp) / "public"
             public.mkdir()
             (public / "manifest.sig").write_bytes(
-                b"\x00binary secret password token bytes"
+                b"\x00binary secret password token .env .age known_hosts bytes"
             )
             result = run_cli("scan-public", "--root", str(public))
-        self.assertEqual(result.returncode, self.tool.EXIT_OK)
-        self.assertEqual(json.loads(result.stdout)["status"], "ok")
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_SECRET_EXPOSURE")
 
     def test_public_scan_rejects_oversized_files(self):
         with tempfile.TemporaryDirectory() as temp:
             public = pathlib.Path(temp) / "public"
             public.mkdir()
-            (public / "large.bin").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+            large = public / "large.bin"
+            with large.open("wb") as handle:
+                handle.truncate(getattr(self.tool, "MAX_FILE_BYTES", 8 * 1024 * 1024) + 1)
             result = run_cli("scan-public", "--root", str(public))
         self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
         self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
@@ -261,6 +264,64 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
             with mock.patch.object(
                 self.tool, "_scan_public_file", create=True, side_effect=failure
             ):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_fails_when_final_file_identity_or_size_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release.json").write_text("{}", encoding="utf-8")
+            real_fstat = self.tool.os.fstat
+            calls = 0
+
+            def changing_fstat(descriptor):
+                nonlocal calls
+                calls += 1
+                result = real_fstat(descriptor)
+                if calls < 2:
+                    return result
+                values = list(result)
+                values[6] += 1
+                return os.stat_result(values)
+
+            with mock.patch.object(self.tool.os, "fstat", side_effect=changing_fstat):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertGreaterEqual(calls, 2)
+
+    def test_public_scan_enforces_entry_cap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "one.txt").write_text("safe", encoding="utf-8")
+            (public / "two.txt").write_text("safe", encoding="utf-8")
+            with mock.patch.object(self.tool, "MAX_SCAN_ENTRIES", 1, create=True):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_enforces_depth_cap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            current = public
+            for index in range(getattr(self.tool, "MAX_SCAN_DEPTH", 32) + 1):
+                current.mkdir(parents=True)
+                current = current / ("d%s" % index)
+            current.mkdir()
+            (current / "release.json").write_text("{}", encoding="utf-8")
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_enforces_global_deadline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(self.tool, "MAX_SCAN_SECONDS", 0, create=True):
                 with self.assertRaises(self.tool.ReleaseVaultError) as caught:
                     self.tool.scan_public_tree(public)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")

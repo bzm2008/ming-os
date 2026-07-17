@@ -52,11 +52,15 @@ _RFC3339_RE = re.compile(
     r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
 )
 
-MAX_FILE_BYTES = 8 * 1024 * 1024
+# The public scan root contains trust material, receipts, signatures, and
+# hashes; payload and ISO blobs are outside this boundary.
+MAX_FILE_BYTES = 64 * 1024 * 1024
 READ_CHUNK_BYTES = 64 * 1024
 MARKER_TAIL_BYTES = 256
 MAX_READ_SECONDS = 5.0
-_BINARY_ALLOWLIST_SUFFIXES = frozenset({".gpg", ".kbx", ".keyring", ".sig"})
+MAX_SCAN_SECONDS = 30.0
+MAX_SCAN_ENTRIES = 10_000
+MAX_SCAN_DEPTH = 32
 
 _PATH_MARKERS = (
     "secret",
@@ -289,14 +293,12 @@ def _sensitive_component(component: str) -> str | None:
     return None
 
 
-def _sensitive_content(content: bytes, *, allowlisted_binary: bool = False) -> str | None:
-    """Return a marker reason, allowing incidental bytes in known binaries."""
+def _sensitive_content(content: bytes) -> str | None:
+    """Return a marker reason for text and binary bytes alike."""
 
     lowered = content.lower()
     if _PRIVATE_KEY_HEADER_RE.search(content):
         return "private-key marker"
-    if allowlisted_binary:
-        return None
     if _PRIVATE_KEY_TEXT_RE.search(content):
         return "private-key marker"
     if _SSH_PRIVATE_NAME_RE.search(content):
@@ -309,24 +311,20 @@ def _sensitive_content(content: bytes, *, allowlisted_binary: bool = False) -> s
     return None
 
 
-def _looks_binary(content: bytes) -> bool:
-    if b"\x00" in content:
-        return True
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
-    return any(ord(char) < 0x20 and char not in "\t\n\r\f" for char in text)
-
-
 def _not_ready(message: str):
     raise ReleaseVaultError("E_RELEASE_NOT_READY", message)
 
 
-def _iter_public_entries(root: pathlib.Path):
+def _check_deadline(deadline: float | None):
+    if deadline is not None and time.monotonic() >= deadline:
+        _not_ready("public scan deadline exceeded")
+
+
+def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
     """Yield regular-file entries without following symlinked directories."""
 
     root_path = os.fspath(root)
+    _check_deadline(deadline)
     try:
         root_stat = os.lstat(root_path)
     except OSError as exc:
@@ -335,6 +333,7 @@ def _iter_public_entries(root: pathlib.Path):
         _not_ready("public tree is missing or invalid")
 
     def walk(directory, relative_prefix):
+        _check_deadline(deadline)
         try:
             before = os.stat(directory, follow_symlinks=False)
             if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
@@ -361,7 +360,14 @@ def _iter_public_entries(root: pathlib.Path):
             ) from exc
 
         for entry in sorted(entries, key=lambda item: item.name.casefold()):
+            _check_deadline(deadline)
+            if budget is not None:
+                budget["entries"] += 1
+                if budget["entries"] > MAX_SCAN_ENTRIES:
+                    _not_ready("public tree has too many entries")
             relative = relative_prefix / entry.name
+            if len(relative.parts) > MAX_SCAN_DEPTH:
+                _not_ready("public tree exceeds depth limit")
             try:
                 if entry.is_symlink():
                     yield relative, entry, True
@@ -381,9 +387,10 @@ def _iter_public_entries(root: pathlib.Path):
     yield from walk(root_path, pathlib.Path())
 
 
-def _scan_public_file(entry) -> str | None:
+def _scan_public_file(entry, *, deadline=None) -> str | None:
     """Stream one regular file with size and identity checks."""
 
+    _check_deadline(deadline)
     try:
         before = os.stat(entry.path, follow_symlinks=False)
     except OSError as exc:
@@ -413,14 +420,12 @@ def _scan_public_file(entry) -> str | None:
         if after.st_size > MAX_FILE_BYTES:
             _not_ready("public file is too large")
 
-        suffix = pathlib.Path(entry.name).suffix.lower()
-        allowlisted_suffix = suffix in _BINARY_ALLOWLIST_SUFFIXES
-        allowlisted_binary = False
-        first_chunk = True
         started = time.monotonic()
         tail = b""
         total = 0
+        detected_reason = None
         while True:
+            _check_deadline(deadline)
             if time.monotonic() - started > MAX_READ_SECONDS:
                 _not_ready("public file read timed out")
             try:
@@ -432,15 +437,25 @@ def _scan_public_file(entry) -> str | None:
             total += len(chunk)
             if total > MAX_FILE_BYTES:
                 _not_ready("public file is too large")
-            if first_chunk:
-                allowlisted_binary = allowlisted_suffix and _looks_binary(chunk)
-                first_chunk = False
             combined = tail + chunk
-            reason = _sensitive_content(combined, allowlisted_binary=allowlisted_binary)
-            if reason:
-                return reason
+            reason = _sensitive_content(combined)
+            if reason and detected_reason is None:
+                detected_reason = reason
             tail = combined[-MARKER_TAIL_BYTES:]
-        return None
+        _check_deadline(deadline)
+        try:
+            final = os.fstat(descriptor)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
+        if (
+            stat.S_ISLNK(final.st_mode)
+            or not stat.S_ISREG(final.st_mode)
+            or not os.path.samestat(before, final)
+            or final.st_size != after.st_size
+            or final.st_size != total
+        ):
+            _not_ready("public file changed during scan")
+        return detected_reason
     finally:
         try:
             os.close(descriptor)
@@ -456,9 +471,15 @@ def scan_public_tree(root: pathlib.Path) -> dict:
     identity to catch replacement races on platforms without ``O_NOFOLLOW``.
     """
 
+    started = time.monotonic()
+    deadline = started + MAX_SCAN_SECONDS
+    budget = {"entries": 0}
     findings = []
     files_scanned = 0
-    for relative, entry, is_symlink in _iter_public_entries(pathlib.Path(root)):
+    for relative, entry, is_symlink in _iter_public_entries(
+        pathlib.Path(root), deadline=deadline, budget=budget
+    ):
+        _check_deadline(deadline)
         relative_parts = relative.parts
         relative_name = relative.as_posix()
         if is_symlink:
@@ -470,7 +491,7 @@ def scan_public_tree(root: pathlib.Path) -> dict:
             None,
         )
         if reason is None:
-            reason = _scan_public_file(entry)
+            reason = _scan_public_file(entry, deadline=deadline)
         if reason:
             findings.append({"path": relative_name, "reason": reason})
 
