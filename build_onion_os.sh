@@ -193,7 +193,9 @@ umount_chroot() {
 # 在 chroot 中执行命令
 # 参数: $@ 要执行的命令
 chroot_exec() {
-    chroot "${CHROOT_DIR}" /usr/bin/env \
+    # Do not inherit release-vault credentials or arbitrary host variables
+    # into maintainer scripts and the generated root filesystem.
+    chroot "${CHROOT_DIR}" /usr/bin/env -i \
         DEBIAN_FRONTEND=noninteractive \
         DEBCONF_NONINTERACTIVE_SEEN=true \
         HOME="/root" \
@@ -2717,6 +2719,34 @@ EOF
         return 1
     fi
 }
+# ======================== 发布信任门禁 ========================
+run_release_preflight() {
+    local mode="${MING_RELEASE_MODE:-development}"
+    local config="${MING_RELEASE_PREFLIGHT_CONFIG:-}"
+    if [[ "${mode}" != "release" && -z "${config}" ]]; then
+        return 0
+    fi
+    if [[ "${mode}" != "release" ]]; then
+        log_error "MING_RELEASE_PREFLIGHT_CONFIG 只能与 MING_RELEASE_MODE=release 一起使用"
+        return 1
+    fi
+    if [[ -z "${config}" || ! -f "${config}" ]]; then
+        log_error "发布模式需要已审核的 release preflight 配置；拒绝继续"
+        return 1
+    fi
+    require_cmd python3 "安装 Python 3 后重试"
+    # Release gate command: ming-release-vault.py preflight --mode release
+    local result
+    if ! result="$(python3 "${SCRIPT_DIR}/tools/ming-release-vault.py" preflight --mode release --config "${config}")"; then
+        log_error "发布信任门禁未通过；未生成 ISO"
+        return 1
+    fi
+    if ! printf '%s\n' "${result}" | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if value.get("status") == "ok" else 1)'; then
+        log_error "发布信任门禁返回了非 ready 状态；未生成 ISO"
+        return 1
+    fi
+    log_info "发布信任门禁通过"
+}
 # ======================== 主流程 ========================
 main() {
     echo -e "${GREEN}"
@@ -2739,6 +2769,7 @@ main() {
     clean_chroot
     umount_chroot
     trap - EXIT
+    run_release_preflight
     build_iso
     local end_time
     end_time=$(date +%s)

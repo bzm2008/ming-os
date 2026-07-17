@@ -135,6 +135,7 @@ resume_main() {
     # recovery remains a full deterministic replay.
     if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]; then
         log_step "复用现有 chroot，跳过模块重放"
+        run_release_preflight
         build_iso
         return 0
     fi
@@ -186,6 +187,7 @@ resume_main() {
     trap - EXIT
 
     # 调用主脚本里完整的 build_iso（含 build_iso_manual → grub-mkimage + El Torito + EFI）
+    run_release_preflight
     build_iso
 
     # 复制到 Windows 目录

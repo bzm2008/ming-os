@@ -235,6 +235,14 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("# Ming OS 26.4.0 Home Edition", readme)
         self.assertIn("ming-os-26.4.0-home-amd64.iso", readme)
 
+    def test_release_preflight_is_before_iso_creation(self):
+        marker = "ming-release-vault.py preflight --mode release"
+        self.assertIn(marker, self.build)
+        main_body = self.build.split("main() {", 1)[1]
+        self.assertLess(main_body.index("run_release_preflight"), main_body.index("    build_iso"))
+        self.assertIn("MING_RELEASE_PREFLIGHT_CONFIG", self.build)
+        self.assertNotRegex(self.build, r"(?:--private-key|--password|MING_RELEASE_PASSWORD)")
+
     def test_readme_ota_example_is_actionable_and_declares_the_2632_transition_limit(self):
         readme = README.read_text(encoding="utf-8")
         for marker in (
