@@ -1724,6 +1724,8 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self.assertIn("readlink -f", text)
         self.assertIn("exec {vault_fd}<", text)
         self.assertIn("stat -L", text)
+        self.assertIn("*$'\\n'*", text)
+        self.assertIn("*$'\\r'*", text)
         self.assertNotRegex(text, r"(?:\brm\b|\bmv\b|\bchmod\b|\bsh -c\b|\beval\b|\$\(|\.\./)")
 
 
