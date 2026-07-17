@@ -514,9 +514,31 @@ class ArgumentParseError(ValueError):
     """Raised so CLI argument failures remain JSON, like other failures."""
 
 
+class HelpRequested(ValueError):
+    """Carries formatter output for the JSON help response."""
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.text = text
+
+
+class JsonHelpAction(argparse.Action):
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, **kwargs):
+        kwargs.setdefault("nargs", 0)
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        raise HelpRequested(parser.format_help())
+
+
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise ArgumentParseError(message)
+
+    def __init__(self, *args, **kwargs):
+        kwargs["add_help"] = False
+        super().__init__(*args, **kwargs)
+        self.add_argument("-h", "--help", action=JsonHelpAction, help=argparse.SUPPRESS)
 
     def exit(self, status=0, message=None):
         if status:
@@ -529,7 +551,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="ming-release-vault.py",
         description="Validate public release receipts and scan public release material.",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command", required=True, parser_class=JsonArgumentParser
+    )
 
     scan = commands.add_parser("scan-public", help="scan a public release tree")
     scan.add_argument(
@@ -548,6 +572,8 @@ def main(argv=None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
+    except HelpRequested as exc:
+        return emit_ok({"help": exc.text})
     except ArgumentParseError:
         return emit_error("E_USAGE", "invalid release-vault arguments")
     try:

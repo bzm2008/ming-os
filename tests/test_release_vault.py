@@ -390,9 +390,26 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
 
     def test_scan_public_root_help_states_trust_material_boundary(self):
         result = run_cli("scan-public", "--help")
-        self.assertIn("trust-material", result.stdout)
-        self.assertIn("payload", result.stdout)
+        self.assertEqual(result.returncode, self.tool.EXIT_OK)
+        self.assertEqual(result.stderr, "")
+        decoder = json.JSONDecoder()
+        output, end = decoder.raw_decode(result.stdout)
+        self.assertEqual(result.stdout[end:].strip(), "")
+        self.assertEqual(output["status"], "ok")
+        self.assertIn("trust-material", output["help"])
+        self.assertIn("payload", output["help"])
         self.assertIn("marker-free", TOOL.read_text(encoding="utf-8"))
+
+    def test_top_level_and_receipt_help_are_json_objects(self):
+        for args in (("--help",), ("verify-receipt", "--help")):
+            with self.subTest(args=args):
+                result = run_cli(*args)
+                self.assertEqual(result.returncode, self.tool.EXIT_OK)
+                self.assertEqual(result.stderr, "")
+                output, end = json.JSONDecoder().raw_decode(result.stdout)
+                self.assertEqual(result.stdout[end:].strip(), "")
+                self.assertEqual(output["status"], "ok")
+                self.assertIn("usage:", output["help"])
 
     def test_parser_usage_errors_do_not_echo_secret_arguments(self):
         with tempfile.TemporaryDirectory() as temp:
