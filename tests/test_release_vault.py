@@ -1032,6 +1032,27 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
         self.assertEqual(target.read_bytes(), b"attacker-original\n")
 
+    def test_atomic_write_preserves_replaced_destination_when_source_cleanup_fails(self):
+        target = self.vault / "encrypted" / "unlink-race.txt"
+        real_unlink = self.tool.os.unlink
+        triggered = False
+
+        def fail_source_unlink(path, *args, **kwargs):
+            nonlocal triggered
+            if not triggered:
+                attacker = self.root / "attacker-unlink.txt"
+                attacker.write_bytes(b"attacker-after-link\n")
+                os.replace(attacker, target)
+                triggered = True
+                raise OSError("simulated source unlink failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(self.tool.os, "unlink", side_effect=fail_source_unlink):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool._atomic_write(target, b"trusted\n", "output")
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        self.assertEqual(target.read_bytes(), b"attacker-after-link\n")
+
     def test_create_bundle_cleans_new_artifacts_when_sidecar_write_fails(self):
         original_atomic_write = self.tool._atomic_write
 
