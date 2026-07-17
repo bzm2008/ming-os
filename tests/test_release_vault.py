@@ -1265,7 +1265,7 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self.config = {
             "host_alias": "nas-tunnel",
             "port": 2222,
-            "remote_dir": "/srv/release-vault/v1",
+            "remote_dir": "/srv/ming-os/release-vault/v1",
             "known_hosts": str(self.known_hosts),
             "object": self.bundle.name,
             "sidecar": self.sidecar.name,
@@ -1277,19 +1277,40 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self._vault_env.stop()
         self.temp_dir.cleanup()
 
-    def fake_ssh(self, calls=None, *, symlink=False, missing_sidecar=False, hash_value=None):
+    def fake_ssh(
+        self,
+        calls=None,
+        *,
+        symlink=False,
+        missing_sidecar=False,
+        hash_value=None,
+        sidecar_stat_delta=0,
+        receipt_stat_delta=0,
+        object_stat_delta_after_hash=0,
+    ):
         if calls is None:
             calls = []
         remote_hash = hash_value or self.bundle_hash
         remote_sidecar = f"{remote_hash}  {self.bundle.name}\n"
         remote_receipt = self.receipt.read_text(encoding="utf-8")
 
-        def runner(*, argv, command, operation, path):
+        object_stat_calls = 0
+
+        def runner(*, argv, command, operation, path, timeout=None):
+            nonlocal object_stat_calls
             calls.append({"argv": list(argv), "command": list(command), "operation": operation, "path": path})
             if operation == "stat":
-                return {"mode": "symlink" if symlink else "regular", "size": self.bundle.stat().st_size}
+                if path == self.bundle.name:
+                    object_stat_calls += 1
+                    delta = object_stat_delta_after_hash if object_stat_calls > 1 else 0
+                    size = self.bundle.stat().st_size + delta
+                elif path == self.sidecar.name:
+                    size = len(remote_sidecar.encode("ascii")) + sidecar_stat_delta
+                else:
+                    size = len(remote_receipt.encode("utf-8")) + receipt_stat_delta
+                return {"mode": "symlink" if symlink else "regular", "size": size}
             if operation == "sha256sum":
-                return f"{remote_hash}  /srv/release-vault/v1/{self.bundle.name}\n"
+                return f"{remote_hash}  /srv/ming-os/release-vault/v1/{self.bundle.name}\n"
             if operation == "cat" and path == self.sidecar.name:
                 if missing_sidecar:
                     raise FileNotFoundError(path)
@@ -1310,6 +1331,50 @@ class ReleaseVaultNasTests(unittest.TestCase):
             self.assertIn(call["operation"], ("stat", "sha256sum", "cat"))
             joined = " ".join(call["command"])
             self.assertNotRegex(joined, r"(?:\brm\b|\bmv\b|\bchmod\b|\bsh -c\b|;|&&|\$\(|\.\.)")
+
+    def test_verify_nas_rechecks_stats_after_hash_and_reads(self):
+        calls = []
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            self.tool.verify_nas(self.config, ssh_runner=self.fake_ssh(calls))
+        object_stats = [
+            index
+            for index, call in enumerate(calls)
+            if call["operation"] == "stat" and call["path"] == self.bundle.name
+        ]
+        sidecar_stats = [
+            index
+            for index, call in enumerate(calls)
+            if call["operation"] == "stat" and call["path"] == self.sidecar.name
+        ]
+        receipt_stats = [
+            index
+            for index, call in enumerate(calls)
+            if call["operation"] == "stat" and call["path"] == self.receipt.name
+        ]
+        self.assertGreaterEqual(len(object_stats), 2)
+        self.assertGreaterEqual(len(sidecar_stats), 2)
+        self.assertGreaterEqual(len(receipt_stats), 2)
+        self.assertGreater(object_stats[-1], next(index for index, call in enumerate(calls) if call["operation"] == "sha256sum"))
+        self.assertGreater(sidecar_stats[-1], next(index for index, call in enumerate(calls) if call["operation"] == "cat" and call["path"] == self.sidecar.name))
+        self.assertGreater(receipt_stats[-1], next(index for index, call in enumerate(calls) if call["operation"] == "cat" and call["path"] == self.receipt.name))
+
+    def test_verify_nas_rejects_metadata_length_changes(self):
+        for mutation in (
+            {"sidecar_stat_delta": 1},
+            {"receipt_stat_delta": 1},
+        ):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.verify_nas(self.config, ssh_runner=self.fake_ssh(**mutation))
+                self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+
+    def test_verify_nas_rejects_object_size_change_after_hash(self):
+        with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+            self.tool.verify_nas(
+                self.config,
+                ssh_runner=self.fake_ssh(object_stat_delta_after_hash=1),
+            )
+        self.assertEqual(caught.exception.error_code, "E_VAULT_HASH_MISMATCH")
 
     def test_verify_nas_rejects_remote_path_traversal(self):
         for mutation in ("../outside.age", "recovery-bundle-1.age/child"):
@@ -1375,6 +1440,99 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self.assertIn("ForwardAgent=no", argv)
         self.assertIn("UserKnownHostsFile=" + str(self.known_hosts), argv)
 
+    def test_verify_nas_uses_one_bounded_deadline_for_all_ssh_calls(self):
+        calls = []
+        base = self.fake_ssh()
+
+        def timed_runner(**kwargs):
+            calls.append(kwargs["timeout"])
+            return base(**kwargs)
+
+        with mock.patch.object(self.tool, "NAS_VERIFY_TIMEOUT_SECONDS", 25.0, create=True):
+            with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+                self.tool.verify_nas(self.config, ssh_runner=timed_runner)
+        self.assertEqual(len(calls), 9)
+        self.assertTrue(all(0 < timeout <= 25.0 for timeout in calls))
+        self.assertLessEqual(max(calls), 25.0)
+
+    def test_verify_nas_rejects_known_hosts_replacement_between_calls(self):
+        calls = []
+        base = self.fake_ssh(calls)
+
+        def replacing_runner(**kwargs):
+            result = base(**kwargs)
+            if len(calls) == 1:
+                replacement = self.root / "known_hosts.replacement"
+                replacement.write_text("nas-tunnel ssh-ed25519 AAAAChanged\n", encoding="ascii")
+                os.replace(replacement, self.known_hosts)
+            return result
+
+        with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+            self.tool.verify_nas(self.config, ssh_runner=replacing_runner)
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+
+    def test_verify_nas_rejects_wildcard_hashed_or_unrelated_known_hosts(self):
+        invalid_lines = (
+            "* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEPIN\n",
+            "|1|hashed-host|salt ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEPIN\n",
+            "other-host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEPIN\n",
+            "nas-tunnel\n",
+        )
+        original = self.known_hosts.read_text(encoding="ascii")
+        try:
+            for line in invalid_lines:
+                with self.subTest(line=line):
+                    self.known_hosts.write_text(line, encoding="ascii")
+                    with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                        self.tool.verify_nas(self.config, ssh_runner=self.fake_ssh())
+                    self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        finally:
+            self.known_hosts.write_text(original, encoding="ascii")
+
+    def test_verify_nas_rejects_unrelated_known_hosts_even_with_pinned_alias(self):
+        original = self.known_hosts.read_text(encoding="ascii")
+        try:
+            self.known_hosts.write_text(
+                original + "other-host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEPIN\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.verify_nas(self.config, ssh_runner=self.fake_ssh())
+            self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        finally:
+            self.known_hosts.write_text(original, encoding="ascii")
+
+    def test_verify_nas_keeps_remote_stdout_bounded_and_stderr_silent(self):
+        source = (ROOT / "tools" / "ming-release-vault.py").read_text(encoding="utf-8")
+        self.assertNotIn("capture_output=True", source)
+        self.assertIn("stderr=subprocess.DEVNULL", source)
+        self.assertIn("MAX_REMOTE_OUTPUT_BYTES", source)
+
+    def test_verify_nas_rejects_oversized_known_hosts_before_ssh(self):
+        original = self.known_hosts.read_text(encoding="ascii")
+        try:
+            self.known_hosts.write_text(
+                original + ("x" * (self.tool.MAX_KNOWN_HOSTS_BYTES + 1)),
+                encoding="ascii",
+            )
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.verify_nas(self.config, ssh_runner=self.fake_ssh())
+            self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        finally:
+            self.known_hosts.write_text(original, encoding="ascii")
+
+    def test_verify_nas_rejects_oversized_remote_output(self):
+        def oversized_runner(argv, **kwargs):
+            stream = kwargs["stdout"]
+            stream.write(b"x" * (self.tool.MAX_REMOTE_OUTPUT_BYTES + 1))
+            stream.flush()
+            return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
+
+        with mock.patch.object(self.tool.subprocess, "run", side_effect=oversized_runner):
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.verify_nas(self.config)
+        self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+
     def test_test_ssh_environment_does_not_bypass_real_runner(self):
         calls = []
         receipt_bytes = self.receipt.read_bytes()
@@ -1383,21 +1541,34 @@ class ReleaseVaultNasTests(unittest.TestCase):
             calls.append(list(argv))
             command = argv[argv.index(self.config["host_alias"]) + 1 :]
             if command[0] == "stat":
-                output = f"regular file:{self.bundle.stat().st_size}\n".encode("ascii")
+                target = command[-1]
+                if target.endswith(self.bundle.name):
+                    size = self.bundle.stat().st_size
+                elif target.endswith(self.sidecar.name):
+                    size = self.sidecar.stat().st_size
+                elif target.endswith(self.receipt.name):
+                    size = self.receipt.stat().st_size
+                else:
+                    raise AssertionError(target)
+                output = f"regular file:{size}\n".encode("ascii")
             elif command[0] == "sha256sum":
-                output = f"{self.bundle_hash}  /srv/release-vault/v1/{self.bundle.name}\n".encode("ascii")
+                output = f"{self.bundle_hash}  /srv/ming-os/release-vault/v1/{self.bundle.name}\n".encode("ascii")
             elif command[0] == "cat" and command[-1].endswith(self.sidecar.name):
                 output = self.sidecar.read_bytes()
             else:
                 output = receipt_bytes
-            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr=b"")
+            stream = kwargs.get("stdout")
+            if stream is not None:
+                stream.write(output)
+                stream.flush()
+            return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
 
         with mock.patch.dict(os.environ, {"MING_RELEASE_TEST_SSH": "1"}, clear=False):
             with mock.patch.object(self.tool.subprocess, "run", side_effect=subprocess_runner):
                 result = self.tool.verify_nas(self.config)
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("test_commands", result)
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 9)
 
     def test_remote_command_helper_is_a_fixed_read_only_allowlist(self):
         helper = ROOT / "tools" / "ming-release-vault-remote-command.sh"
@@ -1406,6 +1577,9 @@ class ReleaseVaultNasTests(unittest.TestCase):
         self.assertIn("stat", text)
         self.assertIn("sha256sum", text)
         self.assertIn("cat", text)
+        self.assertIn("/proc/self/fd/", text)
+        self.assertIn("readlink -f", text)
+        self.assertIn("exec {vault_fd}<", text)
         self.assertNotRegex(text, r"(?:\brm\b|\bmv\b|\bchmod\b|\bsh -c\b|\beval\b|\$\(|\.\./)")
 
 

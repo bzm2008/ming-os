@@ -8,28 +8,16 @@ deny() {
     exit 2
 }
 
-case "$base_dir" in
-    /*) ;;
-    *) deny ;;
-esac
-case "$base_dir" in
-    *'..'*|*'//'*) deny ;;
-esac
-[ -d "$base_dir" ] || deny
-[ ! -L "$base_dir" ] || deny
-base_current=/
-IFS=/ read -r -a base_parts <<< "${base_dir#/}"
-for component in "${base_parts[@]}"; do
-    [ -n "$component" ] || deny
-    base_current="$base_current$component"
-    [ ! -L "$base_current" ] || deny
-    base_current="$base_current/"
-done
+# The configured root itself must be canonical.  This rejects a symlinked
+# vault before any object path is opened.
+base_real=`readlink -f -- "$base_dir"` || deny
+[ "$base_real" = "$base_dir" ] || deny
+[ -d "$base_real" ] || deny
 
 original=${SSH_ORIGINAL_COMMAND-}
 [ -n "$original" ] || deny
 case "$original" in
-    *'..'*|*'$'*|*';'*|*'&&'*|*'|'*|*'`'*|*'>'*|*'<'*|*'"'*|*"'"*) deny ;;
+    ' '*|*' '|*$'\t'*|*'\n'*|*'\r'*|*'..'*|*'$'*|*';'*|*'&&'*|*'||'*|*'`'*|*'>'*|*'<'*|*'"'*|*"'"*) deny ;;
 esac
 
 op=''
@@ -69,22 +57,27 @@ case "$name" in
 esac
 [[ "$name" =~ ^recovery-bundle-[0-9]+\.(age|sha256|json)$ ]] || deny
 
-current=$base_dir
-IFS=/ read -r -a name_parts <<< "$name"
-for component in "${name_parts[@]}"; do
-    current="$current/$component"
-    [ ! -L "$current" ] || deny
-done
-[ -f "$current" ] || deny
+# stat reports the object type without following a symlink.  Once that lstat
+# equivalent succeeds, every read below is bound to the opened descriptor.
+target_type=`LC_ALL=C stat --format='%F' -- "$target"` || deny
+[ "$target_type" = 'regular file' ] || deny
+exec {vault_fd}<"$target" || deny
+vault_fd_path=/proc/self/fd/$vault_fd
+resolved_target=`readlink -f -- "$vault_fd_path"` || deny
+case "$resolved_target" in
+    "$base_real"/*) ;;
+    *) deny ;;
+esac
+[ "$resolved_target" = "$target" ] || deny
 
 case "$op" in
     stat)
-        LC_ALL=C stat --format='%F:%s' -- "$current"
+        LC_ALL=C stat --format='%F:%s' -- "$vault_fd_path"
         ;;
     sha256sum)
-        LC_ALL=C sha256sum -- "$current"
+        LC_ALL=C sha256sum -- "$vault_fd_path"
         ;;
     cat)
-        LC_ALL=C cat -- "$current"
+        LC_ALL=C cat -- "$vault_fd_path"
         ;;
 esac

@@ -21,6 +21,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import pathlib
 import posixpath
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
 
@@ -97,10 +99,13 @@ NAS_CONFIG_FIELDS = frozenset(
         "receipt",
     }
 )
+NAS_REMOTE_DIR = "/srv/ming-os/release-vault/v1"
+NAS_VERIFY_TIMEOUT_SECONDS = 25.0
 _NAS_OBJECT_RE = re.compile(r"recovery-bundle-[0-9]+\.(?:age|sha256|json)\Z")
 _NAS_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,252}[A-Za-z0-9])?\Z")
 _NAS_REMOTE_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 MAX_REMOTE_OUTPUT_BYTES = 1 * 1024 * 1024
+MAX_KNOWN_HOSTS_BYTES = 64 * 1024
 
 # Passwords are intentionally not an input channel for this command.  These
 # names are rejected before spawning age and are removed from the child env.
@@ -1808,6 +1813,8 @@ def _nas_validate_config(config: Mapping) -> dict:
     ):
         _nas_permission("NAS remote directory is invalid")
     remote_dir = "/" + "/".join(components)
+    if remote_dir != NAS_REMOTE_DIR:
+        _nas_permission("NAS remote directory does not match the fixed vault root")
 
     known_hosts = config["known_hosts"]
     if not isinstance(known_hosts, str) or not known_hosts or any(ord(char) < 0x20 for char in known_hosts):
@@ -1825,6 +1832,11 @@ def _nas_validate_config(config: Mapping) -> dict:
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         _nas_permission("NAS known-hosts path is not a regular file")
+    known_hosts_path = pathlib.Path(os.path.abspath(os.fspath(known_hosts_path)))
+    known_hosts_identity = _nas_known_hosts_snapshot(os.fspath(known_hosts_path))
+    _nas_validate_known_hosts_file(
+        os.fspath(known_hosts_path), host_alias, known_hosts_identity
+    )
 
     object_name = _nas_validate_name(config["object"], "object")
     sidecar_name = _nas_validate_name(config["sidecar"], "sidecar")
@@ -1838,6 +1850,7 @@ def _nas_validate_config(config: Mapping) -> dict:
         "port": port,
         "remote_dir": remote_dir,
         "known_hosts": os.path.abspath(os.fspath(known_hosts_path)),
+        "_known_hosts_identity": known_hosts_identity,
         "object": object_name,
         "sidecar": sidecar_name,
         "receipt": receipt_name,
@@ -1907,7 +1920,62 @@ def _nas_decode_output(value):
     return value
 
 
-def _nas_invoke(config: Mapping, operation: str, path: str, ssh_runner=None):
+def _nas_run_bounded(argv, timeout):
+    """Run one SSH command while retaining at most MAX_REMOTE_OUTPUT_BYTES."""
+
+    read_fd, write_fd = os.pipe()
+    output = bytearray()
+    overflow = False
+    reader_error = []
+
+    def drain_output():
+        nonlocal overflow
+        try:
+            with os.fdopen(read_fd, "rb", closefd=True) as stream:
+                while True:
+                    chunk = stream.read(READ_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    available = MAX_REMOTE_OUTPUT_BYTES - len(output)
+                    if available <= 0:
+                        overflow = True
+                        continue
+                    if len(chunk) > available:
+                        output.extend(chunk[:available])
+                        overflow = True
+                    else:
+                        output.extend(chunk)
+        except OSError as exc:
+            reader_error.append(exc)
+
+    reader = threading.Thread(target=drain_output, daemon=True)
+    reader.start()
+    try:
+        with os.fdopen(write_fd, "wb", closefd=True) as stream:
+            completed = subprocess.run(
+                list(argv),
+                stdout=stream,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                timeout=timeout,
+            )
+    finally:
+        # Closing the write end lets the bounded reader finish even when the
+        # subprocess wrapper was replaced by a test runner.
+        reader.join()
+    if reader_error:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION") from reader_error[0]
+    if overflow:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    if completed.returncode:
+        code = "E_VAULT_PERMISSION" if completed.returncode == 2 else "E_VAULT_UNREACHABLE"
+        raise _NasRemoteFailure(code)
+    return bytes(output)
+
+
+def _nas_invoke(config: Mapping, operation: str, path: str, ssh_runner=None, timeout=None):
     remote_path = posixpath.join(config["remote_dir"], path)
     if operation == "stat":
         command = ("stat", "--format=%F:%s", remote_path)
@@ -1919,29 +1987,39 @@ def _nas_invoke(config: Mapping, operation: str, path: str, ssh_runner=None):
         raise AssertionError(operation)
     argv = _nas_ssh_argv(config, command)
     using_subprocess = ssh_runner is None
+    if timeout is not None:
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError) as exc:
+            raise _NasRemoteFailure("E_VAULT_UNREACHABLE") from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise _NasRemoteFailure("E_VAULT_UNREACHABLE")
     try:
         if using_subprocess:
-            completed = subprocess.run(
-                list(argv),
-                capture_output=True,
-                check=False,
-                shell=False,
-                timeout=15,
+            bounded = _nas_run_bounded(
+                argv,
+                timeout if timeout is not None else NAS_VERIFY_TIMEOUT_SECONDS,
             )
-            if completed.returncode:
-                code = "E_VAULT_PERMISSION" if completed.returncode == 2 else "E_VAULT_UNREACHABLE"
-                raise _NasRemoteFailure(code)
-            return _nas_decode_output(completed.stdout), command, argv
+            return _nas_decode_output(bounded), command, argv
         try:
-            result = ssh_runner(argv=argv, command=command, operation=operation, path=path)
+            result = ssh_runner(
+                argv=argv,
+                command=command,
+                operation=operation,
+                path=path,
+                timeout=timeout,
+            )
         except TypeError:
             try:
-                result = ssh_runner(argv, command)
+                result = ssh_runner(argv=argv, command=command, operation=operation, path=path)
             except TypeError:
                 try:
-                    result = ssh_runner(command)
+                    result = ssh_runner(argv, command)
                 except (TypeError, AttributeError):
-                    result = ssh_runner(" ".join(command))
+                    try:
+                        result = ssh_runner(command)
+                    except (TypeError, AttributeError):
+                        result = ssh_runner(" ".join(command))
         if isinstance(result, tuple) and len(result) == 3 and isinstance(result[0], int):
             returncode, stdout, _stderr = result
             if returncode:
@@ -2012,7 +2090,11 @@ def _nas_parse_hash(value, expected_name: str, expected_path: str | None = None)
     expected_paths = {expected_name}
     if expected_path is not None:
         expected_paths.add(expected_path)
-    if match is None or (match.group(2) is not None and match.group(2) not in expected_paths):
+    if match is None or (
+        match.group(2) is not None
+        and match.group(2) not in expected_paths
+        and re.fullmatch(r"/proc/self/fd/[0-9]+", match.group(2)) is None
+    ):
         raise _NasRemoteFailure("E_VAULT_PERMISSION")
     return match.group(1)
 
@@ -2048,9 +2130,102 @@ def _nas_parse_receipt(value) -> dict:
         raise _NasRemoteFailure("E_VAULT_PERMISSION") from exc
 
 
+def _nas_known_hosts_snapshot(path: str):
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unsafe")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _nas_known_hosts_identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
+    """Parse a small, pinned known_hosts file without following replacements."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
+    try:
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            before = os.fstat(stream.fileno())
+            if _nas_known_hosts_identity(before) != expected:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
+            data = stream.read(MAX_KNOWN_HOSTS_BYTES + 1)
+            after = os.fstat(stream.fileno())
+    except ReleaseVaultError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
+    if len(data) > MAX_KNOWN_HOSTS_BYTES:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts file is too large")
+    if _nas_known_hosts_identity(after) != expected:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts file is invalid") from exc
+
+    key_lines = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) < 3 or fields[0] != host_alias:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts entry is invalid")
+        key_type, key_data = fields[1], fields[2]
+        if re.fullmatch(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9@._+:-]+", key_type) is None:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts entry is invalid")
+        if re.fullmatch(r"[A-Za-z0-9+/=]+", key_data) is None:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts entry is invalid")
+        key_lines += 1
+    if key_lines != 1:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts entry is missing")
+
+
+def _nas_check_known_hosts(path: str, expected):
+    current = _nas_known_hosts_snapshot(path)
+    if current != expected:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
+
+
+def _nas_payload_length(value) -> int:
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    raise _NasRemoteFailure("E_VAULT_PERMISSION")
+
+
 def verify_nas(config: Mapping, ssh_runner=None) -> dict:
     """Verify the encrypted bundle and public metadata through read-only SSH."""
 
+    try:
+        total_timeout = float(NAS_VERIFY_TIMEOUT_SECONDS)
+    except (TypeError, ValueError) as exc:
+        raise ReleaseVaultError("E_VAULT_UNREACHABLE", "NAS verification deadline is invalid") from exc
+    if not math.isfinite(total_timeout) or total_timeout <= 0:
+        raise ReleaseVaultError("E_VAULT_UNREACHABLE", "NAS verification deadline is invalid")
+    deadline = time.monotonic() + total_timeout
     validated_config = _nas_validate_config(config)
     _vault, local_bundle, local_sidecar, local_receipt_path = _nas_local_paths(validated_config)
     try:
@@ -2070,13 +2245,26 @@ def verify_nas(config: Mapping, ssh_runner=None) -> dict:
         raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local sidecar does not match bundle")
 
     commands = []
+    known_hosts_path = validated_config["known_hosts"]
+    known_hosts_identity = validated_config["_known_hosts_identity"]
 
     def read(operation, path):
+        _nas_check_known_hosts(known_hosts_path, known_hosts_identity)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReleaseVaultError("E_VAULT_UNREACHABLE", "NAS verification deadline exceeded")
         try:
-            value, command, _argv = _nas_invoke(validated_config, operation, path, ssh_runner)
+            value, command, _argv = _nas_invoke(
+                validated_config,
+                operation,
+                path,
+                ssh_runner,
+                timeout=remaining,
+            )
         except _NasRemoteFailure as exc:
             raise ReleaseVaultError(exc.error_code, "NAS read verification failed") from exc
         commands.append(list(command))
+        _nas_check_known_hosts(known_hosts_path, known_hosts_identity)
         return value
 
     try:
@@ -2097,12 +2285,35 @@ def verify_nas(config: Mapping, ssh_runner=None) -> dict:
         )
         if remote_hash != local_hash or remote_hash != local_receipt["bundle_sha256"]:
             raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote bundle hash does not match receipt")
+        remote_object_size_after_hash = _nas_parse_stat(
+            read("stat", validated_config["object"])
+        )
+        if remote_object_size_after_hash != remote_object_size:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote bundle size changed during verification")
+        remote_sidecar_payload = read("cat", validated_config["sidecar"])
+        remote_sidecar_length = _nas_payload_length(remote_sidecar_payload)
+        if remote_sidecar_length != remote_sidecar_size:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote sidecar size changed during read")
+        remote_sidecar_size_after_read = _nas_parse_stat(
+            read("stat", validated_config["sidecar"])
+        )
+        if remote_sidecar_size_after_read != remote_sidecar_size:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote sidecar size changed during read")
         remote_sidecar_hash = _nas_parse_sidecar(
-            read("cat", validated_config["sidecar"]), validated_config["object"]
+            remote_sidecar_payload, validated_config["object"]
         )
         if remote_sidecar_hash != remote_hash or remote_sidecar_hash != local_sidecar_hash:
             raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote sidecar does not match bundle")
-        remote_receipt = _nas_parse_receipt(read("cat", validated_config["receipt"]))
+        remote_receipt_payload = read("cat", validated_config["receipt"])
+        remote_receipt_length = _nas_payload_length(remote_receipt_payload)
+        if remote_receipt_length != remote_receipt_size:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote receipt size changed during read")
+        remote_receipt_size_after_read = _nas_parse_stat(
+            read("stat", validated_config["receipt"])
+        )
+        if remote_receipt_size_after_read != remote_receipt_size:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote receipt size changed during read")
+        remote_receipt = _nas_parse_receipt(remote_receipt_payload)
         if remote_receipt != local_receipt:
             raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote receipt does not match local receipt")
     except _NasRemoteFailure as exc:
