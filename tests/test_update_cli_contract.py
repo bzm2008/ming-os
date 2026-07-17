@@ -341,7 +341,7 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertEqual({"schema": "ming.update.discovery.v1"}, value)
         self.assertEqual(2, len(calls))
         self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
-        self.assertEqual("ming.sca-hun.cn", urllib.parse.urlsplit(calls[1]).netloc)
+        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
         self.assertTrue(all(urllib.parse.urlsplit(url).scheme == "https" for url in calls))
 
     def test_discovery_fallback_is_not_used_for_primary_protocol_failure(self):

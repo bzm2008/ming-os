@@ -92,7 +92,7 @@ Expected public response:
 ### OTA discovery 备用域名
 
 `ming.scallion.uno` 仍是当前主地址。为域名失效后的迁移预留
-`https://ming.sca-hun.cn/api/onion-update/check`，但新域名尚未备案，当前版本
+`https://ming.sca-hub.cn/api/onion-update/check`，但新域名尚未备案，当前版本
 默认不发送请求。完成备案、证书、API parity 和签名响应核验后，才可由发布负责人
 在受控配置中开启 fallback；它不会放宽任何 manifest、payload 或签名门禁。
 

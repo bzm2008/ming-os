@@ -35,7 +35,7 @@ The current discovery endpoint remains `ming.scallion.uno`. A reserved backup
 endpoint is recorded for the day the primary domain is retired:
 
 ```text
-https://ming.sca-hun.cn/api/onion-update/check
+https://ming.sca-hub.cn/api/onion-update/check
 ```
 
 The backup is intentionally **disabled** in this release because the domain is

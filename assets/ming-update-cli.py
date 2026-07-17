@@ -28,7 +28,7 @@ DEFAULT_KEY_POLICY = pathlib.Path("/usr/share/ming-update/trust/key-policy.json"
 DEFAULT_DISCOVERY_URL = "https://ming.scallion.uno/api/onion-update/check"
 # Kept disabled until the replacement domain is registered/production ready.  The
 # signed discovery response remains the source of truth when this is enabled.
-FALLBACK_DISCOVERY_URL = "https://ming.sca-hun.cn/api/onion-update/check"
+FALLBACK_DISCOVERY_URL = "https://ming.sca-hub.cn/api/onion-update/check"
 DISCOVERY_FALLBACK_ENV = "MING_UPDATE_ENABLE_FALLBACK_DOMAIN"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._-]{3,128}$")
