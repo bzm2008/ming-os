@@ -1064,7 +1064,6 @@ APPLIBICON
             [store]="ming-app-store spark-store"
             [app-library]="ming-app-library"
             [wechat-mgr]="ming-wechat-manager wechat"
-            [garlic-claw]="garlic-claw"
         )
         for src_name in "${!png_map[@]}"; do
             local src_file="${assets}/${src_name}.png"
@@ -1790,7 +1789,7 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1903,11 +1902,13 @@ for launcher in \
     "ming-edge:ming-edge.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
-    "garlic-claw:garlic-claw.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
+if [[ -f /usr/share/applications/papyrus.desktop ]]; then
+    _plank_launcher "papyrus" "papyrus.desktop" || missing=1
+fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
@@ -2003,7 +2004,7 @@ APPS = [
     ('ming-files.desktop', 'files-icon', '文件'),
     ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
-    ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
+    ('papyrus.desktop', 'papyrus', 'Papyrus'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -3456,7 +3457,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=40
@@ -4895,7 +4896,7 @@ TASKS = [
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'ming-settings --page advanced'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'ming-settings --page appearance'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
+    ('写作助手', 'papyrus', '打开 Papyrus', 'papyrus'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -5371,7 +5372,6 @@ configure_notification_filter() {
   <property name="known-applications" type="array">
     <value type="string" value="network-manager-applet"/>
     <value type="string" value="pulseaudio"/>
-    <value type="string" value="garlic-claw"/>
   </property>
 </channel>
 NOTIFYCFG
@@ -5412,11 +5412,11 @@ configure_thunar_uca() {
     <directories/>
 </action>
 <action>
-    <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
+    <icon>papyrus</icon>
+    <name>打开 Papyrus</name>
     <unique-id>4</unique-id>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析此文件</description>
+    <command>papyrus "%f"</command>
+    <description>使用 Papyrus 打开此文件</description>
     <patterns>*</patterns>
     <text-files/>
     <other-files/>
@@ -5470,19 +5470,6 @@ Type=Application
 Categories=Utility;System;
 StartupNotify=true
 APPLIBDESKTOP
-
-    cat > "${desktop_dir}/garlic-claw.desktop" << GCDESKTOP
-[Desktop Entry]
-Name=AI 助手
-Name[zh_CN]=Garlic Claw
-Comment=Ming OS AI 助手
-Exec=xfce4-terminal --title="Garlic Claw" -e "garlic-claw"
-Icon=utilities-terminal
-Terminal=false
-Type=Application
-Categories=System;AI;
-StartupNotify=true
-GCDESKTOP
 
     chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
     chmod +x "${desktop_dir}"/*.desktop
@@ -6289,11 +6276,11 @@ configure_simplified_menus() {
     <directories/>
 </action>
 <action>
-    <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
+    <icon>papyrus</icon>
+    <name>打开 Papyrus</name>
     <submenu></submenu>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析文件</description>
+    <command>papyrus "%f"</command>
+    <description>使用 Papyrus 打开文件</description>
     <range>*</range>
     <patterns>*</patterns>
     <text-files/>

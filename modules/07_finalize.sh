@@ -31,7 +31,7 @@ readonly DESKTOP_LAUNCHERS=(
     "ming-files.desktop"
     "ming-edge.desktop"
     "spark-store.desktop"
-    "garlic-claw.desktop"
+    "papyrus.desktop"
     "ming-terminal.desktop"
 )
 
