@@ -161,6 +161,22 @@ published alongside the release asset.
 
 ## Verification Status
 
+## Release Trust Operations
+
+Release operators must read [`docs/releases/ming-release-vault-operations.md`](docs/releases/ming-release-vault-operations.md)
+before building or publishing 26.4.0. The release gate is read-only and
+requires the reviewed public keyring, policy, receipt, local encrypted bundle,
+sidecar and fixed NAS verification. Encrypted recovery bundles and all private
+credentials stay outside GitHub, the website and the ISO build context.
+
+```bash
+python3 tools/ming-release-vault.py preflight --mode release --config /path/to/release-preflight.json
+```
+
+Only a JSON result with `status=ok` permits a release build. A missing official
+trust root or a failed NAS check must freeze publication; do not create a
+replacement signing key.
+
 Required validation for the 26.4.0 ISO:
 
 - `xorriso -report_el_torito` shows BIOS and UEFI boot images.

@@ -36,6 +36,18 @@ __pycache__/
 /rebrand_to_ming.py
 /Calamares
 
+# Release vault private material (public receipts and trust files remain tracked)
+.age
+*.age
+.MING_RELEASE_VAULT/
+MING_RELEASE_VAULT/
+gpg-home/
+**/gpg-home/
+private-receipt
+private-receipt*.json
+release-vault-local/
+**/release-vault-local/
+
 # OS files
 .DS_Store
 Thumbs.db
