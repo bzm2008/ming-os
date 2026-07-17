@@ -1855,6 +1855,8 @@ def _nas_validate_config(config: Mapping) -> dict:
     object_name = _nas_validate_name(config["object"], "object")
     sidecar_name = _nas_validate_name(config["sidecar"], "sidecar")
     receipt_name = _nas_validate_name(config["receipt"], "receipt")
+    if not object_name.endswith(".age"):
+        _nas_permission("NAS object must be an encrypted age bundle")
     stem = object_name.rsplit(".", 1)[0]
     if sidecar_name != f"{stem}.sha256" or receipt_name != f"{stem}.json":
         _nas_permission("NAS object sidecars are inconsistent")

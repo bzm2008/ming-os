@@ -1386,6 +1386,15 @@ class ReleaseVaultNasTests(unittest.TestCase):
                     self.tool.verify_nas(candidate, ssh_runner=self.fake_ssh())
                 self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
 
+    def test_verify_nas_binds_object_role_to_age_bundle(self):
+        for suffix in (".sha256", ".json"):
+            candidate = dict(self.config)
+            candidate["object"] = "recovery-bundle-1" + suffix
+            with self.subTest(suffix=suffix):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.verify_nas(candidate, ssh_runner=self.fake_ssh())
+                self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+
     def test_verify_nas_rejects_unknown_config_fields_and_unapproved_ip_aliases(self):
         unknown = dict(self.config)
         unknown["unexpected"] = True
