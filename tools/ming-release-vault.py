@@ -3,7 +3,8 @@
 
 This tool intentionally has no decryption, signing, upload, or remote execution
 surface.  It is the small public-boundary checker used before a release is
-published.
+published. Unknown regular binaries are accepted only when they are
+marker-free; payload and ISO blobs do not belong under the scan root.
 """
 
 from __future__ import annotations
@@ -324,6 +325,8 @@ def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
     """Yield regular-file entries without following symlinked directories."""
 
     root_path = os.fspath(root)
+    if budget is None:
+        budget = {"entries": 0}
     _check_deadline(deadline)
     try:
         root_stat = os.lstat(root_path)
@@ -341,14 +344,19 @@ def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
             with os.scandir(directory) as iterator:
                 entries = []
                 while True:
+                    _check_deadline(deadline)
                     try:
-                        entries.append(next(iterator))
+                        entry = next(iterator)
                     except StopIteration:
                         break
                     except OSError as exc:
                         raise ReleaseVaultError(
                             "E_RELEASE_NOT_READY", "public tree could not be enumerated"
                         ) from exc
+                    budget["entries"] += 1
+                    if budget["entries"] > MAX_SCAN_ENTRIES:
+                        _not_ready("public tree has too many entries")
+                    entries.append(entry)
             after = os.stat(directory, follow_symlinks=False)
             if not os.path.samestat(before, after):
                 _not_ready("public tree changed during scan")
@@ -361,10 +369,6 @@ def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
 
         for entry in sorted(entries, key=lambda item: item.name.casefold()):
             _check_deadline(deadline)
-            if budget is not None:
-                budget["entries"] += 1
-                if budget["entries"] > MAX_SCAN_ENTRIES:
-                    _not_ready("public tree has too many entries")
             relative = relative_prefix / entry.name
             if len(relative.parts) > MAX_SCAN_DEPTH:
                 _not_ready("public tree exceeds depth limit")
@@ -453,6 +457,8 @@ def _scan_public_file(entry, *, deadline=None) -> str | None:
             or not os.path.samestat(before, final)
             or final.st_size != after.st_size
             or final.st_size != total
+            or final.st_mtime_ns != after.st_mtime_ns
+            or final.st_ctime_ns != after.st_ctime_ns
         ):
             _not_ready("public file changed during scan")
         return detected_reason
@@ -526,7 +532,12 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     scan = commands.add_parser("scan-public", help="scan a public release tree")
-    scan.add_argument("--root", required=True, type=pathlib.Path)
+    scan.add_argument(
+        "--root",
+        required=True,
+        type=pathlib.Path,
+        help="public trust-material directory only; exclude payload/ISO blobs",
+    )
 
     receipt = commands.add_parser("verify-receipt", help="validate a public receipt")
     receipt.add_argument("--receipt", required=True, type=pathlib.Path)

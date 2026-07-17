@@ -303,6 +303,39 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
                     self.tool.scan_public_tree(public)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
 
+    def test_public_scan_caps_scandir_before_materializing_unbounded_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            state = {"count": 0}
+
+            class EntryStream:
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    state["count"] += 1
+                    if state["count"] > 3:
+                        raise AssertionError("scanner enumerated past the entry cap")
+                    entry = mock.Mock()
+                    entry.name = "entry-%s.txt" % state["count"]
+                    entry.path = str(public / entry.name)
+                    return entry
+
+            class ScanDir:
+                def __enter__(self):
+                    return EntryStream()
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    return False
+
+            with mock.patch.object(self.tool, "MAX_SCAN_ENTRIES", 2):
+                with mock.patch.object(self.tool.os, "scandir", return_value=ScanDir()):
+                    with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                        self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertEqual(state["count"], 3)
+
     def test_public_scan_enforces_depth_cap(self):
         with tempfile.TemporaryDirectory() as temp:
             public = pathlib.Path(temp) / "public"
@@ -325,6 +358,41 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
                 with self.assertRaises(self.tool.ReleaseVaultError) as caught:
                     self.tool.scan_public_tree(public)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_detects_same_size_in_place_rewrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            target = public / "release.json"
+            target.write_text("{}", encoding="utf-8")
+            real_read = self.tool.os.read
+            changed = {"value": False}
+
+            def mutating_read(descriptor, size):
+                data = real_read(descriptor, size)
+                if data and not changed["value"]:
+                    changed["value"] = True
+                    before = os.stat(target)
+                    with target.open("r+b") as handle:
+                        handle.write(b"[]")
+                        handle.flush()
+                    os.utime(
+                        target,
+                        ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000),
+                    )
+                return data
+
+            with mock.patch.object(self.tool.os, "read", side_effect=mutating_read):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertTrue(changed["value"])
+
+    def test_scan_public_root_help_states_trust_material_boundary(self):
+        result = run_cli("scan-public", "--help")
+        self.assertIn("trust-material", result.stdout)
+        self.assertIn("payload", result.stdout)
+        self.assertIn("marker-free", TOOL.read_text(encoding="utf-8"))
 
     def test_parser_usage_errors_do_not_echo_secret_arguments(self):
         with tempfile.TemporaryDirectory() as temp:
