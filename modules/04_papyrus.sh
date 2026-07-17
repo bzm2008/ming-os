@@ -16,6 +16,8 @@ find_papyrus_asset() {
         return 0
     fi
     for candidate in \
+        "${PAPYRUS_ASSET_DIR}"/*.deb \
+        "${PAPYRUS_ASSET_DIR}"/*.AppImage \
         "${PAPYRUS_ASSET_DIR}"/Papyrus_*.deb \
         "${PAPYRUS_ASSET_DIR}"/Papyrus_*.AppImage \
         "${PAPYRUS_ASSET_DIR}"/papyrus_*.deb \
@@ -23,6 +25,16 @@ find_papyrus_asset() {
         [[ -f "${candidate}" ]] && { printf '%s\n' "${candidate}"; return 0; }
     done
     return 1
+}
+
+rollback_papyrus() {
+    local backup="$1" artifact_backup="$2"
+    rm -rf "${PAPYRUS_ROOT}"
+    [[ -e "${backup}" ]] && mv "${backup}" "${PAPYRUS_ROOT}"
+    rm -f /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
+        "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png
+    cp -a "${artifact_backup}"/* / 2>/dev/null || true
+    rm -rf "${artifact_backup}"
 }
 
 verify_papyrus_asset() {
@@ -99,6 +111,13 @@ Keywords=writing;research;assistant;
 PAPYRUSDESKTOP
 }
 
+install_papyrus_thunar_action() {
+    local uca="/home/${MING_USER:-user}/.config/Thunar/uca.xml"
+    [[ -f "${uca}" ]] || return 0
+    grep -Fq 'papyrus-uca-action' "${uca}" && return 0
+    sed -i '/<\/actions>/i\\<action><icon>papyrus</icon><name>Papyrus</name><unique-id>papyrus-uca-action</unique-id><command>/usr/bin/papyrus %f</command><description>Open with Papyrus</description><patterns>*</patterns><text-files/><other-files/></action>' "${uca}"
+}
+
 install_papyrus_asset() {
     local asset="$1" stage
     stage=$(mktemp -d /tmp/papyrus-stage.XXXXXX)
@@ -126,12 +145,7 @@ install_papyrus_asset() {
         fi
     done
     if ! write_papyrus_launcher || ! write_papyrus_desktop; then
-        rm -rf "${PAPYRUS_ROOT}"
-        [[ -e "${backup}" ]] && mv "${backup}" "${PAPYRUS_ROOT}"
-        rm -f /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
-            "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png
-        cp -a "${artifact_backup}"/* / 2>/dev/null || true
-        rm -rf "${artifact_backup}"
+        rollback_papyrus "${backup}" "${artifact_backup}"
         return 1
     fi
     if [[ -f "${PAPYRUS_ROOT}/usr/share/icons/hicolor/128x128/apps/papyrus.png" ]]; then
@@ -167,6 +181,7 @@ main() {
     if [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
         /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER:-user}" || true
     fi
+    install_papyrus_thunar_action
     echo "[04_papyrus] Papyrus installed from verified local asset."
 }
 

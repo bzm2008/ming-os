@@ -132,12 +132,14 @@ CORE_NAMES = {
     "ming-terminal.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
+    "papyrus.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
+    "papyrus.desktop",
     "ming-terminal.desktop",
 ])}
 CORE_FALLBACKS = {

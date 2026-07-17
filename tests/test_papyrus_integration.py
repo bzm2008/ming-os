@@ -51,10 +51,20 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn("grep -Fxq 'papyrus'", self.papyrus)
         self.assertIn("mv", self.papyrus)
         self.assertIn('mv "${PAPYRUS_ROOT}" "${backup}"', self.papyrus)
+        self.assertIn('PAPYRUS_ASSET', self.papyrus)
+        self.assertIn('*.deb|*.DEB', self.papyrus)
+        self.assertIn('*.AppImage|*.appimage', self.papyrus)
+        self.assertIn('rollback_papyrus', self.papyrus)
 
     def test_optional_ui_entries_are_gated_on_installed_desktop(self):
         self.assertNotIn("papyrus.dockitem", self.desktop)
         self.assertNotIn("papyrus.desktop", self.desktop)
+        self.assertIn("ming-refresh-dock-launchers", self.papyrus)
+        self.assertIn("uca.xml", self.papyrus)
+
+    def test_phone_desktop_knows_papyrus_without_fallback_generation(self):
+        self.assertIn('"papyrus.desktop"', self.phone)
+        self.assertNotIn('"papyrus.desktop": (', self.phone)
 
 
 if __name__ == "__main__":
