@@ -259,6 +259,17 @@ prepare_chroot_scripts() {
             fi
         done
     fi
+    # Stage an optional local Papyrus release explicitly; arbitrary host paths
+    # are never passed into chroot/module environment.
+    if [[ -n "${PAPYRUS_ASSET:-}" && -f "${PAPYRUS_ASSET}" ]]; then
+        mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets"
+        cp -f "${PAPYRUS_ASSET}" "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/"
+    elif [[ -n "${PAPYRUS_ASSET_DIR:-}" && -d "${PAPYRUS_ASSET_DIR}" ]]; then
+        mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets"
+        find "${PAPYRUS_ASSET_DIR}" -maxdepth 1 -type f \
+            \( -iname 'papyrus_*.deb' -o -iname 'papyrus_*.appimage' \) \
+            -exec cp -f {} "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/" \;
+    fi
 
     # 部署可执行的 apt-build wrapper，供模块脚本里 timeout 直接调用。
     # 根因：bash 函数无法被 timeout 启动（exec 语义），必须是真实可执行文件。

@@ -1789,7 +1789,7 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1906,9 +1906,6 @@ for launcher in \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
-if [[ -f /usr/share/applications/papyrus.desktop ]]; then
-    _plank_launcher "papyrus" "papyrus.desktop" || missing=1
-fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
@@ -2004,7 +2001,6 @@ APPS = [
     ('ming-files.desktop', 'files-icon', '文件'),
     ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
-    ('papyrus.desktop', 'papyrus', 'Papyrus'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -3457,7 +3453,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=40
@@ -4896,7 +4892,6 @@ TASKS = [
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'ming-settings --page advanced'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'ming-settings --page appearance'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('写作助手', 'papyrus', '打开 Papyrus', 'papyrus'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -5412,11 +5407,11 @@ configure_thunar_uca() {
     <directories/>
 </action>
 <action>
-    <icon>papyrus</icon>
-    <name>打开 Papyrus</name>
+    <icon>utilities-terminal</icon>
+    <name>打开文件</name>
     <unique-id>4</unique-id>
-    <command>papyrus "%f"</command>
-    <description>使用 Papyrus 打开此文件</description>
+    <command>thunar "%f"</command>
+    <description>使用文件管理器打开此文件</description>
     <patterns>*</patterns>
     <text-files/>
     <other-files/>
@@ -6276,11 +6271,11 @@ configure_simplified_menus() {
     <directories/>
 </action>
 <action>
-    <icon>papyrus</icon>
-    <name>打开 Papyrus</name>
+    <icon>utilities-terminal</icon>
+    <name>打开文件</name>
     <submenu></submenu>
-    <command>papyrus "%f"</command>
-    <description>使用 Papyrus 打开文件</description>
+    <command>thunar "%f"</command>
+    <description>使用文件管理器打开文件</description>
     <range>*</range>
     <patterns>*</patterns>
     <text-files/>

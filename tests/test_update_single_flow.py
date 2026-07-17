@@ -12,7 +12,7 @@ SETTINGS = ROOT / "assets" / "ming-settings.py"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 OTA = ROOT / "modules" / "06_ota_update.sh"
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
-GARLIC = ROOT / "modules" / "04_garlic_claw.sh"
+PAPYRUS = ROOT / "modules" / "04_papyrus.sh"
 FINALIZER = ROOT / "modules" / "07_finalize.sh"
 
 
@@ -45,7 +45,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         cls.phone = PHONE.read_text(encoding="utf-8")
         cls.ota = OTA.read_text(encoding="utf-8")
         cls.desktop = DESKTOP.read_text(encoding="utf-8")
-        cls.garlic = GARLIC.read_text(encoding="utf-8")
+        cls.papyrus = PAPYRUS.read_text(encoding="utf-8")
         cls.finalizer = FINALIZER.read_text(encoding="utf-8")
 
     def test_settings_starts_with_one_check_action_and_promotes_it_after_detection(self):
@@ -335,7 +335,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertNotIn('"ming-update:ming-update.desktop"', self.desktop)
         self.assertNotIn("('ming-update.desktop'", self.desktop)
         self.assertIn('rm -f -- "${plank_dir}/launchers/ming-update.dockitem"', self.desktop)
-        self.assertNotIn("检查系统更新", self.garlic)
+        self.assertNotIn("检查系统更新", self.papyrus)
         self.assertNotIn('"ming-update.desktop"', self.finalizer)
 
 

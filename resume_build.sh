@@ -151,7 +151,7 @@ resume_main() {
         "01_base.sh"
         "02_apps.sh"
         "03_desktop.sh"
-        "04_garlic_claw.sh"
+        "04_papyrus.sh"
         "05_security_tools.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"

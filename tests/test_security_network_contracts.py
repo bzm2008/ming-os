@@ -45,7 +45,7 @@ class SecurityBuildContracts(unittest.TestCase):
 
     def test_full_and_resume_builds_run_identical_security_sequence(self):
         expected = [
-            "01_base.sh", "02_apps.sh", "03_desktop.sh", "04_garlic_claw.sh",
+            "01_base.sh", "02_apps.sh", "03_desktop.sh", "04_papyrus.sh",
             "05_security_tools.sh", "06_ota_update.sh", "08_settings_hub.sh",
             "07_finalize.sh",
         ]

@@ -132,14 +132,12 @@ CORE_NAMES = {
     "ming-terminal.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
     "ming-terminal.desktop",
 ])}
 CORE_FALLBACKS = {
@@ -151,7 +149,6 @@ CORE_GENERATED = {
     "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
     "ming-terminal.desktop": ("Ming 终端", "ming-terminal", "ming-terminal", "System;TerminalEmulator;"),
     "ming-edge.desktop": ("Microsoft Edge", "ming-edge", "microsoft-edge", "Network;WebBrowser;"),
-    "garlic-claw.desktop": ("Garlic Claw", "xfce4-terminal --hide-menubar --title=\"Garlic Claw\" -e garlic-claw", "utilities-terminal", "Utility;"),
 }
 LOG_PATH = HOME / ".cache" / "ming-os" / "ming-phone-desktop.log"
 ACTION_LOG_PATH = HOME / ".cache" / "ming-os" / "status-actions.log"
