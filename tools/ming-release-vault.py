@@ -2045,7 +2045,10 @@ def _nas_run_bounded(argv, timeout):
         if reader.is_alive():
             reader_stuck = True
             _nas_terminate_process_group(process)
-            _nas_close_stream(process.stdout, asynchronous=os.name == "nt")
+            # A descendant can retain the pipe after the SSH process exits or
+            # escapes its process group. Never block the caller on close;
+            # the daemon reader is intentionally best-effort after deadline.
+            _nas_close_stream(process.stdout, asynchronous=True)
             remaining = max(0.0, deadline - time.monotonic())
             reader.join(timeout=remaining)
             if reader.is_alive():
