@@ -1834,7 +1834,7 @@ def _nas_validate_config(config: Mapping) -> dict:
         _nas_permission("NAS known-hosts path is not a regular file")
     known_hosts_path = pathlib.Path(os.path.abspath(os.fspath(known_hosts_path)))
     known_hosts_identity = _nas_known_hosts_snapshot(os.fspath(known_hosts_path))
-    _nas_validate_known_hosts_file(
+    known_hosts_digest = _nas_validate_known_hosts_file(
         os.fspath(known_hosts_path), host_alias, known_hosts_identity
     )
 
@@ -1851,6 +1851,7 @@ def _nas_validate_config(config: Mapping) -> dict:
         "remote_dir": remote_dir,
         "known_hosts": os.path.abspath(os.fspath(known_hosts_path)),
         "_known_hosts_identity": known_hosts_identity,
+        "_known_hosts_digest": known_hosts_digest,
         "object": object_name,
         "sidecar": sidecar_name,
         "receipt": receipt_name,
@@ -2137,27 +2138,25 @@ def _nas_known_hosts_snapshot(path: str):
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unsafe")
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
+    return _nas_known_hosts_identity(info)
 
 
 def _nas_known_hosts_identity(info):
+    birthtime_ns = getattr(info, "st_birthtime_ns", None)
+    if birthtime_ns is None:
+        birthtime = getattr(info, "st_birthtime", None)
+        birthtime_ns = None if birthtime is None else int(birthtime * 1_000_000_000)
     return (
         info.st_dev,
         info.st_ino,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        birthtime_ns,
     )
 
 
-def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
-    """Parse a small, pinned known_hosts file without following replacements."""
+def _nas_read_known_hosts_bytes(path: str, expected):
+    """Read a bounded pinned file through an identity-checked descriptor."""
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -2167,7 +2166,7 @@ def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
     try:
         with os.fdopen(descriptor, "rb", closefd=True) as stream:
             before = os.fstat(stream.fileno())
-            if _nas_known_hosts_identity(before) != expected:
+            if not stat.S_ISREG(before.st_mode) or _nas_known_hosts_identity(before) != expected:
                 raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
             data = stream.read(MAX_KNOWN_HOSTS_BYTES + 1)
             after = os.fstat(stream.fileno())
@@ -2177,8 +2176,15 @@ def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
     if len(data) > MAX_KNOWN_HOSTS_BYTES:
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts file is too large")
-    if _nas_known_hosts_identity(after) != expected:
+    if not stat.S_ISREG(after.st_mode) or _nas_known_hosts_identity(after) != expected:
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
+    return data
+
+
+def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
+    """Parse a small, pinned known_hosts file without following replacements."""
+
+    data = _nas_read_known_hosts_bytes(path, expected)
     try:
         text = data.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -2200,12 +2206,17 @@ def _nas_validate_known_hosts_file(path: str, host_alias: str, expected):
         key_lines += 1
     if key_lines != 1:
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts entry is missing")
+    return hashlib.sha256(data).digest()
 
 
-def _nas_check_known_hosts(path: str, expected):
+def _nas_check_known_hosts(path: str, expected, expected_digest=None):
     current = _nas_known_hosts_snapshot(path)
     if current != expected:
         raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path changed")
+    if expected_digest is not None:
+        data = _nas_read_known_hosts_bytes(path, expected)
+        if hashlib.sha256(data).digest() != expected_digest:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts contents changed")
 
 
 def _nas_payload_length(value) -> int:
@@ -2247,9 +2258,10 @@ def verify_nas(config: Mapping, ssh_runner=None) -> dict:
     commands = []
     known_hosts_path = validated_config["known_hosts"]
     known_hosts_identity = validated_config["_known_hosts_identity"]
+    known_hosts_digest = validated_config["_known_hosts_digest"]
 
     def read(operation, path):
-        _nas_check_known_hosts(known_hosts_path, known_hosts_identity)
+        _nas_check_known_hosts(known_hosts_path, known_hosts_identity, known_hosts_digest)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ReleaseVaultError("E_VAULT_UNREACHABLE", "NAS verification deadline exceeded")
@@ -2264,7 +2276,7 @@ def verify_nas(config: Mapping, ssh_runner=None) -> dict:
         except _NasRemoteFailure as exc:
             raise ReleaseVaultError(exc.error_code, "NAS read verification failed") from exc
         commands.append(list(command))
-        _nas_check_known_hosts(known_hosts_path, known_hosts_identity)
+        _nas_check_known_hosts(known_hosts_path, known_hosts_identity, known_hosts_digest)
         return value
 
     try:

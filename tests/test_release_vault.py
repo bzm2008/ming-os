@@ -1471,6 +1471,35 @@ class ReleaseVaultNasTests(unittest.TestCase):
             self.tool.verify_nas(self.config, ssh_runner=replacing_runner)
         self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
 
+    def test_verify_nas_accepts_normal_known_hosts_fixture(self):
+        validated = self.tool._nas_validate_config(self.config)
+        self.assertEqual(validated["host_alias"], "nas-tunnel")
+
+    def test_verify_nas_rejects_known_hosts_content_change_between_calls(self):
+        calls = []
+        base = self.fake_ssh(calls)
+        original = self.known_hosts.read_bytes()
+        original_stat = self.known_hosts.stat()
+
+        def mutating_runner(**kwargs):
+            result = base(**kwargs)
+            if len(calls) == 1:
+                changed = bytearray(original)
+                changed[-2] = ord("Q") if changed[-2] != ord("Q") else ord("R")
+                self.known_hosts.write_bytes(bytes(changed))
+                os.utime(
+                    self.known_hosts,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+            return result
+
+        try:
+            with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                self.tool.verify_nas(self.config, ssh_runner=mutating_runner)
+            self.assertEqual(caught.exception.error_code, "E_VAULT_PERMISSION")
+        finally:
+            self.known_hosts.write_bytes(original)
+
     def test_verify_nas_rejects_wildcard_hashed_or_unrelated_known_hosts(self):
         invalid_lines = (
             "* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEPIN\n",
