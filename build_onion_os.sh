@@ -267,7 +267,7 @@ prepare_chroot_scripts() {
     elif [[ -n "${PAPYRUS_ASSET_DIR:-}" && -d "${PAPYRUS_ASSET_DIR}" ]]; then
         mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets"
         find "${PAPYRUS_ASSET_DIR}" -maxdepth 1 -type f \
-            \( -iname 'papyrus_*.deb' -o -iname 'papyrus_*.appimage' \) \
+            \( -iname '*.deb' -o -iname '*.DEB' -o -iname '*.AppImage' -o -iname '*.appimage' \) \
             -exec cp -f {} "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/" \;
     fi
 
