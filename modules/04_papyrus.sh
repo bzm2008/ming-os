@@ -106,7 +106,7 @@ install_papyrus_asset() {
     rm -rf "${backup}"
     case "${asset}" in
         *.deb|*.DEB) dpkg-deb -x "${asset}" "${stage}" || { rm -rf "${stage}"; return 1; } ;;
-        *.AppImage|*.appimage) install -Dm755 "${asset}" "${stage}/Papyrus.AppImage" ;;
+        *.AppImage|*.appimage) install -Dm755 "${asset}" "${stage}/Papyrus.AppImage" || { rm -rf "${stage}"; return 1; } ;;
     esac
     if [[ -e "${PAPYRUS_ROOT}" || -L "${PAPYRUS_ROOT}" ]]; then
         mv "${PAPYRUS_ROOT}" "${backup}" || { rm -rf "${stage}"; return 1; }
@@ -116,11 +116,29 @@ install_papyrus_asset() {
         rm -rf "${stage}"
         return 1
     fi
+    local artifact_backup
+    artifact_backup=$(mktemp -d /tmp/papyrus-artifacts.XXXXXX)
+    for artifact in /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
+        "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png; do
+        if [[ -e "${artifact}" ]]; then
+            mkdir -p "${artifact_backup}$(dirname "${artifact}")"
+            cp -a "${artifact}" "${artifact_backup}${artifact}"
+        fi
+    done
     if ! write_papyrus_launcher || ! write_papyrus_desktop; then
         rm -rf "${PAPYRUS_ROOT}"
         [[ -e "${backup}" ]] && mv "${backup}" "${PAPYRUS_ROOT}"
+        rm -f /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
+            "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png
+        cp -a "${artifact_backup}"/* / 2>/dev/null || true
+        rm -rf "${artifact_backup}"
         return 1
     fi
+    if [[ -f "${PAPYRUS_ROOT}/usr/share/icons/hicolor/128x128/apps/papyrus.png" ]]; then
+        install -Dm644 "${PAPYRUS_ROOT}/usr/share/icons/hicolor/128x128/apps/papyrus.png" \
+            /usr/share/icons/hicolor/128x128/apps/papyrus.png || return 1
+    fi
+    rm -rf "${artifact_backup}"
     rm -rf "${backup}"
     install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"
     printf '%s\n' "verified" > "${PAPYRUS_MARKER}"
@@ -145,6 +163,9 @@ main() {
     if ! install_papyrus_asset "${asset}"; then
         echo "[04_papyrus] Papyrus installation failed; existing installation preserved." >&2
         return 1
+    fi
+    if [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+        /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER:-user}" || true
     fi
     echo "[04_papyrus] Papyrus installed from verified local asset."
 }

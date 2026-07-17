@@ -148,7 +148,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("/usr/local/bin/ming-package-install-gui \"%f\"", final_menu)
         self.assertIn("以管理员身份编辑", final_menu)
         self.assertIn("以管理员身份打开", final_menu)
-        self.assertIn("询问 Garlic Claw", final_menu)
+        self.assertNotIn("Garlic Claw", final_menu)
 
     def test_package_install_gui_distinguishes_installation_from_launch_readiness(self):
         gui = package_install_gui_source()
