@@ -1945,6 +1945,18 @@ def _nas_terminate_process_group(process):
                 process.send_signal(ctrl_break)
             except (OSError, AttributeError):
                 pass
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                timeout=0.05,
+            )
+        except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+            pass
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -1954,6 +1966,19 @@ def _nas_terminate_process_group(process):
         process.kill()
     except (OSError, AttributeError):
         pass
+
+
+def _nas_close_stream(stream, asynchronous=False):
+    def close():
+        try:
+            stream.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    if asynchronous:
+        threading.Thread(target=close, daemon=True).start()
+    else:
+        close()
 
 
 def _nas_run_bounded(argv, timeout):
@@ -2019,19 +2044,14 @@ def _nas_run_bounded(argv, timeout):
         reader.join(timeout=remaining)
         if reader.is_alive():
             reader_stuck = True
-            try:
-                process.stdout.close()
-            except (OSError, ValueError, AttributeError):
-                pass
+            _nas_terminate_process_group(process)
+            _nas_close_stream(process.stdout, asynchronous=os.name == "nt")
             remaining = max(0.0, deadline - time.monotonic())
             reader.join(timeout=remaining)
             if reader.is_alive():
                 reader_stuck = True
         else:
-            try:
-                process.stdout.close()
-            except (OSError, ValueError, AttributeError):
-                pass
+            _nas_close_stream(process.stdout)
     if timed_out or reader_stuck:
         raise _NasRemoteFailure("E_VAULT_UNREACHABLE")
     if reader_error:
@@ -2410,6 +2430,120 @@ def verify_nas(config: Mapping, ssh_runner=None) -> dict:
     return result
 
 
+def _preflight_path(value, field: str) -> pathlib.Path:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release preflight configuration is invalid")
+    path = pathlib.Path(value)
+    if not path.is_absolute():
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release preflight paths must be absolute")
+    return path
+
+
+def _preflight_regular_file(path: pathlib.Path, field: str, max_bytes: int) -> pathlib.Path:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"release {field} is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"release {field} is unsafe")
+    return path
+
+
+def _preflight_created_at(receipt: Mapping, max_age_seconds: int) -> None:
+    try:
+        created = _datetime.datetime.fromisoformat(receipt["created_at"].replace("Z", "+00:00"))
+        now = _datetime.datetime.now(_datetime.timezone.utc)
+        age = (now - created).total_seconds()
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release receipt timestamp is invalid") from exc
+    if age < -300 or age > max_age_seconds:
+        raise ReleaseVaultError("E_RECEIPT_STALE", "release receipt is outside the freshness window")
+
+
+def _preflight_config(value: Mapping) -> dict:
+    if not isinstance(value, Mapping) or set(value) - PREFLIGHT_FIELDS:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release preflight configuration is invalid")
+    required = {"public_root", "public_keyring", "policy", "receipt", "bundle", "sidecar", "nas_config"}
+    if not required.issubset(value):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release preflight configuration is incomplete")
+    max_age = value.get("max_receipt_age_seconds", PREFLIGHT_DEFAULT_MAX_RECEIPT_AGE_SECONDS)
+    if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release receipt freshness policy is invalid")
+    return {
+        "public_root": _preflight_path(value["public_root"], "public root"),
+        "public_keyring": _preflight_path(value["public_keyring"], "public keyring"),
+        "policy": _preflight_path(value["policy"], "key policy"),
+        "receipt": _preflight_path(value["receipt"], "receipt"),
+        "bundle": _preflight_path(value["bundle"], "bundle"),
+        "sidecar": _preflight_path(value["sidecar"], "sidecar"),
+        "nas_config": _preflight_path(value["nas_config"], "NAS config"),
+        "max_receipt_age_seconds": max_age,
+    }
+
+
+def preflight(config: Mapping, mode: str = "release", nas_verifier=None) -> dict:
+    """Run the read-only release gate without accessing signing material."""
+
+    if mode != "release":
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release mode is required")
+    validated = _preflight_config(config)
+    try:
+        scan_public_tree(validated["public_root"])
+    except ReleaseVaultError as exc:
+        raise
+
+    _preflight_regular_file(validated["public_keyring"], "public keyring", MAX_FILE_BYTES)
+    _preflight_regular_file(validated["policy"], "key policy", MAX_FILE_BYTES)
+    _preflight_regular_file(validated["receipt"], "receipt", MAX_RECEIPT_BYTES)
+    _preflight_regular_file(validated["bundle"], "bundle", MAX_BUNDLE_BYTES)
+    _preflight_regular_file(validated["sidecar"], "sidecar", MAX_SIDECAR_BYTES)
+    _preflight_regular_file(validated["nas_config"], "NAS config", MAX_RECEIPT_BYTES)
+
+    try:
+        receipt = validate_receipt(_load_json(validated["receipt"]))
+    except ReleaseVaultError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "release receipt is invalid") from exc
+    _preflight_created_at(receipt, validated["max_receipt_age_seconds"])
+
+    keyring_hash, _ = _hash_regular_file(validated["public_keyring"], max_bytes=MAX_FILE_BYTES)
+    policy_hash, _ = _hash_regular_file(validated["policy"], max_bytes=MAX_FILE_BYTES)
+    if keyring_hash != receipt["public_keyring_sha256"] or policy_hash != receipt["key_policy_sha256"]:
+        raise ReleaseVaultError("E_PUBLIC_TRUST_MISMATCH", "public trust material does not match receipt")
+
+    bundle_hash, bundle_bytes = _hash_regular_file(validated["bundle"], max_bytes=MAX_BUNDLE_BYTES)
+    if bundle_hash != receipt["bundle_sha256"] or bundle_bytes != receipt["bundle_bytes"]:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local bundle does not match receipt")
+    try:
+        sidecar_hash = _read_sidecar(validated["sidecar"], validated["bundle"].name)
+    except ReleaseVaultError as exc:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local sidecar is invalid") from exc
+    if sidecar_hash != bundle_hash:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local sidecar does not match bundle")
+
+    try:
+        nas_config = _load_json(validated["nas_config"])
+    except ReleaseVaultError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "NAS verification configuration is unavailable") from exc
+    checker = nas_verifier or verify_nas
+    try:
+        nas_result = checker(nas_config)
+    except ReleaseVaultError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "NAS verification did not pass") from exc
+    if not isinstance(nas_result, Mapping) or nas_result.get("status") != "ok":
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "NAS verification did not pass")
+    return {
+        "status": "ok",
+        "mode": "release",
+        "checks": {
+            "public_scan": True,
+            "public_trust": True,
+            "receipt": True,
+            "local_bundle": True,
+            "nas": True,
+        },
+    }
+
+
 class ArgumentParseError(ValueError):
     """Raised so CLI argument failures remain JSON, like other failures."""
 
@@ -2472,6 +2606,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     nas.add_argument("--config", required=True, type=pathlib.Path)
 
+    preflight = commands.add_parser(
+        "preflight",
+        help="run the read-only release publication gate",
+    )
+    preflight.add_argument("--mode", required=True)
+    preflight.add_argument("--config", required=True, type=pathlib.Path)
+
     bundle = commands.add_parser(
         "create-bundle",
         help="encrypt a local recovery bundle",
@@ -2517,6 +2658,12 @@ def main(argv=None) -> int:
                 raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS config is unavailable") from exc
             result = verify_nas(nas_config)
             return emit_ok(result)
+        if args.command == "preflight":
+            try:
+                preflight_config = _load_json(args.config)
+            except ReleaseVaultError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "release preflight configuration is unavailable") from exc
+            return emit_ok(preflight(preflight_config, mode=args.mode))
         if args.command == "create-bundle":
             fingerprints = None
             if args.primary_fingerprint is not None or args.signing_fingerprint is not None:

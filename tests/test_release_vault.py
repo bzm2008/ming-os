@@ -1605,8 +1605,13 @@ class ReleaseVaultNasTests(unittest.TestCase):
 
         with mock.patch.object(self.tool.threading, "Thread", FakeReader):
             with mock.patch.object(self.tool.subprocess, "Popen", side_effect=fake_popen):
-                with self.assertRaises(self.tool._NasRemoteFailure) as caught:
-                    self.tool._nas_run_bounded(("ssh",), 0.01)
+                with mock.patch.object(
+                    self.tool.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(["taskkill"], 0),
+                ):
+                    with self.assertRaises(self.tool._NasRemoteFailure) as caught:
+                        self.tool._nas_run_bounded(("ssh",), 0.01)
         self.assertEqual(caught.exception.error_code, "E_VAULT_UNREACHABLE")
         self.assertTrue(joins)
         self.assertIsNotNone(joins[0])
