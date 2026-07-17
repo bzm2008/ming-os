@@ -55,6 +55,8 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn('*.deb|*.DEB', self.papyrus)
         self.assertIn('*.AppImage|*.appimage', self.papyrus)
         self.assertIn('rollback_papyrus', self.papyrus)
+        self.assertIn('install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"', self.papyrus)
+        self.assertIn('rollback_papyrus "${backup}" "${artifact_backup}"', self.papyrus)
 
     def test_optional_ui_entries_are_gated_on_installed_desktop(self):
         self.assertIn("papyrus.dockitem", self.desktop)

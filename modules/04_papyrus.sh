@@ -141,7 +141,10 @@ install_papyrus_asset() {
         "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png; do
         if [[ -e "${artifact}" ]]; then
             mkdir -p "${artifact_backup}$(dirname "${artifact}")"
-            cp -a "${artifact}" "${artifact_backup}${artifact}"
+            cp -a "${artifact}" "${artifact_backup}${artifact}" || {
+                rollback_papyrus "${backup}" "${artifact_backup}"
+                return 1
+            }
         fi
     done
     if ! write_papyrus_launcher || ! write_papyrus_desktop; then
@@ -155,10 +158,15 @@ install_papyrus_asset() {
                 return 1
             }
     fi
-    rm -rf "${artifact_backup}"
-    rm -rf "${backup}"
-    install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"
-    printf '%s\n' "verified" > "${PAPYRUS_MARKER}"
+    if ! install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"; then
+        rollback_papyrus "${backup}" "${artifact_backup}"
+        return 1
+    fi
+    if ! printf '%s\n' "verified" > "${PAPYRUS_MARKER}"; then
+        rollback_papyrus "${backup}" "${artifact_backup}"
+        return 1
+    fi
+    rm -rf "${artifact_backup}" "${backup}"
 }
 
 main() {
