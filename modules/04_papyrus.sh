@@ -8,6 +8,7 @@ set -uo pipefail
 readonly PAPYRUS_ROOT="/opt/papyrus"
 readonly PAPYRUS_ASSET_DIR="${PAPYRUS_ASSET_DIR:-/tmp/ming-build/papyrus-assets}"
 readonly PAPYRUS_MARKER="/var/lib/ming-os/papyrus-installed"
+readonly PAPYRUS_TRUST_MARKER="/var/lib/ming-os/trusted-desktops/papyrus.desktop"
 
 find_papyrus_asset() {
     local candidate
@@ -32,7 +33,7 @@ rollback_papyrus() {
     rm -rf "${PAPYRUS_ROOT}"
     [[ -e "${backup}" ]] && mv "${backup}" "${PAPYRUS_ROOT}"
     rm -f /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
-        "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png
+        "${PAPYRUS_MARKER}" "${PAPYRUS_TRUST_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png
     cp -a "${artifact_backup}"/* / 2>/dev/null || true
     rm -rf "${artifact_backup}"
 }
@@ -138,7 +139,7 @@ install_papyrus_asset() {
     local artifact_backup
     artifact_backup=$(mktemp -d /tmp/papyrus-artifacts.XXXXXX)
     for artifact in /usr/bin/papyrus /usr/share/applications/papyrus.desktop \
-        "${PAPYRUS_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png; do
+        "${PAPYRUS_MARKER}" "${PAPYRUS_TRUST_MARKER}" /usr/share/icons/hicolor/128x128/apps/papyrus.png; do
         if [[ -e "${artifact}" ]]; then
             mkdir -p "${artifact_backup}$(dirname "${artifact}")"
             cp -a "${artifact}" "${artifact_backup}${artifact}" || {
@@ -158,7 +159,11 @@ install_papyrus_asset() {
                 return 1
             }
     fi
-    if ! install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"; then
+    if ! install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")" "$(dirname "${PAPYRUS_TRUST_MARKER}")"; then
+        rollback_papyrus "${backup}" "${artifact_backup}"
+        return 1
+    fi
+    if ! printf '%s\n' "/usr/share/applications/papyrus.desktop" > "${PAPYRUS_TRUST_MARKER}"; then
         rollback_papyrus "${backup}" "${artifact_backup}"
         return 1
     fi

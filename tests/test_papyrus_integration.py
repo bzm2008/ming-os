@@ -69,6 +69,12 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn('"papyrus.desktop"', self.phone)
         self.assertNotIn('"papyrus.desktop": (', self.phone)
 
+    def test_papyrus_has_root_owned_launcher_trust_marker(self):
+        launch = (ROOT / "assets" / "ming-launch.py").read_text(encoding="utf-8")
+        self.assertIn("trusted-desktops", launch)
+        self.assertIn("papyrus.desktop", self.papyrus)
+        self.assertIn("trusted-desktops", self.papyrus)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ IPC_VERSION = 1
 ACTIVATION_ACK_TIMEOUT = 6.0
 DPKG_QUERY = "/usr/bin/dpkg-query"
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
+TRUSTED_DESKTOP_MARKER_DIR = pathlib.Path("/var/lib/ming-os/trusted-desktops")
 INTERACTION_BOOST = "/usr/local/bin/ming-interaction-boost"
 PREFETCH_HELPER = "/usr/local/bin/ming-prefetch"
 
@@ -234,7 +235,12 @@ def verify_package_owned_system_desktop(
         if not callable(owner_lookup):
             return False
         if not owner_lookup(desktop_path, command_runner=runner, timeout=2):
-            return False
+            marker = TRUSTED_DESKTOP_MARKER_DIR / desktop_path.name
+            metadata = marker.stat()
+            if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                return False
+            if marker.read_text(encoding="utf-8").strip() != str(desktop_path):
+                return False
         revalidator = descriptor_revalidator or descriptor_revalidate_system_desktop
         return bool(revalidator(desktop_path, directory_path))
     except (
