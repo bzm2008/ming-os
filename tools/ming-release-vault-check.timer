@@ -1,0 +1,11 @@
+[Unit]
+Description=Monthly Ming OS release vault integrity check
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=1h
+Unit=ming-release-vault-check.service
+
+[Install]
+WantedBy=timers.target
