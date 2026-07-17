@@ -886,6 +886,52 @@ class ReleaseVaultBundleTests(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
         self.assertFalse(self.output.exists())
 
+    def test_create_bundle_rejects_scandir_entry_outside_input_root(self):
+        outside = self.root / "outside-entry.key"
+        outside.write_bytes(b"outside\n")
+
+        class Entry:
+            name = "escaped.key"
+            path = str(outside)
+
+        class EntryStream:
+            def __init__(self):
+                self.done = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.done:
+                    raise StopIteration
+                self.done = True
+                return Entry()
+
+        real_scandir = self.tool.os.scandir
+
+        def fake_scandir(candidate):
+            if pathlib.Path(candidate) == self.private_input:
+                return EntryStream()
+            return real_scandir(candidate)
+
+        with mock.patch.dict(os.environ, {"MING_RELEASE_VAULT": str(self.vault)}, clear=False):
+            with mock.patch.object(self.tool.os, "scandir", side_effect=fake_scandir):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.create_bundle(
+                        self.private_input,
+                        self.output,
+                        self.recipient,
+                        age_runner=self.fake_age_runner(),
+                    )
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertFalse(self.output.exists())
+
     def test_atomic_write_fails_closed_when_output_parent_is_replaced(self):
         parent = self.vault / "encrypted"
         parent_real = self.vault / "encrypted-real"

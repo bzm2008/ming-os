@@ -832,6 +832,8 @@ def _bundle_entries(root: pathlib.Path, *, deadline=None, budget=None):
             if any(part in ("", ".", "..") for part in relative.parts):
                 raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains an unsafe path")
             path = pathlib.Path(entry.path)
+            if not _path_within(_absolute_path(path, "input entry"), root):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input entry is outside the input root")
             try:
                 info = os.lstat(path)
             except OSError as exc:
