@@ -19,9 +19,11 @@ import argparse
 import datetime as _datetime
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import pathlib
+import posixpath
 import re
 import shutil
 import stat
@@ -83,6 +85,22 @@ MAX_BUNDLE_ENTRIES = 10_000
 MAX_BUNDLE_DEPTH = 32
 MAX_BUNDLE_SECONDS = 30.0
 AGE_RUN_TIMEOUT_SECONDS = 60
+
+NAS_CONFIG_FIELDS = frozenset(
+    {
+        "host_alias",
+        "port",
+        "remote_dir",
+        "known_hosts",
+        "object",
+        "sidecar",
+        "receipt",
+    }
+)
+_NAS_OBJECT_RE = re.compile(r"recovery-bundle-[0-9]+\.(?:age|sha256|json)\Z")
+_NAS_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,252}[A-Za-z0-9])?\Z")
+_NAS_REMOTE_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+MAX_REMOTE_OUTPUT_BYTES = 1 * 1024 * 1024
 
 # Passwords are intentionally not an input channel for this command.  These
 # names are rejected before spawning age and are removed from the child env.
@@ -1721,6 +1739,386 @@ def create_bundle(
         raise
 
 
+class _NasRemoteFailure(Exception):
+    """Internal marker used to map a fixed SSH operation to a safe error."""
+
+    def __init__(self, error_code: str):
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
+def _nas_permission(message: str):
+    raise ReleaseVaultError("E_VAULT_PERMISSION", message)
+
+
+def _nas_validate_name(value, field: str) -> str:
+    if not isinstance(value, str) or not value or any(ord(char) < 0x20 for char in value):
+        _nas_permission(f"NAS {field} is invalid")
+    if "/" in value or "\\" in value or value in {".", ".."} or _NAS_OBJECT_RE.fullmatch(value) is None:
+        _nas_permission(f"NAS {field} is invalid")
+    return value
+
+
+def _nas_validate_config(config: Mapping) -> dict:
+    """Validate the closed NAS config contract and return a safe copy."""
+
+    if not isinstance(config, Mapping):
+        _nas_permission("NAS config is invalid")
+    fields = set(config)
+    if fields != NAS_CONFIG_FIELDS:
+        _nas_permission("NAS config fields are invalid")
+
+    host_alias = config["host_alias"]
+    if not isinstance(host_alias, str) or not host_alias or any(
+        char.isspace() or char in "@/:\\" or ord(char) < 0x20 for char in host_alias
+    ):
+        _nas_permission("NAS host alias is invalid")
+    if host_alias.isdigit():
+        _nas_permission("NAS host alias is invalid")
+    try:
+        host_is_ip = ipaddress.ip_address(host_alias) is not None
+    except ValueError:
+        host_is_ip = False
+    if not host_is_ip and _NAS_HOST_RE.fullmatch(host_alias) is None:
+        _nas_permission("NAS host alias is invalid")
+    if host_is_ip:
+        approved = {
+            item.strip()
+            for item in os.environ.get("MING_RELEASE_APPROVED_TUNNEL_ENDPOINTS", "").split(",")
+            if item.strip()
+        }
+        if host_alias not in approved:
+            _nas_permission("NAS host alias is not an approved tunnel endpoint")
+
+    port = config["port"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        _nas_permission("NAS port is invalid")
+
+    remote_dir = config["remote_dir"]
+    if not isinstance(remote_dir, str) or not remote_dir.startswith("/"):
+        _nas_permission("NAS remote directory is invalid")
+    if any(ord(char) < 0x20 for char in remote_dir) or remote_dir.startswith("//"):
+        _nas_permission("NAS remote directory is invalid")
+    components = remote_dir.split("/")[1:]
+    if not components or any(
+        not component
+        or component in {".", ".."}
+        or _NAS_REMOTE_COMPONENT_RE.fullmatch(component) is None
+        for component in components
+    ):
+        _nas_permission("NAS remote directory is invalid")
+    remote_dir = "/" + "/".join(components)
+
+    known_hosts = config["known_hosts"]
+    if not isinstance(known_hosts, str) or not known_hosts or any(ord(char) < 0x20 for char in known_hosts):
+        _nas_permission("NAS known-hosts path is invalid")
+    known_hosts_path = pathlib.Path(known_hosts)
+    if not known_hosts_path.is_absolute():
+        _nas_permission("NAS known-hosts path is invalid")
+    try:
+        if _symlink_component(known_hosts_path) is not None:
+            _nas_permission("NAS known-hosts path contains a symlink")
+        info = os.lstat(known_hosts_path)
+    except ReleaseVaultError:
+        raise
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS known-hosts path is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        _nas_permission("NAS known-hosts path is not a regular file")
+
+    object_name = _nas_validate_name(config["object"], "object")
+    sidecar_name = _nas_validate_name(config["sidecar"], "sidecar")
+    receipt_name = _nas_validate_name(config["receipt"], "receipt")
+    stem = object_name.rsplit(".", 1)[0]
+    if sidecar_name != f"{stem}.sha256" or receipt_name != f"{stem}.json":
+        _nas_permission("NAS object sidecars are inconsistent")
+
+    return {
+        "host_alias": host_alias,
+        "port": port,
+        "remote_dir": remote_dir,
+        "known_hosts": os.path.abspath(os.fspath(known_hosts_path)),
+        "object": object_name,
+        "sidecar": sidecar_name,
+        "receipt": receipt_name,
+    }
+
+
+def _nas_local_paths(config: Mapping):
+    vault = _configured_vault()
+    object_path = vault / "encrypted" / config["object"]
+    sidecar_path = vault / "encrypted" / config["sidecar"]
+    receipt_path = vault / "receipts" / config["receipt"]
+    paths = []
+    for path, field in (
+        (object_path, "local bundle"),
+        (sidecar_path, "local sidecar"),
+        (receipt_path, "local receipt"),
+    ):
+        try:
+            paths.append(_require_regular_file(path, field))
+        except ReleaseVaultError as exc:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} is unavailable") from exc
+    return vault, paths[0], paths[1], paths[2]
+
+
+def _nas_ssh_argv(config: Mapping, command: tuple[str, ...]) -> tuple[str, ...]:
+    return (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={config['known_hosts']}",
+        "-o",
+        "GlobalKnownHostsFile=none",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "RequestTTY=no",
+        "-p",
+        str(config["port"]),
+        config["host_alias"],
+        *command,
+    )
+
+
+def _nas_decode_output(value):
+    if isinstance(value, bytes):
+        if len(value) > MAX_REMOTE_OUTPUT_BYTES:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION") from exc
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > MAX_REMOTE_OUTPUT_BYTES:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        return value
+    return value
+
+
+def _nas_invoke(config: Mapping, operation: str, path: str, ssh_runner=None):
+    remote_path = posixpath.join(config["remote_dir"], path)
+    if operation == "stat":
+        command = ("stat", "--format=%F:%s", remote_path)
+    elif operation == "sha256sum":
+        command = ("sha256sum", remote_path)
+    elif operation == "cat":
+        command = ("cat", remote_path)
+    else:
+        raise AssertionError(operation)
+    argv = _nas_ssh_argv(config, command)
+    using_subprocess = ssh_runner is None
+    try:
+        if using_subprocess:
+            completed = subprocess.run(
+                list(argv),
+                capture_output=True,
+                check=False,
+                shell=False,
+                timeout=15,
+            )
+            if completed.returncode:
+                code = "E_VAULT_PERMISSION" if completed.returncode == 2 else "E_VAULT_UNREACHABLE"
+                raise _NasRemoteFailure(code)
+            return _nas_decode_output(completed.stdout), command, argv
+        try:
+            result = ssh_runner(argv=argv, command=command, operation=operation, path=path)
+        except TypeError:
+            try:
+                result = ssh_runner(argv, command)
+            except TypeError:
+                try:
+                    result = ssh_runner(command)
+                except (TypeError, AttributeError):
+                    result = ssh_runner(" ".join(command))
+        if isinstance(result, tuple) and len(result) == 3 and isinstance(result[0], int):
+            returncode, stdout, _stderr = result
+            if returncode:
+                code = "E_VAULT_PERMISSION" if returncode == 2 else "E_VAULT_UNREACHABLE"
+                raise _NasRemoteFailure(code)
+            result = stdout
+        if isinstance(result, subprocess.CompletedProcess):
+            if result.returncode:
+                code = "E_VAULT_PERMISSION" if result.returncode == 2 else "E_VAULT_UNREACHABLE"
+                raise _NasRemoteFailure(code)
+            result = result.stdout
+        return _nas_decode_output(result), command, argv
+    except _NasRemoteFailure:
+        raise
+    except FileNotFoundError as exc:
+        code = "E_VAULT_UNREACHABLE" if using_subprocess else "E_VAULT_PERMISSION"
+        raise _NasRemoteFailure(code) from exc
+    except PermissionError as exc:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _NasRemoteFailure("E_VAULT_UNREACHABLE") from exc
+    except subprocess.CalledProcessError as exc:
+        code = "E_VAULT_PERMISSION" if exc.returncode == 2 else "E_VAULT_UNREACHABLE"
+        raise _NasRemoteFailure(code) from exc
+    except OSError as exc:
+        raise _NasRemoteFailure("E_VAULT_UNREACHABLE") from exc
+    except ReleaseVaultError as exc:
+        if exc.error_code in {"E_VAULT_PERMISSION", "E_VAULT_UNREACHABLE"}:
+            raise _NasRemoteFailure(exc.error_code) from exc
+        raise _NasRemoteFailure("E_VAULT_UNREACHABLE") from exc
+    except Exception as exc:
+        raise _NasRemoteFailure("E_VAULT_UNREACHABLE") from exc
+
+
+def _nas_parse_stat(value):
+    if isinstance(value, Mapping):
+        mode = value.get("mode", value.get("type"))
+        size = value.get("size")
+        if mode in {"symlink", "link", "directory", "dir", "special"}:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        if isinstance(mode, str) and mode.startswith("l"):
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        if mode not in {"regular", "regular file", "file", "-", None} and not (
+            isinstance(mode, str) and mode.startswith("-")
+        ):
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        return size
+    text = _nas_decode_output(value)
+    if not isinstance(text, str):
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    line = text.strip()
+    match = re.fullmatch(r"(?:regular(?: file)?|-)[: ]([0-9]+)", line)
+    if match is None:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    return int(match.group(1))
+
+
+def _nas_parse_hash(value, expected_name: str, expected_path: str | None = None) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("sha256", value.get("hash"))
+    text = _nas_decode_output(value)
+    if not isinstance(text, str):
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    line = text.strip()
+    match = re.fullmatch(r"([a-f0-9]{64})(?:[ \t]+[*]?([^ \t\r\n]+))?", line)
+    expected_paths = {expected_name}
+    if expected_path is not None:
+        expected_paths.add(expected_path)
+    if match is None or (match.group(2) is not None and match.group(2) not in expected_paths):
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    return match.group(1)
+
+
+def _nas_parse_sidecar(value, expected_name: str) -> str:
+    text = _nas_decode_output(value)
+    if not isinstance(text, str):
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    match = re.fullmatch(r"([a-f0-9]{64})[ \t]{2}([^\r\n]+)\r?\n?", text)
+    if match is None or match.group(2) != expected_name:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION")
+    return match.group(1)
+
+
+def _nas_parse_receipt(value) -> dict:
+    if isinstance(value, Mapping):
+        candidate = dict(value)
+    else:
+        text = _nas_decode_output(value)
+        if not isinstance(text, str):
+            raise _NasRemoteFailure("E_VAULT_PERMISSION")
+        try:
+            candidate = json.loads(
+                text,
+                object_pairs_hook=_strict_object_pairs,
+                parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise _NasRemoteFailure("E_VAULT_PERMISSION") from exc
+    try:
+        return validate_receipt(candidate)
+    except ReleaseVaultError as exc:
+        raise _NasRemoteFailure("E_VAULT_PERMISSION") from exc
+
+
+def verify_nas(config: Mapping, ssh_runner=None) -> dict:
+    """Verify the encrypted bundle and public metadata through read-only SSH."""
+
+    validated_config = _nas_validate_config(config)
+    _vault, local_bundle, local_sidecar, local_receipt_path = _nas_local_paths(validated_config)
+    try:
+        local_receipt = validate_receipt(_load_json(local_receipt_path))
+    except ReleaseVaultError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "local receipt is invalid") from exc
+    try:
+        local_hash, local_bytes = _hash_regular_file(local_bundle, max_bytes=MAX_BUNDLE_BYTES)
+        local_sidecar_hash = _read_sidecar(local_sidecar, validated_config["object"])
+    except ReleaseVaultError as exc:
+        if exc.error_code == "E_VAULT_HASH_MISMATCH":
+            raise
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "local vault metadata is unavailable") from exc
+    if local_hash != local_receipt["bundle_sha256"] or local_bytes != local_receipt["bundle_bytes"]:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local receipt does not match bundle")
+    if local_sidecar_hash != local_hash:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "local sidecar does not match bundle")
+
+    commands = []
+
+    def read(operation, path):
+        try:
+            value, command, _argv = _nas_invoke(validated_config, operation, path, ssh_runner)
+        except _NasRemoteFailure as exc:
+            raise ReleaseVaultError(exc.error_code, "NAS read verification failed") from exc
+        commands.append(list(command))
+        return value
+
+    try:
+        remote_object_size = _nas_parse_stat(read("stat", validated_config["object"]))
+        remote_sidecar_size = _nas_parse_stat(read("stat", validated_config["sidecar"]))
+        remote_receipt_size = _nas_parse_stat(read("stat", validated_config["receipt"]))
+        if remote_object_size != local_receipt["bundle_bytes"] or remote_object_size != local_bytes:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote bundle size does not match receipt")
+        if remote_sidecar_size <= 0 or remote_sidecar_size > MAX_SIDECAR_BYTES:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote sidecar metadata is invalid")
+        if remote_receipt_size <= 0 or remote_receipt_size > MAX_RECEIPT_BYTES:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "remote receipt metadata is invalid")
+        remote_path = posixpath.join(validated_config["remote_dir"], validated_config["object"])
+        remote_hash = _nas_parse_hash(
+            read("sha256sum", validated_config["object"]),
+            validated_config["object"],
+            remote_path,
+        )
+        if remote_hash != local_hash or remote_hash != local_receipt["bundle_sha256"]:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote bundle hash does not match receipt")
+        remote_sidecar_hash = _nas_parse_sidecar(
+            read("cat", validated_config["sidecar"]), validated_config["object"]
+        )
+        if remote_sidecar_hash != remote_hash or remote_sidecar_hash != local_sidecar_hash:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote sidecar does not match bundle")
+        remote_receipt = _nas_parse_receipt(read("cat", validated_config["receipt"]))
+        if remote_receipt != local_receipt:
+            raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "remote receipt does not match local receipt")
+    except _NasRemoteFailure as exc:
+        raise ReleaseVaultError(exc.error_code, "NAS read verification failed") from exc
+
+    result = {
+        "status": "ok",
+        "bundle_bytes": local_bytes,
+        "bundle_sha256": local_hash,
+        "object": validated_config["object"],
+    }
+    if ssh_runner is not None:
+        result["test_commands"] = commands
+    return result
+
+
 class ArgumentParseError(ValueError):
     """Raised so CLI argument failures remain JSON, like other failures."""
 
@@ -1777,6 +2175,12 @@ def _build_parser() -> argparse.ArgumentParser:
     receipt = commands.add_parser("verify-receipt", help="validate a public receipt")
     receipt.add_argument("--receipt", required=True, type=pathlib.Path)
 
+    nas = commands.add_parser(
+        "verify-nas",
+        help="verify an encrypted recovery bundle through the pinned NAS tunnel",
+    )
+    nas.add_argument("--config", required=True, type=pathlib.Path)
+
     bundle = commands.add_parser(
         "create-bundle",
         help="encrypt a local recovery bundle",
@@ -1815,6 +2219,13 @@ def main(argv=None) -> int:
         if args.command == "verify-receipt":
             receipt = validate_receipt(_load_json(args.receipt))
             return emit_ok({"receipt": receipt})
+        if args.command == "verify-nas":
+            try:
+                nas_config = _load_json(args.config)
+            except ReleaseVaultError as exc:
+                raise ReleaseVaultError("E_VAULT_PERMISSION", "NAS config is unavailable") from exc
+            result = verify_nas(nas_config)
+            return emit_ok(result)
         if args.command == "create-bundle":
             fingerprints = None
             if args.primary_fingerprint is not None or args.signing_fingerprint is not None:
