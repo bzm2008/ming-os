@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -199,6 +200,83 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
             result = run_cli("scan-public", "--root", str(public))
         self.assertEqual(result.returncode, self.tool.EXIT_OK)
         self.assertEqual(json.loads(result.stdout)["status"], "ok")
+
+    def test_public_scan_allows_incidental_markers_in_allowlisted_binary_signature(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "manifest.sig").write_bytes(
+                b"\x00binary secret password token bytes"
+            )
+            result = run_cli("scan-public", "--root", str(public))
+        self.assertEqual(result.returncode, self.tool.EXIT_OK)
+        self.assertEqual(json.loads(result.stdout)["status"], "ok")
+
+    def test_public_scan_rejects_oversized_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "large.bin").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+            result = run_cli("scan-public", "--root", str(public))
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+
+    def test_public_scan_fails_closed_when_file_read_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release.json").write_text("{}", encoding="utf-8")
+            failure = self.tool.ReleaseVaultError(
+                "E_RELEASE_NOT_READY", "public file could not be read"
+            )
+            with mock.patch.object(
+                self.tool, "_scan_public_file", create=True, side_effect=failure
+            ):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_fails_closed_when_enumeration_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            failure = self.tool.ReleaseVaultError(
+                "E_RELEASE_NOT_READY", "public tree could not be enumerated"
+            )
+            with mock.patch.object(
+                self.tool, "_iter_public_entries", create=True, side_effect=failure
+            ):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_public_scan_fails_closed_when_file_changes_during_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            (public / "release.json").write_text("{}", encoding="utf-8")
+            failure = self.tool.ReleaseVaultError(
+                "E_RELEASE_NOT_READY", "public file changed during scan"
+            )
+            with mock.patch.object(
+                self.tool, "_scan_public_file", create=True, side_effect=failure
+            ):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_parser_usage_errors_do_not_echo_secret_arguments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = run_cli(
+                "scan-public",
+                "--root",
+                temp,
+                "--password=do-not-echo-this",
+            )
+        self.assertEqual(result.returncode, self.tool.EXIT_USAGE)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["error_code"], "E_USAGE")
+        self.assertNotIn("do-not-echo-this", result.stdout)
 
 
 if __name__ == "__main__":

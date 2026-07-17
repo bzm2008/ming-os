@@ -11,9 +11,12 @@ from __future__ import annotations
 import argparse
 import datetime as _datetime
 import json
+import os
 import pathlib
 import re
+import stat
 import sys
+import time
 from collections.abc import Mapping
 
 
@@ -48,6 +51,12 @@ _RFC3339_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
 )
+
+MAX_FILE_BYTES = 8 * 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+MARKER_TAIL_BYTES = 256
+MAX_READ_SECONDS = 5.0
+_BINARY_ALLOWLIST_SUFFIXES = frozenset({".gpg", ".kbx", ".keyring", ".sig"})
 
 _PATH_MARKERS = (
     "secret",
@@ -85,7 +94,9 @@ _CONTENT_MARKERS = (
     b"known_hosts",
 )
 _PRIVATE_KEY_HEADER_RE = re.compile(
-    rb"-----BEGIN[ -]+(?:[A-Z0-9][A-Z0-9 -]*[ -]+)?PRIVATE KEY-----"
+    rb"-----BEGIN[ -]+(?:[A-Z0-9][A-Z0-9 -]*[ -]+)?"
+    rb"(?:PRIVATE|SECRET) KEY(?:[ -]+BLOCK)?-----",
+    re.IGNORECASE,
 )
 _PRIVATE_KEY_TEXT_RE = re.compile(rb"private[ _-]+key", re.IGNORECASE)
 _PRIVATE_PATH_RE = re.compile(rb"(?:^|[/\\])private(?:[/\\]|$)")
@@ -278,12 +289,14 @@ def _sensitive_component(component: str) -> str | None:
     return None
 
 
-def _sensitive_content(content: bytes) -> str | None:
-    # Binary public keyrings and signatures remain allowed when they contain no
-    # sensitive marker; marker checks apply to their raw bytes as well.
+def _sensitive_content(content: bytes, *, allowlisted_binary: bool = False) -> str | None:
+    """Return a marker reason, allowing incidental bytes in known binaries."""
+
     lowered = content.lower()
     if _PRIVATE_KEY_HEADER_RE.search(content):
         return "private-key marker"
+    if allowlisted_binary:
+        return None
     if _PRIVATE_KEY_TEXT_RE.search(content):
         return "private-key marker"
     if _SSH_PRIVATE_NAME_RE.search(content):
@@ -296,54 +309,170 @@ def _sensitive_content(content: bytes) -> str | None:
     return None
 
 
+def _looks_binary(content: bytes) -> bool:
+    if b"\x00" in content:
+        return True
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return any(ord(char) < 0x20 and char not in "\t\n\r\f" for char in text)
+
+
+def _not_ready(message: str):
+    raise ReleaseVaultError("E_RELEASE_NOT_READY", message)
+
+
+def _iter_public_entries(root: pathlib.Path):
+    """Yield regular-file entries without following symlinked directories."""
+
+    root_path = os.fspath(root)
+    try:
+        root_stat = os.lstat(root_path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "public tree is missing or invalid") from exc
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        _not_ready("public tree is missing or invalid")
+
+    def walk(directory, relative_prefix):
+        try:
+            before = os.stat(directory, follow_symlinks=False)
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+                _not_ready("public tree changed during scan")
+            with os.scandir(directory) as iterator:
+                entries = []
+                while True:
+                    try:
+                        entries.append(next(iterator))
+                    except StopIteration:
+                        break
+                    except OSError as exc:
+                        raise ReleaseVaultError(
+                            "E_RELEASE_NOT_READY", "public tree could not be enumerated"
+                        ) from exc
+            after = os.stat(directory, follow_symlinks=False)
+            if not os.path.samestat(before, after):
+                _not_ready("public tree changed during scan")
+        except ReleaseVaultError:
+            raise
+        except OSError as exc:
+            raise ReleaseVaultError(
+                "E_RELEASE_NOT_READY", "public tree could not be enumerated"
+            ) from exc
+
+        for entry in sorted(entries, key=lambda item: item.name.casefold()):
+            relative = relative_prefix / entry.name
+            try:
+                if entry.is_symlink():
+                    yield relative, entry, True
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    yield from walk(entry.path, relative)
+                    continue
+                if entry.is_file(follow_symlinks=False):
+                    yield relative, entry, False
+                    continue
+            except OSError as exc:
+                raise ReleaseVaultError(
+                    "E_RELEASE_NOT_READY", "public tree could not be enumerated"
+                ) from exc
+            _not_ready("public tree contains unsupported file")
+
+    yield from walk(root_path, pathlib.Path())
+
+
+def _scan_public_file(entry) -> str | None:
+    """Stream one regular file with size and identity checks."""
+
+    try:
+        before = os.stat(entry.path, follow_symlinks=False)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        _not_ready("public file changed during scan")
+    if before.st_size > MAX_FILE_BYTES:
+        _not_ready("public file is too large")
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(entry.path, flags)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
+
+    try:
+        try:
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
+        if stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode):
+            _not_ready("public file changed during scan")
+        if not os.path.samestat(before, after):
+            _not_ready("public file changed during scan")
+        if after.st_size > MAX_FILE_BYTES:
+            _not_ready("public file is too large")
+
+        suffix = pathlib.Path(entry.name).suffix.lower()
+        allowlisted_suffix = suffix in _BINARY_ALLOWLIST_SUFFIXES
+        allowlisted_binary = False
+        first_chunk = True
+        started = time.monotonic()
+        tail = b""
+        total = 0
+        while True:
+            if time.monotonic() - started > MAX_READ_SECONDS:
+                _not_ready("public file read timed out")
+            try:
+                chunk = os.read(descriptor, READ_CHUNK_BYTES)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_FILE_BYTES:
+                _not_ready("public file is too large")
+            if first_chunk:
+                allowlisted_binary = allowlisted_suffix and _looks_binary(chunk)
+                first_chunk = False
+            combined = tail + chunk
+            reason = _sensitive_content(combined, allowlisted_binary=allowlisted_binary)
+            if reason:
+                return reason
+            tail = combined[-MARKER_TAIL_BYTES:]
+        return None
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
 def scan_public_tree(root: pathlib.Path) -> dict:
     """Scan a public-material tree and return a sanitized summary.
 
-    Symlinks are rejected because they can make a public tree resolve to a
-    private file after the scan. Findings contain only relative paths.
+    Enumeration and file reads fail closed. Regular files are opened without
+    following symlinks where supported and compared with their directory-entry
+    identity to catch replacement races on platforms without ``O_NOFOLLOW``.
     """
-
-    root = pathlib.Path(root)
-    if root.is_symlink() or not root.exists() or not root.is_dir():
-        raise ReleaseVaultError("E_RELEASE_NOT_READY", "public tree is missing or invalid")
 
     findings = []
     files_scanned = 0
-    try:
-        paths = sorted(root.rglob("*"), key=lambda path: path.as_posix().lower())
-    except OSError as exc:
-        raise ReleaseVaultError("E_RELEASE_NOT_READY", "public tree could not be enumerated") from exc
-
-    for path in paths:
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue
+    for relative, entry, is_symlink in _iter_public_entries(pathlib.Path(root)):
         relative_parts = relative.parts
-        if path.is_symlink():
-            findings.append({"path": relative.as_posix(), "reason": "symlink"})
+        relative_name = relative.as_posix()
+        if is_symlink:
+            findings.append({"path": relative_name, "reason": "symlink"})
             continue
-        component_reason = next(
+        files_scanned += 1
+        reason = next(
             (reason for component in relative_parts if (reason := _sensitive_component(component))),
             None,
         )
-        if path.is_dir():
-            if component_reason:
-                findings.append({"path": relative.as_posix(), "reason": component_reason})
-            continue
-        if not path.is_file():
-            continue
-        files_scanned += 1
-        reason = component_reason
         if reason is None:
-            try:
-                content = path.read_bytes()
-            except (OSError, UnicodeError):
-                findings.append({"path": relative.as_posix(), "reason": "unreadable file"})
-                continue
-            reason = _sensitive_content(content)
+            reason = _scan_public_file(entry)
         if reason:
-            findings.append({"path": relative.as_posix(), "reason": reason})
+            findings.append({"path": relative_name, "reason": reason})
 
     if findings:
         raise ReleaseVaultError(
@@ -387,8 +516,8 @@ def main(argv=None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
-    except ArgumentParseError as exc:
-        return emit_error("E_USAGE", str(exc))
+    except ArgumentParseError:
+        return emit_error("E_USAGE", "invalid release-vault arguments")
     try:
         if args.command == "scan-public":
             return emit_ok(scan_public_tree(args.root))
