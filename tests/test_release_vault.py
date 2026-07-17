@@ -30,6 +30,7 @@ def run_cli(*args):
         [sys.executable, str(TOOL), *args],
         capture_output=True,
         text=True,
+        timeout=10,
     )
 
 
@@ -138,6 +139,32 @@ class ReleaseVaultReceiptTests(unittest.TestCase):
                 with self.assertRaises(self.tool.ReleaseVaultError) as caught:
                     self.tool._load_json(path)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+
+    def test_receipt_rejects_initial_to_open_metadata_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.write_receipt(temp, self.receipt)
+            real_fstat = self.tool.os.fstat
+            calls = 0
+
+            def changed_fstat(descriptor):
+                nonlocal calls
+                calls += 1
+                result = real_fstat(descriptor)
+                changed = mock.Mock(wraps=result)
+                for field in ("st_mode", "st_ino", "st_dev", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                    setattr(changed, field, getattr(result, field))
+                birthtime = getattr(result, "st_birthtime_ns", None)
+                if birthtime is not None:
+                    changed.st_birthtime_ns = birthtime + 1
+                else:
+                    changed.st_ctime_ns = result.st_ctime_ns + 1
+                return changed
+
+            with mock.patch.object(self.tool.os, "fstat", side_effect=changed_fstat):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool._load_json(path)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertGreaterEqual(calls, 1)
 
     def test_direct_validator_returns_a_sanitized_copy(self):
         validated = self.tool.validate_receipt(self.receipt)
@@ -379,7 +406,12 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
             def mutate_directory(entry, **kwargs):
                 if not changed["value"]:
                     changed["value"] = True
+                    before = os.stat(public)
                     (public / "late.json").write_text("{}", encoding="utf-8")
+                    os.utime(
+                        public,
+                        ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000),
+                    )
                 return None
 
             with mock.patch.object(
@@ -441,6 +473,35 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
                     self.tool.scan_public_tree(public)
         self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
         self.assertTrue(changed["value"])
+
+    def test_public_scan_rejects_initial_to_open_metadata_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            public = pathlib.Path(temp) / "public"
+            public.mkdir()
+            target = public / "release.json"
+            target.write_text("{}", encoding="utf-8")
+            real_fstat = self.tool.os.fstat
+            calls = 0
+
+            def changed_fstat(descriptor):
+                nonlocal calls
+                calls += 1
+                result = real_fstat(descriptor)
+                changed = mock.Mock(wraps=result)
+                for field in ("st_mode", "st_ino", "st_dev", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                    setattr(changed, field, getattr(result, field))
+                birthtime = getattr(result, "st_birthtime_ns", None)
+                if birthtime is not None:
+                    changed.st_birthtime_ns = birthtime + 1
+                else:
+                    changed.st_ctime_ns = result.st_ctime_ns + 1
+                return changed
+
+            with mock.patch.object(self.tool.os, "fstat", side_effect=changed_fstat):
+                with self.assertRaises(self.tool.ReleaseVaultError) as caught:
+                    self.tool.scan_public_tree(public)
+        self.assertEqual(caught.exception.error_code, "E_RELEASE_NOT_READY")
+        self.assertGreaterEqual(calls, 1)
 
     def test_scan_public_root_help_states_trust_material_boundary(self):
         result = run_cli("scan-public", "--help")

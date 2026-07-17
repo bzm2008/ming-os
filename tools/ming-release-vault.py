@@ -4,7 +4,9 @@
 This tool intentionally has no decryption, signing, upload, or remote execution
 surface.  It is the small public-boundary checker used before a release is
 published. Unknown regular binaries are accepted only when they are
-marker-free; payload and ISO blobs do not belong under the scan root.
+marker-free; payload and ISO blobs do not belong under the scan root. The root
+is local trust material, and scan deadlines are cooperative between bounded
+system calls rather than hard interruption of a blocking OS call.
 """
 
 from __future__ import annotations
@@ -291,7 +293,7 @@ def _load_json(path: pathlib.Path) -> dict:
             or not os.path.samestat(before, opened)
             or opened.st_size != before.st_size
             or opened.st_size > MAX_RECEIPT_BYTES
-            or opened.st_mtime_ns != before.st_mtime_ns
+            or _metadata_changed(before, opened)
         ):
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt changed during read")
 
@@ -322,8 +324,7 @@ def _load_json(path: pathlib.Path) -> dict:
             or not os.path.samestat(opened, final)
             or final.st_size != opened.st_size
             or final.st_size != total
-            or final.st_mtime_ns != opened.st_mtime_ns
-            or final.st_ctime_ns != opened.st_ctime_ns
+            or _metadata_changed(opened, final)
         ):
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt changed during read")
         try:
@@ -396,6 +397,22 @@ def _same_directory_snapshot(before, after) -> bool:
         and before.st_mtime_ns == after.st_mtime_ns
         and before.st_ctime_ns == after.st_ctime_ns
     )
+
+
+def _metadata_changed(before, after) -> bool:
+    if before.st_mtime_ns != after.st_mtime_ns:
+        return True
+    before_birth = getattr(before, "st_birthtime_ns", None)
+    after_birth = getattr(after, "st_birthtime_ns", None)
+    if before_birth is not None and after_birth is not None:
+        if before_birth != after_birth:
+            return True
+        # Windows fstat may expose creation time through ctime while path
+        # stat exposes a different copy timestamp. Birthtime is the stable
+        # equivalent there; POSIX ctime remains a metadata-change signal.
+        if os.name == "nt":
+            return False
+    return before.st_ctime_ns != after.st_ctime_ns
 
 
 def _iter_public_entries(root: pathlib.Path, *, deadline=None, budget=None):
@@ -506,7 +523,11 @@ def _scan_public_file(entry, *, deadline=None) -> str | None:
             raise ReleaseVaultError("E_RELEASE_NOT_READY", "public file could not be read") from exc
         if stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode):
             _not_ready("public file changed during scan")
-        if not os.path.samestat(before, after):
+        if (
+            not os.path.samestat(before, after)
+            or after.st_size != before.st_size
+            or _metadata_changed(before, after)
+        ):
             _not_ready("public file changed during scan")
         if after.st_size > MAX_FILE_BYTES:
             _not_ready("public file is too large")
@@ -544,8 +565,7 @@ def _scan_public_file(entry, *, deadline=None) -> str | None:
             or not os.path.samestat(before, final)
             or final.st_size != after.st_size
             or final.st_size != total
-            or final.st_mtime_ns != after.st_mtime_ns
-            or final.st_ctime_ns != after.st_ctime_ns
+            or _metadata_changed(after, final)
         ):
             _not_ready("public file changed during scan")
         return detected_reason
