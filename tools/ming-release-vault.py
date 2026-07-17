@@ -13,12 +13,18 @@ from __future__ import annotations
 
 import argparse
 import datetime as _datetime
+import hashlib
+import io
 import json
 import os
 import pathlib
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 from collections.abc import Mapping
 
@@ -66,6 +72,24 @@ MAX_SCAN_ENTRIES = 10_000
 MAX_SCAN_DEPTH = 32
 MAX_RECEIPT_BYTES = 1 * 1024 * 1024
 MAX_RECEIPT_READ_SECONDS = 5.0
+MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_ENTRIES = 10_000
+AGE_RUN_TIMEOUT_SECONDS = 60
+
+# Passwords are intentionally not an input channel for this command.  These
+# names are rejected before spawning age and are removed from the child env.
+_PASSWORD_ENV_NAMES = frozenset(
+    {
+        "MING_RELEASE_PASSWORD",
+        "MING_RELEASE_PASSPHRASE",
+        "AGE_PASSWORD",
+        "AGE_PASSPHRASE",
+        "PASSPHRASE",
+        "PASSWORD",
+        "PASSWD",
+    }
+)
 
 _PATH_MARKERS = (
     "secret",
@@ -617,6 +641,631 @@ def scan_public_tree(root: pathlib.Path) -> dict:
     return {"files_scanned": files_scanned}
 
 
+# ---------------------------------------------------------------------------
+# Local encrypted recovery bundle
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _absolute_path(value, field: str) -> pathlib.Path:
+    """Return a lexical absolute path without following symlinks."""
+
+    try:
+        path = pathlib.Path(value)
+    except (TypeError, ValueError) as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} is invalid") from exc
+    if not path.is_absolute():
+        path = pathlib.Path.cwd() / path
+    return pathlib.Path(os.path.abspath(os.fspath(path)))
+
+
+def _path_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+    """Compare normalized paths without resolving symlink targets."""
+
+    try:
+        common = os.path.commonpath([os.fspath(path), os.fspath(root)])
+    except ValueError:
+        return False
+    return os.path.normcase(common) == os.path.normcase(os.fspath(root))
+
+
+def _symlink_component(path: pathlib.Path) -> pathlib.Path | None:
+    """Return the first symlink component, if one exists."""
+
+    path = _absolute_path(path, "path")
+    current = pathlib.Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            # Missing descendants cannot be symlinks yet.  Existing parents
+            # have already been checked, and callers may create descendants.
+            continue
+        except OSError as exc:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "path could not be checked") from exc
+        if stat.S_ISLNK(info.st_mode):
+            return current
+    return None
+
+
+def _require_directory(path: pathlib.Path, field: str) -> pathlib.Path:
+    path = _absolute_path(path, field)
+    if _symlink_component(path) is not None:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} contains a symlink")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} is unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} is not a directory")
+    return path
+
+
+def _require_regular_file(path: pathlib.Path, field: str) -> pathlib.Path:
+    path = _absolute_path(path, field)
+    if _symlink_component(path) is not None:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} contains a symlink")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} is unavailable") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", f"{field} is not a regular file")
+    return path
+
+
+def _configured_vault() -> pathlib.Path:
+    raw = os.environ.get("MING_RELEASE_VAULT")
+    if not raw:
+        raise ReleaseVaultError("E_VAULT_NOT_CONFIGURED", "MING_RELEASE_VAULT is required")
+    path = _absolute_path(raw, "MING_RELEASE_VAULT")
+    if _symlink_component(path) is not None:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "MING_RELEASE_VAULT contains a symlink")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_NOT_CONFIGURED", "MING_RELEASE_VAULT is unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise ReleaseVaultError("E_VAULT_NOT_CONFIGURED", "MING_RELEASE_VAULT is not a directory")
+    return path
+
+
+def _reject_repository_path(path: pathlib.Path, field: str):
+    if _path_within(path, REPO_ROOT):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} must be outside the Git worktree")
+
+
+def _prepare_output_path(value, vault: pathlib.Path, field: str) -> pathlib.Path:
+    path = _absolute_path(value, field)
+    if not _path_within(path, vault):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} must be under MING_RELEASE_VAULT")
+    _reject_repository_path(path, field)
+    if _symlink_component(path) is not None:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} contains a symlink")
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} could not be checked") from exc
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} is a symlink")
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unavailable") from exc
+    if not _path_within(parent, vault) or _symlink_component(parent) is not None:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unsafe")
+    return path
+
+
+def _bundle_entries(root: pathlib.Path):
+    """Collect regular files/directories with deterministic relative names."""
+
+    root = _require_directory(root, "input")
+    entries = []
+    count = 0
+    pending = [(root, pathlib.PurePosixPath())]
+    while pending:
+        directory, relative_prefix = pending.pop()
+        try:
+            children = list(os.scandir(directory))
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "input could not be enumerated") from exc
+        children.sort(key=lambda entry: (entry.name.casefold(), entry.name))
+        for entry in children:
+            count += 1
+            if count > MAX_BUNDLE_ENTRIES:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains too many entries")
+            relative = relative_prefix / entry.name
+            if any(part in ("", ".", "..") for part in relative.parts):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains an unsafe path")
+            path = pathlib.Path(entry.path)
+            try:
+                info = os.lstat(path)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input changed during enumeration") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains a symlink")
+            if stat.S_ISDIR(info.st_mode):
+                entries.append((relative, path, "directory", info))
+                pending.append((path, relative))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input contains an unsupported file")
+            if info.st_size > MAX_BUNDLE_FILE_BYTES:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file is too large")
+            entries.append((relative, path, "file", info))
+    entries.sort(key=lambda item: (item[0].as_posix().casefold(), item[0].as_posix()))
+    return root, entries
+
+
+def _same_file_metadata(before, after) -> bool:
+    return (
+        os.path.samestat(before, after)
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        # Windows may assign a fresh ctime while opening a file; birthtime is
+        # the stable identity signal there. POSIX retains ctime semantics via
+        # the shared metadata helper.
+        and not _metadata_changed(before, after)
+    )
+
+
+def _build_deterministic_tar(root: pathlib.Path) -> bytes:
+    """Build a normalized tar stream; no source metadata leaks into it."""
+
+    root, entries = _bundle_entries(root)
+    stream = io.BytesIO()
+    total_bytes = 0
+    try:
+        archive = tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT)
+    except (OSError, tarfile.TarError) as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle archive could not be created") from exc
+    try:
+        for relative, path, kind, initial in entries:
+            name = relative.as_posix()
+            info = tarfile.TarInfo(name)
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mtime = 0
+            info.pax_headers = {}
+            if kind == "directory":
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o700
+                info.size = 0
+                archive.addfile(info)
+                continue
+
+            info.type = tarfile.REGTYPE
+            info.mode = 0o600
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(os.fspath(path), flags)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file could not be opened") from exc
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode) or not _same_file_metadata(initial, opened):
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
+                if opened.st_size > MAX_BUNDLE_FILE_BYTES:
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file is too large")
+                info.size = opened.st_size
+                total_bytes += opened.st_size
+                if total_bytes > MAX_BUNDLE_BYTES:
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input bundle is too large")
+                with os.fdopen(descriptor, "rb", closefd=False) as source:
+                    archive.addfile(info, source)
+                final = os.fstat(descriptor)
+                if not _same_file_metadata(opened, final):
+                    raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file changed during archive")
+            except ReleaseVaultError:
+                raise
+            except (OSError, tarfile.TarError) as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "input file could not be archived") from exc
+            finally:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    finally:
+        try:
+            archive.close()
+        except (OSError, tarfile.TarError) as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle archive could not be finalized") from exc
+    return stream.getvalue()
+
+
+def _hash_regular_file(path: pathlib.Path) -> tuple[str, int]:
+    path = _require_regular_file(path, "file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "file could not be read") from exc
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        initial = os.fstat(descriptor)
+        while True:
+            try:
+                chunk = os.read(descriptor, READ_CHUNK_BYTES)
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "file could not be read") from exc
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        final = os.fstat(descriptor)
+        if not _same_file_metadata(initial, final) or final.st_size != total:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "file changed during read")
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    return digest.hexdigest(), total
+
+
+def _atomic_write(path: pathlib.Path, data: bytes, field: str):
+    path = _absolute_path(path, field)
+    if _symlink_component(path) is not None:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} contains a symlink")
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unavailable") from exc
+    if _symlink_component(parent) is not None:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} directory is unsafe")
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=os.fspath(parent)
+        )
+        temporary = pathlib.Path(temporary_name)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        try:
+            directory_fd = os.open(os.fspath(parent), os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_fd)
+    except OSError as exc:
+        raise ReleaseVaultError("E_VAULT_PERMISSION", f"{field} could not be written") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _sidecar_path(bundle: pathlib.Path) -> pathlib.Path:
+    return bundle.with_suffix(".sha256")
+
+
+def _read_sidecar(path: pathlib.Path, bundle_name: str) -> str:
+    path = _require_regular_file(path, "sidecar")
+    try:
+        text = path.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar could not be read") from exc
+    expected = re.fullmatch(r"([a-f0-9]{64})  ([^\r\n]+)\n?", text)
+    if expected is None or expected.group(2) != bundle_name:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "sidecar is invalid")
+    return expected.group(1)
+
+
+def _child_environment() -> dict[str, str]:
+    for name in _PASSWORD_ENV_NAMES:
+        if name in os.environ:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "password environment is not accepted")
+    environment = os.environ.copy()
+    for name in list(environment):
+        if name in _PASSWORD_ENV_NAMES or "PASSWORD" in name.upper() or "PASSPHRASE" in name.upper():
+            environment.pop(name, None)
+    return environment
+
+
+def _resolve_age_runner(age_runner=None):
+    if callable(age_runner):
+        return age_runner, None
+    if os.environ.get("MING_RELEASE_TEST_AGE"):
+        return "__test_age_runner__", None
+    configured = age_runner or os.environ.get("MING_RELEASE_AGE", "age")
+    candidate = os.fspath(configured)
+    if any(separator in candidate for separator in (os.sep, os.altsep) if separator):
+        resolved = pathlib.Path(candidate)
+        if not resolved.is_absolute():
+            resolved = _absolute_path(resolved, "age")
+        try:
+            info = os.lstat(resolved)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "age is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "age is unavailable")
+        return os.fspath(resolved), None
+    resolved = shutil.which(candidate)
+    if not resolved:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "age is unavailable")
+    return resolved, None
+
+
+def _invoke_age(runner, argv, tar_bytes: bytes, output: pathlib.Path, environment):
+    if runner == "__test_age_runner__":
+        # This deterministic runner exists only for contract tests.  It still
+        # receives the exact argv/env boundary used by a real age process.
+        try:
+            output.write_bytes(b"age-test-v1\n" + tar_bytes)
+        except OSError as exc:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "age output could not be written") from exc
+        return {
+            "argv": list(argv),
+            "environment": {
+                key: environment[key]
+                for key in ("MING_RELEASE_TEST_AGE",)
+                if key in environment
+            },
+        }
+    if callable(runner):
+        try:
+            result = runner(argv=tuple(argv), input_bytes=tar_bytes, output_path=output, environment=environment)
+        except TypeError:
+            result = runner(tuple(argv), tar_bytes, output, environment)
+        if isinstance(result, (bytes, bytearray)):
+            try:
+                output.write_bytes(bytes(result))
+            except OSError as exc:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "age output could not be written") from exc
+            result = 0
+        if result not in (None, 0, True):
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "age encryption failed")
+        return None
+    try:
+        completed = subprocess.run(
+            list(argv),
+            input=tar_bytes,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            check=False,
+            timeout=AGE_RUN_TIMEOUT_SECONDS,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "age encryption failed") from exc
+    if completed.returncode != 0:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "age encryption failed")
+    return None
+
+
+def _coerce_fingerprints(fingerprints):
+    if isinstance(fingerprints, Mapping):
+        primary = fingerprints.get("primary") or fingerprints.get("primary_fingerprint")
+        signing = fingerprints.get("signing") or fingerprints.get("signing_fingerprint")
+    elif isinstance(fingerprints, (tuple, list)) and len(fingerprints) == 2:
+        primary, signing = fingerprints
+    else:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "fingerprints are required")
+    return _require_fingerprint(primary, "primary_fingerprint"), _require_fingerprint(signing, "signing_fingerprint")
+
+
+def _receipt_destination(bundle: pathlib.Path, receipt_path=None) -> pathlib.Path:
+    if receipt_path is not None:
+        return pathlib.Path(receipt_path)
+    raw_vault = os.environ.get("MING_RELEASE_VAULT")
+    if raw_vault:
+        vault = _absolute_path(raw_vault, "MING_RELEASE_VAULT")
+        return vault / "receipts" / f"{bundle.stem}.json"
+    return bundle.with_suffix(".json")
+
+
+def write_receipt(
+    bundle,
+    sidecar,
+    public_keyring,
+    policy,
+    bundle_id,
+    generation,
+    fingerprints,
+    receipt_path=None,
+):
+    """Write a public receipt atomically and validate the bytes read back."""
+
+    bundle = _require_regular_file(bundle, "bundle")
+    sidecar = _require_regular_file(sidecar, "sidecar")
+    public_keyring = _require_regular_file(public_keyring, "public keyring")
+    policy = _require_regular_file(policy, "policy")
+    bundle_id = _require_opaque_id(bundle_id, "bundle_id")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "generation is invalid")
+    primary, signing = _coerce_fingerprints(fingerprints)
+    bundle_hash, bundle_bytes = _hash_regular_file(bundle)
+    sidecar_hash = _read_sidecar(sidecar, bundle.name)
+    if sidecar_hash != bundle_hash:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar does not match bundle")
+    keyring_hash, _ = _hash_regular_file(public_keyring)
+    policy_hash, _ = _hash_regular_file(policy)
+    receipt = {
+        "format": RECEIPT_FORMAT,
+        "bundle_id": bundle_id,
+        "generation": generation,
+        "primary_fingerprint": primary,
+        "signing_fingerprint": signing,
+        "bundle_sha256": bundle_hash,
+        "bundle_bytes": bundle_bytes,
+        "public_keyring_sha256": keyring_hash,
+        "key_policy_sha256": policy_hash,
+        "encryption_format": "age-v1",
+        "created_at": _datetime.datetime.now(_datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "nas_object": bundle_id,
+        "status": "verified",
+    }
+    validated = validate_receipt(receipt)
+    destination = _receipt_destination(bundle, receipt_path)
+    vault = os.environ.get("MING_RELEASE_VAULT")
+    if vault:
+        vault_path = _configured_vault()
+        destination = _prepare_output_path(destination, vault_path, "receipt")
+    else:
+        destination = _absolute_path(destination, "receipt")
+        _reject_repository_path(destination, "receipt")
+    encoded = (json.dumps(validated, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode("ascii")
+    _atomic_write(destination, encoded, "receipt")
+    try:
+        read_back = validate_receipt(_load_json(destination))
+    except ReleaseVaultError:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    if read_back != validated:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "receipt read-back validation failed")
+    return read_back
+
+
+def create_bundle(
+    input_dir,
+    output,
+    recipient_file,
+    age_runner=None,
+    *,
+    sidecar=None,
+    receipt=None,
+    public_keyring=None,
+    policy=None,
+    bundle_id=None,
+    generation=None,
+    fingerprints=None,
+):
+    """Create an age-encrypted deterministic recovery bundle."""
+
+    vault = _configured_vault()
+    input_path = _require_directory(input_dir, "input")
+    output_path = _prepare_output_path(output, vault, "output")
+    if _path_within(output_path, input_path):
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "output must not be inside input")
+    recipient_path = _require_regular_file(recipient_file, "recipient file")
+    try:
+        if os.stat(recipient_path, follow_symlinks=False).st_size > MAX_RECEIPT_BYTES:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is too large")
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "recipient file is unavailable") from exc
+    if any(name in os.environ for name in _PASSWORD_ENV_NAMES):
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "password environment is not accepted")
+    if output_path.suffix.lower() != ".age":
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "output must be an .age bundle")
+    if input_path == REPO_ROOT or _path_within(input_path, REPO_ROOT):
+        # A repository-local source could accidentally archive an ignored .age
+        # object. Private input belongs in the explicitly configured vault.
+        raise ReleaseVaultError("E_VAULT_PERMISSION", "input must be outside the Git worktree")
+    runner, _ = _resolve_age_runner(age_runner)
+    tar_bytes = _build_deterministic_tar(input_path)
+    environment = _child_environment()
+    sidecar_path = _prepare_output_path(sidecar, vault, "sidecar") if sidecar else _sidecar_path(output_path)
+    sidecar_path = _prepare_output_path(sidecar_path, vault, "sidecar")
+    if receipt is not None:
+        receipt_candidate = _prepare_output_path(receipt, vault, "receipt")
+    else:
+        receipt_candidate = None
+    temporary = None
+    invocation = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.", suffix=".age.tmp", dir=os.fspath(output_path.parent)
+        )
+        os.close(descriptor)
+        temporary = pathlib.Path(temporary_name)
+        temporary.unlink()
+        argv = [os.fspath(runner), "-R", os.fspath(recipient_path), "-o", os.fspath(temporary)]
+        invocation = _invoke_age(runner, argv, tar_bytes, temporary, environment)
+        encrypted = _require_regular_file(temporary, "age output")
+        encrypted_hash, encrypted_bytes = _hash_regular_file(encrypted)
+        os.replace(encrypted, output_path)
+        try:
+            os.chmod(output_path, 0o600)
+        except OSError as exc:
+            raise ReleaseVaultError("E_VAULT_PERMISSION", "bundle permissions could not be set") from exc
+        temporary = None
+    except ReleaseVaultError:
+        raise
+    except OSError as exc:
+        raise ReleaseVaultError("E_RELEASE_NOT_READY", "bundle output could not be committed") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+    _atomic_write(sidecar_path, f"{encrypted_hash}  {output_path.name}\n".encode("ascii"), "sidecar")
+    if _read_sidecar(sidecar_path, output_path.name) != encrypted_hash:
+        raise ReleaseVaultError("E_VAULT_HASH_MISMATCH", "sidecar read-back validation failed")
+
+    result = {
+        "bundle_id": bundle_id or output_path.stem,
+        "bundle_sha256": encrypted_hash,
+        "bundle_bytes": encrypted_bytes,
+        "sidecar": sidecar_path.name,
+    }
+    metadata_requested = any(
+        item is not None for item in (receipt, public_keyring, policy, generation, fingerprints)
+    )
+    if metadata_requested:
+        if public_keyring is None:
+            public_keyring = vault / "public" / "release-keyring.gpg"
+        if policy is None:
+            policy = vault / "public" / "key-policy.json"
+        if generation is None:
+            match = re.fullmatch(r"recovery-bundle-([0-9]+)", output_path.stem)
+            if match is None:
+                raise ReleaseVaultError("E_RELEASE_NOT_READY", "generation is required")
+            generation = int(match.group(1))
+        if fingerprints is None:
+            raise ReleaseVaultError("E_RELEASE_NOT_READY", "fingerprints are required")
+        receipt_value = write_receipt(
+            output_path,
+            sidecar_path,
+            public_keyring,
+            policy,
+            bundle_id or output_path.stem,
+            generation,
+            fingerprints,
+            receipt_path=receipt_candidate,
+        )
+        result["receipt"] = receipt_value
+    if invocation is not None:
+        result["test_invocation"] = invocation
+    return result
+
+
 class ArgumentParseError(ValueError):
     """Raised so CLI argument failures remain JSON, like other failures."""
 
@@ -656,7 +1305,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
 def _build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(
         prog="ming-release-vault.py",
-        description="Validate public release receipts and scan public release material.",
+        description="Validate public release receipts, scan public release material, and prepare encrypted recovery bundles.",
     )
     commands = parser.add_subparsers(
         dest="command", required=True, parser_class=JsonArgumentParser
@@ -672,6 +1321,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     receipt = commands.add_parser("verify-receipt", help="validate a public receipt")
     receipt.add_argument("--receipt", required=True, type=pathlib.Path)
+
+    bundle = commands.add_parser("create-bundle", help="encrypt a local recovery bundle")
+    bundle.add_argument("--input", required=True, type=pathlib.Path)
+    bundle.add_argument("--output", required=True, type=pathlib.Path)
+    bundle.add_argument("--recipient-file", required=True, type=pathlib.Path)
+    bundle.add_argument("--sidecar", type=pathlib.Path)
+    bundle.add_argument("--receipt", type=pathlib.Path)
+    bundle.add_argument("--public-keyring", type=pathlib.Path)
+    bundle.add_argument("--policy", type=pathlib.Path)
+    bundle.add_argument("--bundle-id")
+    bundle.add_argument("--generation", type=int)
+    bundle.add_argument("--primary-fingerprint")
+    bundle.add_argument("--signing-fingerprint")
     return parser
 
 
@@ -689,6 +1351,24 @@ def main(argv=None) -> int:
         if args.command == "verify-receipt":
             receipt = validate_receipt(_load_json(args.receipt))
             return emit_ok({"receipt": receipt})
+        if args.command == "create-bundle":
+            fingerprints = None
+            if args.primary_fingerprint is not None or args.signing_fingerprint is not None:
+                fingerprints = (args.primary_fingerprint, args.signing_fingerprint)
+            return emit_ok(
+                create_bundle(
+                    args.input,
+                    args.output,
+                    args.recipient_file,
+                    sidecar=args.sidecar,
+                    receipt=args.receipt,
+                    public_keyring=args.public_keyring,
+                    policy=args.policy,
+                    bundle_id=args.bundle_id,
+                    generation=args.generation,
+                    fingerprints=fingerprints,
+                )
+            )
         return emit_error("E_USAGE", "unsupported command")
     except ReleaseVaultError as exc:
         return emit_error(exc.error_code, exc.message, exc.details)

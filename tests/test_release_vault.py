@@ -25,12 +25,16 @@ def load_tool():
     return module
 
 
-def run_cli(*args):
+def run_cli(*args, env=None):
+    child_env = os.environ.copy()
+    if env is not None:
+        child_env.update(env)
     return subprocess.run(
         [sys.executable, str(TOOL), *args],
         capture_output=True,
         text=True,
         timeout=10,
+        env=child_env,
     )
 
 
@@ -538,6 +542,232 @@ class ReleaseVaultPublicScannerTests(unittest.TestCase):
         output = json.loads(result.stdout)
         self.assertEqual(output["error_code"], "E_USAGE")
         self.assertNotIn("do-not-echo-this", result.stdout)
+
+
+class ReleaseVaultBundleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tool = load_tool()
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp_dir.name)
+        self.vault = self.root / "release-vault"
+        (self.vault / "encrypted").mkdir(parents=True)
+        (self.vault / "receipts").mkdir()
+        (self.vault / "public").mkdir()
+        self.private_input = self.root / "private-input"
+        self.private_input.mkdir()
+        (self.private_input / "secret.key").write_bytes(b"private recovery material\n")
+        (self.private_input / "revocation.crt").write_bytes(b"revocation certificate\n")
+        (self.private_input / "nested").mkdir()
+        (self.private_input / "nested" / "manifest.txt").write_text(
+            "recovery manifest\n", encoding="utf-8"
+        )
+        self.recipient = self.root / "recipient.txt"
+        self.recipient.write_text("age1example-recipient\n", encoding="utf-8")
+        self.keyring = self.vault / "public" / "release-keyring.gpg"
+        self.policy = self.vault / "public" / "key-policy.json"
+        self.keyring.write_bytes(b"public keyring\n")
+        self.policy.write_text('{"allowed_primary_fingerprints": []}\n', encoding="utf-8")
+        self.output = self.vault / "encrypted" / "recovery-bundle-1.age"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def cli(self, *args, env=None):
+        child_env = {"MING_RELEASE_VAULT": str(self.vault)}
+        if env:
+            child_env.update(env)
+        return run_cli(*args, env=child_env)
+
+    def test_create_bundle_requires_explicit_vault_and_rejects_output_outside_it(self):
+        missing = run_cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_VAULT": ""},
+        )
+        self.assertEqual(missing.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(missing.stdout)["error_code"], "E_VAULT_NOT_CONFIGURED")
+
+        outside = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.root / "outside.age"),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(outside.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(outside.stdout)["error_code"], "E_VAULT_PERMISSION")
+
+    def test_create_bundle_rejects_input_symlink_and_repository_output(self):
+        try:
+            os.symlink(self.private_input / "secret.key", self.private_input / "link.key")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink support is unavailable: %s" % exc)
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+
+        repository_output = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(ROOT / ".release-bundle.age"),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(repository_output.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(repository_output.stdout)["error_code"], "E_VAULT_PERMISSION")
+
+    def test_create_bundle_rejects_password_option_and_environment(self):
+        option = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            "--password",
+            "do-not-echo-this",
+        )
+        self.assertEqual(option.returncode, self.tool.EXIT_USAGE)
+        self.assertNotIn("do-not-echo-this", option.stdout)
+
+        password_env = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_PASSWORD": "do-not-echo-this", "MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(password_env.returncode, self.tool.EXIT_NOT_READY)
+        self.assertNotIn("do-not-echo-this", password_env.stdout)
+
+    def test_create_bundle_rejects_absent_age(self):
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            env={"PATH": "", "MING_RELEASE_AGE": "age-not-installed"},
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_NOT_READY)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "E_RELEASE_NOT_READY")
+
+    def test_create_bundle_uses_recipient_file_and_deterministic_tar_stream(self):
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            "--public-keyring",
+            str(self.keyring),
+            "--policy",
+            str(self.policy),
+            "--primary-fingerprint",
+            "A" * 40,
+            "--signing-fingerprint",
+            "B" * 40,
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_OK, result.stderr)
+        payload = json.loads(result.stdout)
+        invocation = payload["test_invocation"]
+        self.assertIn("-R", invocation["argv"])
+        self.assertNotIn("password", " ".join(invocation["argv"]).lower())
+        self.assertNotIn("MING_RELEASE_PASSWORD", invocation["environment"])
+        self.assertNotIn("AGE_PASSPHRASE", invocation["environment"])
+        self.assertTrue(self.output.is_file())
+        sidecar = self.output.with_suffix(".sha256")
+        self.assertTrue(sidecar.is_file())
+        expected_hash = __import__("hashlib").sha256(self.output.read_bytes()).hexdigest()
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), "%s  %s\n" % (expected_hash, self.output.name))
+        self.assertEqual(payload["bundle_sha256"], expected_hash)
+
+        second = self.vault / "encrypted" / "recovery-bundle-2.age"
+        result2 = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(second),
+            "--recipient-file",
+            str(self.recipient),
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(result2.returncode, self.tool.EXIT_OK, result2.stderr)
+        self.assertEqual(self.output.read_bytes(), second.read_bytes())
+
+    def test_create_bundle_receipt_is_atomic_validated_and_public_only(self):
+        result = self.cli(
+            "create-bundle",
+            "--input",
+            str(self.private_input),
+            "--output",
+            str(self.output),
+            "--recipient-file",
+            str(self.recipient),
+            "--public-keyring",
+            str(self.keyring),
+            "--policy",
+            str(self.policy),
+            "--primary-fingerprint",
+            "A" * 40,
+            "--signing-fingerprint",
+            "B" * 40,
+            env={"MING_RELEASE_TEST_AGE": "1"},
+        )
+        self.assertEqual(result.returncode, self.tool.EXIT_OK, result.stderr)
+        receipt_path = self.vault / "receipts" / "recovery-bundle-1.json"
+        self.assertTrue(receipt_path.is_file())
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.tool.validate_receipt(receipt), receipt)
+        serialized = json.dumps(receipt)
+        for forbidden in (str(self.vault), str(self.private_input), "ming.sca-hub.cn", "ssh://"):
+            self.assertNotIn(forbidden, serialized)
+
+
+class ReleaseVaultReceiptSchemaTests(unittest.TestCase):
+    def test_release_receipt_schema_matches_validator_contract(self):
+        schema_path = ROOT / "docs" / "releases" / "26.4.0-release-receipt.schema.json"
+        self.assertTrue(schema_path.is_file())
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(schema["additionalProperties"], False)
+        self.assertEqual(schema["properties"]["format"]["const"], "ming-release-vault-receipt-v1")
+        self.assertEqual(
+            set(schema["required"]),
+            set(load_tool().REQUIRED_RECEIPT_FIELDS),
+        )
 
 
 if __name__ == "__main__":

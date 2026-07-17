@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ming.scallion.uno/schemas/26.4.0-release-receipt.schema.json",
+  "title": "Ming OS 26.4.0 release vault receipt",
+  "description": "Public metadata for an encrypted recovery bundle. This schema deliberately excludes host, NAS, credential, and private-key data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "bundle_id",
+    "generation",
+    "primary_fingerprint",
+    "signing_fingerprint",
+    "bundle_sha256",
+    "bundle_bytes",
+    "public_keyring_sha256",
+    "key_policy_sha256",
+    "encryption_format",
+    "created_at",
+    "nas_object",
+    "status"
+  ],
+  "properties": {
+    "format": {
+      "const": "ming-release-vault-receipt-v1"
+    },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "primary_fingerprint": {
+      "type": "string",
+      "pattern": "^(?:[0-9A-F]{40}|[0-9A-F]{64})$"
+    },
+    "signing_fingerprint": {
+      "type": "string",
+      "pattern": "^(?:[0-9A-F]{40}|[0-9A-F]{64})$"
+    },
+    "bundle_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "bundle_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "public_keyring_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "key_policy_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "encryption_format": {
+      "const": "age-v1"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nas_object": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "status": {
+      "const": "verified"
+    }
+  }
+}
