@@ -1955,7 +1955,7 @@ def _nas_terminate_process_group(process):
                 shell=False,
                 timeout=0.05,
             )
-        except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+        except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError, TypeError, ValueError):
             pass
     else:
         try:
