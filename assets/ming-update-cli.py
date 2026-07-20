@@ -231,6 +231,33 @@ def _discovery_version(value, field):
     return value
 
 
+def _compare_release_versions(left, right):
+    """Return -1/0/1 using the same numeric and suffix ordering as manifests."""
+    pattern = re.compile(
+        r"^(?P<numeric>[0-9]+(?:\.[0-9]+){1,3})(?P<suffix>[A-Za-z0-9._-]+)?$"
+    )
+    left_match = pattern.fullmatch(left)
+    right_match = pattern.fullmatch(right)
+    if left_match is None or right_match is None:
+        raise UpdateError("E_PROTOCOL_UNSUPPORTED", "release version is invalid")
+    left_numeric = tuple(int(part) for part in left_match.group("numeric").split("."))
+    right_numeric = tuple(int(part) for part in right_match.group("numeric").split("."))
+    width = max(len(left_numeric), len(right_numeric))
+    left_key = left_numeric + (0,) * (width - len(left_numeric))
+    right_key = right_numeric + (0,) * (width - len(right_numeric))
+    if left_key != right_key:
+        return 1 if left_key > right_key else -1
+    left_suffix = left_match.group("suffix") or ""
+    right_suffix = right_match.group("suffix") or ""
+    if left_suffix == right_suffix:
+        return 0
+    if not left_suffix:
+        return 1
+    if not right_suffix:
+        return -1
+    return 1 if left_suffix > right_suffix else -1
+
+
 def validate_discovery(value, architecture, current_version=None):
     if not isinstance(value, dict) or value.get("schema") != "ming.update.discovery.v1":
         raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update discovery schema is unsupported")
@@ -275,6 +302,8 @@ def validate_discovery(value, architecture, current_version=None):
         "minimum_bootstrap": _discovery_version(value.get("minimum_bootstrap"), "minimum bootstrap version"),
         "release_notes": value.get("release_notes") if isinstance(value.get("release_notes"), str) else "",
     }
+    if current_version is not None and _compare_release_versions(result["version"], current_version) <= 0:
+        raise UpdateError("E_PROTOCOL_UNSUPPORTED", "update target version is not newer than this system")
     manifest_sha256 = _safe_sha256(value.get("manifest_sha256"), "manifest_sha256")
     result.update({
         "manifest_url": _content_addressed_https(

@@ -165,6 +165,87 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertTrue((self.root / "cache" / "discovery.json").is_file())
         self.assert_schema(value)
 
+    def test_preview_2640_discovers_the_formal_26401_transaction(self):
+        manifest_hash = hashlib.sha256(b"formal-manifest").hexdigest()
+        controller = self.controller(
+            capability={"available": True, "capability": "transactional-slot-v1", "bootstrap_version": "1.0.0"},
+            current_version="26.4.0",
+            discovery={
+                "schema": "ming.update.discovery.v1",
+                "available": True,
+                "current_version": "26.4.0",
+                "architecture": "amd64",
+                "capability": "transactional-slot-v1",
+                "delivery": "transactional-slot-v1",
+                "release_id": "ming-os-26.4.0.1-amd64-formal",
+                "version": "26.4.0.1",
+                "minimum_bootstrap": "1.0.0",
+                "manifest_url": "https://updates.example/objects/" + manifest_hash,
+                "manifest_signature_url": "https://updates.example/objects/" + ("d" * 64),
+                "manifest_sha256": manifest_hash,
+            },
+        )
+
+        value = controller.check()
+
+        self.assertTrue(value["ok"])
+        self.assertEqual(value["state"], "available")
+        self.assertEqual(value["update"]["available_version"], "26.4.0.1")
+        self.assert_schema(value)
+
+    def test_formal_26401_rejects_a_same_or_older_transaction(self):
+        for target_version in ("26.4.0.1", "26.4.0"):
+            with self.subTest(target_version=target_version):
+                manifest_hash = hashlib.sha256(target_version.encode("ascii")).hexdigest()
+                controller = self.controller(
+                    capability={"available": True, "capability": "transactional-slot-v1", "bootstrap_version": "1.0.0"},
+                    current_version="26.4.0.1",
+                    discovery={
+                        "schema": "ming.update.discovery.v1",
+                        "available": True,
+                        "current_version": "26.4.0.1",
+                        "architecture": "amd64",
+                        "capability": "transactional-slot-v1",
+                        "delivery": "transactional-slot-v1",
+                        "release_id": "ming-os-26.4.0.1-amd64-formal",
+                        "version": target_version,
+                        "minimum_bootstrap": "1.0.0",
+                        "manifest_url": "https://updates.example/objects/" + manifest_hash,
+                        "manifest_signature_url": "https://updates.example/objects/" + ("e" * 64),
+                        "manifest_sha256": manifest_hash,
+                    },
+                )
+
+                value = controller.check()
+
+                self.assertFalse(value["ok"])
+                self.assertEqual(value["error_code"], "E_PROTOCOL_UNSUPPORTED")
+                self.assertEqual(value["state"], "failed")
+                self.assert_schema(value)
+
+    def test_formal_26401_accepts_the_signed_no_update_contract(self):
+        controller = self.controller(
+            capability={"available": True, "capability": "transactional-slot-v1", "bootstrap_version": "1.0.0"},
+            current_version="26.4.0.1",
+            discovery={
+                "schema": "ming.update.discovery.v1",
+                "available": False,
+                "current_version": "26.4.0.1",
+                "architecture": "amd64",
+                "capability": "transactional-slot-v1",
+                "delivery": "none",
+            },
+        )
+
+        value = controller.check()
+
+        self.assertTrue(value["ok"])
+        self.assertEqual(value["state"], "idle")
+        self.assertEqual(value["action"], "none")
+        self.assertEqual(value["update"]["delivery"], "none")
+        self.assertIsNone(value["update"]["available_version"])
+        self.assert_schema(value)
+
     def test_discovery_runtime_rejects_fields_and_locators_outside_the_frozen_schema(self):
         valid = {
             "schema": "ming.update.discovery.v1",
