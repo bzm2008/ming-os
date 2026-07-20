@@ -200,6 +200,27 @@ ensure_resume_runtime_packages() {
     fi
 }
 
+verify_resume_release_identity() {
+    local os_release="${CHROOT_DIR}/etc/os-release"
+    local update_version_file="${CHROOT_DIR}/etc/ming-version"
+    local display_version_file="${CHROOT_DIR}/etc/ming-display-version"
+    local file
+    for file in "${os_release}" "${update_version_file}" "${display_version_file}"; do
+        if [[ ! -f "${file}" || -L "${file}" ]]; then
+            log_error "resume rootfs release identity is missing or unsafe: ${file}"
+            return 1
+        fi
+    done
+    grep -Fqx "VERSION_ID=\"${MING_OS_UPDATE_VERSION}\"" "${os_release}" \
+        && grep -Fqx "MING_DISPLAY_VERSION=\"${MING_OS_VERSION}\"" "${os_release}" \
+        && grep -Fqx "${MING_OS_UPDATE_VERSION}" "${update_version_file}" \
+        && grep -Fqx "${MING_OS_VERSION}" "${display_version_file}" \
+        || {
+            log_error "resume rootfs release identity does not match this formal build"
+            return 1
+        }
+}
+
 resume_main() {
     [[ "${EUID}" -ne 0 ]] && { echo "[ERROR] 需要 root 权限"; exit 1; }
 
@@ -210,7 +231,12 @@ resume_main() {
     # replaying every package module; this is intentionally opt-in so normal
     # recovery remains a full deterministic replay.
     if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]; then
+        if [[ "${MING_RELEASE_MODE:-development}" != "development" ]]; then
+            log_error "正式发布禁止跳过模块重放"
+            return 1
+        fi
         log_step "复用现有 chroot，跳过模块重放"
+        verify_resume_release_identity
         run_release_preflight
         build_iso
         return 0

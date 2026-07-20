@@ -30,11 +30,25 @@ class FormalReleaseIdentityContracts(unittest.TestCase):
             'write_file /etc/ming-version <<MINGVERSION', BASE)
         self.assertIn(
             'write_file /etc/ming-display-version <<MINGDISPLAYVERSION', BASE)
+        self.assertIn("verify_resume_release_identity", RESUME)
+        skip = RESUME.split('if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]', 1)[1]
+        self.assertLess(
+            skip.index("verify_resume_release_identity"),
+            skip.index("build_iso"),
+        )
+        self.assertIn('MING_RELEASE_MODE:-development', skip)
+        self.assertIn("正式发布禁止跳过模块重放", skip)
 
     def test_settings_uses_the_public_version_label(self):
         self.assertIn("def public_release_version(value):", SETTINGS)
         self.assertIn('line.startswith("MING_DISPLAY_VERSION=")', SETTINGS)
         self.assertIn("version_formatter(current_version)", SETTINGS)
+
+    def test_lsb_release_keeps_the_public_version(self):
+        self.assertIn("DISTRIB_RELEASE=${MING_OS_VERSION}", BASE)
+        self.assertIn("DISTRIB_RELEASE=${version}", BASE)
+        self.assertNotIn("DISTRIB_RELEASE=${MING_OS_UPDATE_VERSION}", BASE)
+        self.assertNotIn("DISTRIB_RELEASE=${update_version}", BASE)
 
     def test_formal_iso_identity_is_immutable_and_distinct_from_preview(self):
         self.assertIn('readonly MING_OS_BUILD_SUFFIX="formal"', BUILD)
