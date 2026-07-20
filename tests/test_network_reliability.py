@@ -259,6 +259,14 @@ class NetworkReliabilityContracts(unittest.TestCase):
         self.assertIn('connection modify uuid "${CONNECTION_UUID}" 802-11-wireless.powersave 2', dispatcher)
         self.assertNotIn("systemctl restart NetworkManager", dispatcher)
 
+    def test_wifi_drop_policy_requires_an_unexpected_networkmanager_reason(self):
+        dispatcher = BASE.split(
+            "cat > /etc/NetworkManager/dispatcher.d/80-ming-wifi-reliability", 1
+        )[1].split("MINGWIFIRELIABILITY", 2)[1]
+        self.assertIn("GENERAL.REASON", dispatcher)
+        self.assertIn("supplicant", dispatcher)
+        self.assertIn("ip-config", dispatcher)
+
     def test_network_profile_migration_is_in_boot_order_and_rootfs_gated(self):
         self.assertIn("ming-network-profile-migrate.service", BASE)
         self.assertIn("Before=NetworkManager.service", BASE)

@@ -1008,6 +1008,14 @@ action="${2:-}"
 [[ "${action}" == "down" ]] || exit 0
 [[ -n "${CONNECTION_UUID:-}" ]] || exit 0
 
+# Do not reinterpret an intentional user disconnect as a hardware fault.
+# NetworkManager's C.UTF-8 reason is the only trigger for this scoped recovery.
+reason=$(env LC_ALL=C.UTF-8 nmcli -g GENERAL.REASON device show "${ifname}" 2>/dev/null || true)
+case "${reason,,}" in
+    *supplicant*|*ip-config*|*carrier*|*firmware*|*timeout*|*failed*) ;;
+    *) exit 0 ;;
+esac
+
 state_dir=/run/ming-os/wifi-drop-history
 install -d -m 0700 "${state_dir}"
 key=$(printf '%s' "${CONNECTION_UUID}" | sha256sum | awk '{print $1}')
