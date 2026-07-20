@@ -25,13 +25,15 @@ echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 seed_resume_package_installer() {
     local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
     local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_guard="/tmp/ming-build/assets/ming-package-runtime-root-guard.sh"
     local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
     local current_link="/usr/local/lib/ming-os/package-installer-current"
     local stage contract required_common_sha actual_common_sha actual_installer_sha target
     local target_dir_meta target_installer_meta target_common_meta
     local target_installer_sha target_common_sha
     if ! chroot_exec test -s "${installer_source}" \
-        || ! chroot_exec test -s "${common_source}"; then
+        || ! chroot_exec test -s "${common_source}" \
+        || ! chroot_exec test -s "${runtime_guard}"; then
         log_error "resume 构建缺少受控的 ming-package-installer/ming-shell-common 资产"
         return 1
     fi
@@ -71,7 +73,11 @@ PY
         return 1
     fi
 
-    chroot_exec mkdir -p "${runtime_root}" /usr/local/sbin
+    chroot_exec install -d -m 0755 /usr/local/sbin || return 1
+    if ! chroot_exec bash "${runtime_guard}" "${runtime_root}"; then
+        log_error "resume 构建的安装器运行时根目录不安全"
+        return 1
+    fi
     stage="$(chroot_exec mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
     if ! chroot_exec install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
         || ! chroot_exec install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \

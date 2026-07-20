@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import pathlib
+import shutil
 import stat
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HELPER = ROOT / "assets" / "ming-spark-package-helper.py"
+INSTALLER = ROOT / "assets" / "ming-package-installer.py"
 
 
 def load_helper():
@@ -142,7 +144,44 @@ class SparkPackageHelperAssetTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual([], resolve_calls)
 
-    def test_default_runtime_candidates_prefer_immutable_v4_then_regular_fallback(self):
+    def test_extensionless_immutable_v4_runtime_loads_with_source_loader(self):
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = pathlib.Path(directory) / "ming-package-installer"
+            shutil.copyfile(INSTALLER, runtime)
+            runtime.chmod(0o755)
+
+            loaded = helper._load_package_installer(runtime, platform_name="nt")
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(
+            "ming-package-installer-26.4.0-v4",
+            loaded.PACKAGE_INSTALLER_CONTRACT,
+        )
+        self.assertTrue(callable(loaded.PackageInstaller.verify_installed))
+
+    def test_stale_contract_is_rejected_before_runtime_code_executes(self):
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            marker = base / "executed"
+            runtime = base / "stale-installer.py"
+            runtime.write_text(
+                "import pathlib\n"
+                "pathlib.Path(%r).write_text('executed', encoding='utf-8')\n"
+                "PACKAGE_INSTALLER_CONTRACT = 'ming-package-installer-26.4.0-v3'\n"
+                "class PackageInstaller:\n"
+                "    def verify_installed(self, package):\n"
+                "        return {}\n" % str(marker),
+                encoding="utf-8",
+            )
+
+            loaded = helper._load_package_installer(runtime, platform_name="nt")
+
+            self.assertIsNone(loaded)
+            self.assertFalse(marker.exists())
+
+    def test_default_runtime_path_is_only_the_exact_immutable_v4_file(self):
         helper = load_helper()
 
         service = helper.SparkPackageHelper(runner=ProtocolRunner())
@@ -151,16 +190,10 @@ class SparkPackageHelperAssetTests(unittest.TestCase):
             pathlib.Path(
                 "/usr/local/lib/ming-os/package-installer-runtimes/"
                 "ming-package-installer-26.4.0-v4/ming-package-installer"),
-            service.package_installer_paths[0],
+            service.package_installer_path,
         )
-        self.assertEqual(
-            pathlib.Path("/usr/local/sbin/ming-package-installer"),
-            service.package_installer_paths[1],
-        )
-        self.assertNotIn(
-            "package-installer-current",
-            "\n".join(str(path) for path in service.package_installer_paths),
-        )
+        self.assertFalse(hasattr(service, "package_installer_paths"))
+        self.assertNotIn("/usr/local/sbin", str(service.package_installer_path))
 
 
 class SparkPackageRequestTests(unittest.TestCase):

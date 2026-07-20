@@ -6,9 +6,11 @@ passes user input to a shell and it stages downloaded DEBs before any package
 manager process can consume them.
 """
 
+import ast
 import dataclasses
 import hashlib
 import hmac
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -57,8 +59,6 @@ REQUIRED_PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v4"
 PACKAGE_INSTALLER_PATH = pathlib.Path(
     "/usr/local/lib/ming-os/package-installer-runtimes/%s/ming-package-installer"
     % REQUIRED_PACKAGE_INSTALLER_CONTRACT)
-PACKAGE_INSTALLER_FALLBACK_PATH = pathlib.Path(
-    "/usr/local/sbin/ming-package-installer")
 
 
 class HelperError(Exception):
@@ -281,8 +281,23 @@ def _load_package_installer(
         runtime = pathlib.Path(resolve_func(configured))
         if not protected(runtime, True):
             return None
-        spec = importlib.util.spec_from_file_location(
-            "ming_package_installer_for_spark", runtime)
+        tree = ast.parse(runtime.read_text(encoding="utf-8"), filename=str(runtime))
+        contracts = []
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name) or target.id != "PACKAGE_INSTALLER_CONTRACT":
+                continue
+            if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+                return None
+            contracts.append(node.value.value)
+        if contracts != [REQUIRED_PACKAGE_INSTALLER_CONTRACT]:
+            return None
+        module_name = "ming_package_installer_for_spark_%s" % hashlib.sha256(
+            str(runtime).encode("utf-8", "strict")).hexdigest()[:16]
+        loader = importlib.machinery.SourceFileLoader(module_name, str(runtime))
+        spec = importlib.util.spec_from_loader(module_name, loader)
         if spec is None or spec.loader is None:
             return None
         module = importlib.util.module_from_spec(spec)
@@ -296,7 +311,7 @@ def _load_package_installer(
             return None
         return module
     except (AttributeError, ImportError, NameError, OSError, RuntimeError,
-            SyntaxError, TypeError, ValueError):
+            SyntaxError, TypeError, UnicodeError, ValueError):
         return None
 
 
@@ -317,12 +332,8 @@ class SparkPackageHelper:
         self.keyring_path = str(keyring_path or SPARK_KEYRING)
         self.verify_source = (runner is None) if verify_source is None else bool(verify_source)
         self.package_installer_module = package_installer_module
-        if package_installer_path is None:
-            self.package_installer_paths = (
-                PACKAGE_INSTALLER_PATH, PACKAGE_INSTALLER_FALLBACK_PATH)
-        else:
-            self.package_installer_paths = (pathlib.Path(package_installer_path),)
-        self.package_installer_path = self.package_installer_paths[0]
+        self.package_installer_path = pathlib.Path(
+            package_installer_path or PACKAGE_INSTALLER_PATH)
         self.lstat_func = lstat_func or os.lstat
         self.euid_getter = euid_getter or getattr(os, "geteuid", lambda: 1)
         self.environ = dict(os.environ if environ is None else environ)
@@ -711,10 +722,7 @@ class SparkPackageHelper:
     def _verify_package_install(self, request):
         runtime = self.package_installer_module
         if runtime is None:
-            for candidate in self.package_installer_paths:
-                runtime = _load_package_installer(candidate)
-                if runtime is not None:
-                    break
+            runtime = _load_package_installer(self.package_installer_path)
         if (
             runtime is None
             or getattr(runtime, "PACKAGE_INSTALLER_CONTRACT", None)

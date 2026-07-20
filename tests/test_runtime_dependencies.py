@@ -418,12 +418,28 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 self.assertIn(expected, resume_runtime)
         boundary = APPS.split("deploy_spark_security_boundary() {", 1)[1].split(
             "\ninstall_app_store() {", 1)[0]
+        self.assertNotIn(
+            "install -d -m 0755 /usr/local/sbin /usr/local/lib/ming-os",
+            boundary,
+        )
         self.assertIn("deploy_package_installer_runtime || return 1", boundary)
         self.assertNotIn(
             'install -m 0755 "${asset_dir}/ming-package-installer.py" '
             '/usr/local/sbin/ming-package-installer',
             boundary,
         )
+
+    def test_full_and_resume_guard_runtime_root_before_staging(self):
+        full_runtime = APPS.split("deploy_package_installer_runtime() {", 1)[1].split(
+            "\ndeploy_spark_security_boundary() {", 1)[0]
+        resume_runtime = RESUME.split("seed_resume_package_installer() {", 1)[1].split(
+            "\nseed_resume_spark_security() {", 1)[0]
+        guard = 'bash "${runtime_guard}" "${runtime_root}"'
+        for label, function in (("full", full_runtime), ("resume", resume_runtime)):
+            with self.subTest(path=label):
+                self.assertIn(guard, function)
+                self.assertLess(function.index(guard), function.index("mktemp -d"))
+                self.assertNotIn('mkdir -p "${runtime_root}"', function)
 
     def test_package_install_gui_distinguishes_installation_from_launch_readiness(self):
         gui = package_install_gui_source()

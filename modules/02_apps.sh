@@ -1775,12 +1775,14 @@ MINGSPARKMODE
 deploy_package_installer_runtime() {
     local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
     local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_guard="/tmp/ming-build/assets/ming-package-runtime-root-guard.sh"
     local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
     local current_link="/usr/local/lib/ming-os/package-installer-current"
     local stage contract required_common_sha actual_common_sha actual_installer_sha target
     local target_dir_meta target_installer_meta target_common_meta
     local target_installer_sha target_common_sha
-    if [[ ! -s "${installer_source}" || ! -s "${common_source}" ]]; then
+    if [[ ! -s "${installer_source}" || ! -s "${common_source}" \
+        || ! -s "${runtime_guard}" ]]; then
         echo "[ERROR] full build is missing the controlled package installer runtime assets" >&2
         return 1
     fi
@@ -1820,7 +1822,11 @@ PY
         return 1
     fi
 
-    mkdir -p "${runtime_root}" /usr/local/sbin || return 1
+    install -d -m 0755 /usr/local/sbin || return 1
+    if ! bash "${runtime_guard}" "${runtime_root}"; then
+        echo "[ERROR] full build package installer runtime root is unsafe" >&2
+        return 1
+    fi
     stage="$(mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
     if ! install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
         || ! install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
@@ -1882,13 +1888,12 @@ PY
 deploy_spark_security_boundary() {
     local asset_dir="/tmp/ming-build/assets"
     local asset
-    for asset in ming-package-installer.py ming-shell-common.py ming-spark-package-helper.py ming-spark-security-converge.py; do
+    for asset in ming-package-installer.py ming-shell-common.py ming-package-runtime-root-guard.sh ming-spark-package-helper.py ming-spark-security-converge.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "[ERROR] missing Spark security asset: ${asset}" >&2
             return 1
         fi
     done
-    install -d -m 0755 /usr/local/sbin /usr/local/lib/ming-os
     deploy_package_installer_runtime || return 1
     install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
     install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
