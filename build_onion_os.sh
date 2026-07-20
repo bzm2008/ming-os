@@ -1620,9 +1620,6 @@ validate_r4_compatibility() {
 from pathlib import Path
 import ast
 import configparser
-import importlib.machinery
-import importlib.util
-import inspect
 import io
 import os
 import re
@@ -1659,50 +1656,6 @@ def require_directory(relative_path):
     if not path.is_dir():
         errors.append(f"missing directory {relative_path}")
 
-def load_python_runtime(path):
-    path = Path(path)
-    module_name = "ming_rootfs_gate_" + re.sub(r"[^a-zA-Z0-9_]", "_", path.name)
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        if spec is None or spec.loader is None:
-            loader = importlib.machinery.SourceFileLoader(module_name, str(path))
-            spec = importlib.util.spec_from_loader(module_name, loader)
-        if spec is None or spec.loader is None:
-            raise ImportError("no Python source loader")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    except Exception as exc:
-        errors.append(f"cannot load Python runtime {path.relative_to(root)}: {exc}")
-        return None
-
-def require_python_class(path, class_name):
-    module = load_python_runtime(path)
-    if module is None:
-        return None
-    value = getattr(module, class_name, None)
-    if not inspect.isclass(value):
-        errors.append(f"{Path(path).relative_to(root)} missing class {class_name}")
-        return None
-    return module
-
-def require_python_method(owner, method_name, required_parameters=()):
-    value = getattr(owner, method_name, None)
-    if not callable(value):
-        errors.append(f"{owner.__name__} missing method {method_name}")
-        return None
-    try:
-        parameters = inspect.signature(value).parameters
-    except (TypeError, ValueError) as exc:
-        errors.append(f"cannot inspect {owner.__name__}.{method_name}: {exc}")
-        return None
-    missing = [name for name in required_parameters if name not in parameters]
-    if missing:
-        errors.append(
-            f"{owner.__name__}.{method_name} missing parameters: {', '.join(missing)}"
-        )
-    return value
-
 def load_python_ast(path):
     path = Path(path)
     try:
@@ -1711,7 +1664,7 @@ def load_python_ast(path):
         errors.append(f"cannot parse Python runtime {path.relative_to(root)}: {exc}")
         return None
 
-def require_ast_method(tree, class_name, method_name):
+def require_ast_class(tree, class_name):
     if tree is None:
         return None
     owner = next(
@@ -1722,6 +1675,12 @@ def require_ast_method(tree, class_name, method_name):
     if owner is None:
         errors.append(f"Python AST missing class {class_name}")
         return None
+    return owner
+
+def require_ast_method(tree, class_name, method_name, required_parameters=()):
+    owner = require_ast_class(tree, class_name)
+    if owner is None:
+        return None
     method = next(
         (node for node in owner.body
          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -1730,6 +1689,20 @@ def require_ast_method(tree, class_name, method_name):
     )
     if method is None:
         errors.append(f"Python AST missing method {class_name}.{method_name}")
+        return None
+    parameters = {
+        argument.arg
+        for argument in (
+            method.args.posonlyargs
+            + method.args.args
+            + method.args.kwonlyargs
+        )
+    }
+    missing = [name for name in required_parameters if name not in parameters]
+    if missing:
+        errors.append(
+            f"Python AST {class_name}.{method_name} missing parameters: {', '.join(missing)}"
+        )
     return method
 
 def ast_has_call(tree, attribute_name):
@@ -2211,41 +2184,42 @@ for marker in [
 performance_policy_path = root / "usr/local/lib/ming-os/ming-performance-policy.py"
 performance_policy = require_file(
     "usr/local/lib/ming-os/ming-performance-policy.py", "SO_PEERCRED")
-performance_policy_module = require_python_class(performance_policy_path, "ResourcePolicy")
-if performance_policy_module is not None:
-    require_python_method(performance_policy_module.ResourcePolicy, "begin", ("pid", "starttime", "reason"))
-    require_python_method(performance_policy_module.ResourcePolicy, "end", ("token",))
-    require_python_method(performance_policy_module.ResourcePolicy, "apply_background", (
+performance_policy_tree = load_python_ast(performance_policy_path)
+require_ast_method(
+    performance_policy_tree, "ResourcePolicy", "begin",
+    ("pid", "starttime", "reason"),
+)
+require_ast_method(
+    performance_policy_tree, "ResourcePolicy", "end", ("token",))
+require_ast_method(
+    performance_policy_tree, "ResourcePolicy", "apply_background", (
         "pid", "starttime", "desktop_file", "visible", "generation",
-    ))
-    require_python_method(performance_policy_module.ResourcePolicy, "status")
-    require_python_method(performance_policy_module.ResourcePolicy, "_prune_background_state")
+    ),
+)
+require_ast_method(
+    performance_policy_tree, "ResourcePolicy", "status")
+require_ast_method(
+    performance_policy_tree, "ResourcePolicy", "_prune_background_state")
 if "cpu.max" in performance_policy or "CPUQuota" in performance_policy:
     errors.append("background resource policy must not impose a shared hard CPU quota")
 window_resource_monitor_path = root / "usr/local/bin/ming-window-resource-monitor"
 window_resource_monitor = require_file(
     "usr/local/bin/ming-window-resource-monitor", "active-window-changed")
-window_resource_monitor_module = require_python_class(window_resource_monitor_path, "WnckResourceMonitor")
-if window_resource_monitor_module is not None:
-    require_python_method(
-        window_resource_monitor_module.EventState,
-        "next_background_generation",
-        ("pid", "starttime"),
-    )
-    require_python_method(
-        window_resource_monitor_module.PolicyClient,
-        "background",
-        ("pid", "starttime", "visible"),
-    )
-    require_python_method(
-        window_resource_monitor_module.WnckResourceMonitor,
-        "on_window_workspace_changed",
-        ("window",),
-    )
-    require_python_method(
-        window_resource_monitor_module.WnckResourceMonitor,
-        "on_window_manager_changed",
-    )
+window_resource_monitor_tree = load_python_ast(window_resource_monitor_path)
+require_ast_method(
+    window_resource_monitor_tree, "EventState", "next_background_generation",
+    ("pid", "starttime"),
+)
+require_ast_method(
+    window_resource_monitor_tree, "PolicyClient", "background",
+    ("pid", "starttime", "visible"),
+)
+require_ast_method(
+    window_resource_monitor_tree, "WnckResourceMonitor", "on_window_workspace_changed",
+    ("window",),
+)
+require_ast_method(
+    window_resource_monitor_tree, "WnckResourceMonitor", "on_window_manager_changed")
 for forbidden in ["xprop", "wmctrl"]:
     if forbidden in window_resource_monitor:
         errors.append(f"ming-window-resource-monitor must not poll windows with {forbidden}")

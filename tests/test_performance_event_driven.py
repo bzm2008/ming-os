@@ -1374,6 +1374,46 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    def test_rootfs_performance_contract_gate_is_ast_only(self):
+        build = BUILD.read_text(encoding="utf-8")
+        gate = build[
+            build.index("validate_r4_compatibility() {"):
+            build.index("write_grub_config() {")
+        ]
+        for forbidden in (
+            "importlib",
+            "import inspect",
+            "load_python_runtime",
+            "spec_from_file_location",
+            "exec_module",
+        ):
+            self.assertNotIn(forbidden, gate)
+        for marker in (
+            "def load_python_ast",
+            "def require_ast_class",
+            "def require_ast_method",
+            "required_parameters",
+            "ast.parse",
+            'environment["PYTHONPYCACHEPREFIX"] = pycache',
+            "performance_policy_tree = load_python_ast(performance_policy_path)",
+            'performance_policy_tree, "ResourcePolicy", "begin",\n'
+            '    ("pid", "starttime", "reason"),',
+            'performance_policy_tree, "ResourcePolicy", "end", ("token",)',
+            'performance_policy_tree, "ResourcePolicy", "apply_background", (\n'
+            '        "pid", "starttime", "desktop_file", "visible", "generation",',
+            'performance_policy_tree, "ResourcePolicy", "status"',
+            'performance_policy_tree, "ResourcePolicy", "_prune_background_state"',
+            "window_resource_monitor_tree = load_python_ast(window_resource_monitor_path)",
+            'window_resource_monitor_tree, "EventState", "next_background_generation",\n'
+            '    ("pid", "starttime"),',
+            'window_resource_monitor_tree, "PolicyClient", "background",\n'
+            '    ("pid", "starttime", "visible"),',
+            'window_resource_monitor_tree, "WnckResourceMonitor", "on_window_workspace_changed",\n'
+            '    ("window",),',
+            'window_resource_monitor_tree, "WnckResourceMonitor", "on_window_manager_changed"',
+        ):
+            self.assertIn(marker, gate)
+
     def test_installed_rootfs_gate_validates_performance_runtime_contracts(self):
         build = BUILD.read_text(encoding="utf-8")
         gate = build[
@@ -1388,15 +1428,15 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             '"readonly SUPERVISOR_INTERVAL=30"',
             '"monotonic_seconds"',
             "import ast",
-            "import inspect",
-            "import importlib.util",
-            "def load_python_runtime",
-            "def require_python_class",
-            "def require_python_method",
+            "def load_python_ast",
+            "def require_ast_class",
+            "def require_ast_method",
+            "required_parameters",
             "ast.parse",
-            'require_python_class(performance_policy_path, "ResourcePolicy")',
-            'require_python_method(performance_policy_module.ResourcePolicy, "apply_background"',
-            'require_python_class(window_resource_monitor_path, "WnckResourceMonitor")',
+            "performance_policy_tree = load_python_ast(performance_policy_path)",
+            'performance_policy_tree, "ResourcePolicy", "apply_background"',
+            "window_resource_monitor_tree = load_python_ast(window_resource_monitor_path)",
+            'window_resource_monitor_tree, "WnckResourceMonitor", "on_window_manager_changed"',
         ):
             self.assertIn(marker, gate)
         for fragile_marker in (
