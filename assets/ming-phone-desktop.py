@@ -966,15 +966,15 @@ def load_apps(default_only=False):
         for path in sorted(launchers):
             add_app_from_path(apps_by_basename, path, default_only=default_only)
 
-    truncation = []
+    reached_limits = []
     if root_limit_reached:
-        truncation.append("root-limit=%d" % root_limit)
+        reached_limits.append("root-limit=%d" % root_limit)
     if directory_entry_limit_reached:
-        truncation.append("directory-entry-limit=%d" % directory_entry_limit)
+        reached_limits.append("directory-entry-limit=%d" % directory_entry_limit)
     if launcher_limit_reached:
-        truncation.append("launcher-limit=%d" % launcher_limit)
-    if truncation:
-        log("application catalog enumeration truncated: " + ", ".join(truncation))
+        reached_limits.append("launcher-limit=%d" % launcher_limit)
+    if reached_limits:
+        log("application catalog enumeration budget reached: " + ", ".join(reached_limits))
 
     apps = list(apps_by_basename.values())
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item["basename"], 999), item["name"].lower()))

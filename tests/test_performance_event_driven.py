@@ -643,7 +643,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             {app["basename"] for app in apps}
         ))
         self.assertEqual([
-            "application catalog enumeration truncated: root-limit=3, "
+            "application catalog enumeration budget reached: root-limit=3, "
             "directory-entry-limit=6, launcher-limit=6",
         ], logs)
 
@@ -710,7 +710,67 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         )
         self.assertNotIn("later.desktop", apps_by_basename)
         self.assertEqual([
-            "application catalog enumeration truncated: "
+            "application catalog enumeration budget reached: "
+            "directory-entry-limit=1, launcher-limit=1",
+        ], logs)
+
+    def test_exact_catalog_budget_reports_reached_without_probe(self):
+        namespace = load_phone_subset({"load_apps"})
+        next_calls = []
+        closed = []
+        logs = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = pathlib.Path(directory) / "applications"
+            catalog.mkdir()
+            launcher = catalog / "only.desktop"
+
+            class ExactScan:
+                def __init__(self):
+                    self._entries = iter((types.SimpleNamespace(
+                        name=launcher.name,
+                        path=str(launcher),
+                    ),))
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    next_calls.append(True)
+                    return next(self._entries)
+
+                def close(self):
+                    closed.append(True)
+
+            def add_app_from_path(apps_by_basename, path, default_only=False):
+                path = pathlib.Path(path)
+                apps_by_basename[path.name] = {
+                    "basename": path.name,
+                    "name": path.stem,
+                    "path": str(path),
+                }
+                return True
+
+            scan = ExactScan()
+            namespace.update({
+                "APP_DIRS": [catalog],
+                "APP_CATALOG_MAX_ROOTS": 1,
+                "APP_CATALOG_MAX_DIRECTORY_ENTRIES": 1,
+                "APP_CATALOG_MAX_LAUNCHERS": 1,
+                "CORE_NAMES": set(),
+                "DESKTOP_ORDER": {},
+                "os": types.SimpleNamespace(scandir=lambda _path: scan),
+                "add_core_app": lambda _apps, _basename: False,
+                "add_app_from_path": add_app_from_path,
+                "log": logs.append,
+            })
+            apps = namespace["load_apps"]()
+
+        self.assertEqual(["only.desktop"], [app["basename"] for app in apps])
+        self.assertEqual(1, len(next_calls))
+        self.assertEqual([True], closed)
+        self.assertEqual([
+            "application catalog enumeration budget reached: "
             "directory-entry-limit=1, launcher-limit=1",
         ], logs)
 
