@@ -1263,10 +1263,9 @@ for link_path, expected_target, expected_resolved_target in spark_vendor_links:
     if not link.is_symlink():
         errors.append(f"unsafe vendor Spark Store link: {link_path}")
         continue
-    if link_path == "/usr/local/bin/spark-store":
-        link_metadata = link.lstat()
-        if link_metadata.st_uid != 0 or link_metadata.st_gid != 0:
-            errors.append("postinst Spark Store link is not owned by root:root")
+    link_metadata = link.lstat()
+    if link_metadata.st_uid != 0 or link_metadata.st_gid != 0:
+        errors.append(f"vendor Spark Store link is not owned by root:root: {link_path}")
     try:
         actual_target = os.readlink(link)
     except OSError as error:
@@ -1298,6 +1297,7 @@ else:
             or not stat.S_ISREG(spark_target_metadata.st_mode)
             or spark_target_metadata.st_uid != 0
             or spark_target_metadata.st_gid != 0
+            or bool(spark_target_metadata.st_mode & 0o022)
             or not spark_target_metadata.st_mode & 0o111
             or spark_target_metadata.st_size == 0):
         errors.append("unsafe vendor Spark Store target: /opt/spark-store/extras/spark-store")

@@ -243,6 +243,15 @@ class MultimediaRuntimeContracts(unittest.TestCase):
                 self.assertEqual("", wget_calls)
                 self.assertIn("E_PACKAGE_FAILED", completed.stderr)
 
+    def test_development_identity_without_explicit_mode_fails_before_download(self):
+        completed, wget_calls = run_spark_asset_gate(
+            "MING_RELEASE_STAGE=development\nVERSION_ID=26.4.0.1-development\n"
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertEqual("", wget_calls)
+        self.assertIn("E_PACKAGE_FAILED", completed.stderr)
+
     def test_explicit_development_download_rejects_a_bad_digest(self):
         completed, wget_calls = run_spark_asset_gate(
             "MING_RELEASE_STAGE=development\nVERSION_ID=26.4.0.1-development\n",

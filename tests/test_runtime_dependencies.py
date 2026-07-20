@@ -192,9 +192,17 @@ def write_core_desktops(root):
 
 
 def run_backend_validator(
-        root, final_uid=0, final_gid=0, first_link_uid=0, first_link_gid=0):
+        root,
+        final_uid=0,
+        final_gid=0,
+        final_write_bits=0,
+        first_link_uid=0,
+        first_link_gid=0,
+        second_link_uid=0,
+        second_link_gid=0):
     final_path = root / SPARK_VENDOR_TARGET.lstrip("/")
     first_link_path = root / "usr/local/bin/spark-store"
+    second_link_path = root / SPARK_VENDOR_LINK.lstrip("/")
     registry = root / ".ming-test-symlinks.json"
     raw_links = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
     links = {str(root / path): target for path, target in raw_links.items()}
@@ -234,9 +242,18 @@ def _ming_test_lstat(path, *args, **kwargs):
                 uid=%d,
                 gid=%d,
             )
+        if path_text == %r:
+            return _MingTestStat(
+                metadata,
+                mode=stat.S_IFLNK | 0o777,
+                uid=%d,
+                gid=%d,
+            )
         return _MingTestStat(metadata, mode=stat.S_IFLNK | 0o777)
     if path_text == %r:
-        mode = metadata.st_mode | 0o111 if %r else metadata.st_mode & ~0o111
+        mode = metadata.st_mode & ~0o022
+        mode = mode | 0o111 if %r else mode & ~0o111
+        mode |= %d
         return _MingTestStat(metadata, mode=mode, uid=%d, gid=%d)
     return metadata
 
@@ -259,8 +276,12 @@ os.readlink = _ming_test_readlink
         str(first_link_path),
         first_link_uid,
         first_link_gid,
+        str(second_link_path),
+        second_link_uid,
+        second_link_gid,
         str(final_path),
         final_executable,
+        final_write_bits,
         final_uid,
         final_gid,
     )
@@ -608,6 +629,44 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 first_link_gid=1000,
             )
             self.assertNotEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_a_non_root_package_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+            write_vendor_spark_package(root)
+
+            result = run_backend_validator(
+                root,
+                second_link_uid=1000,
+                second_link_gid=1000,
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_a_writable_final_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+            write_vendor_spark_package(root)
+
+            for write_bits in (0o020, 0o002):
+                with self.subTest(write_bits=oct(write_bits)):
+                    result = run_backend_validator(root, final_write_bits=write_bits)
+                    self.assertNotEqual(0, result.returncode, result.stderr)
 
     def test_r4_validation_invokes_required_runtime_gate(self):
         validation = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]
