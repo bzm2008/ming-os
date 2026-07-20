@@ -9,6 +9,7 @@ manager process can consume them.
 import dataclasses
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import pathlib
@@ -52,6 +53,8 @@ E_REQUEST_INVALID = "E_REQUEST_INVALID"
 E_AUTHORIZATION_FAILED = "E_AUTHORIZATION_FAILED"
 E_FILE_UNSAFE = "E_FILE_UNSAFE"
 E_PACKAGE_UNVERIFIED = "E_PACKAGE_UNVERIFIED"
+PACKAGE_INSTALLER_PATH = pathlib.Path("/usr/local/sbin/ming-package-installer")
+REQUIRED_PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v4"
 
 
 class HelperError(Exception):
@@ -238,6 +241,36 @@ def _deb822_stanzas(output):
     return stanzas
 
 
+def _load_package_installer(path=PACKAGE_INSTALLER_PATH):
+    """Load only the root-controlled installer runtime with the pinned contract."""
+    try:
+        runtime = pathlib.Path(path).resolve(strict=True)
+        metadata = os.lstat(runtime)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (os.name != "nt" and (
+                int(metadata.st_uid) != 0 or bool(metadata.st_mode & 0o022)
+            ))
+        ):
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "ming_package_installer_for_spark", runtime)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if (
+            getattr(module, "PACKAGE_INSTALLER_CONTRACT", None)
+            != REQUIRED_PACKAGE_INSTALLER_CONTRACT
+            or not callable(getattr(module, "PackageInstaller", None))
+            or not callable(getattr(module.PackageInstaller, "verify_installed", None))
+        ):
+            return None
+        return module
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return None
+
+
 class SparkPackageHelper:
     MAX_DEB_BYTES = MAX_DEB_BYTES
 
@@ -245,7 +278,8 @@ class SparkPackageHelper:
             self, runner=None, log_path=None, download_root=None, staging_root=None,
             source_list=None, euid_getter=None, environ=None, passwd_lookup=None,
             session_reader=None, lstat_func=None, keyring_path=None,
-            verify_source=None):
+            verify_source=None, package_installer_module=None,
+            package_installer_path=None):
         self.runner = runner or _run
         self.log_path = pathlib.Path(log_path or LOG_PATH)
         self.download_root = pathlib.Path(download_root or DOWNLOAD_ROOT)
@@ -253,6 +287,9 @@ class SparkPackageHelper:
         self.source_list = str(source_list or SPARK_SOURCE_LIST)
         self.keyring_path = str(keyring_path or SPARK_KEYRING)
         self.verify_source = (runner is None) if verify_source is None else bool(verify_source)
+        self.package_installer_module = package_installer_module
+        self.package_installer_path = pathlib.Path(
+            package_installer_path or PACKAGE_INSTALLER_PATH)
         self.lstat_func = lstat_func or os.lstat
         self.euid_getter = euid_getter or getattr(os, "geteuid", lambda: 1)
         self.environ = dict(os.environ if environ is None else environ)
@@ -365,20 +402,13 @@ class SparkPackageHelper:
         ):
             raise HelperError(E_FILE_UNSAFE, "downloaded DEB metadata is unsafe")
 
-    @staticmethod
-    def _parent_chain(path):
-        current = pathlib.Path(path.anchor or pathlib.Path(path).anchor or os.sep)
-        parts = path.parts
-        for part in parts:
-            if part in ("", path.anchor, current.anchor):
-                continue
-            if part == path.name:
-                break
+    def _reject_symlink_parents(self, relative):
+        current = self.download_root
+        parents = [current]
+        for part in relative.parts[:-1]:
             current = current / part
-            yield current
-
-    def _reject_symlink_parents(self, path):
-        for parent in self._parent_chain(path):
+            parents.append(current)
+        for parent in parents:
             try:
                 metadata = self.lstat_func(parent)
             except OSError as error:
@@ -399,7 +429,7 @@ class SparkPackageHelper:
         package, filename = relative.parts
         if not _valid_package(package) or not filename.endswith(".deb") or filename == ".deb":
             raise HelperError(E_FILE_UNSAFE, "DEB path layout is invalid")
-        self._reject_symlink_parents(path)
+        self._reject_symlink_parents(relative)
         try:
             metadata = self.lstat_func(path)
         except OSError as error:
@@ -636,12 +666,59 @@ class SparkPackageHelper:
             "package": request.package,
             "installed": False,
             "launch_ready": False,
+            "launchers": [],
             "resolver": "spark",
             "error_code": "",
             "error": "",
         }
         result.update(values)
         return _redact_value(result)
+
+    def _verify_package_install(self, request):
+        runtime = self.package_installer_module
+        if runtime is None:
+            runtime = _load_package_installer(self.package_installer_path)
+        if (
+            runtime is None
+            or getattr(runtime, "PACKAGE_INSTALLER_CONTRACT", None)
+            != REQUIRED_PACKAGE_INSTALLER_CONTRACT
+            or not callable(getattr(runtime, "PackageInstaller", None))
+            or not callable(getattr(runtime.PackageInstaller, "verify_installed", None))
+        ):
+            self.log_event(
+                "postflight_rejected", package=request.package,
+                error_code=E_PACKAGE_FAILED, detail="installer contract mismatch")
+            return self._result(
+                False, request, error_code=E_PACKAGE_FAILED,
+                error="受控软件包验证组件不可用。")
+        try:
+            verifier = runtime.PackageInstaller(runner=self.runner)
+            payload = verifier.verify_installed(request.package)
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            self.log_event(
+                "postflight_failed", package=request.package,
+                error_code=E_PACKAGE_FAILED, detail=error)
+            return self._result(False, request, error_code=E_PACKAGE_FAILED)
+        if not isinstance(payload, dict) or payload.get("package") != request.package:
+            return self._result(False, request, error_code=E_PACKAGE_FAILED)
+        launchers = payload.get("launchers")
+        if not isinstance(launchers, list):
+            return self._result(False, request, error_code=E_PACKAGE_FAILED)
+        if payload.get("installed") is not True:
+            return self._result(
+                False, request, installed=False, launchers=launchers,
+                error_code=E_PACKAGE_FAILED)
+        if payload.get("launch_ready") is not True:
+            return self._result(
+                False, request, installed=True, launch_ready=False,
+                launchers=launchers, error_code=E_LAUNCH_NOT_READY)
+        if payload.get("ok") is not True:
+            return self._result(
+                False, request, installed=True, launch_ready=True,
+                launchers=launchers, error_code=E_PACKAGE_FAILED)
+        return self._result(
+            True, request, installed=True, launch_ready=True,
+            launchers=launchers)
 
     def _run_typed_apt(self, request, operation, package=""):
         try:
@@ -656,8 +733,10 @@ class SparkPackageHelper:
             failure = self._failure_code(code, output, error)
             self.log_event("apt_failed", operation=operation, package=package, error_code=failure)
             return self._result(False, request, error_code=failure)
+        if operation == "install":
+            return self._verify_package_install(request)
         return self._result(
-            True, request, installed=(operation == "install"), launch_ready=True)
+            True, request, installed=False, launch_ready=False)
 
     def execute(self, request, request_uid):
         staged = None

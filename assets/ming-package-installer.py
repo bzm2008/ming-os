@@ -25,7 +25,7 @@ VERSION_PATTERN = re.compile(r"^[0-9A-Za-z.+:~\-]+$")
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 SHELL_WRAPPER_REJECTION = "shell command wrappers are not allowed"
 PACKAGE_INSTALLER_PATH = "/usr/local/sbin/ming-package-installer"
-PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v3"
+PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v4"
 REQUIRED_COMMON_SHA256 = "cc2e34b62e6ab9cac74164dd51c2b5218d016f42500f80017931ce7d6f3b6ad1"
 PACKAGE_MANAGER_LOCK = "/run/lock/ming-package-manager.lock"
 PACKAGE_MANAGER_LOCK_TIMEOUT = 30
@@ -1184,6 +1184,60 @@ class PackageInstaller:
                          if not launch_ready else []),
             **proxy_fields,
             **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
+        )
+
+    def verify_installed(self, package):
+        """Verify installed state and launcher readiness without another APT transaction."""
+        package = package.strip() if isinstance(package, str) else ""
+        if not PACKAGE_PATTERN.fullmatch(package):
+            return self._result(
+                False,
+                action="verify-installed",
+                state="validation_failed",
+                package=package,
+                error_code=E_PACKAGE_FAILED,
+                error="软件包名称格式无效。",
+            )
+        returncode, output, command_error = self._call(
+            ("dpkg-query", "-W", "-f=${Status}", package), timeout=20)
+        if returncode != 0 or output.strip() != "install ok installed":
+            self._log("installed-state verification failed for %s: %s" % (
+                package, command_error.strip() or output.strip() or "not installed"))
+            return self._result(
+                False,
+                action="verify-installed",
+                state="verification_failed",
+                package=package,
+                installed=False,
+                launch_ready=False,
+                error_code=E_PACKAGE_FAILED,
+                error="软件包事务结束后未处于完整安装状态。",
+            )
+
+        launchers, enumeration_error = self._package_launchers(package)
+        launcher_warnings = [record for record in launchers if not record.get("ok")]
+        if enumeration_error:
+            launcher_warnings.append({
+                "path": "", "name": package, "ok": False,
+                "visible": True, "activation": "", "error": enumeration_error,
+            })
+        state, launch_ready, launch_error = self._launch_readiness(
+            launchers, "verified", enumeration_error)
+        proxy_fields = self._proxy_result_fields(launchers)
+        self._log_launch_readiness(package, launcher_warnings, enumeration_error)
+        return self._result(
+            True,
+            action="verify-installed",
+            state=state,
+            package=package,
+            installed=True,
+            launch_ready=launch_ready,
+            launchers=launchers,
+            launcher_warnings=launcher_warnings,
+            error=launch_error,
+            error_code=E_LAUNCH_NOT_READY if not launch_ready else "",
+            repair_argv=self._repair_argv(package) if not launch_ready else [],
+            **proxy_fields,
         )
 
     def repair(self, package):

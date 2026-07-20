@@ -3,6 +3,7 @@ import importlib.util
 import json
 import pathlib
 import os
+import types
 import unittest
 import tempfile
 
@@ -114,6 +115,96 @@ class NetworkReliabilityContracts(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(
             [("ming-net-" + "a" * 32, "wlan0", "secret")], backend.calls)
+
+    def test_libnm_wifi_connect_sets_bssid_as_a_string_mac_address(self):
+        class FakeSetting:
+            def __init__(self):
+                self.properties = {}
+
+            @classmethod
+            def new(cls):
+                return cls()
+
+            def set_property(self, name, value):
+                self.properties[name] = value
+
+        class FakeConnection:
+            def __init__(self):
+                self.settings = []
+
+            @classmethod
+            def new(cls):
+                return cls()
+
+            def add_setting(self, setting):
+                self.settings.append(setting)
+
+        class FakeWireless(FakeSetting):
+            pass
+
+        class FakeClient:
+            def __init__(self):
+                self.connection = None
+
+            def get_manager_running(self):
+                return True
+
+            def add_and_activate_connection_async(
+                    self, connection, _device, _path, _cancellable, callback, _data):
+                self.connection = connection
+                callback(self, object(), None)
+
+            @staticmethod
+            def add_and_activate_connection_finish(_result):
+                return object()
+
+        class FakeBytes:
+            @staticmethod
+            def new(value):
+                return bytes(value)
+
+        class FakeAccessPoint:
+            @staticmethod
+            def get_path():
+                return "/org/freedesktop/NetworkManager/AccessPoint/1"
+
+        raw_ssid = "中文网络".encode("utf-8")
+        bssid = "AA:BB:CC:DD:EE:FF"
+        device = object()
+        client = FakeClient()
+        backend = self.device.NetworkManagerBackend()
+        backend.NM = types.SimpleNamespace(
+            SimpleConnection=FakeConnection,
+            SettingConnection=type("FakeConnectionSetting", (FakeSetting,), {}),
+            SettingWireless=FakeWireless,
+            SettingWirelessSecurity=type("FakeSecuritySetting", (FakeSetting,), {}),
+            SettingIP4Config=type("FakeIPv4Setting", (FakeSetting,), {}),
+            SettingIP6Config=type("FakeIPv6Setting", (FakeSetting,), {}),
+        )
+        backend.GLib = types.SimpleNamespace(Bytes=FakeBytes)
+        backend.client = client
+        backend.wifi_scan = lambda: [{
+            "ifname": "wlan0",
+            "bssid": bssid,
+            "ssid_bytes": raw_ssid,
+            "_key_mgmt": "wpa-psk",
+            "_device": device,
+            "_ap": FakeAccessPoint(),
+        }]
+        backend._run_async = lambda starter, _finisher, timeout=30: (
+            starter(lambda *_args: None) or (True, object()))
+        backend._wait_device_connected = lambda _device, timeout=30: (True, "")
+        network_id = self.device.make_network_id("wlan0", bssid, raw_ssid)
+
+        result = backend.wifi_connect(
+            network_id=network_id, ifname="wlan0", password="not-in-argv")
+
+        self.assertTrue(result["ok"], result)
+        wireless = next(
+            setting for setting in client.connection.settings
+            if isinstance(setting, FakeWireless))
+        self.assertIsInstance(wireless.properties["bssid"], str)
+        self.assertEqual(bssid, wireless.properties["bssid"])
 
     def test_ethernet_repair_targets_one_interface_without_networkmanager_restart(self):
         class Backend:

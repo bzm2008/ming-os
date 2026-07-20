@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import pathlib
@@ -39,7 +40,8 @@ def valid_session(uid=1000, **overrides):
 class ProtocolRunner:
     def __init__(
             self, digest="", package="sample-app", version="1.2.3",
-            architecture="amd64", installer_result=None, locked_result=None):
+            architecture="amd64", installer_result=None, locked_result=None,
+            dpkg_status="install ok installed"):
         self.digest = digest
         self.package = package
         self.version = version
@@ -52,6 +54,7 @@ class ProtocolRunner:
             "error_code": "",
         }
         self.locked_result = locked_result or (0, "", "")
+        self.dpkg_status = dpkg_status
         self.commands = []
 
     def __call__(self, command, timeout=20):
@@ -75,6 +78,8 @@ class ProtocolRunner:
             return 0, json.dumps(self.installer_result), ""
         if command[0] == "/usr/bin/flock":
             return self.locked_result
+        if command[0] == "/usr/bin/dpkg-query":
+            return 0, self.dpkg_status + "\n", ""
         raise AssertionError("unexpected command: %r" % (command,))
 
 
@@ -332,6 +337,42 @@ class SparkPackageFileTests(unittest.TestCase):
                 service.stage_deb(linked_source, source.stat().st_uid)
             self.assertEqual("E_FILE_UNSAFE", raised.exception.code)
 
+    def test_rejects_same_name_intermediate_symlink_without_following_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            download = base / "download"
+            package_dir = download / "sample.deb"
+            package_dir.mkdir(parents=True)
+            source = package_dir / "sample.deb"
+            source.write_bytes(b"payload")
+            checked = []
+
+            def fake_lstat(path):
+                candidate = pathlib.Path(path)
+                checked.append(candidate)
+                if candidate == package_dir:
+                    metadata = os.lstat(package_dir)
+                    values = {
+                        name: getattr(metadata, name)
+                        for name in dir(metadata)
+                        if name.startswith("st_")
+                    }
+                    values["st_mode"] = stat.S_IFLNK | 0o777
+                    return types.SimpleNamespace(**values)
+                return os.lstat(path)
+
+            service = self.helper.SparkPackageHelper(
+                download_root=download,
+                staging_root=base / "incoming",
+                lstat_func=fake_lstat,
+            )
+
+            with self.assertRaises(self.helper.HelperError) as raised:
+                service.stage_deb(source, source.stat().st_uid)
+
+            self.assertEqual("E_FILE_UNSAFE", raised.exception.code)
+            self.assertIn(package_dir, checked)
+
     def test_delete_after_install_refuses_an_inode_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             source = pathlib.Path(directory) / "sample.deb"
@@ -491,6 +532,111 @@ class SparkPackageRepositoryTests(unittest.TestCase):
         self.assertIn("DPkg::Lock::Timeout=60", command)
         self.assertNotIn("sh", command)
         self.assertNotIn("eval", command)
+
+    def test_package_name_install_requires_exact_status_and_launcher_postflight(self):
+        def runtime_for(payload):
+            class FakeInstaller:
+                def __init__(self, runner=None):
+                    self.runner = runner
+
+                def verify_installed(self, _package):
+                    return dict(payload)
+
+            return types.SimpleNamespace(
+                PACKAGE_INSTALLER_CONTRACT="ming-package-installer-26.4.0-v4",
+                PackageInstaller=FakeInstaller,
+            )
+
+        not_installed = ProtocolRunner()
+        request = self.helper.parse_request([
+            "ssinstall", "sample-app", "--no-create-desktop-entry", "--native"])
+
+        missing = self.helper.SparkPackageHelper(
+            runner=not_installed,
+            package_installer_module=runtime_for({
+                "ok": False,
+                "package": "sample-app",
+                "installed": False,
+                "launch_ready": False,
+                "launchers": [],
+                "error_code": "E_PACKAGE_FAILED",
+            }),
+        ).execute(request, 1000)
+
+        self.assertFalse(missing["ok"])
+        self.assertFalse(missing["installed"])
+        self.assertFalse(missing["launch_ready"])
+        self.assertEqual("E_PACKAGE_FAILED", missing["error_code"])
+
+        not_ready = ProtocolRunner(installer_result={
+            "ok": True,
+            "package": "sample-app",
+            "installed": True,
+            "launch_ready": False,
+            "launchers": [{"path": "/usr/share/applications/sample.desktop", "ok": False}],
+            "error_code": "E_LAUNCH_NOT_READY",
+        })
+        failed = self.helper.SparkPackageHelper(
+            runner=not_ready,
+            package_installer_module=runtime_for(not_ready.installer_result),
+        ).execute(request, 1000)
+        self.assertFalse(failed["ok"])
+        self.assertTrue(failed["installed"])
+        self.assertFalse(failed["launch_ready"])
+        self.assertEqual("E_LAUNCH_NOT_READY", failed["error_code"])
+        self.assertEqual(not_ready.installer_result["launchers"], failed["launchers"])
+
+    def test_package_name_install_loads_matching_installer_contract_without_reinstall(self):
+        helper = self.helper
+        self.assertIn(
+            "package_installer_module",
+            inspect.signature(helper.SparkPackageHelper).parameters,
+        )
+
+        class FakeInstaller:
+            def __init__(self, runner=None):
+                self.runner = runner
+
+            def verify_installed(self, package):
+                return {
+                    "ok": True,
+                    "package": package,
+                    "installed": True,
+                    "launch_ready": True,
+                    "launchers": [{"path": "/usr/share/applications/sample.desktop", "ok": True}],
+                    "error_code": "",
+                }
+
+        runtime = types.SimpleNamespace(
+            PACKAGE_INSTALLER_CONTRACT="ming-package-installer-26.4.0-v4",
+            PackageInstaller=FakeInstaller,
+        )
+        runner = ProtocolRunner()
+        service = helper.SparkPackageHelper(
+            runner=runner, package_installer_module=runtime)
+        request = helper.parse_request([
+            "ssinstall", "sample-app", "--no-create-desktop-entry", "--native"])
+
+        result = service.execute(request, 1000)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["installed"])
+        self.assertTrue(result["launch_ready"])
+        self.assertEqual(runtime.PackageInstaller(runner=runner).verify_installed(
+            "sample-app")["launchers"], result["launchers"])
+        flattened = " ".join(" ".join(command) for command in runner.commands)
+        self.assertEqual(1, flattened.count("apt-get"))
+        self.assertNotIn("--reinstall", flattened)
+
+        mismatched = types.SimpleNamespace(
+            PACKAGE_INSTALLER_CONTRACT="ming-package-installer-26.4.0-v3",
+            PackageInstaller=FakeInstaller,
+        )
+        rejected = helper.SparkPackageHelper(
+            runner=ProtocolRunner(), package_installer_module=mismatched,
+        ).execute(request, 1000)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual("E_PACKAGE_FAILED", rejected["error_code"])
 
     def test_installer_json_must_be_ok_and_use_the_spark_resolver(self):
         with tempfile.TemporaryDirectory() as directory:

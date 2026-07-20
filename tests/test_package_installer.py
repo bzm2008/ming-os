@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -147,6 +148,69 @@ class PackageInstallerInspectTests(unittest.TestCase):
         self.assertIn("log_path", result)
         self.assertEqual([command], runner.commands)
 
+    def test_verify_installed_is_non_mutating_and_reports_launcher_truth(self):
+        installer = load_installer()
+        self.assertTrue(
+            callable(getattr(installer.PackageInstaller, "verify_installed", None)),
+            "PackageInstaller must expose a non-mutating verify_installed method",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            applications = package_application_dir(directory)
+            executable = pathlib.Path(directory) / "usr" / "bin" / "sample-app"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            desktop = applications / "sample-app.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Sample\n"
+                "Exec=\"%s\"\n" % executable.as_posix(),
+                encoding="utf-8",
+            )
+            exact_status = ("dpkg-query", "-W", "-f=${Status}", "sample-app")
+            list_files = ("dpkg-query", "-L", "sample-app")
+            owner = ("dpkg-query", "-S", "--", str(desktop))
+            installed_owners = (
+                "dpkg-query", "-W",
+                "-f=${db:Status-Abbrev}\\t${binary:Package}\\n",
+                "--", "sample-app",
+            )
+            runner = FakeRunner({
+                exact_status: (0, "install ok installed\n", ""),
+                list_files: (0, str(desktop) + "\n", ""),
+                owner: (0, "sample-app: %s\n" % desktop, ""),
+                installed_owners: (0, "ii \tsample-app\n", ""),
+            })
+            service = configured_package_installer(
+                installer, applications, runner=runner,
+                log_path=pathlib.Path(directory) / "installer.log")
+
+            result = service.verify_installed("sample-app")
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["installed"])
+        self.assertTrue(result["launch_ready"], result)
+        self.assertEqual([str(desktop)], [item["path"] for item in result["launchers"]])
+        flattened = " ".join(" ".join(command) for command in runner.commands)
+        self.assertNotIn("apt-get", flattened)
+        self.assertNotIn("flock", flattened)
+
+    def test_verify_installed_rejects_non_exact_dpkg_status_before_launcher_scan(self):
+        installer = load_installer()
+        self.assertTrue(
+            callable(getattr(installer.PackageInstaller, "verify_installed", None)),
+            "PackageInstaller must expose a non-mutating verify_installed method",
+        )
+        exact_status = ("dpkg-query", "-W", "-f=${Status}", "sample-app")
+        runner = FakeRunner({exact_status: (0, "deinstall ok config-files\n", "")})
+
+        result = installer.PackageInstaller(runner=runner).verify_installed("sample-app")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["installed"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("E_PACKAGE_FAILED", result["error_code"])
+        self.assertEqual([exact_status], runner.commands)
+
     def test_install_rejects_wrong_architecture_before_apt_or_privilege_use(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
@@ -254,7 +318,7 @@ class PackageInstallerTransactionTests(unittest.TestCase):
             command,
         )
         self.assertIn("Dir::Etc::sourceparts=-", command)
-        self.assertEqual("ming-package-installer-26.4.0-v3", installer.PACKAGE_INSTALLER_CONTRACT)
+        self.assertEqual("ming-package-installer-26.4.0-v4", installer.PACKAGE_INSTALLER_CONTRACT)
 
     def test_cli_passes_spark_resolver_and_json_contract(self):
         installer = load_installer()
