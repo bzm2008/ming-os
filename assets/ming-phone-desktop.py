@@ -903,11 +903,80 @@ def load_apps(default_only=False):
     if default_only:
         for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
             add_core_app(apps_by_basename, basename)
-    for directory in APP_DIRS:
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.glob("*.desktop")):
+
+    roots = []
+    root_limit_reached = False
+    root_limit = max(0, int(APP_CATALOG_MAX_ROOTS))
+    for raw_directory in APP_DIRS:
+        if len(roots) >= root_limit:
+            root_limit_reached = True
+            break
+        roots.append(Path(raw_directory))
+
+    directory_entry_limit = max(0, int(APP_CATALOG_MAX_DIRECTORY_ENTRIES))
+    launcher_limit = max(0, int(APP_CATALOG_MAX_LAUNCHERS))
+    remaining_directory_entries = directory_entry_limit
+    remaining_launchers = launcher_limit
+    directory_entry_limit_reached = False
+    launcher_limit_reached = False
+    scan_states = []
+    try:
+        for directory in roots:
+            if not directory.is_dir():
+                continue
+            try:
+                scan = os.scandir(directory)
+            except OSError:
+                continue
+            scan_states.append([directory, scan, iter(scan), []])
+
+        active = list(scan_states)
+        if active and remaining_directory_entries == 0:
+            directory_entry_limit_reached = True
+        if active and remaining_launchers == 0:
+            launcher_limit_reached = True
+        # Advance roots in rounds so a noisy Desktop cannot consume the whole
+        # global budget before later application roots get sampled.
+        while active and remaining_directory_entries > 0 and remaining_launchers > 0:
+            next_active = []
+            for state in active:
+                if remaining_directory_entries <= 0 or remaining_launchers <= 0:
+                    break
+                try:
+                    candidate = next(state[2])
+                except (OSError, StopIteration):
+                    continue
+                remaining_directory_entries -= 1
+                if candidate.name.endswith(".desktop"):
+                    state[3].append(Path(candidate.path))
+                    remaining_launchers -= 1
+                next_active.append(state)
+            active = next_active
+            if active and remaining_directory_entries == 0:
+                directory_entry_limit_reached = True
+            if active and remaining_launchers == 0:
+                launcher_limit_reached = True
+    finally:
+        for _directory, scan, _iterator, _launchers in scan_states:
+            try:
+                scan.close()
+            except OSError:
+                pass
+
+    for _directory, _scan, _iterator, launchers in scan_states:
+        for path in sorted(launchers):
             add_app_from_path(apps_by_basename, path, default_only=default_only)
+
+    truncation = []
+    if root_limit_reached:
+        truncation.append("root-limit=%d" % root_limit)
+    if directory_entry_limit_reached:
+        truncation.append("directory-entry-limit=%d" % directory_entry_limit)
+    if launcher_limit_reached:
+        truncation.append("launcher-limit=%d" % launcher_limit)
+    if truncation:
+        log("application catalog enumeration truncated: " + ", ".join(truncation))
+
     apps = list(apps_by_basename.values())
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item["basename"], 999), item["name"].lower()))
     return apps

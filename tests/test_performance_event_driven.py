@@ -523,6 +523,130 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         self.assertEqual(roots[:2], scanned_roots)
         self.assertIn("APP_CATALOG_MAX_DIRECTORY_ENTRIES", assignments)
 
+    def test_load_apps_bounds_catalog_enumeration_without_losing_core_discovery(self):
+        namespace = load_phone_subset({"load_apps"})
+        inspected_names = []
+        scanned_roots = []
+        closed_roots = []
+        parsed = []
+        core_calls = []
+        logs = []
+
+        class FakeEntry:
+            def __init__(self, root, name):
+                self._root = root
+                self._name = name
+
+            @property
+            def name(self):
+                inspected_names.append(self._name)
+                return self._name
+
+            @property
+            def path(self):
+                return str(self._root / self._name)
+
+        class FakeScan:
+            def __init__(self, root, names):
+                self._root = root
+                self._entries = iter(FakeEntry(root, name) for name in names)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+                return False
+
+            def close(self):
+                if self._root not in closed_roots:
+                    closed_roots.append(self._root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            roots = [root / ("root-%d" % index) for index in range(4)]
+            entries_by_root = {
+                roots[0]: ["z.desktop", "shared.desktop", "ignored.txt"],
+                roots[1]: ["shared.desktop", "c.desktop", "later.desktop"],
+                roots[2]: ["y.desktop", "x.desktop", "late.desktop"],
+                roots[3]: ["never.desktop"],
+            }
+            for catalog_root in roots:
+                catalog_root.mkdir()
+                for name in entries_by_root[catalog_root]:
+                    (catalog_root / name).write_text("entry\n", encoding="utf-8")
+
+            def scandir(path):
+                catalog_root = pathlib.Path(path)
+                scanned_roots.append(catalog_root)
+                return FakeScan(catalog_root, entries_by_root[catalog_root])
+
+            def add_core_app(apps_by_basename, basename):
+                core_calls.append(basename)
+                apps_by_basename[basename] = {
+                    "basename": basename,
+                    "name": basename,
+                    "path": "/core/%s" % basename,
+                }
+                return True
+
+            def add_app_from_path(apps_by_basename, path, default_only=False):
+                path = pathlib.Path(path)
+                parsed.append((path, default_only))
+                if path.name in apps_by_basename:
+                    return False
+                apps_by_basename[path.name] = {
+                    "basename": path.name,
+                    "name": path.stem,
+                    "path": str(path),
+                }
+                return True
+
+            namespace.update({
+                "APP_DIRS": roots,
+                "APP_CATALOG_MAX_ROOTS": 3,
+                "APP_CATALOG_MAX_DIRECTORY_ENTRIES": 6,
+                "APP_CATALOG_MAX_LAUNCHERS": 6,
+                "CORE_NAMES": {"core-a.desktop", "core-b.desktop"},
+                "DESKTOP_ORDER": {"core-b.desktop": 0, "core-a.desktop": 1},
+                "os": types.SimpleNamespace(scandir=scandir),
+                "add_core_app": add_core_app,
+                "add_app_from_path": add_app_from_path,
+                "log": logs.append,
+            })
+            apps = namespace["load_apps"](default_only=True)
+
+        expected_paths = [
+            roots[0] / "shared.desktop",
+            roots[0] / "z.desktop",
+            roots[1] / "c.desktop",
+            roots[1] / "shared.desktop",
+            roots[2] / "x.desktop",
+            roots[2] / "y.desktop",
+        ]
+        self.assertEqual(["core-b.desktop", "core-a.desktop"], core_calls)
+        self.assertEqual(roots[:3], scanned_roots)
+        self.assertEqual(roots[:3], closed_roots)
+        self.assertEqual(6, len(inspected_names))
+        self.assertEqual(expected_paths, [path for path, _default_only in parsed])
+        self.assertTrue(all(default_only for _path, default_only in parsed))
+        self.assertEqual(str(roots[0] / "shared.desktop"), next(
+            app["path"] for app in apps if app["basename"] == "shared.desktop"
+        ))
+        self.assertTrue({"core-a.desktop", "core-b.desktop"}.issubset(
+            {app["basename"] for app in apps}
+        ))
+        self.assertEqual([
+            "application catalog enumeration truncated: root-limit=3, "
+            "directory-entry-limit=6, launcher-limit=6",
+        ], logs)
+
     def test_catalog_gio_event_marks_dirty_before_debounced_refresh(self):
         tree = ast.parse(PHONE.read_text(encoding="utf-8"))
         phone_class = next(
