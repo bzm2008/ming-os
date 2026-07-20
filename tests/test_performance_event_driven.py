@@ -930,6 +930,60 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             desktop._clear_catalog_sync_retry()
             self.assertEqual([1], removed_sources)
 
+    def test_layout_save_failure_does_not_reconcile_desktop_files(self):
+        namespace = load_phone_subset({"sync_layout"})
+        app_path = "/applications/alpha.desktop"
+        layout = {
+            "version": namespace["LAYOUT_VERSION"],
+            "catalog_paths": [app_path],
+            "items": [{
+                "id": "alpha",
+                "type": "app",
+                "path": app_path,
+                "x": 10,
+                "y": 20,
+                "pinned": True,
+            }],
+        }
+        app = {
+            "id": "alpha",
+            "path": app_path,
+            "basename": "alpha.desktop",
+            "name": "Alpha",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "Alpha.desktop"
+            manifest = root / "desktop-generated-manifest.json"
+            launcher.write_bytes(b"last-good-launcher")
+            manifest.write_bytes(b"last-good-manifest")
+            sync_calls = []
+
+            def sync_files(_layout):
+                sync_calls.append(True)
+                launcher.write_bytes(b"mutated-launcher")
+                manifest.write_bytes(b"mutated-manifest")
+                return True
+
+            namespace.update({
+                "load_apps": lambda default_only=False: [dict(app)],
+                "read_layout": lambda _path: dict(layout),
+                "load_layout": lambda: dict(layout),
+                "migrate_layout": lambda value: dict(value),
+                "canonicalize_core_layout_item": lambda item, _apps, _seen: dict(item),
+                "save_layout": lambda _layout: False,
+                "sync_files": sync_files,
+                "log": lambda _message: None,
+            })
+
+            updated, status = namespace["sync_layout"](report_status=True)
+
+            self.assertEqual(app_path, updated["items"][0]["path"])
+            self.assertIs(False, status)
+            self.assertEqual([], sync_calls)
+            self.assertEqual(b"last-good-launcher", launcher.read_bytes())
+            self.assertEqual(b"last-good-manifest", manifest.read_bytes())
+
     def test_desktop_replacement_fsyncs_file_and_parent_directory(self):
         tree = ast.parse(PHONE.read_text(encoding="utf-8"))
         functions = {

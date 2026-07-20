@@ -726,14 +726,23 @@ class DesktopSourceTests(unittest.TestCase):
                 "[Desktop Entry]\nType=Application\nName=Stale\nExec=stale\nX-Ming-Managed=true\n",
                 encoding="utf-8",
             )
+            reclaimed = desktop / "reclaimed.desktop"
+            reclaimed_text = "[Desktop Entry]\nType=Application\nName=Reclaimed\nExec=reclaimed\n"
+            reclaimed.write_text(reclaimed_text, encoding="utf-8")
             manifest = root / "desktop-generated-manifest.json"
-            manifest.write_text(json.dumps({"version": 1, "marker": "X-Ming-Managed", "managed_files": ["stale.desktop"]}), encoding="utf-8")
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "marker": "X-Ming-Managed",
+                "managed_files": ["stale.desktop", "reclaimed.desktop"],
+            }), encoding="utf-8")
             namespace["DESKTOP_DIR"] = desktop
             namespace["DESKTOP_MANIFEST_PATH"] = manifest
             layout = {"items": [{"id": "alpha", "type": "app", "path": str(app), "name": "Alpha", "pinned": True}]}
             namespace["sync_files"](layout)
             self.assertTrue(user.exists())
             self.assertFalse(stale.exists())
+            self.assertTrue(reclaimed.exists())
+            self.assertEqual(reclaimed_text, reclaimed.read_text(encoding="utf-8"))
             generated = desktop / "Alpha.desktop"
             self.assertTrue(generated.exists())
             self.assertIn("X-Ming-Managed=true", generated.read_text(encoding="utf-8"))

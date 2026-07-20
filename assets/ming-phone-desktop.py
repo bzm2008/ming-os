@@ -1187,13 +1187,15 @@ def sync_layout(width=1366, report_status=False):
         layout_saved = save_layout(layout)
         if not layout_saved:
             log("could not save reconciled desktop layout")
-        try:
-            files_synced = sync_files(layout)
-        except Exception as exc:
-            log(f"desktop file reconciliation failed: {exc}")
-            if not report_status:
-                raise
             files_synced = False
+        else:
+            try:
+                files_synced = sync_files(layout)
+            except Exception as exc:
+                log(f"desktop file reconciliation failed: {exc}")
+                if not report_status:
+                    raise
+                files_synced = False
         sync_succeeded = layout_saved and files_synced
     return (layout, sync_succeeded) if report_status else layout
 
@@ -1497,6 +1499,15 @@ def sync_files(layout):
             relative = _manifest_relative(candidate)
             if relative:
                 managed_before.add(relative)
+    source_paths = set()
+    for source_item in layout.get("items", []):
+        if source_item.get("path"):
+            source_paths.add(Path(source_item["path"]).resolve())
+        source_paths.update(
+            Path(child).resolve()
+            for child in source_item.get("children", [])
+            if isinstance(child, (str, os.PathLike))
+        )
     managed_files = set()
     managed_dirs = set()
     for item in layout.get("items", []):
@@ -1540,12 +1551,17 @@ def sync_files(layout):
             old.relative_to(DESKTOP_DIR)
         except ValueError:
             continue
-        if old.is_file():
-            try:
-                old.unlink()
-            except OSError as exc:
-                log(f"could not remove managed desktop launcher {old}: {exc}")
-                succeeded = False
+        if not old.is_file() or not _desktop_has_marker(old):
+            continue
+        source_resolver = globals().get("managed_desktop_source_path")
+        old_source = source_resolver(old) if callable(source_resolver) else None
+        if old.resolve() in source_paths or old_source in source_paths:
+            continue
+        try:
+            old.unlink()
+        except OSError as exc:
+            log(f"could not remove managed desktop launcher {old}: {exc}")
+            succeeded = False
     for relative in sorted(managed_dirs_before - managed_dirs):
         old = DESKTOP_DIR / Path(relative)
         try:
