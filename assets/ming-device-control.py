@@ -2529,6 +2529,97 @@ class DeviceController:
         return network_result(False, "error", code, text, retryable,
                               changed=rc == 0, action="repair_failed", error=text, status=after)
 
+    def audio_widget_status(self):
+        """Read only the fields needed by the always-visible status widget."""
+        if not self._can_run("pactl"):
+            return self._audio_status_result(state="unavailable", error="pactl 不可用")
+        info_rc, info, info_error = self._run(["pactl", "info"])
+        if info_rc != 0:
+            return self._audio_status_result(
+                state="no_server", backend="pactl", error=info_error or info or "PulseAudio 服务没有运行。")
+        defaults = self._pactl_info_defaults(info)
+        default_sink = defaults.get("sink", "")
+        if not default_sink or default_sink.lower() == "auto_null":
+            return self._audio_status_result(
+                state="no_default_sink", backend="pactl", server_available=True,
+                default_source=defaults.get("source", ""), error="没有可用的默认输出设备。")
+        volume_rc, volume_output, volume_error = self._run(
+            ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+        value = parse_percent(volume_output)
+        sinks_rc, sinks_output, sinks_error = self._run(
+            ["pactl", "list", "short", "sinks"])
+        playback_devices = self._pactl_sink_records(sinks_output, default_sink)
+        sink_present = any(item.get("id") == default_sink for item in playback_devices)
+        mute_rc, mute_output, mute_error = self._run(
+            ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
+        if volume_rc != 0 or value is None:
+            return self._audio_status_result(
+                state="no_default_sink", backend="pactl", server_available=True,
+                default_sink=default_sink, default_sink_present=sink_present,
+                playback_devices=playback_devices,
+                error=volume_error or volume_output or "无法读取默认输出音量。")
+        return self._audio_status_result(
+            available=True, state="ready", backend="pactl", value=value,
+            server_available=True, playback_ready=bool(sinks_rc == 0 and sink_present),
+            default_sink=default_sink, default_sink_present=sink_present,
+            playback_devices=playback_devices,
+            output_muted=(bool(re.search(r"Mute:\s*yes", mute_output or "", re.I))
+                          if mute_rc == 0 else None),
+            error=sinks_error if sinks_rc != 0 else (mute_error if mute_rc != 0 else ""),
+        )
+
+    def wifi_widget_status(self):
+        """Return a cheap Wi-Fi state without PCI/USB or journal diagnostics."""
+        backend = self._get_network_backend()
+        if backend is not None:
+            try:
+                devices = [
+                    (str(device.get_iface() or ""), backend._state_name(device))
+                    for device in backend._wifi_devices()
+                ]
+                if devices:
+                    return classify_wifi(
+                        wifi_devices=devices, pci_output="", usb_output="",
+                        rfkill_output="", firmware_output="", hardware_probes_ok=True)
+            except Exception:
+                pass
+        rc, output, error = self._run_c(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status"])
+        devices = []
+        for line in output.splitlines():
+            fields = line.split(":", 2)
+            if len(fields) == 3 and fields[1] == "wifi":
+                devices.append((fields[0], fields[2]))
+        return classify_wifi(
+            wifi_devices=devices, pci_output="", usb_output="", rfkill_output="",
+            firmware_output="", network_error=error if rc != 0 else "",
+            hardware_probes_ok=rc == 0)
+
+    def bluetooth_widget_status(self):
+        """Use one bounded BlueZ query for the compact widget."""
+        if not self._can_run("bluetoothctl"):
+            return {"available": False, "text": "不可用", "state": "diagnostic_unavailable"}
+        rc, output, error = self._run(["bluetoothctl", "show"])
+        if rc != 0:
+            return {"available": False, "text": "不可用", "state": "diagnostic_unavailable", "error": error}
+        powered = bool(re.search(r"Powered:\s*yes", output, re.I))
+        return {
+            "available": True,
+            "text": "已开启" if powered else "已关闭",
+            "state": "ready" if powered else "controller_off",
+            "powered": powered,
+        }
+
+    def widget_status(self):
+        """Lightweight status snapshot for the expanded widget only."""
+        return {
+            "audio": self.audio_widget_status(),
+            "brightness": self.brightness_status(),
+            "wifi": self.wifi_widget_status(),
+            "bluetooth": self.bluetooth_widget_status(),
+            "battery": self.battery_status(),
+        }
+
     def status(self):
         return {
             "audio": self.audio_status(),

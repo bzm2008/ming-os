@@ -103,7 +103,7 @@ SETTING_SPECS = {
         "default": "adaptive",
     },
     "background_throttle": {
-        "kind": "bool", "backend": "local", "default": True,
+        "kind": "bool", "backend": "local", "default": False,
     },
     "disk_prefetch": {
         "kind": "enum", "choices": ("auto", "off"), "backend": "local",
@@ -131,6 +131,7 @@ class SettingsBackend:
         self.plank_path = self.home / ".config/plank/dock1/settings"
         self.autostart_dir = self.home / ".config/autostart"
         self.picom_autostart_path = self.autostart_dir / "picom.desktop"
+        self._migrate_performance_defaults()
         self.system_autostart_dirs = tuple(
             pathlib.Path(item) for item in (
                 ("/etc/xdg/autostart",) if system_autostart_dirs is None
@@ -177,8 +178,24 @@ class SettingsBackend:
         except (OSError, ValueError):
             return {}
 
+    def _migrate_performance_defaults(self):
+        """Move preview installs to the formal release's conservative default once."""
+        if not self.local_path.is_file():
+            return
+        data = self._read_local()
+        try:
+            version = int(data.get("_ming_performance_policy_version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version >= 2:
+            return
+        data["background_throttle"] = False
+        data["_ming_performance_policy_version"] = 2
+        self._write_local(data)
+
     def _write_local(self, data):
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
+        data.setdefault("_ming_performance_policy_version", 2)
         fd, temporary = tempfile.mkstemp(prefix="settings-", dir=str(self.local_path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:

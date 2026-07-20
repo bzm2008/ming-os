@@ -124,8 +124,13 @@ MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
 SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
-APP_DIRS = [DESKTOP_DIR, SYSTEM_APPLICATION_DIR, HOME / ".local/share/applications"]
-APP_CATALOG_FINGERPRINT_VERSION = 1
+APP_DIRS = [
+    DESKTOP_DIR,
+    SYSTEM_APPLICATION_DIR,
+    Path("/usr/local/share/applications"),
+    HOME / ".local/share/applications",
+]
+APP_CATALOG_FINGERPRINT_VERSION = 2
 CORE_NAMES = {
     "Install Ming OS.desktop",
     "ming-settings.desktop",
@@ -2044,8 +2049,10 @@ class StatusWidget(Gtk.Box):
         self.pack_start(box, False, False, 0)
         self.apply_collapsed_state(animate=False)
         self.refresh()
+        if not self.collapsed:
+            self.refresh_status_once()
         self.metric_timer = GLib.timeout_add_seconds(5, self.refresh_metrics)
-        GLib.timeout_add_seconds(15, self.refresh)
+        self.clock_timer = GLib.timeout_add_seconds(1, self.refresh)
 
     def preferred_height(self):
         return int(self._display_height)
@@ -2058,6 +2065,7 @@ class StatusWidget(Gtk.Box):
             log("could not save status widget state: %s" % exc)
         self.apply_collapsed_state(animate=True)
         if not self.collapsed:
+            self.refresh_status_once()
             self.refresh_metrics()
 
     def apply_collapsed_state(self, animate=False):
@@ -2515,14 +2523,24 @@ class StatusWidget(Gtk.Box):
         date_text = "%s %s" % (weekdays[now.weekday()], now.strftime("%m/%d"))
         self.time_label.set_text(time_text)
         self.date_label.set_text(date_text)
+        return True
+
+    def refresh_status_once(self):
+        """Read device state once after expansion without a periodic probe."""
+        if self.collapsed or self.refreshing:
+            return False
         if not self.refreshing:
             self.refreshing = True
             threading.Thread(target=self.collect_status, daemon=True).start()
-        return True
+        return False
 
     def collect_status(self):
         try:
-            status = self.device_controller.status() if self.device_controller else {}
+            status = (
+                self.device_controller.widget_status()
+                if self.device_controller and hasattr(self.device_controller, "widget_status")
+                else self.device_controller.status() if self.device_controller else {}
+            )
         except Exception as exc:
             log(f"device status collection failed: {exc}")
             status = {}
@@ -2754,9 +2772,11 @@ class PhoneDesktop(Gtk.Window):
         self.layout_stamp = self.current_layout_stamp()
         self.appearance_stamp = self.current_appearance_stamp()
         self.catalog_stamp = app_catalog_fingerprint()
+        self._catalog_monitors = []
+        self._catalog_debounce_source = 0
+        self.start_catalog_monitor()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
-        GLib.timeout_add_seconds(3, self.refresh_if_apps_changed)
 
     @property
     def window_origin(self):
@@ -2772,6 +2792,38 @@ class PhoneDesktop(Gtk.Window):
 
     def apply_shell_css(self):
         self.css_provider.load_from_data(css_for_appearance(self.appearance))
+
+    def start_catalog_monitor(self):
+        """Watch launcher and Ming state directories without GTK polling."""
+        for directory in (HOME / ".local/share/applications", STATE_DIR):
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log("could not prepare watched directory %s: %s" % (directory, exc))
+        watched = set(APP_DIRS) | {STATE_DIR}
+        for directory in watched:
+            try:
+                monitor = Gio.File.new_for_path(str(directory)).monitor_directory(
+                    Gio.FileMonitorFlags.WATCH_MOVES,
+                    None)
+                monitor.connect("changed", self.on_catalog_file_changed)
+                self._catalog_monitors.append(monitor)
+            except (GLib.Error, OSError, TypeError, ValueError) as exc:
+                log("file monitor unavailable for %s: %s" % (directory, exc))
+
+    def on_catalog_file_changed(self, *_args):
+        """Debounce package/appearance bursts and refresh on the GTK main loop."""
+        if self._catalog_debounce_source:
+            try:
+                GLib.source_remove(self._catalog_debounce_source)
+            except (TypeError, ValueError):
+                pass
+        self._catalog_debounce_source = GLib.timeout_add(500, self._run_catalog_refresh)
+
+    def _run_catalog_refresh(self):
+        self._catalog_debounce_source = 0
+        self.refresh_if_apps_changed()
+        return False
 
     def mark_ready(self):
         try:
@@ -3223,7 +3275,7 @@ class PhoneDesktop(Gtk.Window):
         layout_changed = stamp != self.layout_stamp
         catalog_changed = catalog_stamp != self.catalog_stamp
         if not layout_changed and not catalog_changed and not appearance_changed:
-            return True
+            return False
         if appearance_changed:
             updated_appearance = load_appearance()
             old_scale = self.appearance.get("desktop_icon_scale", 1.0)
@@ -3249,7 +3301,7 @@ class PhoneDesktop(Gtk.Window):
                 and updated.get("version") == LAYOUT_VERSION and updated != self.layout):
             self.layout = updated
             self.render()
-        return True
+        return False
 
     def find_drop_target(self, source, x, y):
         best = None

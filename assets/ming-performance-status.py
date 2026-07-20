@@ -241,6 +241,23 @@ class PerformanceStatus:
                 continue
         return {"memory": memory, "cpu": cpu, "network": network}
 
+    def _default_route_interface(self) -> str:
+        """Resolve the default interface from procfs without spawning helpers."""
+        route_text = self._read("/proc/net/route") or ""
+        candidates: list[tuple[int, str]] = []
+        for line in route_text.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 8 or fields[1] != "00000000":
+                continue
+            try:
+                flags = int(fields[3], 16)
+                metric = int(fields[6])
+            except (TypeError, ValueError):
+                continue
+            if flags & 0x1:
+                candidates.append((metric, fields[0]))
+        return min(candidates)[1] if candidates else ""
+
     def _metric_result(self, mode: str, value: float | None, unit: str,
                        available: bool, reason: str = "", **extra: Any) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -292,9 +309,7 @@ class PerformanceStatus:
         old_network = prior.get("network", {}) if isinstance(prior, Mapping) else {}
         deltas = []
         selected_interface = ""
-        route = self._probe(("ip", "route", "show", "default"), timeout=1.0)
-        route_match = re.search(r"\bdev\s+(\S+)", route.stdout or "")
-        preferred = route_match.group(1) if route_match else ""
+        preferred = self._default_route_interface()
         for interface, counters in raw["network"].items():
             old = old_network.get(interface, {}) if isinstance(old_network, Mapping) else {}
             delta = counters["bytes"] - int(old.get("bytes", counters["bytes"]))
