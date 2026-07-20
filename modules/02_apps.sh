@@ -1761,21 +1761,63 @@ verify_spark_asset() {
     [[ "${actual_sha256}" == "${expected_sha256}" ]]
 }
 
-build_mode="${MING_RELEASE_MODE:-development}"
-case "${build_mode}" in
-    release|development) ;;
-    *) printf '%s\n' E_PACKAGE_FAILED >&2; exit 1 ;;
-esac
+release_field() {
+    local key="$1"
+    awk -F= -v key="${key}" \
+        '$1 == key {value=substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", value); print value; exit}' \
+        /etc/os-release 2>/dev/null
+}
+
+resolve_build_mode() {
+    local requested="${MING_RELEASE_MODE:-}"
+    local release_stage version_id identity_mode
+    release_stage="$(release_field MING_RELEASE_STAGE)" || return 1
+    version_id="$(release_field VERSION_ID)" || return 1
+    case "${release_stage}:${version_id}" in
+        stable:26.4.0.1)
+            identity_mode="release"
+            ;;
+        development:26.4.0.1-development)
+            identity_mode="development"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [[ -z "${requested}" ]]; then
+        [[ "${identity_mode}" == "release" ]] || return 1
+        printf '%s\n' release
+        return 0
+    fi
+    case "${requested}" in
+        release|development)
+            [[ "${requested}" == "${identity_mode}" ]] || return 1
+            printf '%s\n' "${requested}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if ! build_mode="$(resolve_build_mode)"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
 
 asset=""
 candidates=()
-if [[ -n "${MING_SPARK_STORE_ASSET:-}" ]]; then
-    candidates+=("${MING_SPARK_STORE_ASSET}")
+if [[ "${build_mode}" == "release" ]]; then
+    candidates+=("/var/cache/ming-os/${deb_name}")
+else
+    if [[ -n "${MING_SPARK_STORE_ASSET:-}" ]]; then
+        candidates+=("${MING_SPARK_STORE_ASSET}")
+    fi
+    candidates+=(
+        "/tmp/ming-build/assets/${deb_name}"
+        "/var/cache/ming-os/${deb_name}"
+    )
 fi
-candidates+=(
-    "/tmp/ming-build/assets/${deb_name}"
-    "/var/cache/ming-os/${deb_name}"
-)
 for candidate in "${candidates[@]}"; do
     [[ -e "${candidate}" || -L "${candidate}" ]] || continue
     if verify_spark_asset "${candidate}"; then
@@ -1816,6 +1858,13 @@ if ! verify_spark_asset "${deb}"; then
     exit 1
 fi
 
+verify_installed_spark_package() {
+    local installed
+    installed="$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' spark-store 2>/dev/null)" \
+        || return 1
+    [[ "${installed}" == $'ii \t5.2.1.0' ]]
+}
+
 mkdir -p /root/.config "${HOME:-/root}/.config"
 touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 
@@ -1840,6 +1889,9 @@ try:
         result = json.load(stream)
 except (OSError, TypeError, ValueError):
     result = None
+# A dependency diagnosis is trustworthy only when the installer returned a
+# structured error code. Malformed output is a generic package failure so it
+# cannot be misreported as a resolver failure.
 if not isinstance(result, dict):
     print("E_PACKAGE_FAILED", file=sys.stderr)
     raise SystemExit(1)
@@ -1910,16 +1962,17 @@ else
         printf '%s\n' "${install_code}" >&2
         exit 1
     fi
-    if ! dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii '; then
-        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
-        exit 1
-    fi
-    if [[ ! -x /usr/local/bin/spark-store ]]; then
-        printf '%s\n' E_LAUNCH_NOT_READY | tee -a "${log}" >&2
-        exit 1
-    fi
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+if ! verify_installed_spark_package; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+if [[ ! -x /usr/local/bin/spark-store ]]; then
+    printf '%s\n' E_LAUNCH_NOT_READY | tee -a "${log}" >&2
+    exit 1
 fi
 
 # Spark Store currently ships an enabled notifier with invalid restart fields
@@ -1952,6 +2005,10 @@ SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
 
     if ! /usr/local/bin/ming-install-spark-store; then
+        if [[ "${MING_RELEASE_MODE:-}" == "release" ]]; then
+            echo "[ERROR] 星火应用商店安装失败，正式构建已中止。" >&2
+            return 1
+        fi
         echo "[WARN] 星火应用商店安装失败，保留 ming-install-spark-store 供用户联网后重试。"
     fi
 
@@ -2262,7 +2319,11 @@ main() {
     run_optional_step install_edge
     run_optional_step install_wps_office
     run_optional_step install_wechat
-    run_optional_step install_app_store
+    if [[ "${MING_RELEASE_MODE:-}" == "release" ]]; then
+        run_required_step install_app_store || return 1
+    else
+        run_optional_step install_app_store
+    fi
     run_optional_step install_utilities
 
     echo "=====> [02_apps] 应用软件安装完成 <====="

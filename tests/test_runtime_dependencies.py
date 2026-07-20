@@ -105,9 +105,9 @@ def write_executable(root, relative_path, content="#!/bin/sh\nexit 0\n"):
 
 
 SPARK_VENDOR_LINK = "/opt/durapps/spark-store/bin/spark-store"
+SPARK_VENDOR_LINK_TARGET = "../../../spark-store/extras/spark-store"
 SPARK_VENDOR_TARGET = "/opt/spark-store/extras/spark-store"
 SPARK_VENDOR_PATHS = (
-    "/usr/local/bin/spark-store",
     SPARK_VENDOR_LINK,
     SPARK_VENDOR_TARGET,
 )
@@ -149,7 +149,7 @@ def write_vendor_spark_package(
         root,
         *,
         first_target=SPARK_VENDOR_LINK,
-        second_target=SPARK_VENDOR_TARGET,
+        second_target=SPARK_VENDOR_LINK_TARGET,
         first_is_regular=False,
         final_exists=True,
         final_executable=True,
@@ -191,8 +191,10 @@ def write_core_desktops(root):
         write_executable(root, command.lstrip("/"))
 
 
-def run_backend_validator(root, final_uid=0, final_gid=0):
+def run_backend_validator(
+        root, final_uid=0, final_gid=0, first_link_uid=0, first_link_gid=0):
     final_path = root / SPARK_VENDOR_TARGET.lstrip("/")
+    first_link_path = root / "usr/local/bin/spark-store"
     registry = root / ".ming-test-symlinks.json"
     raw_links = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
     links = {str(root / path): target for path, target in raw_links.items()}
@@ -225,6 +227,13 @@ def _ming_test_lstat(path, *args, **kwargs):
     metadata = _ming_original_lstat(path, *args, **kwargs)
     path_text = str(path)
     if path_text in _ming_test_links:
+        if path_text == %r:
+            return _MingTestStat(
+                metadata,
+                mode=stat.S_IFLNK | 0o777,
+                uid=%d,
+                gid=%d,
+            )
         return _MingTestStat(metadata, mode=stat.S_IFLNK | 0o777)
     if path_text == %r:
         mode = metadata.st_mode | 0o111 if %r else metadata.st_mode & ~0o111
@@ -245,7 +254,16 @@ def _ming_test_is_symlink(path):
 pathlib.Path.lstat = _ming_test_lstat
 pathlib.Path.is_symlink = _ming_test_is_symlink
 os.readlink = _ming_test_readlink
-""" % (links, str(final_path), final_executable, final_uid, final_gid)
+""" % (
+        links,
+        str(first_link_path),
+        first_link_uid,
+        first_link_gid,
+        str(final_path),
+        final_executable,
+        final_uid,
+        final_gid,
+    )
     return subprocess.run(
         [sys.executable, "-", str(root)],
         input=ownership_shim + desktop_backend_validator_source(),
@@ -537,7 +555,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "regular wrapper spoof": {"first_is_regular": True},
             "non executable final target": {"final_executable": False},
             "wrong package version": {"version": "5.2.1.1"},
-            "wrong dpkg owner": {"owned_paths": (SPARK_VENDOR_LINK, SPARK_VENDOR_TARGET)},
+            "wrong dpkg owner": {"owned_paths": (SPARK_VENDOR_TARGET,)},
         }
         for label, options in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
@@ -569,6 +587,26 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             write_vendor_spark_package(root)
 
             result = run_backend_validator(root, final_uid=1000, final_gid=1000)
+            self.assertNotEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_a_non_root_postinst_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+            write_vendor_spark_package(root)
+
+            result = run_backend_validator(
+                root,
+                first_link_uid=1000,
+                first_link_gid=1000,
+            )
             self.assertNotEqual(0, result.returncode, result.stderr)
 
     def test_r4_validation_invokes_required_runtime_gate(self):

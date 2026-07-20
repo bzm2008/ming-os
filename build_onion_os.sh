@@ -318,8 +318,14 @@ prepare_chroot_scripts() {
             log_error "Spark Store 受控资产 SHA256 不匹配"
             return 1
         fi
-        install -m 0644 "${spark_asset}" \
-            "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${SPARK_STORE_DEB_NAME}"
+        if [[ "${MING_RELEASE_MODE}" == "release" ]]; then
+            install -d -m 0755 "${CHROOT_DIR}/var/cache/ming-os"
+            install -m 0644 "${spark_asset}" \
+                "${CHROOT_DIR}/var/cache/ming-os/${SPARK_STORE_DEB_NAME}"
+        else
+            install -m 0644 "${spark_asset}" \
+                "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${SPARK_STORE_DEB_NAME}"
+        fi
     elif [[ "${MING_RELEASE_MODE}" == "release" ]]; then
         log_error "正式构建必须提供已校验的 Spark Store ${SPARK_STORE_VERSION} 受控资产"
         return 1
@@ -1182,8 +1188,10 @@ from pathlib import Path
 import configparser
 import io
 import os
+import posixpath
 import shlex
 import shutil
+import stat
 import sys
 
 root = Path(sys.argv[1])
@@ -1234,12 +1242,104 @@ edge_backends = [
 if not any(path.is_file() and os.access(path, os.X_OK) for path in edge_backends):
     errors.append("missing Microsoft Edge browser backend behind ming-edge wrapper")
 
-spark_vendor_wrapper = root / "usr/local/bin/spark-store"
+spark_vendor_links = (
+    (
+        "/usr/local/bin/spark-store",
+        "/opt/durapps/spark-store/bin/spark-store",
+        "/opt/durapps/spark-store/bin/spark-store",
+    ),
+    (
+        "/opt/durapps/spark-store/bin/spark-store",
+        "../../../spark-store/extras/spark-store",
+        "/opt/spark-store/extras/spark-store",
+    ),
+)
+spark_vendor_paths = {
+    "/opt/durapps/spark-store/bin/spark-store",
+    "/opt/spark-store/extras/spark-store",
+}
+for link_path, expected_target, expected_resolved_target in spark_vendor_links:
+    link = root / link_path.lstrip("/")
+    if not link.is_symlink():
+        errors.append(f"unsafe vendor Spark Store link: {link_path}")
+        continue
+    if link_path == "/usr/local/bin/spark-store":
+        link_metadata = link.lstat()
+        if link_metadata.st_uid != 0 or link_metadata.st_gid != 0:
+            errors.append("postinst Spark Store link is not owned by root:root")
+    try:
+        actual_target = os.readlink(link)
+    except OSError as error:
+        errors.append(f"unreadable vendor Spark Store link {link_path}: {error}")
+        continue
+    if actual_target != expected_target:
+        errors.append(
+            f"unexpected vendor Spark Store link target: {link_path} -> {actual_target}"
+        )
+        continue
+    resolved_target = posixpath.normpath(
+        actual_target
+        if actual_target.startswith("/")
+        else posixpath.join(posixpath.dirname(link_path), actual_target)
+    )
+    if resolved_target != expected_resolved_target:
+        errors.append(
+            f"vendor Spark Store link escapes its package target: {link_path}"
+        )
+
+spark_vendor_target = root / "opt/spark-store/extras/spark-store"
+try:
+    spark_target_metadata = spark_vendor_target.lstat()
+except OSError as error:
+    errors.append(f"missing vendor Spark Store target: {error}")
+else:
+    if (
+            spark_vendor_target.is_symlink()
+            or not stat.S_ISREG(spark_target_metadata.st_mode)
+            or spark_target_metadata.st_uid != 0
+            or spark_target_metadata.st_gid != 0
+            or not spark_target_metadata.st_mode & 0o111
+            or spark_target_metadata.st_size == 0):
+        errors.append("unsafe vendor Spark Store target: /opt/spark-store/extras/spark-store")
+
+def dpkg_package_fields(status_path, package):
+    try:
+        lines = status_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    fields = {}
+    for line in lines + [""]:
+        if not line:
+            if fields.get("Package") == package:
+                return fields
+            fields = {}
+            continue
+        if line[0].isspace() or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key] = value.strip()
+    return None
+
+spark_package = dpkg_package_fields(root / "var/lib/dpkg/status", "spark-store")
 if not (
-        spark_vendor_wrapper.is_file()
-        and not spark_vendor_wrapper.is_symlink()
-        and os.access(spark_vendor_wrapper, os.X_OK)):
-    errors.append("missing vendor Spark Store wrapper: /usr/local/bin/spark-store")
+        spark_package
+        and spark_package.get("Status") == "install ok installed"
+        and spark_package.get("Version") == "5.2.1.0"):
+    errors.append("Spark Store package is not installed at exact version 5.2.1.0")
+
+spark_owned_paths = set()
+for owner_name in ("spark-store.list", "spark-store:amd64.list"):
+    owner_file = root / "var/lib/dpkg/info" / owner_name
+    if not owner_file.is_file() or owner_file.is_symlink():
+        continue
+    spark_owned_paths.update(
+        line.strip()
+        for line in owner_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.startswith("/")
+    )
+if not spark_vendor_paths.issubset(spark_owned_paths):
+    errors.append("vendor Spark Store chain is not owned by dpkg package spark-store")
+
 spark_wrapper = root / "usr/local/bin/ming-spark-store"
 spark_installer = root / "usr/local/bin/ming-install-spark-store"
 wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
