@@ -102,6 +102,22 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("process.communicate(input_text", stdin_runner)
         self.assertNotIn("password", command.replace("--password-stdin", ""))
 
+    def test_wifi_connection_command_uses_opaque_network_id_not_display_ssid(self):
+        command = function_source("wifi_connect_command")
+        connect = function_source("on_wifi_connect", "MingSettings")
+        self.assertIn('"--network-id"', command)
+        self.assertIn('network_id', command)
+        self.assertNotIn('"--ssid"', command)
+        self.assertIn('network["network_id"]', connect)
+        self.assertIn('network.get("display")', connect)
+
+    def test_wifi_connect_button_enters_progress_and_recovers_after_readback(self):
+        connect = function_source("on_wifi_connect", "MingSettings")
+        self.assertIn('_btn.set_sensitive(False)', connect)
+        self.assertIn('_btn.set_label("连接中...")', connect)
+        self.assertIn('_btn.set_sensitive(True)', connect)
+        self.assertIn('_btn.set_label("连接")', connect)
+
     def test_bluetooth_uses_structured_status_and_only_repairs_allowed_states(self):
         refresh = function_source("refresh_bluetooth_status", "MingSettings")
         repair = function_source("on_bluetooth_repair", "MingSettings")

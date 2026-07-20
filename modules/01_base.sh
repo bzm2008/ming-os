@@ -218,16 +218,10 @@ HWLOAD
 set -u
 
 LOG=/tmp/ming-hardware-preload.log
+# Network and Bluetooth drivers (iwlwifi, ath9k, e1000e, btusb, btintel,
+# btrtl, btbcm, ath3k) are selected by modalias/udev.  The explicit radio
+# repair tool may load Bluetooth modules only after a user-requested diagnosis.
 modules=(
-iwlmvm
-iwlwifi
-ath9k
-ath10k_pci
-btusb
-btintel
-btrtl
-btbcm
-ath3k
 usbhid
 i2c_hid
 hid_multitouch
@@ -840,6 +834,7 @@ configure_users() {
 configure_network() {
     apt install -y --no-install-recommends \
         network-manager \
+        gir1.2-nm-1.0 \
         wpasupplicant \
         bluez \
         ifupdown
@@ -981,6 +976,59 @@ BTCFG
     # is actually usable; remove old resume-build drop-ins that waited here.
     systemctl disable --now NetworkManager-wait-online.service 2>/dev/null || true
     rm -rf /etc/systemd/system/NetworkManager-wait-online.service.d
+
+    # Repair only stale, image-generated wired profiles.  The helper refuses
+    # user profiles, static routes and 802.1x before performing an atomic write.
+    cat > /etc/systemd/system/ming-network-profile-migrate.service << 'MINGNMPROFILE'
+[Unit]
+Description=Ming OS safe NetworkManager profile migration
+After=local-fs.target
+Before=NetworkManager.service
+ConditionPathExists=/usr/local/bin/ming-device-control
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ming-device-control migrate-network-profiles --json
+
+[Install]
+WantedBy=multi-user.target
+MINGNMPROFILE
+    systemctl enable ming-network-profile-migrate.service 2>/dev/null || true
+
+    # Keep the normal AC/battery policy under TLP.  Only after repeated drops
+    # do we disable Wi-Fi power saving, and then only for that exact profile.
+    install -d -m 0755 /etc/NetworkManager/dispatcher.d
+    cat > /etc/NetworkManager/dispatcher.d/80-ming-wifi-reliability << 'MINGWIFIRELIABILITY'
+#!/usr/bin/env bash
+set -uo pipefail
+
+ifname="${1:-}"
+action="${2:-}"
+[[ -n "${ifname}" && -d "/sys/class/net/${ifname}/wireless" ]] || exit 0
+[[ "${action}" == "down" ]] || exit 0
+[[ -n "${CONNECTION_UUID:-}" ]] || exit 0
+
+state_dir=/run/ming-os/wifi-drop-history
+install -d -m 0700 "${state_dir}"
+key=$(printf '%s' "${CONNECTION_UUID}" | sha256sum | awk '{print $1}')
+history="${state_dir}/${key}"
+now=$(date +%s)
+temporary=$(mktemp "${history}.XXXXXX") || exit 0
+{
+    [[ -f "${history}" ]] && awk -v cutoff="$((now - 600))" '$1 >= cutoff' "${history}"
+    printf '%s\n' "${now}"
+} > "${temporary}"
+chmod 0600 "${temporary}"
+mv -f "${temporary}" "${history}"
+
+if [[ $(wc -l < "${history}") -ge 3 ]]; then
+    env LC_ALL=C.UTF-8 nmcli --wait 5 \
+        connection modify uuid "${CONNECTION_UUID}" 802-11-wireless.powersave 2 \
+        >/dev/null 2>&1 || true
+fi
+exit 0
+MINGWIFIRELIABILITY
+    chmod 0755 /etc/NetworkManager/dispatcher.d/80-ming-wifi-reliability
 
     echo "ming-os" > /etc/hostname
 
@@ -2674,18 +2722,11 @@ done
 # NetworkManager is the sole network owner in a newly installed target.
 chroot "${target}" systemctl disable networking.service systemd-networkd.service 2>/dev/null || true
 chroot "${target}" systemctl enable NetworkManager.service 2>/dev/null || return 1
-# Let modalias/udev select Ethernet drivers; preloading both Realtek variants
-# can bind the wrong module and hide carrier state.
+# Let modalias/udev select Ethernet and Wi-Fi drivers.  Force-loading a popular
+# module can bind the wrong device, hide carrier, or delay boot on unrelated
+# old hardware.
 mkdir -p "${target}/etc/modules-load.d"
-cat > "${target}/etc/modules-load.d/ming-network.conf" << 'NETMOD'
-# Ming OS: Wi-Fi compatibility modules; Ethernet is selected by modalias/udev.
-iwlwifi
-ath9k
-ath10k_pci
-rtl8192ee
-rtl8188ee
-e1000e
-NETMOD
+rm -f "${target}/etc/modules-load.d/ming-network.conf"
 # 确保固件被 initramfs 包含（update-initramfs 已在前面运行）
 chroot "${target}" depmod -a 2>/dev/null || true
 MINGIDENTITY
@@ -4360,15 +4401,13 @@ configure_installed_system_static_defaults() {
     fi
     install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
 
+    # Network drivers are selected by kernel modalias/udev.  Keep the legacy
+    # heredoc marker for resumed-build parsers, then remove the preview list so
+    # it cannot steal a device binding in the final rootfs.
     cat > /etc/modules-load.d/ming-network.conf << 'STATICNETMOD'
-# Ming OS: Wi-Fi modules only; Ethernet is selected by modalias/udev.
-iwlwifi
-ath9k
-ath10k_pci
-rtl8192ee
-rtl8188ee
-e1000e
+# Ming OS: network drivers are selected by kernel modalias/udev.
 STATICNETMOD
+    rm -f /etc/modules-load.d/ming-network.conf
 
     cat > /etc/grub.d/09_ming_os << 'STATICGRUB'
 #!/bin/sh

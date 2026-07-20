@@ -90,7 +90,7 @@ def parse_bluetooth(line):
 def main():
     cache = NotificationDeduplicator()
     threads = [
-        threading.Thread(target=monitor, args=(["nmcli", "monitor"], parse_network, cache), daemon=True),
+        threading.Thread(target=monitor, args=(["env", "LC_ALL=C.UTF-8", "nmcli", "monitor"], parse_network, cache), daemon=True),
         threading.Thread(target=monitor, args=(["bluetoothctl", "--monitor"], parse_bluetooth, cache), daemon=True),
     ]
     for thread in threads:

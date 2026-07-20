@@ -625,9 +625,11 @@ def audio_output_label(device):
     return label
 
 
-def wifi_connect_command(ssid, bssid, ifname, with_secret=False):
+def wifi_connect_command(network_id, ifname, with_secret=False):
+    # The backend resolves network_id to the scanned BSSID and raw SSID bytes;
+    # the display-only SSID/bssid are never reconstructed into a shell argv.
     command = device_control_cli_command(
-        "wifi-connect", "--ssid", ssid, "--bssid", bssid, "--ifname", ifname)
+        "wifi-connect", "--network-id", network_id, "--ifname", ifname)
     if with_secret:
         command.append("--password-stdin")
     return command
@@ -1588,6 +1590,7 @@ class MingSettings(Adw.ApplicationWindow):
     def build_network(self):
         sc, box = self.page_scroller()
         self.network_page = sc
+        self.ethernet_ifname = ""
 
         wired_grp = Adw.PreferencesGroup(
             title="有线网络", description="显示网卡、驱动、网线、地址、网关和 DNS 状态。")
@@ -1691,7 +1694,7 @@ class MingSettings(Adw.ApplicationWindow):
                 self.wifi_switch.set_active(output.strip() == "enabled")
             self.loading_wifi_state = False
 
-        run_capture_async(["nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
+        run_capture_async(["env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
         return sc
 
     def refresh_ethernet_status(self):
@@ -1702,10 +1705,13 @@ class MingSettings(Adw.ApplicationWindow):
                 status = {}
             devices = status.get("devices") or []
             if not devices:
+                self.ethernet_ifname = ""
                 self.ethernet_status_row.set_title("未检测到有线网卡")
-                self.ethernet_status_row.set_subtitle(status.get("error") or error or "可继续使用无线网络。")
+                self.ethernet_status_row.set_subtitle(
+                    status.get("reason_text") or status.get("error") or error or "可继续使用无线网络。")
                 return False
             device = devices[0]
+            self.ethernet_ifname = device.get("device") or ""
             self.ethernet_status_row.set_title(
                 "有线网络已连接" if device.get("state") == "connected" else "有线网络未连接")
             self.ethernet_status_row.set_subtitle(
@@ -1720,13 +1726,16 @@ class MingSettings(Adw.ApplicationWindow):
             timeout=10, on_done=done)
 
     def on_ethernet_repair(self, _button):
+        if not self.ethernet_ifname:
+            self.toast("未找到可修复的有线网卡。", "warning")
+            return
         def done(rc, _output, error):
             self.toast("有线连接已重新检查。" if rc == 0 else
                        "有线连接修复失败：%s" % (error or "NetworkManager 未能连接"))
             self.refresh_ethernet_status()
             return False
         run_capture_async(
-            ["/usr/local/bin/ming-device-control", "ethernet-repair"],
+            ["/usr/local/bin/ming-device-control", "ethernet-repair", "--ifname", self.ethernet_ifname],
             timeout=35, on_done=done)
 
     def apply_time_sync_status(self, status):
@@ -1788,7 +1797,7 @@ class MingSettings(Adw.ApplicationWindow):
             return
         state = "on" if sw.get_active() else "off"
         run_capture_async(
-            ["nmcli", "radio", "wifi", state], timeout=8,
+            ["env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi", state], timeout=8,
             on_done=lambda rc, _output, error: (
                 self.toast("无线网络切换失败：%s" % (error or "NetworkManager 不可用"))
                 if rc != 0 else None))
@@ -1946,7 +1955,7 @@ class MingSettings(Adw.ApplicationWindow):
             else:
                 self.wifi_list_state_row = None
             for network in networks[:30]:
-                ssid = network["ssid"] or "（隐藏网络）"
+                ssid = network.get("display", network.get("ssid", "")) or "（隐藏网络）"
                 bssid = network["bssid"] or "未知"
                 signal = network["signal"]
                 signal_text = "%s%%" % signal if signal is not None else "未知"
@@ -1958,7 +1967,7 @@ class MingSettings(Adw.ApplicationWindow):
                         network["ifname"] or "未知"))
                 connect = Gtk.Button(label="连接")
                 connect.set_valign(Gtk.Align.CENTER)
-                connect.set_sensitive(bool(network["ssid"] and network["bssid"] and network["ifname"]))
+                connect.set_sensitive(bool(network.get("network_id") and network.get("ifname")))
                 connect.connect("clicked", self.on_wifi_connect, network)
                 row.add_suffix(connect)
                 new_grp.add(row)
@@ -1973,8 +1982,9 @@ class MingSettings(Adw.ApplicationWindow):
         run_task_async(wifi_scan_snapshot, done)
 
     def on_wifi_connect(self, _btn, network):
-        ssid = network["ssid"]
-        bssid = network["bssid"]
+        ssid = network.get("display") or network.get("ssid") or "（隐藏网络）"
+        bssid = network.get("bssid", "")
+        network_id = network["network_id"]
         ifname = network["ifname"]
         dlg = Adw.MessageDialog(
             transient_for=self, heading="连接到 %s" % ssid,
@@ -1987,10 +1997,14 @@ class MingSettings(Adw.ApplicationWindow):
         dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
         def on_resp(d, resp):
             if resp == "ok":
+                _btn.set_sensitive(False)
+                _btn.set_label("连接中...")
                 generation = self.wifi_connect_state.begin()
                 secret = entry.get_text()
                 entry.set_text("")
                 def connected(result, error):
+                    _btn.set_label("连接")
+                    _btn.set_sensitive(True)
                     self.apply_wifi_connect_result(generation, ssid, bssid, result, error)
 
                 def parse_connected(rc, output, error):
@@ -2000,7 +2014,7 @@ class MingSettings(Adw.ApplicationWindow):
                         result = None
                     connected(result, error if rc != 0 else "")
 
-                command = wifi_connect_command(ssid, bssid, ifname, with_secret=bool(secret))
+                command = wifi_connect_command(network_id, ifname, with_secret=bool(secret))
                 if secret:
                     run_capture_stdin_async(command, secret + "\n", timeout=40, on_done=parse_connected)
                 else:
@@ -2842,8 +2856,8 @@ class MingSettings(Adw.ApplicationWindow):
             "interaction_policy", ["自适应性能", "兼容模式", "关闭"],
             ["adaptive", "compat", "off"]))
         performance_grp.add(self.backend_switch_row(
-            "后台应用节流", "窗口不可见约 10 秒后降低 CPU、IO 和定时器唤醒。",
-            "background_throttle", True))
+            "后台应用节流", "默认关闭；手动开启后仅降低后台权重和唤醒频率。",
+            "background_throttle", False))
         performance_grp.add(self.backend_combo_row(
             "HDD 应用预读", "仅机械硬盘按需预读受信任系统库，不运行常驻 preload。",
             "disk_prefetch", ["自动", "关闭"], ["auto", "off"]))

@@ -1006,8 +1006,8 @@ validate_isolinux_fallback() {
 validate_required_desktop_runtime() {
     log_info "Validating required Ming desktop runtime..."
 
-    if ! chroot_exec python3 -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); from gi.repository import Gtk, Adw, Gio"; then
-        log_error "GTK4/libadwaita/Gio typelibs are unavailable in the target system"
+    if ! chroot_exec python3 -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); gi.require_version('NM', '1.0'); from gi.repository import Gtk, Adw, Gio, NM"; then
+        log_error "GTK4/libadwaita/Gio/libnm typelibs are unavailable in the target system"
         return 1
     fi
 
@@ -1054,7 +1054,7 @@ validate_required_desktop_runtime() {
         return 1
     fi
     for package in \
-        python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        python3-gi gir1.2-nm-1.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
@@ -2234,10 +2234,17 @@ hardware_preload = require_file("usr/local/sbin/ming-hardware-preload", "modules
 for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in hardware_preload:
         errors.append(f"ming-hardware-preload must not blindly load Broadcom module {conflicting_module}")
-network_modules = require_file("etc/modules-load.d/ming-network.conf")
-for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
-    if f"\n{conflicting_module}\n" in f"\n{network_modules}\n":
-        errors.append(f"modules-load.d must not force Broadcom module {conflicting_module}")
+network_modules_path = root / "etc/modules-load.d/ming-network.conf"
+network_modules = (
+    network_modules_path.read_text(encoding="utf-8", errors="replace")
+    if network_modules_path.is_file() else ""
+)
+for conflicting_module in [
+    "brcmfmac", "brcmsmac", "b43", "wl", "iwlwifi", "iwlmvm", "ath9k",
+    "ath10k_pci", "rtl8192ee", "rtl8188ee", "e1000e", "r8168", "r8169",
+]:
+    if re.search(rf"(?m)^\s*{conflicting_module}\s*$", network_modules):
+        errors.append(f"modules-load.d must not force network module {conflicting_module}")
 installed_identity = require_file("usr/local/sbin/ming-fix-installed-identity")
 for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in installed_identity:
@@ -2339,7 +2346,30 @@ for marker in [
 if not os.access(root / "usr/local/sbin/ming-radio-repair", os.X_OK):
     errors.append("ming-radio-repair must be executable")
 
-hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "iwlwifi")
+profile_migration = require_file(
+    "etc/systemd/system/ming-network-profile-migrate.service",
+    "Before=NetworkManager.service",
+)
+if "ExecStart=/usr/local/bin/ming-device-control migrate-network-profiles --json" not in profile_migration:
+    errors.append("network profile migration service must use the constrained JSON helper")
+if not (root / "etc/systemd/system/multi-user.target.wants/ming-network-profile-migrate.service").is_symlink():
+    errors.append("network profile migration service must be enabled before NetworkManager")
+wifi_dispatcher = require_file(
+    "etc/NetworkManager/dispatcher.d/80-ming-wifi-reliability",
+    "connection modify uuid",
+)
+if "systemctl restart NetworkManager" in wifi_dispatcher:
+    errors.append("Wi-Fi reliability dispatcher must not restart NetworkManager")
+if not os.access(root / "etc/NetworkManager/dispatcher.d/80-ming-wifi-reliability", os.X_OK):
+    errors.append("Wi-Fi reliability dispatcher must be executable")
+
+hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "modules=(")
+for forbidden_module in [
+    "iwlwifi", "iwlmvm", "ath9k", "ath10k_pci", "e1000e", "rtl8192ee", "rtl8188ee",
+    "btusb", "btintel", "btrtl", "btbcm", "ath3k",
+]:
+    if re.search(rf"(?m)^\s*{forbidden_module}\s*$", hardware_modules):
+        errors.append(f"network module must be selected by modalias, not preloaded: {forbidden_module}")
 for marker in [
     "btusb", "btintel", "btrtl", "btbcm", "ath3k",
     "hid_multitouch", "bcm5974", "hid_apple", "applespi",
@@ -2350,10 +2380,15 @@ for marker in [
         errors.append(f"hardware modules preload missing {marker}")
 require_file("etc/systemd/system/ming-hardware-preload.service", "Before=NetworkManager.service bluetooth.service display-manager.service")
 require_file("etc/modules-load.d/ming-hardware.conf", "loop")
-network_modules = require_file("etc/modules-load.d/ming-network.conf", "iwlwifi")
-for forbidden_module in ["r8168", "r8169"]:
-    if re.search(rf"(?m)^\s*{forbidden_module}\s*$", network_modules):
-        errors.append(f"Ethernet module must be selected by modalias, not preloaded: {forbidden_module}")
+network_modules_path = root / "etc/modules-load.d/ming-network.conf"
+if network_modules_path.exists():
+    network_modules = network_modules_path.read_text(encoding="utf-8", errors="replace")
+    for forbidden_module in [
+        "iwlwifi", "iwlmvm", "ath9k", "ath10k_pci", "rtl8192ee", "rtl8188ee",
+        "e1000e", "r8168", "r8169",
+    ]:
+        if re.search(rf"(?m)^\s*{forbidden_module}\s*$", network_modules):
+            errors.append(f"network module must be selected by modalias, not preloaded: {forbidden_module}")
 if not (root / "etc/systemd/system/multi-user.target.wants/NetworkManager.service").is_symlink():
     errors.append("NetworkManager.service must be enabled as the sole network owner")
 for owner in ["networking.service", "systemd-networkd.service"]:
