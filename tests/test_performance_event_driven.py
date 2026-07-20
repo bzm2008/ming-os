@@ -671,6 +671,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "safe_name",
             "_desktop_has_marker",
             "_mark_desktop_file",
+            "_confirm_file_durable",
             "_durable_replace",
             "write_managed_wrapper_proxy",
             "copy_desktop",
@@ -790,6 +791,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "safe_name",
             "_desktop_has_marker",
             "_mark_desktop_file",
+            "_confirm_file_durable",
             "_manifest_relative",
             "empty_desktop_manifest",
             "write_managed_wrapper_proxy",
@@ -994,7 +996,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         for caller in ("write_managed_wrapper_proxy", "copy_desktop"):
             self.assertIn("_durable_replace", ast.unparse(functions[caller]))
 
-        namespace = load_phone_subset({"_durable_replace"})
+        namespace = load_phone_subset({"_confirm_file_durable", "_durable_replace"})
         events = []
         descriptors = iter((41, 42))
         fake_os = types.SimpleNamespace(
@@ -1026,6 +1028,63 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             ("fsync", 42),
             ("close", 42),
         ], events)
+
+    def test_unchanged_retry_confirms_durability_after_parent_fsync_failure(self):
+        namespace = load_phone_subset({
+            "safe_name",
+            "_desktop_has_marker",
+            "_mark_desktop_file",
+            "_confirm_file_durable",
+            "_durable_replace",
+            "write_managed_wrapper_proxy",
+            "copy_desktop",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source.desktop"
+            desktop_dir = root / "Desktop"
+            desktop_dir.mkdir()
+            source.write_text(
+                "[Desktop Entry]\nType=Application\nName=Durable\nExec=durable\n",
+                encoding="utf-8",
+            )
+            target = desktop_dir / "Durable.desktop"
+            real_confirm = namespace["_confirm_file_durable"]
+            pending = namespace["_DESKTOP_DURABILITY_PENDING"]
+            confirmations = []
+            fail_target_once = True
+
+            def flaky_confirm(path, data_synced=False):
+                nonlocal fail_target_once
+                resolved = pathlib.Path(path)
+                confirmations.append((resolved, data_synced))
+                if resolved == target and fail_target_once:
+                    fail_target_once = False
+                    raise OSError("parent directory fsync failed")
+                return real_confirm(path, data_synced=data_synced)
+
+            namespace.update({
+                "_confirm_file_durable": flaky_confirm,
+                "log": lambda _message: None,
+            })
+
+            self.assertIsNone(namespace["copy_desktop"](
+                source, desktop_dir, name="Durable", managed=True))
+            self.assertTrue(target.exists(), "replace completed before parent fsync failed")
+            self.assertIn(str(target.absolute()), pending)
+            self.assertEqual(target, namespace["copy_desktop"](
+                source, desktop_dir, name="Durable", managed=True))
+            self.assertNotIn(str(target.absolute()), pending)
+            self.assertEqual([(target, True), (target, False)], confirmations)
+
+            proxy = desktop_dir / "proxy.desktop"
+            __import__("shutil").copy2(source, proxy)
+            self.assertTrue(namespace["write_managed_wrapper_proxy"](proxy, source))
+            pending.add(str(proxy.absolute()))
+            confirmations.clear()
+            self.assertTrue(namespace["write_managed_wrapper_proxy"](proxy, source))
+            self.assertEqual([(proxy, False)], confirmations)
+            self.assertNotIn(str(proxy.absolute()), pending)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")

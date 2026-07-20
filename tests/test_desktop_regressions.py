@@ -687,7 +687,7 @@ class DesktopSourceTests(unittest.TestCase):
         tree = ast.parse(source)
         wanted = {
             "app_id", "safe_name", "legacy_desktop_entry", "read_app", "_desktop_has_marker", "_manifest_relative",
-            "_mark_desktop_file", "_durable_replace", "copy_desktop",
+            "_mark_desktop_file", "_confirm_file_durable", "_durable_replace", "copy_desktop",
             "empty_desktop_manifest", "load_desktop_manifest", "save_desktop_manifest",
             "_atomic_write_json", "sync_files",
         }

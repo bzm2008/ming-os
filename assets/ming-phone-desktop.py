@@ -139,6 +139,8 @@ APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
 APP_CATALOG_TOTAL_HASH_BYTES = 2 * 1024 * 1024
 CATALOG_MONITOR_RETRY_DELAYS_MS = (500, 2_000, 10_000, 30_000)
 CATALOG_SYNC_RETRY_DELAYS_MS = (1_000, 5_000, 30_000)
+DESKTOP_DURABILITY_PENDING_MAX = 256
+_DESKTOP_DURABILITY_PENDING = set()
 CORE_NAMES = {
     "Install Ming OS.desktop",
     "ming-settings.desktop",
@@ -1278,27 +1280,51 @@ def managed_desktop_source_path(path):
     return trusted_wrapper_source_path(value)
 
 
+def _confirm_file_durable(target, data_synced=False):
+    """Fsync an existing file and its parent before reporting convergence."""
+    target = Path(target)
+    key = str(target.absolute())
+    if key not in _DESKTOP_DURABILITY_PENDING:
+        return True
+    if not data_synced:
+        descriptor = os.open(str(target), os.O_RDWR)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(str(target.parent), flags)
+    except OSError:
+        if os.name == "nt":
+            _DESKTOP_DURABILITY_PENDING.discard(key)
+            return True
+        raise
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    _DESKTOP_DURABILITY_PENDING.discard(key)
+    return True
+
+
 def _durable_replace(staged, target):
     """Replace a file only after its data and destination directory are durable."""
     staged = Path(staged)
     target = Path(target)
+    key = str(target.absolute())
+    if (
+            key not in _DESKTOP_DURABILITY_PENDING
+            and len(_DESKTOP_DURABILITY_PENDING) >= DESKTOP_DURABILITY_PENDING_MAX):
+        raise OSError("desktop durability queue is full")
     descriptor = os.open(str(staged), os.O_RDWR)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
     os.replace(str(staged), str(target))
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        directory_fd = os.open(str(target.parent), flags)
-    except OSError:
-        if os.name == "nt":
-            return
-        raise
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    _DESKTOP_DURABILITY_PENDING.add(key)
+    _confirm_file_durable(target, data_synced=True)
 
 
 def write_managed_wrapper_proxy(target, source):
@@ -1342,6 +1368,7 @@ def write_managed_wrapper_proxy(target, source):
             )
         desired = rewritten.replace("\n", newline).encode("utf-8")
         if desired == original:
+            _confirm_file_durable(target)
             return True
         with tempfile.NamedTemporaryFile(
             prefix=".%s." % target.name,
@@ -1436,6 +1463,7 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
             if managed and _desktop_has_marker(target):
                 if target.stat().st_mode & 0o777 != 0o755:
                     target.chmod(0o755)
+            _confirm_file_durable(target)
             return target
         if target.exists() and not _desktop_has_marker(target):
             # Never overwrite an unrelated launcher with the same display
@@ -1464,6 +1492,7 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
             if unchanged:
                 if target.stat().st_mode & 0o777 != 0o755:
                     target.chmod(0o755)
+                _confirm_file_durable(target)
                 return target
             with tempfile.NamedTemporaryFile(
                 prefix=".%s." % target.name,
