@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess
 import sys
@@ -9,12 +10,121 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 def heredoc(source, declaration, marker):
     start = source.index(declaration)
     end = source.index("\n" + marker, start + len(declaration))
     return source[start:end]
+
+
+def spark_installer_source():
+    return APPS.split(
+        "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'", 1
+    )[1].split("\nSPARKINSTALL", 1)[0]
+
+
+def bash_path(path):
+    value = str(path.resolve()).replace("\\", "/")
+    if os.name == "nt":
+        return "/%s%s" % (value[0].lower(), value[2:])
+    return value
+
+
+def write_shell_executable(path, content):
+    path.write_text(content, encoding="utf-8", newline="\n")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def spark_asset_gate_source(root):
+    source = spark_installer_source().split("mkdir -p /root/.config", 1)[0]
+    root_guard = """if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    echo "Administrator privileges are required to install Spark Store." >&2
+    exit 1
+fi
+
+"""
+    source = source.replace(root_guard, "")
+    root_path = bash_path(root)
+    replacements = {
+        'readonly deb="/tmp/${deb_name}"':
+            'readonly deb="%s/tmp/${deb_name}"' % root_path,
+        'log="/var/log/ming-spark-store-install.log"':
+            'log="%s/var/log/ming-spark-store-install.log"' % root_path,
+        "/tmp/ming-build": root_path + "/tmp/ming-build",
+        "/var/cache/ming-os": root_path + "/var/cache/ming-os",
+        "/etc/os-release": root_path + "/etc/os-release",
+    }
+    for original, replacement in replacements.items():
+        source = source.replace(original, replacement)
+    return source
+
+
+def run_spark_asset_gate(os_release, *, mode=None, cache_content=None):
+    with tempfile.TemporaryDirectory(prefix="ming-spark-gate-") as directory:
+        root = pathlib.Path(directory)
+        (root / "etc").mkdir(parents=True)
+        (root / "etc/os-release").write_text(os_release, encoding="utf-8")
+        (root / "tmp").mkdir()
+        (root / "var/log").mkdir(parents=True)
+        if cache_content is not None:
+            cache = root / "var/cache/ming-os/spark-store_5.2.1.0_amd64.deb"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(cache_content)
+
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        wget_log = root / "wget.log"
+        write_shell_executable(
+            fake_bin / "timeout",
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "while [[ $# -gt 0 && \"$1\" == --* ]]; do shift; done\n"
+            "[[ $# -gt 0 ]] && shift\n"
+            "exec \"$@\"\n",
+        )
+        write_shell_executable(
+            fake_bin / "wget",
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf 'wget\\n' >>\"${MING_TEST_WGET_LOG}\"\n"
+            "output=\n"
+            "for argument in \"$@\"; do\n"
+            "  case \"${argument}\" in --output-document=*) output=${argument#*=} ;; esac\n"
+            "done\n"
+            "[[ -n \"${output}\" ]]\n"
+            "printf 'downloaded-but-untrusted' >\"${output}\"\n",
+        )
+        environment = dict(os.environ)
+        environment.pop("MING_RELEASE_MODE", None)
+        if mode is not None:
+            environment["MING_RELEASE_MODE"] = mode
+        script = (
+            'export PATH="%s:/usr/local/bin:/usr/bin:/bin"\n' % bash_path(fake_bin)
+            + 'export MING_TEST_WGET_LOG="%s"\n' % bash_path(wget_log)
+            + spark_asset_gate_source(root)
+        )
+        completed = subprocess.run(
+            [BASH],
+            input=script,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        calls = wget_log.read_text(encoding="utf-8") if wget_log.exists() else ""
+        return completed, calls
+
+
+def apps_main_source():
+    start = APPS.index("main() {")
+    end = APPS.index("\n}\n\nmain", start) + 2
+    return APPS[start:end]
 
 
 class MultimediaRuntimeContracts(unittest.TestCase):
@@ -93,6 +203,113 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             '[[ "${MING_RELEASE_MODE}" == "release" ]]',
         ):
             self.assertIn(marker, BUILD)
+        staging = BUILD.split("# Formal builds consume a locally controlled Spark asset", 1)[1]
+        staging = staging.split("# Stage only the pinned Papyrus release asset", 1)[0]
+        self.assertIn('"${CHROOT_DIR}/var/cache/ming-os"', staging)
+        self.assertIn(
+            '"${CHROOT_DIR}/var/cache/ming-os/${SPARK_STORE_DEB_NAME}"',
+            staging,
+        )
+
+    def test_release_identity_without_environment_never_downloads_when_cache_is_missing(self):
+        completed, wget_calls = run_spark_asset_gate(
+            "MING_RELEASE_STAGE=stable\nVERSION_ID=26.4.0.1\n"
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertEqual("", wget_calls)
+        self.assertIn("E_PACKAGE_FAILED", completed.stderr)
+
+    def test_release_rejects_a_bad_cached_digest_without_downloading(self):
+        completed, wget_calls = run_spark_asset_gate(
+            "MING_RELEASE_STAGE=stable\nVERSION_ID=26.4.0.1\n",
+            cache_content=b"tampered release asset",
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertEqual("", wget_calls)
+        self.assertIn("E_PACKAGE_FAILED", completed.stderr)
+
+    def test_unknown_or_conflicting_release_identity_fails_before_download(self):
+        cases = (
+            ("MING_RELEASE_STAGE=preview\nVERSION_ID=26.4.0.1\n", None),
+            ("MING_RELEASE_STAGE=stable\nVERSION_ID=26.4.0.1\n", "development"),
+            ("MING_RELEASE_STAGE=development\nVERSION_ID=26.4.0.1-development\n", "release"),
+        )
+        for os_release, mode in cases:
+            with self.subTest(os_release=os_release, mode=mode):
+                completed, wget_calls = run_spark_asset_gate(os_release, mode=mode)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual("", wget_calls)
+                self.assertIn("E_PACKAGE_FAILED", completed.stderr)
+
+    def test_explicit_development_download_rejects_a_bad_digest(self):
+        completed, wget_calls = run_spark_asset_gate(
+            "MING_RELEASE_STAGE=development\nVERSION_ID=26.4.0.1-development\n",
+            mode="development",
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertEqual("wget\n", wget_calls)
+        self.assertIn("E_PACKAGE_FAILED", completed.stderr)
+
+    def test_release_app_store_install_failure_propagates_from_main(self):
+        harness = """
+run_required_step() { "$@"; }
+run_optional_step() { "$@" || true; }
+install_xfce_desktop() { return 0; }
+install_fonts() { return 0; }
+install_required_desktop_runtime() { return 0; }
+generate_edge_video_samples() { return 0; }
+enable_bluetooth_after_runtime() { return 0; }
+install_fcitx5() { return 0; }
+deploy_eyecare() { return 0; }
+install_edge() { return 0; }
+install_wps_office() { return 0; }
+install_wechat() { return 0; }
+install_app_store() { return 42; }
+install_utilities() { return 0; }
+"""
+        source = harness + apps_main_source() + "\nmain\n"
+        for mode, expected_success in (("release", False), ("development", True)):
+            with self.subTest(mode=mode):
+                environment = dict(os.environ)
+                environment["MING_RELEASE_MODE"] = mode
+                completed = subprocess.run(
+                    [BASH],
+                    input=source,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment,
+                )
+                self.assertEqual(expected_success, completed.returncode == 0)
+
+    def test_installer_requires_the_exact_installed_package_version(self):
+        installer = spark_installer_source()
+        self.assertIn("verify_installed_spark_package() {", installer)
+        function = installer.split("verify_installed_spark_package() {", 1)[1]
+        function = "verify_installed_spark_package() {" + function.split("\n}\n", 1)[0] + "\n}\n"
+        harness = "dpkg-query() { printf '%s' \"${MING_TEST_DPKG_RESULT}\"; }\n" + function
+        cases = (
+            ("ii \t5.2.1.0", True),
+            ("ii \t5.2.1.1", False),
+            ("rc \t5.2.1.0", False),
+            ("", False),
+        )
+        for result, expected_success in cases:
+            with self.subTest(result=result):
+                environment = dict(os.environ)
+                environment["MING_TEST_DPKG_RESULT"] = result
+                completed = subprocess.run(
+                    [BASH],
+                    input=harness + "\nverify_installed_spark_package\n",
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment,
+                )
+                self.assertEqual(expected_success, completed.returncode == 0)
 
     def test_invalid_installer_json_is_a_package_failure_without_traceback(self):
         installer = heredoc(

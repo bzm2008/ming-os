@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import re
@@ -103,6 +104,75 @@ def write_executable(root, relative_path, content="#!/bin/sh\nexit 0\n"):
     return path
 
 
+SPARK_VENDOR_LINK = "/opt/durapps/spark-store/bin/spark-store"
+SPARK_VENDOR_TARGET = "/opt/spark-store/extras/spark-store"
+SPARK_VENDOR_PATHS = (
+    "/usr/local/bin/spark-store",
+    SPARK_VENDOR_LINK,
+    SPARK_VENDOR_TARGET,
+)
+
+
+def write_symlink(root, relative_path, target):
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Windows CI may not grant SeCreateSymbolicLinkPrivilege. Store a regular
+    # placeholder plus structured link metadata; run_backend_validator patches
+    # lstat/readlink in its child process so the production validator still
+    # exercises symlink semantics.
+    path.write_text(target, encoding="utf-8")
+    registry = root / ".ming-test-symlinks.json"
+    links = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
+    links[relative_path] = target
+    registry.write_text(json.dumps(links), encoding="utf-8")
+    return path
+
+
+def write_spark_dpkg_metadata(root, version="5.2.1.0", owned_paths=SPARK_VENDOR_PATHS):
+    dpkg = root / "var/lib/dpkg"
+    info = dpkg / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (dpkg / "status").write_text(
+        "Package: spark-store\n"
+        "Status: install ok installed\n"
+        "Architecture: amd64\n"
+        "Version: %s\n\n" % version,
+        encoding="utf-8",
+    )
+    (info / "spark-store.list").write_text(
+        "\n".join(owned_paths) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_vendor_spark_package(
+        root,
+        *,
+        first_target=SPARK_VENDOR_LINK,
+        second_target=SPARK_VENDOR_TARGET,
+        first_is_regular=False,
+        final_exists=True,
+        final_executable=True,
+        version="5.2.1.0",
+        owned_paths=SPARK_VENDOR_PATHS):
+    if first_is_regular:
+        write_executable(root, "usr/local/bin/spark-store")
+    else:
+        write_symlink(root, "usr/local/bin/spark-store", first_target)
+    write_symlink(root, "opt/durapps/spark-store/bin/spark-store", second_target)
+    if final_exists:
+        final = root / SPARK_VENDOR_TARGET.lstrip("/")
+        final.parent.mkdir(parents=True, exist_ok=True)
+        final.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        if final_executable:
+            final.chmod(final.stat().st_mode | 0o111)
+    (root / ".ming-test-final-executable").write_text(
+        "1" if final_executable else "0",
+        encoding="ascii",
+    )
+    write_spark_dpkg_metadata(root, version=version, owned_paths=owned_paths)
+
+
 def write_core_desktops(root):
     targets = {
         "ming-settings.desktop": "/usr/local/bin/ming-control-center",
@@ -121,10 +191,64 @@ def write_core_desktops(root):
         write_executable(root, command.lstrip("/"))
 
 
-def run_backend_validator(root):
+def run_backend_validator(root, final_uid=0, final_gid=0):
+    final_path = root / SPARK_VENDOR_TARGET.lstrip("/")
+    registry = root / ".ming-test-symlinks.json"
+    raw_links = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
+    links = {str(root / path): target for path, target in raw_links.items()}
+    executable_marker = root / ".ming-test-final-executable"
+    final_executable = (
+        executable_marker.read_text(encoding="ascii") == "1"
+        if executable_marker.exists() else True
+    )
+    ownership_shim = """
+import os
+import pathlib
+import stat
+
+_ming_original_lstat = pathlib.Path.lstat
+_ming_original_is_symlink = pathlib.Path.is_symlink
+_ming_original_readlink = os.readlink
+_ming_test_links = %r
+
+class _MingTestStat:
+    def __init__(self, wrapped, *, mode=None, uid=None, gid=None):
+        self._wrapped = wrapped
+        self.st_mode = wrapped.st_mode if mode is None else mode
+        self.st_uid = wrapped.st_uid if uid is None else uid
+        self.st_gid = wrapped.st_gid if gid is None else gid
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+def _ming_test_lstat(path, *args, **kwargs):
+    metadata = _ming_original_lstat(path, *args, **kwargs)
+    path_text = str(path)
+    if path_text in _ming_test_links:
+        return _MingTestStat(metadata, mode=stat.S_IFLNK | 0o777)
+    if path_text == %r:
+        mode = metadata.st_mode | 0o111 if %r else metadata.st_mode & ~0o111
+        return _MingTestStat(metadata, mode=mode, uid=%d, gid=%d)
+    return metadata
+
+def _ming_test_readlink(path, *args, **kwargs):
+    path_text = str(path)
+    if path_text in _ming_test_links:
+        return _ming_test_links[path_text]
+    return _ming_original_readlink(path, *args, **kwargs)
+
+def _ming_test_is_symlink(path):
+    if str(path) in _ming_test_links:
+        return True
+    return _ming_original_is_symlink(path)
+
+pathlib.Path.lstat = _ming_test_lstat
+pathlib.Path.is_symlink = _ming_test_is_symlink
+os.readlink = _ming_test_readlink
+""" % (links, str(final_path), final_executable, final_uid, final_gid)
     return subprocess.run(
         [sys.executable, "-", str(root)],
-        input=desktop_backend_validator_source(),
+        input=ownership_shim + desktop_backend_validator_source(),
         text=True,
         capture_output=True,
         check=False,
@@ -362,7 +486,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 "usr/local/bin/ming-spark-store",
                 "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
             )
-            write_executable(root, "usr/local/bin/spark-store")
+            write_vendor_spark_package(root)
             result = run_backend_validator(root)
             self.assertEqual(0, result.returncode, result.stderr)
 
@@ -384,13 +508,68 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("/usr/local/bin/spark-store", result.stderr)
 
-            write_executable(root, "usr/local/bin/spark-store")
+            write_vendor_spark_package(root)
             result = run_backend_validator(root)
             self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_vendor_spark_gate_rejects_a_symlink_wrapper(self):
-        validator = desktop_backend_validator_source()
-        self.assertIn("not spark_vendor_wrapper.is_symlink()", validator)
+    def test_vendor_spark_gate_accepts_the_exact_package_link_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+            write_vendor_spark_package(root)
+
+            result = run_backend_validator(root)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_spoofed_or_unsafe_package_chains(self):
+        cases = {
+            "relative first link": {"first_target": "../../../opt/durapps/spark-store/bin/spark-store"},
+            "other first target": {"first_target": SPARK_VENDOR_TARGET},
+            "escaping second link": {"second_target": "../../../../../../outside/spark-store"},
+            "dangling final target": {"final_exists": False},
+            "regular wrapper spoof": {"first_is_regular": True},
+            "non executable final target": {"final_executable": False},
+            "wrong package version": {"version": "5.2.1.1"},
+            "wrong dpkg owner": {"owned_paths": (SPARK_VENDOR_LINK, SPARK_VENDOR_TARGET)},
+        }
+        for label, options in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                write_core_desktops(root)
+                write_executable(root, "usr/bin/microsoft-edge-stable")
+                write_executable(root, "usr/local/bin/ming-install-spark-store")
+                write_executable(
+                    root,
+                    "usr/local/bin/ming-spark-store",
+                    "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                )
+                write_vendor_spark_package(root, **options)
+
+                result = run_backend_validator(root)
+                self.assertNotEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_a_non_root_final_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+            write_vendor_spark_package(root)
+
+            result = run_backend_validator(root, final_uid=1000, final_gid=1000)
+            self.assertNotEqual(0, result.returncode, result.stderr)
 
     def test_r4_validation_invokes_required_runtime_gate(self):
         validation = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]
