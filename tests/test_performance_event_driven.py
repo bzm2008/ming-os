@@ -27,6 +27,36 @@ def load_module(path, name):
     return module
 
 
+def load_phone_subset(function_names=(), method_names=()):
+    tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+    wanted_functions = set(function_names)
+    body = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        or (isinstance(node, ast.Import)
+            and all(alias.name != "gi" for alias in node.names))
+        or (isinstance(node, ast.ImportFrom) and node.module != "gi.repository")
+        or (isinstance(node, ast.FunctionDef) and node.name in wanted_functions)
+    ]
+    if method_names:
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        body.extend(
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef) and node.name in set(method_names)
+        )
+    namespace = {
+        "Path": pathlib.Path,
+        "load_shell_common": lambda: None,
+        "__file__": str(PHONE),
+    }
+    module = ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
+    exec(compile(module, str(PHONE), "exec"), namespace)
+    return namespace
+
+
 class PerformanceEventDrivenContracts(unittest.TestCase):
     def test_background_policy_has_no_global_cpu_quota_and_defaults_off(self):
         source = POLICY.read_text(encoding="utf-8")
@@ -543,6 +573,9 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         selected = [
             methods["on_catalog_file_changed"],
             methods["_run_catalog_refresh"],
+            methods["_schedule_catalog_sync_retry"],
+            methods["_run_catalog_sync_retry"],
+            methods["_clear_catalog_sync_retry"],
             methods["refresh_if_apps_changed"],
         ]
         timers = []
@@ -560,13 +593,20 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         stable_catalog = (("version", 4), ("external", "stable"))
         sync_calls = []
         layout = {"version": 4, "items": []}
+        def sync_layout(width, report_status=False):
+            sync_calls.append(width)
+            updated = dict(layout)
+            return (updated, True) if report_status else updated
+
         namespace = {
             "GLib": FakeGLib,
             "app_catalog_fingerprint": lambda: stable_catalog,
-            "sync_layout": lambda width: sync_calls.append(width) or dict(layout),
+            "sync_layout": sync_layout,
             "load_layout": lambda: dict(layout),
             "layout_is_valid": lambda _layout, require_items=False: True,
             "LAYOUT_VERSION": 4,
+            "CATALOG_SYNC_RETRY_DELAYS_MS": (1_000, 5_000, 30_000),
+            "log": lambda _message: None,
         }
         exec(compile(
             ast.Module(body=selected, type_ignores=[]),
@@ -577,6 +617,8 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         desktop = types.SimpleNamespace(
             _catalog_dirty=False,
             _catalog_debounce_source=0,
+            _catalog_sync_retry_source=0,
+            _catalog_sync_retry_attempt=0,
             catalog_stamp=stable_catalog,
             appearance_stamp=(0, 0),
             layout_stamp=0,
@@ -586,7 +628,14 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             get_screen=lambda: fake_screen,
             render=lambda: None,
         )
-        for name in ("on_catalog_file_changed", "_run_catalog_refresh", "refresh_if_apps_changed"):
+        for name in (
+            "on_catalog_file_changed",
+            "_run_catalog_refresh",
+            "_schedule_catalog_sync_retry",
+            "_run_catalog_sync_retry",
+            "_clear_catalog_sync_retry",
+            "refresh_if_apps_changed",
+        ):
             setattr(desktop, name, types.MethodType(namespace[name], desktop))
 
         desktop.on_catalog_file_changed(None, None, None, None, True)
@@ -613,10 +662,16 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and node.name == "refresh_if_apps_changed"
         )
+        clear_retry_method = next(
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_clear_catalog_sync_retry"
+        )
         wanted = {
             "safe_name",
             "_desktop_has_marker",
             "_mark_desktop_file",
+            "_durable_replace",
             "write_managed_wrapper_proxy",
             "copy_desktop",
         }
@@ -634,7 +689,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             node for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name in wanted
         )
-        body.append(refresh_method)
+        body.extend((clear_retry_method, refresh_method))
         namespace = {
             "Path": pathlib.Path,
             "load_shell_common": lambda: None,
@@ -675,7 +730,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
                 if pathlib.Path(target_path) == target:
                     target_replacements.append(target)
 
-            def sync_layout(width):
+            def sync_layout(width, report_status=False):
                 sync_calls.append(width)
                 replacements_before = len(target_replacements)
                 copied = namespace["copy_desktop"](
@@ -683,7 +738,8 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
                 self.assertEqual(target, copied)
                 if len(target_replacements) != replacements_before:
                     pending_catalog_events.append(True)
-                return dict(layout)
+                updated = dict(layout)
+                return (updated, True) if report_status else updated
 
             namespace.update({
                 "app_catalog_fingerprint": lambda: catalog_after,
@@ -696,6 +752,8 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             desktop = types.SimpleNamespace(
                 _catalog_dirty=False,
                 _catalog_debounce_source=0,
+                _catalog_sync_retry_source=0,
+                _catalog_sync_retry_attempt=0,
                 catalog_stamp=catalog_before,
                 appearance_stamp=(0, 0),
                 layout_stamp=0,
@@ -707,6 +765,8 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             )
             desktop.refresh_if_apps_changed = types.MethodType(
                 namespace["refresh_if_apps_changed"], desktop)
+            desktop._clear_catalog_sync_retry = types.MethodType(
+                namespace["_clear_catalog_sync_retry"], desktop)
 
             with mock.patch.object(os, "replace", side_effect=observed_replace):
                 self.assertFalse(desktop.refresh_if_apps_changed())
@@ -724,6 +784,194 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         )
         self.assertEqual([target], target_replacements)
         self.assertEqual([], pending_catalog_events)
+
+    def test_failed_catalog_reconciliation_retries_until_marker_write_succeeds(self):
+        namespace = load_phone_subset({
+            "safe_name",
+            "_desktop_has_marker",
+            "_mark_desktop_file",
+            "_manifest_relative",
+            "empty_desktop_manifest",
+            "write_managed_wrapper_proxy",
+            "copy_desktop",
+            "sync_files",
+            "_durable_replace",
+        }, {
+            "_schedule_catalog_sync_retry",
+            "_run_catalog_sync_retry",
+            "_clear_catalog_sync_retry",
+            "refresh_if_apps_changed",
+        })
+        retry_methods = {
+            "_schedule_catalog_sync_retry",
+            "_run_catalog_sync_retry",
+            "_clear_catalog_sync_retry",
+            "refresh_if_apps_changed",
+        }
+        timers = []
+        removed_sources = []
+        logs = []
+
+        class FakeGLib:
+            @staticmethod
+            def timeout_add(delay, callback, *args):
+                timers.append((delay, callback, args))
+                return len(timers)
+
+            @staticmethod
+            def source_remove(source):
+                removed_sources.append(source)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop_dir = root / "Desktop"
+            source_dir = root / "applications"
+            desktop_dir.mkdir()
+            source_dir.mkdir()
+            source = source_dir / "transient.desktop"
+            source.write_text(
+                "[Desktop Entry]\nType=Application\nName=Transient\nExec=transient\n",
+                encoding="utf-8",
+            )
+            target = desktop_dir / "Transient.desktop"
+            original_target = (
+                b"[Desktop Entry]\nX-Ming-Managed=true\n"
+                b"Name=Last Good\nExec=last-good\n"
+            )
+            target.write_bytes(original_target)
+            layout = {
+                "version": 4,
+                "items": [{
+                    "type": "app",
+                    "path": str(source),
+                    "name": "Transient",
+                    "pinned": True,
+                }],
+            }
+            manifest = namespace["empty_desktop_manifest"]()
+            manifest["managed_files"] = [target.name]
+            manifest["managed"] = [target.name]
+            real_marker = namespace["_mark_desktop_file"]
+            saved_manifests = []
+
+            def save_manifest(value):
+                saved_manifests.append(value)
+                return True
+
+            namespace.update({
+                "DESKTOP_DIR": desktop_dir,
+                "GLib": FakeGLib,
+                "_mark_desktop_file": lambda _path: False,
+                "load_desktop_manifest": lambda: manifest,
+                "save_desktop_manifest": save_manifest,
+                "log": logs.append,
+            })
+            first_status = namespace["sync_files"](layout)
+            self.assertIs(False, first_status)
+            self.assertEqual(original_target, target.read_bytes())
+            self.assertEqual([], saved_manifests)
+            self.assertTrue(any("mark managed desktop launcher" in entry for entry in logs))
+            self.assertTrue(retry_methods.issubset(namespace))
+            self.assertEqual((1_000, 5_000, 30_000), namespace["CATALOG_SYNC_RETRY_DELAYS_MS"])
+
+            def sync_layout(_width, report_status=False):
+                nonlocal first_status
+                status = first_status
+                first_status = True
+                if status is True:
+                    namespace["_mark_desktop_file"] = real_marker
+                    status = namespace["sync_files"](layout)
+                result = dict(layout)
+                return (result, status) if report_status else result
+
+            namespace.update({
+                "app_catalog_fingerprint": lambda: (("version", 4),),
+                "sync_layout": sync_layout,
+                "load_layout": lambda: dict(layout),
+                "layout_is_valid": lambda _layout, require_items=False: True,
+                "LAYOUT_VERSION": 4,
+            })
+            desktop = types.SimpleNamespace(
+                _catalog_dirty=True,
+                _catalog_sync_retry_source=0,
+                _catalog_sync_retry_attempt=0,
+                catalog_stamp=(("version", 4),),
+                appearance_stamp=(0, 0),
+                layout_stamp=0,
+                layout=dict(layout),
+                current_layout_stamp=lambda: 0,
+                current_appearance_stamp=lambda: (0, 0),
+                get_screen=lambda: types.SimpleNamespace(get_width=lambda: 1366),
+                render=lambda: None,
+            )
+            for name in retry_methods:
+                setattr(desktop, name, types.MethodType(namespace[name], desktop))
+
+            self.assertFalse(desktop.refresh_if_apps_changed())
+            self.assertTrue(desktop._catalog_dirty)
+            self.assertEqual(1_000, timers[0][0])
+            desktop._schedule_catalog_sync_retry()
+            self.assertEqual(1, len(timers), "only one sync retry source may be pending")
+            _delay, callback, args = timers.pop()
+            self.assertFalse(callback(*args))
+
+            self.assertFalse(desktop._catalog_dirty)
+            self.assertEqual(0, desktop._catalog_sync_retry_attempt)
+            self.assertEqual(0, desktop._catalog_sync_retry_source)
+            self.assertEqual([], timers)
+            self.assertEqual(1, len(saved_manifests))
+            self.assertNotEqual(original_target, target.read_bytes())
+
+            desktop._catalog_sync_retry_attempt = 99
+            desktop._schedule_catalog_sync_retry()
+            self.assertEqual(30_000, timers[0][0])
+            desktop._schedule_catalog_sync_retry()
+            self.assertEqual(1, len(timers), "capped retry must still use one source")
+            desktop._clear_catalog_sync_retry()
+            self.assertEqual([1], removed_sources)
+
+    def test_desktop_replacement_fsyncs_file_and_parent_directory(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        functions = {
+            node.name: node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("_durable_replace", functions)
+        for caller in ("write_managed_wrapper_proxy", "copy_desktop"):
+            self.assertIn("_durable_replace", ast.unparse(functions[caller]))
+
+        namespace = load_phone_subset({"_durable_replace"})
+        events = []
+        descriptors = iter((41, 42))
+        fake_os = types.SimpleNamespace(
+            O_RDONLY=os.O_RDONLY,
+            O_RDWR=os.O_RDWR,
+            O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
+            name="posix",
+            open=lambda path, flags: (
+                events.append(("open", pathlib.Path(path), flags))
+                or next(descriptors)
+            ),
+            fsync=lambda descriptor: events.append(("fsync", descriptor)),
+            close=lambda descriptor: events.append(("close", descriptor)),
+            replace=lambda source, target: events.append((
+                "replace", pathlib.Path(source), pathlib.Path(target))),
+        )
+        namespace["os"] = fake_os
+        staged = pathlib.Path("/catalog/.app.desktop.stage")
+        target = pathlib.Path("/catalog/app.desktop")
+
+        namespace["_durable_replace"](staged, target)
+
+        self.assertEqual([
+            ("open", staged, os.O_RDWR),
+            ("fsync", 41),
+            ("close", 41),
+            ("replace", staged, target),
+            ("open", target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+            ("fsync", 42),
+            ("close", 42),
+        ], events)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")

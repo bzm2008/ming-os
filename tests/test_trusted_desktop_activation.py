@@ -547,7 +547,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
         wanted = {
             "app_id", "safe_name", "_desktop_has_marker", "_mark_desktop_file",
             "trusted_wrapper_source_path", "managed_desktop_source_path", "write_managed_wrapper_proxy",
-            "copy_desktop",
+            "_durable_replace", "copy_desktop",
             "read_app", "add_app_from_path", "load_apps",
         }
         body = [node for node in tree.body if isinstance(node, ast.Assign)]

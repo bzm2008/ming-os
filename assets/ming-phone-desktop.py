@@ -138,6 +138,7 @@ APP_CATALOG_MAX_LAUNCHERS = 512
 APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
 APP_CATALOG_TOTAL_HASH_BYTES = 2 * 1024 * 1024
 CATALOG_MONITOR_RETRY_DELAYS_MS = (500, 2_000, 10_000, 30_000)
+CATALOG_SYNC_RETRY_DELAYS_MS = (1_000, 5_000, 30_000)
 CORE_NAMES = {
     "Install Ming OS.desktop",
     "ming-settings.desktop",
@@ -1099,7 +1100,7 @@ def clamp_grid_position(x, y, width=1366, height=768):
     return max(PAD_X, min(max_x, snapped_x)), max(PAD_Y, min(max_y, snapped_y))
 
 
-def sync_layout(width=1366):
+def sync_layout(width=1366, report_status=False):
     apps = load_apps(default_only=False)
     primary = read_layout(LAYOUT_PATH)
     try:
@@ -1110,11 +1111,12 @@ def sync_layout(width=1366):
         # Do not let this older binary overwrite a future layout.  load_layout
         # will select the last-good snapshot when one is available.
         log("desktop layout was written by a newer Ming OS; leaving it untouched")
-        return load_layout()
+        layout = load_layout()
+        return (layout, True) if report_status else layout
     layout = load_layout()
     if not apps and layout_is_valid(layout, require_items=True):
         log("app discovery was transiently empty; keeping last known-good layout")
-        return layout
+        return (layout, True) if report_status else layout
     migrated = migrate_layout(layout)
     if migrated is not None:
         layout = migrated
@@ -1180,10 +1182,20 @@ def sync_layout(width=1366):
     layout["version"] = LAYOUT_VERSION
     layout["items"] = items
     layout["catalog_paths"] = sorted(catalog_paths)
+    sync_succeeded = True
     if items:
-        save_layout(layout)
-        sync_files(layout)
-    return layout
+        layout_saved = save_layout(layout)
+        if not layout_saved:
+            log("could not save reconciled desktop layout")
+        try:
+            files_synced = sync_files(layout)
+        except Exception as exc:
+            log(f"desktop file reconciliation failed: {exc}")
+            if not report_status:
+                raise
+            files_synced = False
+        sync_succeeded = layout_saved and files_synced
+    return (layout, sync_succeeded) if report_status else layout
 
 
 def safe_name(name):
@@ -1264,6 +1276,29 @@ def managed_desktop_source_path(path):
     return trusted_wrapper_source_path(value)
 
 
+def _durable_replace(staged, target):
+    """Replace a file only after its data and destination directory are durable."""
+    staged = Path(staged)
+    target = Path(target)
+    descriptor = os.open(str(staged), os.O_RDWR)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(str(staged), str(target))
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(str(target.parent), flags)
+    except OSError:
+        if os.name == "nt":
+            return
+        raise
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def write_managed_wrapper_proxy(target, source):
     """Replace a copied shell wrapper with a broker-only Desktop proxy."""
     target = Path(target)
@@ -1314,10 +1349,8 @@ def write_managed_wrapper_proxy(target, source):
         ) as handle:
             temporary = Path(handle.name)
             handle.write(desired)
-            handle.flush()
-            os.fsync(handle.fileno())
         shutil.copymode(target, temporary)
-        os.replace(str(temporary), str(target))
+        _durable_replace(temporary, target)
         return True
     except (OSError, UnicodeError, ValueError):
         return False
@@ -1389,6 +1422,7 @@ def save_desktop_manifest(manifest, path=None):
 def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=False):
     src = Path(path)
     if not src.is_file():
+        log(f"desktop launcher source is unavailable: {src}")
         return None
     wrapper_resolver = globals().get("trusted_wrapper_source_path")
     wrapper_source = wrapper_resolver(src) if managed and callable(wrapper_resolver) else None
@@ -1415,9 +1449,11 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
             staged = Path(stage_dir) / target.name
             shutil.copy2(src, staged)
             if wrapper_source and not write_managed_wrapper_proxy(staged, wrapper_source):
+                log(f"could not write managed desktop proxy: {src}")
                 return None
-            if managed:
-                _mark_desktop_file(staged)
+            if managed and not _mark_desktop_file(staged):
+                log(f"could not mark managed desktop launcher: {src}")
+                return None
             staged.chmod(0o755)
             try:
                 unchanged = target.read_bytes() == staged.read_bytes()
@@ -1436,18 +1472,20 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
                 temporary = Path(handle.name)
             try:
                 shutil.copy2(staged, temporary)
-                os.replace(str(temporary), str(target))
+                _durable_replace(temporary, target)
             finally:
                 try:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
             return target
-    except Exception:
+    except Exception as exc:
+        log(f"could not copy desktop launcher {src} to {target}: {exc}")
         return None
 
 
 def sync_files(layout):
+    succeeded = True
     DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
     previous_manifest = load_desktop_manifest()
     managed_before = set(previous_manifest.get("managed_files", []))
@@ -1459,38 +1497,11 @@ def sync_files(layout):
             relative = _manifest_relative(candidate)
             if relative:
                 managed_before.add(relative)
-    source_paths = set()
-    for source_item in layout.get("items", []):
-        if source_item.get("path"):
-            source_paths.add(Path(source_item["path"]).resolve())
-        source_paths.update(
-            Path(child).resolve()
-            for child in source_item.get("children", [])
-            if isinstance(child, (str, os.PathLike))
-        )
-    for relative in sorted(managed_before):
-        target = DESKTOP_DIR / Path(relative)
-        try:
-            target.relative_to(DESKTOP_DIR)
-        except ValueError:
-            continue
-        source_resolver = globals().get("managed_desktop_source_path")
-        target_source = source_resolver(target) if callable(source_resolver) else None
-        if (
-                target.is_file()
-                and target.resolve() not in source_paths
-                and target_source not in source_paths):
-            try:
-                target.unlink()
-            except OSError:
-                log(f"could not remove managed desktop launcher: {target}")
-    folders_seen = set()
     managed_files = set()
     managed_dirs = set()
     for item in layout.get("items", []):
         if item.get("type") == "folder":
             folder_dir = DESKTOP_DIR / safe_name(item.get("name", "folder"))
-            folders_seen.add(folder_dir)
             was_present = folder_dir.exists()
             folder_dir.mkdir(parents=True, exist_ok=True)
             relative_dir = _manifest_relative(folder_dir)
@@ -1500,6 +1511,8 @@ def sync_files(layout):
                 child = read_app(child_path)
                 if child:
                     copied = copy_desktop(child_path, folder_dir, child["name"], managed=True)
+                    if copied is None:
+                        succeeded = False
                     relative = _manifest_relative(copied) if copied else None
                     if relative and copied != Path(child_path).resolve():
                         managed_files.add(relative)
@@ -1512,10 +1525,27 @@ def sync_files(layout):
                 preserve_basename=is_core,
                 managed=True,
             )
-            if copied:
+            if copied is None:
+                succeeded = False
+            else:
                 relative = _manifest_relative(copied)
                 if relative and (copied != Path(item["path"]).resolve() or _desktop_has_marker(copied)):
                     managed_files.add(relative)
+    if not succeeded:
+        log("desktop file reconciliation incomplete; preserving previous manifest")
+        return False
+    for relative in sorted(managed_before - managed_files):
+        old = DESKTOP_DIR / Path(relative)
+        try:
+            old.relative_to(DESKTOP_DIR)
+        except ValueError:
+            continue
+        if old.is_file():
+            try:
+                old.unlink()
+            except OSError as exc:
+                log(f"could not remove managed desktop launcher {old}: {exc}")
+                succeeded = False
     for relative in sorted(managed_dirs_before - managed_dirs):
         old = DESKTOP_DIR / Path(relative)
         try:
@@ -1525,9 +1555,19 @@ def sync_files(layout):
         if old.is_dir() and not any(old.iterdir()):
             try:
                 old.rmdir()
-            except Exception:
-                pass
-    save_desktop_manifest({"managed_files": sorted(managed_files), "managed_dirs": sorted(managed_dirs)})
+            except OSError as exc:
+                log(f"could not remove managed desktop folder {old}: {exc}")
+                succeeded = False
+    if not succeeded:
+        log("desktop cleanup incomplete; preserving previous manifest")
+        return False
+    if not save_desktop_manifest({
+            "managed_files": sorted(managed_files),
+            "managed_dirs": sorted(managed_dirs),
+    }):
+        log("could not save managed desktop manifest")
+        succeeded = False
+    return succeeded
 
 
 def command_add(path, folder=False):
@@ -2899,6 +2939,8 @@ class PhoneDesktop(Gtk.Window):
         self._catalog_debounce_source = 0
         self._catalog_retry_source = 0
         self._catalog_retry_attempt = 0
+        self._catalog_sync_retry_source = 0
+        self._catalog_sync_retry_attempt = 0
         self._catalog_dirty = False
         self.start_catalog_monitor()
         self.render()
@@ -2985,6 +3027,39 @@ class PhoneDesktop(Gtk.Window):
         self._catalog_retry_source = 0
         self.start_catalog_monitor()
         return False
+
+    def _schedule_catalog_sync_retry(self):
+        if self._catalog_sync_retry_source or not CATALOG_SYNC_RETRY_DELAYS_MS:
+            return
+        index = min(
+            self._catalog_sync_retry_attempt,
+            len(CATALOG_SYNC_RETRY_DELAYS_MS) - 1,
+        )
+        delay = CATALOG_SYNC_RETRY_DELAYS_MS[index]
+        self._catalog_sync_retry_attempt = min(
+            index + 1,
+            len(CATALOG_SYNC_RETRY_DELAYS_MS) - 1,
+        )
+        try:
+            self._catalog_sync_retry_source = GLib.timeout_add(
+                delay, self._run_catalog_sync_retry)
+        except (AttributeError, TypeError, ValueError):
+            self._catalog_sync_retry_source = 0
+
+    def _run_catalog_sync_retry(self):
+        self._catalog_sync_retry_source = 0
+        self.refresh_if_apps_changed()
+        return False
+
+    def _clear_catalog_sync_retry(self):
+        self._catalog_sync_retry_attempt = 0
+        if not self._catalog_sync_retry_source:
+            return
+        try:
+            GLib.source_remove(self._catalog_sync_retry_source)
+        except (TypeError, ValueError):
+            pass
+        self._catalog_sync_retry_source = 0
 
     def on_catalog_file_changed(self, *_args):
         """Debounce package/appearance bursts and refresh on the GTK main loop."""
@@ -3470,8 +3545,19 @@ class PhoneDesktop(Gtk.Window):
             self.wallpaper.queue_draw()
             self.render()
         if catalog_changed:
-            updated = sync_layout(self.get_screen().get_width())
-            self._catalog_dirty = False
+            try:
+                updated, catalog_synced = sync_layout(
+                    self.get_screen().get_width(), report_status=True)
+            except Exception as exc:
+                log(f"desktop catalog refresh failed: {exc}")
+                updated = load_layout()
+                catalog_synced = False
+            if catalog_synced:
+                self._catalog_dirty = False
+                self._clear_catalog_sync_retry()
+            else:
+                self._catalog_dirty = True
+                self._schedule_catalog_sync_retry()
         else:
             updated = load_layout()
         self.layout_stamp = self.current_layout_stamp()
