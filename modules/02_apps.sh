@@ -1722,23 +1722,24 @@ MINGINPUTCONTROL
 # ======================== 应用商店 (星火应用商店) ========================
 
 install_app_store() {
-    apt install -y --no-install-recommends \
+    /usr/local/sbin/apt-build install --no-install-recommends \
         curl \
-        jq \
         wget \
         apt-transport-https \
         xdg-utils \
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
-        libnotify-bin
+        libnotify-bin || return 1
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash
 set -euo pipefail
 
-api="https://gitee.com/api/v5/repos/spark-store-project/spark-store/releases/latest"
-fallback="https://gitee.com/spark-store-project/spark-store/releases/download/5.1.1/spark-store_5.1.1_amd64.deb"
-deb="/tmp/spark-store.deb"
+readonly version="5.2.1.0"
+readonly deb_name="spark-store_5.2.1.0_amd64.deb"
+readonly expected_sha256="88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
+readonly url="https://gitee.com/spark-store-project/spark-store/releases/download/5.2.1.0/${deb_name}"
+readonly deb="/tmp/${deb_name}"
 log="/var/log/ming-spark-store-install.log"
 
 cleanup() {
@@ -1746,20 +1747,77 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Resolving latest Spark Store release..."
-url="$(curl -fsSL "${api}" 2>/dev/null | jq -r '.assets[]? | select(.name | test("_amd64\\.deb$")) | .browser_download_url' | head -n1 || true)"
-if [[ -z "${url}" || "${url}" == "null" ]]; then
-    url="${fallback}"
-fi
-
-echo "Downloading Spark Store: ${url}"
-wget -c --show-progress -O "${deb}" "${url}"
-mkdir -p /root/.config "${HOME:-/root}/.config"
-touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     echo "Administrator privileges are required to install Spark Store." >&2
     exit 1
 fi
+
+verify_spark_asset() {
+    local candidate="$1"
+    local actual_sha256
+    [[ -f "${candidate}" && ! -L "${candidate}" ]] || return 1
+    actual_sha256="$(sha256sum -- "${candidate}" | awk '{print toupper($1)}')" \
+        || return 1
+    [[ "${actual_sha256}" == "${expected_sha256}" ]]
+}
+
+build_mode="${MING_RELEASE_MODE:-development}"
+case "${build_mode}" in
+    release|development) ;;
+    *) printf '%s\n' E_PACKAGE_FAILED >&2; exit 1 ;;
+esac
+
+asset=""
+candidates=()
+if [[ -n "${MING_SPARK_STORE_ASSET:-}" ]]; then
+    candidates+=("${MING_SPARK_STORE_ASSET}")
+fi
+candidates+=(
+    "/tmp/ming-build/assets/${deb_name}"
+    "/var/cache/ming-os/${deb_name}"
+)
+for candidate in "${candidates[@]}"; do
+    [[ -e "${candidate}" || -L "${candidate}" ]] || continue
+    if verify_spark_asset "${candidate}"; then
+        asset="${candidate}"
+        break
+    fi
+    if [[ "${build_mode}" == "release" ]]; then
+        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+        exit 1
+    fi
+done
+
+if [[ -n "${asset}" ]]; then
+    if [[ "${asset}" != "${deb}" ]]; then
+        install -m 0600 "${asset}" "${deb}"
+    else
+        chmod 0600 "${deb}"
+    fi
+elif [[ "${build_mode}" == "release" ]]; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+else
+    echo "Downloading pinned Spark Store ${version}..."
+    if ! timeout --foreground 300s wget \
+        --quiet \
+        --https-only \
+        --connect-timeout=10 \
+        --read-timeout=60 \
+        --tries=2 \
+        --output-document="${deb}" \
+        "${url}"; then
+        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+        exit 1
+    fi
+fi
+if ! verify_spark_asset "${deb}"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
+mkdir -p /root/.config "${HOME:-/root}/.config"
+touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 
 # At runtime the shared local-package installer validates architecture and
 # metadata, performs one controlled dependency repair, verifies dpkg state and
@@ -1781,9 +1839,12 @@ try:
     with open(sys.argv[1], "r", encoding="utf-8") as stream:
         result = json.load(stream)
 except (OSError, TypeError, ValueError):
-    result = {}
-if not isinstance(result, dict) or result.get("ok") is not True:
-    print(str(result.get("error_code") or "E_RESOLVER_FAILED"), file=sys.stderr)
+    result = None
+if not isinstance(result, dict):
+    print("E_PACKAGE_FAILED", file=sys.stderr)
+    raise SystemExit(1)
+if result.get("ok") is not True:
+    print(str(result.get("error_code") or "E_PACKAGE_FAILED"), file=sys.stderr)
     raise SystemExit(1)
 if result.get("launch_ready") is True:
     raise SystemExit(0)

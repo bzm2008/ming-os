@@ -228,6 +228,26 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("${db:Status-Abbrev}", function)
         self.assertIn('required desktop runtime package is not installed', function)
 
+    def test_build_apt_wrapper_uses_the_shared_package_manager_lock(self):
+        wrapper = BUILD.split(
+            "cat > \"${CHROOT_DIR}/usr/local/sbin/apt-build\" << 'APT_BUILD_WRAPPER'",
+            1,
+        )[1].split("APT_BUILD_WRAPPER", 1)[0]
+
+        self.assertIn("flock", wrapper)
+        self.assertIn("/run/lock/ming-package-manager.lock", wrapper)
+        self.assertIn("DPkg::Lock::Timeout=60", wrapper)
+        self.assertLess(wrapper.index("/usr/bin/flock"), wrapper.index("/usr/bin/apt-get"))
+
+    def test_app_store_dependencies_use_the_locked_build_apt_wrapper(self):
+        function = APPS.split("install_app_store() {", 1)[1].split(
+            "cat > /usr/local/bin/ming-install-spark-store", 1
+        )[0]
+
+        self.assertIn("/usr/local/sbin/apt-build install", function)
+        self.assertIn("libnotify-bin || return 1", function)
+        self.assertNotIn("apt install", function)
+
     def test_main_explicitly_propagates_required_steps_and_tolerates_optional_apps(self):
         main = APPS.split("main() {", 1)[1].split("\n}", 1)[0]
         self.assertIn('run_required_step install_xfce_desktop', main)
@@ -342,8 +362,35 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 "usr/local/bin/ming-spark-store",
                 "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
             )
+            write_executable(root, "usr/local/bin/spark-store")
             result = run_backend_validator(root)
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_raw_spark_binaries_cannot_replace_the_vendor_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            write_core_desktops(root)
+            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/bin/spark-store")
+            write_executable(root, "opt/spark-store/bin/spark-store")
+            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(
+                root,
+                "usr/local/bin/ming-spark-store",
+                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+            )
+
+            result = run_backend_validator(root)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("/usr/local/bin/spark-store", result.stderr)
+
+            write_executable(root, "usr/local/bin/spark-store")
+            result = run_backend_validator(root)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_vendor_spark_gate_rejects_a_symlink_wrapper(self):
+        validator = desktop_backend_validator_source()
+        self.assertIn("not spark_vendor_wrapper.is_symlink()", validator)
 
     def test_r4_validation_invokes_required_runtime_gate(self):
         validation = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]

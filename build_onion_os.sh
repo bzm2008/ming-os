@@ -51,6 +51,9 @@ readonly MING_OS_UPDATE_VERSION="${_MING_UPDATE_VERSION}"
 readonly MING_OS_RELEASE_STAGE="${_MING_RELEASE_STAGE}"
 readonly MING_OS_RELEASE_LABEL="${_MING_RELEASE_LABEL}"
 readonly MING_OS_BUILD_SUFFIX="${_MING_BUILD_SUFFIX}"
+readonly SPARK_STORE_VERSION="5.2.1.0"
+readonly SPARK_STORE_DEB_NAME="spark-store_5.2.1.0_amd64.deb"
+readonly SPARK_STORE_SHA256="88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2640"
@@ -223,6 +226,7 @@ chroot_exec() {
         HOME="/root" \
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin" \
         TERM="linux" \
+        MING_RELEASE_MODE="${MING_RELEASE_MODE}" \
         MING_OS_VERSION="${MING_OS_VERSION}" \
         MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION}" \
         MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}" \
@@ -286,6 +290,40 @@ prepare_chroot_scripts() {
             fi
         done
     fi
+    # Formal builds consume a locally controlled Spark asset. Development
+    # builds may omit it and let the in-image installer fetch the same pinned
+    # release with bounded network timeouts.
+    local spark_asset=""
+    local spark_asset_dir="${MING_SPARK_STORE_ASSET_DIR:-${SCRIPT_DIR}/assets/spark-assets}"
+    local spark_actual_sha=""
+    if [[ -n "${MING_SPARK_STORE_ASSET:-}" ]]; then
+        if [[ ! -f "${MING_SPARK_STORE_ASSET}" || -L "${MING_SPARK_STORE_ASSET}" ]]; then
+            log_error "指定的 Spark Store 受控资产不可用"
+            return 1
+        fi
+        spark_asset="${MING_SPARK_STORE_ASSET}"
+    elif [[ -f "${spark_asset_dir}/${SPARK_STORE_DEB_NAME}" \
+        && ! -L "${spark_asset_dir}/${SPARK_STORE_DEB_NAME}" ]]; then
+        spark_asset="${spark_asset_dir}/${SPARK_STORE_DEB_NAME}"
+    elif [[ -f "${SCRIPT_DIR}/assets/${SPARK_STORE_DEB_NAME}" \
+        && ! -L "${SCRIPT_DIR}/assets/${SPARK_STORE_DEB_NAME}" ]]; then
+        spark_asset="${SCRIPT_DIR}/assets/${SPARK_STORE_DEB_NAME}"
+    fi
+    if [[ -n "${spark_asset}" ]]; then
+        spark_actual_sha="$(sha256sum -- "${spark_asset}" | awk '{print toupper($1)}')" || {
+            log_error "无法校验 Spark Store 受控资产"
+            return 1
+        }
+        if [[ "${spark_actual_sha}" != "${SPARK_STORE_SHA256}" ]]; then
+            log_error "Spark Store 受控资产 SHA256 不匹配"
+            return 1
+        fi
+        install -m 0644 "${spark_asset}" \
+            "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${SPARK_STORE_DEB_NAME}"
+    elif [[ "${MING_RELEASE_MODE}" == "release" ]]; then
+        log_error "正式构建必须提供已校验的 Spark Store ${SPARK_STORE_VERSION} 受控资产"
+        return 1
+    fi
     # Stage only the pinned Papyrus release asset. The chroot never receives
     # an arbitrary host path, and release builds refuse to omit the app.
     local papyrus_asset=""
@@ -341,14 +379,20 @@ prepare_chroot_scripts() {
 # Ming OS build-time apt wrapper: non-interactive, no pty, stdin from /dev/null.
 # Usage: apt-build install [-y] [--no-install-recommends] pkg...
 #        apt-build <any apt-get sub-command> [args...]
-exec env \
+exec /usr/bin/flock \
+    --exclusive \
+    --timeout 30 \
+    --conflict-exit-code 75 \
+    /run/lock/ming-package-manager.lock \
+    /usr/bin/env \
     DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true \
     APT_LISTCHANGES_FRONTEND=none \
     UCF_FORCE_CONFFOLD=1 \
-    apt-get \
+    /usr/bin/apt-get \
     -y \
     -o Dpkg::Use-Pty=0 \
+    -o DPkg::Lock::Timeout=60 \
     -o APT::Install-Recommends=false \
     -o Dpkg::Options::="--force-confold" \
     -o Dpkg::Options::="--force-confdef" \
@@ -1190,22 +1234,23 @@ edge_backends = [
 if not any(path.is_file() and os.access(path, os.X_OK) for path in edge_backends):
     errors.append("missing Microsoft Edge browser backend behind ming-edge wrapper")
 
-spark_backends = [
-    root / "usr/bin/spark-store",
-    root / "opt/spark-store/bin/spark-store",
-]
-if not any(path.is_file() and os.access(path, os.X_OK) for path in spark_backends):
-    spark_wrapper = root / "usr/local/bin/ming-spark-store"
-    spark_installer = root / "usr/local/bin/ming-install-spark-store"
-    wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
-    has_repair_fallback = (
-        desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
-        and spark_installer.is_file()
-        and os.access(spark_installer, os.X_OK)
-        and 'exec pkexec /usr/local/bin/ming-install-spark-store "$@"' in wrapper_text
-    )
-    if not has_repair_fallback:
-        errors.append("Spark Store repair fallback is missing or not executable")
+spark_vendor_wrapper = root / "usr/local/bin/spark-store"
+if not (
+        spark_vendor_wrapper.is_file()
+        and not spark_vendor_wrapper.is_symlink()
+        and os.access(spark_vendor_wrapper, os.X_OK)):
+    errors.append("missing vendor Spark Store wrapper: /usr/local/bin/spark-store")
+spark_wrapper = root / "usr/local/bin/ming-spark-store"
+spark_installer = root / "usr/local/bin/ming-install-spark-store"
+wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
+has_repair_fallback = (
+    desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
+    and spark_installer.is_file()
+    and os.access(spark_installer, os.X_OK)
+    and 'exec pkexec /usr/local/bin/ming-install-spark-store "$@"' in wrapper_text
+)
+if not has_repair_fallback:
+    errors.append("Spark Store repair fallback is missing or not executable")
 
 if errors:
     print("\n".join(errors), file=sys.stderr)

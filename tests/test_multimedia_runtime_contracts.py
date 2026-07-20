@@ -1,4 +1,7 @@
 import pathlib
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -55,6 +58,66 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertIn("ming-package-installer install", installer)
         self.assertIn("ming-phone-desktop --sync", installer)
         self.assertIn("update-desktop-database", installer)
+
+    def test_spark_install_is_pinned_verified_bounded_and_cache_gated(self):
+        installer = heredoc(
+            APPS,
+            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
+            "SPARKINSTALL",
+        )
+
+        for marker in (
+            "5.2.1.0",
+            "spark-store_5.2.1.0_amd64.deb",
+            "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55",
+            "/releases/download/5.2.1.0/",
+            "MING_SPARK_STORE_ASSET",
+            "/tmp/ming-build/assets/",
+            "MING_RELEASE_MODE",
+            "sha256sum",
+            "timeout --foreground 300s",
+            "--connect-timeout=10",
+            "--read-timeout=60",
+        ):
+            self.assertIn(marker, installer)
+        self.assertNotIn("/releases/latest", installer)
+        self.assertNotIn("browser_download_url", installer)
+        self.assertNotIn('Downloading Spark Store: ${url}', installer)
+
+    def test_release_build_stages_only_the_verified_pinned_spark_asset(self):
+        for marker in (
+            "MING_SPARK_STORE_ASSET",
+            "spark-store_5.2.1.0_amd64.deb",
+            "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55",
+            'MING_RELEASE_MODE="${MING_RELEASE_MODE}"',
+            '[[ "${MING_RELEASE_MODE}" == "release" ]]',
+        ):
+            self.assertIn(marker, BUILD)
+
+    def test_invalid_installer_json_is_a_package_failure_without_traceback(self):
+        installer = heredoc(
+            APPS,
+            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
+            "SPARKINSTALL",
+        )
+        validator = installer.split("<<'SPARKRESULTPY'\n", 1)[1].split(
+            "\nSPARKRESULTPY", 1
+        )[0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            result_file = pathlib.Path(directory) / "result.json"
+            for raw in ("", "[]", "{broken", "{}"):
+                with self.subTest(raw=raw):
+                    result_file.write_text(raw, encoding="utf-8")
+                    completed = subprocess.run(
+                        [sys.executable, "-c", validator, str(result_file)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(1, completed.returncode)
+                    self.assertEqual("E_PACKAGE_FAILED", completed.stderr.strip())
+                    self.assertNotIn("Traceback", completed.stderr)
 
     def test_spark_launcher_uses_only_the_vendor_wrapper(self):
         wrapper = APPS.split(
