@@ -293,6 +293,106 @@ class PackageInstallerTransactionTests(unittest.TestCase):
         self.assertEqual("E_PACKAGE_BUSY", result["error_code"])
         self.assertNotIn(installer.PackageInstaller._apt_fix_command(), runner.commands)
 
+    def test_apt_failure_codes_distinguish_lock_resolver_and_package_failures(self):
+        installer = load_installer()
+        classify = installer.PackageInstaller._apt_failure_code
+
+        self.assertEqual(
+            "E_PACKAGE_BUSY",
+            classify(100, "", "Could not get lock /var/lib/dpkg/lock-frontend"),
+        )
+        self.assertEqual(
+            "E_RESOLVER_FAILED",
+            classify(100, "", "unmet dependencies; held broken packages"),
+        )
+        for returncode, detail in (
+            (124, "command timed out"),
+            (100, "No space left on device"),
+            (100, "dpkg-deb: error: archive is truncated"),
+            (100, "installed post-installation script subprocess returned error"),
+            (100, "mirror worker: Resource temporarily unavailable"),
+        ):
+            self.assertEqual("E_PACKAGE_FAILED", classify(returncode, "", detail))
+
+    def test_non_resolver_package_failure_does_not_run_dependency_repair(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "full-disk.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = installer.PackageInstaller._apt_install_command(package)
+            runner = FakeRunner({
+                metadata: (0, metadata_output("full-disk"), ""),
+                apt_install: (100, "", "No space left on device"),
+            })
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertEqual("E_PACKAGE_FAILED", result["error_code"])
+        self.assertFalse(result["dependency_repair_attempted"])
+        self.assertNotIn(installer.PackageInstaller._apt_fix_command(), runner.commands)
+
+    def test_command_boundary_redacts_stdout_and_stderr_secrets(self):
+        installer = load_installer()
+        secret_output = (
+            "fetch https://alice:s3cr3t@example.invalid/repo?token=abc123 "
+            "Password=hunter2 access_token=refresh-secret"
+        )
+        service = installer.PackageInstaller(
+            runner=FakeRunner({("probe",): (1, secret_output, secret_output)}),
+        )
+
+        _returncode, output, error = service._call(("probe",), timeout=20)
+
+        for secret in ("alice", "s3cr3t", "abc123", "hunter2", "refresh-secret"):
+            self.assertNotIn(secret, output)
+            self.assertNotIn(secret, error)
+        self.assertNotIn("?", output)
+
+    def test_apt_failure_json_and_log_only_expose_a_short_redacted_reason(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "busy-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = installer.PackageInstaller._apt_install_command(package)
+            secret_error = (
+                "Could not get lock /var/lib/dpkg/lock-frontend; "
+                "https://alice:s3cr3t@example.invalid/repo?token=abc123 "
+                "Password=hunter2"
+            )
+            logs = []
+            service = installer.PackageInstaller(
+                runner=FakeRunner({
+                    metadata: (0, metadata_output("busy-app"), ""),
+                    apt_install: (75, "", secret_error),
+                }),
+                uid_getter=lambda: 0,
+                logger=logs.append,
+            )
+            stdout = io.StringIO()
+
+            returncode = installer.main(
+                ["install", str(package)], installer=service, stdout=stdout)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(4, returncode)
+        self.assertEqual("E_PACKAGE_BUSY", payload["error_code"])
+        self.assertEqual("软件包管理器正忙，请稍后重试。", payload["error"])
+        boundary = stdout.getvalue() + "\n" + "\n".join(logs)
+        for secret in ("alice", "s3cr3t", "abc123", "hunter2"):
+            self.assertNotIn(secret, boundary)
+
 
 class PackageInstallerInstallTests(unittest.TestCase):
     def test_install_reports_a_readable_launcher_warning_when_exec_is_missing(self):

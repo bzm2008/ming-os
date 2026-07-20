@@ -14,6 +14,7 @@ import os
 import sys
 import types
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 
 SUPPORTED_ARCHITECTURES = {"amd64", "all"}
@@ -22,7 +23,7 @@ VERSION_PATTERN = re.compile(r"^[0-9A-Za-z.+:~\-]+$")
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 SHELL_WRAPPER_REJECTION = "shell command wrappers are not allowed"
 PACKAGE_INSTALLER_PATH = "/usr/local/sbin/ming-package-installer"
-PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v1"
+PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v2"
 REQUIRED_COMMON_SHA256 = "cc2e34b62e6ab9cac74164dd51c2b5218d016f42500f80017931ce7d6f3b6ad1"
 PACKAGE_MANAGER_LOCK = "/run/lock/ming-package-manager.lock"
 PACKAGE_MANAGER_LOCK_TIMEOUT = 30
@@ -31,6 +32,65 @@ PACKAGE_MANAGER_BUSY_EXIT = 75
 E_PACKAGE_BUSY = "E_PACKAGE_BUSY"
 E_RESOLVER_FAILED = "E_RESOLVER_FAILED"
 E_LAUNCH_NOT_READY = "E_LAUNCH_NOT_READY"
+E_PACKAGE_FAILED = "E_PACKAGE_FAILED"
+_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_SECRET_ASSIGNMENT = re.compile(
+    r"\b(password|passwd|token|access[_-]?token|refresh[_-]?token|auth[_-]?token)\b"
+    r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_SECRET_OPTION = re.compile(
+    r"(--(?:password|passwd|token|access-token|refresh-token|auth-token)(?:\s+|=))"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION = re.compile(
+    r"\b(authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+",
+    re.IGNORECASE,
+)
+
+
+def _redacted_url(match):
+    raw = match.group(0)
+    trailing = ""
+    while raw and raw[-1] in ".,);]}":
+        trailing = raw[-1] + trailing
+        raw = raw[:-1]
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+        if not hostname:
+            return "[REDACTED_URL]" + trailing
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = "[%s]" % hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = hostname if port is None else "%s:%s" % (hostname, port)
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + trailing
+    except (AttributeError, TypeError, ValueError):
+        return "[REDACTED_URL]" + trailing
+
+
+def _redact_sensitive(value):
+    text = str(value or "").replace("\x00", " ")
+    text = _URL.sub(_redacted_url, text)
+    text = _AUTHORIZATION.sub(r"\1[REDACTED]", text)
+    text = _SECRET_OPTION.sub(r"\1[REDACTED]", text)
+    return _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
+
+
+def _redact_json_value(value):
+    if isinstance(value, str):
+        return _redact_sensitive(value)
+    if isinstance(value, list):
+        return [_redact_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_json_value(item) for key, item in value.items()}
+    return value
 
 
 def _common_paths(program_path=None, install_prefix=None):
@@ -119,10 +179,11 @@ class PackageInstaller:
             "repair_argv": [],
         }
         result.update(values)
-        return result
+        return _redact_json_value(result)
 
     def _log(self, message):
-        line = "[%s] %s" % (datetime.now().strftime("%F %T"), message)
+        line = "[%s] %s" % (
+            datetime.now().strftime("%F %T"), _redact_sensitive(message))
         try:
             if self.logger is not None:
                 self.logger(line)
@@ -139,8 +200,12 @@ class PackageInstaller:
         except subprocess.TimeoutExpired:
             return 124, "", "命令执行超时。"
         except OSError as exception:
-            return 127, "", str(exception)
-        return int(returncode), output or "", error or ""
+            return 127, "", _redact_sensitive(exception)
+        return (
+            int(returncode),
+            _redact_sensitive(output),
+            _redact_sensitive(error),
+        )
 
     def _package_file(self, package_file):
         path = pathlib.Path(package_file).expanduser()
@@ -246,13 +311,35 @@ class PackageInstaller:
     def _apt_failure_code(returncode, output="", error=""):
         detail = "%s\n%s" % (output or "", error or "")
         lock_markers = (
-            "could not get lock", "unable to acquire the dpkg frontend lock",
-            "package manager lock is busy", "resource temporarily unavailable",
+            "could not get lock /var/lib/dpkg/",
+            "could not open lock file /var/lib/dpkg/",
+            "unable to acquire the dpkg frontend lock",
+            "unable to lock the administration directory",
         )
         if int(returncode) == PACKAGE_MANAGER_BUSY_EXIT or any(
                 marker in detail.casefold() for marker in lock_markers):
             return E_PACKAGE_BUSY
-        return E_RESOLVER_FAILED
+        resolver_markers = (
+            "unmet dependencies", "held broken packages",
+            "unable to correct problems", "pkgproblemresolver",
+            "dependency problems", "dependency error", "depends:", "conflicts:",
+        )
+        if any(marker in detail.casefold() for marker in resolver_markers):
+            return E_RESOLVER_FAILED
+        return E_PACKAGE_FAILED
+
+    @staticmethod
+    def _apt_failure_message(error_code):
+        if error_code == E_PACKAGE_BUSY:
+            return "软件包管理器正忙，请稍后重试。"
+        if error_code == E_RESOLVER_FAILED:
+            return "软件包依赖解析失败，请检查软件源后重试。"
+        return "软件包安装过程失败，请查看受保护的系统日志。"
+
+    @staticmethod
+    def _apt_log_detail(output="", error=""):
+        detail = " ".join(("%s\n%s" % (output or "", error or "")).split())
+        return _redact_sensitive(detail)[:2048] or "apt-get failed without diagnostics"
 
     def _installed(self, package):
         command = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", package)
@@ -558,7 +645,7 @@ class PackageInstaller:
         returncode, output, error = self._call(command, timeout=180)
         dependency_repair_attempted = False
         failure_code = self._apt_failure_code(returncode, output, error)
-        if returncode != 0 and failure_code != E_PACKAGE_BUSY:
+        if returncode != 0 and failure_code == E_RESOLVER_FAILED:
             dependency_repair_attempted = True
             fix_code, fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
             if fix_code == 0:
@@ -568,7 +655,8 @@ class PackageInstaller:
                 error = fix_error or error
         if returncode != 0:
             failure_code = self._apt_failure_code(returncode, output, error)
-            self._log("install failed for %s: %s" % (inspected["file"], error.strip()))
+            self._log("install failed for %s: %s" % (
+                inspected["file"], self._apt_log_detail(output, error)))
             return self._result(
                 False,
                 action="install",
@@ -576,7 +664,7 @@ class PackageInstaller:
                 error_code=failure_code,
                 dependency_repair_attempted=dependency_repair_attempted,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
-                error="安装 DEB 软件包失败：%s" % (error.strip() or "apt-get 失败"),
+                error=self._apt_failure_message(failure_code),
             )
         if not self._installed(inspected["package"]):
             self._log("package verification failed for %s" % inspected["package"])
@@ -638,7 +726,7 @@ class PackageInstaller:
         returncode, output, error = self._call(command, timeout=180)
         dependency_repair_attempted = False
         failure_code = self._apt_failure_code(returncode, output, error)
-        if returncode != 0 and failure_code != E_PACKAGE_BUSY:
+        if returncode != 0 and failure_code == E_RESOLVER_FAILED:
             dependency_repair_attempted = True
             fix_code, fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
             if fix_code == 0:
@@ -648,7 +736,8 @@ class PackageInstaller:
                 error = fix_error or error
         if returncode != 0:
             failure_code = self._apt_failure_code(returncode, output, error)
-            self._log("repair failed for %s: %s" % (package, error.strip()))
+            self._log("repair failed for %s: %s" % (
+                package, self._apt_log_detail(output, error)))
             return self._result(
                 False,
                 action="repair",
@@ -656,7 +745,7 @@ class PackageInstaller:
                 error_code=failure_code,
                 package=package,
                 dependency_repair_attempted=dependency_repair_attempted,
-                error="修复软件包失败：%s" % (error.strip() or "apt-get 失败"),
+                error=self._apt_failure_message(failure_code),
             )
         if not self._installed(package):
             self._log("repair verification failed for %s" % package)

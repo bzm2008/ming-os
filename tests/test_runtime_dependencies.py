@@ -264,6 +264,19 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('dpkg-query -W -f=', function)
         self.assertIn('resume required runtime package is not installed', function)
 
+    def test_resume_revalidates_an_existing_package_installer_contract_directory(self):
+        function = RESUME.split("seed_resume_package_installer() {", 1)[1].split(
+            "\n}\n\nensure_resume_runtime_packages", 1
+        )[0]
+
+        self.assertIn('test ! -L "${target}"', function)
+        self.assertIn('test ! -L "${target}/ming-package-installer"', function)
+        self.assertIn('test ! -L "${target}/ming-shell-common.py"', function)
+        self.assertIn("stat -c '%a:%u:%g'", function)
+        self.assertIn('sha256sum "${target}/ming-package-installer"', function)
+        self.assertIn('sha256sum "${target}/ming-shell-common.py"', function)
+        self.assertIn("拒绝复用损坏的安装器运行时", function)
+
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]
         for marker in [

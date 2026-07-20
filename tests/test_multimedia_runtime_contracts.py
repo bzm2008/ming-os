@@ -79,6 +79,25 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertIn("target_user=", installer)
         self.assertIn("getent passwd", installer)
 
+    def test_clean_build_spark_fallback_uses_locked_apt_and_requires_vendor_wrapper(self):
+        installer = APPS.split(
+            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'", 1
+        )[1].split("SPARKINSTALL", 1)[0]
+        fallback = installer.split("\nelse\n", 1)[1].split(
+            "\n\n# Spark Store currently", 1
+        )[0]
+
+        self.assertIn("flock", fallback)
+        self.assertIn("/run/lock/ming-package-manager.lock", fallback)
+        self.assertIn("DPkg::Lock::Timeout=60", fallback)
+        self.assertIn("/usr/local/bin/spark-store", fallback)
+        self.assertIn("E_LAUNCH_NOT_READY", fallback)
+        self.assertIn("apt_output", fallback)
+        self.assertIn('if run_locked_apt install "${deb}"', fallback)
+        self.assertNotIn("if ! run_locked_apt", fallback)
+        self.assertNotRegex(fallback, r"(?m)^ {4}apt-get\b")
+        self.assertNotIn('cat "${apt_output}" >>"${log}"', fallback)
+
     def test_official_wechat_download_uses_the_same_verified_local_deb_path(self):
         installer = heredoc(
             APPS,

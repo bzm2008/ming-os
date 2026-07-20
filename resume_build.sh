@@ -27,7 +27,9 @@ seed_resume_package_installer() {
     local common_source="/tmp/ming-build/assets/ming-shell-common.py"
     local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
     local current_link="/usr/local/lib/ming-os/package-installer-current"
-    local stage contract required_common_sha actual_common_sha target
+    local stage contract required_common_sha actual_common_sha actual_installer_sha target
+    local target_dir_meta target_installer_meta target_common_meta
+    local target_installer_sha target_common_sha
     if ! chroot_exec test -s "${installer_source}" \
         || ! chroot_exec test -s "${common_source}"; then
         log_error "resume 构建缺少受控的 ming-package-installer/ming-shell-common 资产"
@@ -63,11 +65,17 @@ PY
         log_error "resume 构建拒绝旧版或不匹配的 ming-shell-common"
         return 1
     fi
+    actual_installer_sha="$(chroot_exec sha256sum "${installer_source}" | awk '{print $1}')"
+    if [[ ! "${actual_installer_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        log_error "resume 构建无法校验 ming-package-installer 资产"
+        return 1
+    fi
 
     chroot_exec mkdir -p "${runtime_root}" /usr/local/sbin
     stage="$(chroot_exec mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
     if ! chroot_exec install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
         || ! chroot_exec install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
+        || ! chroot_exec chmod 0755 "${stage}" \
         || ! chroot_exec python3 -m py_compile "${stage}/ming-package-installer" \
         || ! chroot_exec python3 "${stage}/ming-package-installer" --help >/dev/null; then
         chroot_exec rm -rf "${stage}" || true
@@ -76,7 +84,31 @@ PY
     fi
 
     target="${runtime_root}/${contract}"
-    if chroot_exec test -e "${target}"; then
+    if chroot_exec test -e "${target}" || chroot_exec test -L "${target}"; then
+        target_dir_meta="$(chroot_exec stat -c '%a:%u:%g' "${target}" 2>/dev/null || true)"
+        target_installer_meta="$(chroot_exec stat -c '%a:%u:%g' \
+            "${target}/ming-package-installer" 2>/dev/null || true)"
+        target_common_meta="$(chroot_exec stat -c '%a:%u:%g' \
+            "${target}/ming-shell-common.py" 2>/dev/null || true)"
+        target_installer_sha="$(chroot_exec sha256sum "${target}/ming-package-installer" \
+            2>/dev/null | awk '{print $1}' || true)"
+        target_common_sha="$(chroot_exec sha256sum "${target}/ming-shell-common.py" \
+            2>/dev/null | awk '{print $1}' || true)"
+        if ! chroot_exec test ! -L "${target}" \
+            || ! chroot_exec test -d "${target}" \
+            || ! chroot_exec test ! -L "${target}/ming-package-installer" \
+            || ! chroot_exec test -f "${target}/ming-package-installer" \
+            || ! chroot_exec test ! -L "${target}/ming-shell-common.py" \
+            || ! chroot_exec test -f "${target}/ming-shell-common.py" \
+            || [[ "${target_dir_meta}" != "755:0:0" ]] \
+            || [[ "${target_installer_meta}" != "755:0:0" ]] \
+            || [[ "${target_common_meta}" != "644:0:0" ]] \
+            || [[ "${target_installer_sha}" != "${actual_installer_sha}" ]] \
+            || [[ "${target_common_sha}" != "${required_common_sha}" ]]; then
+            chroot_exec rm -rf "${stage}" || true
+            log_error "resume 构建拒绝复用损坏的安装器运行时: ${target}"
+            return 1
+        fi
         chroot_exec rm -rf "${stage}"
     else
         chroot_exec mv -T "${stage}" "${target}"

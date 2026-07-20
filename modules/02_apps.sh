@@ -1742,7 +1742,7 @@ deb="/tmp/spark-store.deb"
 log="/var/log/ming-spark-store-install.log"
 
 cleanup() {
-    rm -f "${deb}"
+    rm -f "${deb}" "${apt_output:-}" "${result_file:-}"
 }
 trap cleanup EXIT
 
@@ -1798,10 +1798,65 @@ SPARKRESULTPY
     cat "${result_file}"
     rm -f "${result_file}"
 else
-    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1 \
-        || { apt-get -y -o Dpkg::Use-Pty=0 -f install >>"${log}" 2>&1 && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1; }
-    dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii' \
-        || { echo "Spark Store package verification failed." >&2; exit 1; }
+    apt_output="$(mktemp /tmp/ming-spark-apt.XXXXXX)"
+
+    run_locked_apt() {
+        flock --exclusive --timeout 30 --conflict-exit-code 75 \
+            /run/lock/ming-package-manager.lock \
+            apt-get -y -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=60 "$@"
+    }
+
+    apt_failure_code() {
+        local returncode="$1"
+        if [[ "${returncode}" -eq 75 ]] || grep -Eqi \
+            'Could not (get|open) lock (file )?/var/lib/dpkg/|Unable to acquire the dpkg frontend lock|Unable to lock the administration directory' \
+            "${apt_output}"; then
+            printf '%s\n' E_PACKAGE_BUSY
+        elif grep -Eqi \
+            'unmet dependencies|held broken packages|unable to correct problems|pkgProblemResolver|dependency problems|dependency error' \
+            "${apt_output}"; then
+            printf '%s\n' E_RESOLVER_FAILED
+        else
+            printf '%s\n' E_PACKAGE_FAILED
+        fi
+    }
+
+    install_rc=0
+    install_code=""
+    if run_locked_apt install "${deb}" >"${apt_output}" 2>&1; then
+        :
+    else
+        install_rc=$?
+        install_code="$(apt_failure_code "${install_rc}")"
+        if [[ "${install_code}" == "E_RESOLVER_FAILED" ]]; then
+            if run_locked_apt -f install >"${apt_output}" 2>&1; then
+                if run_locked_apt install "${deb}" >"${apt_output}" 2>&1; then
+                    install_rc=0
+                    install_code=""
+                else
+                    install_rc=$?
+                    install_code="$(apt_failure_code "${install_rc}")"
+                fi
+            else
+                install_rc=$?
+                install_code="$(apt_failure_code "${install_rc}")"
+            fi
+        fi
+    fi
+    if [[ "${install_rc}" -ne 0 ]]; then
+        printf '[%s] Spark Store package transaction failed: %s\n' \
+            "$(date '+%F %T')" "${install_code}" >>"${log}"
+        printf '%s\n' "${install_code}" >&2
+        exit 1
+    fi
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii '; then
+        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+        exit 1
+    fi
+    if [[ ! -x /usr/local/bin/spark-store ]]; then
+        printf '%s\n' E_LAUNCH_NOT_READY | tee -a "${log}" >&2
+        exit 1
+    fi
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
