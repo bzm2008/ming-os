@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -462,7 +463,8 @@ class DesktopSourceTests(unittest.TestCase):
                 "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python -V %U\n",
                 encoding="utf-8",
             )
-            entry = namespace["legacy_desktop_entry"](launcher)
+            with mock.patch.object(shutil, "which", return_value="/usr/bin/python"):
+                entry = namespace["legacy_desktop_entry"](launcher)
         self.assertEqual(["python", "-V"], entry["argv"])
         self.assertEqual("", entry["diagnostic"])
         self.assertIn('legacy_argv = item.get("legacy_argv")', self.phone)
@@ -509,6 +511,131 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertEqual("工具", migrated["items"][1]["name"])
         self.assertEqual(["/tmp/a.desktop", "/tmp/b.desktop"], migrated["items"][1]["children"])
         self.assertEqual(7, migrated["version"])
+
+    def test_core_layout_path_migration_keeps_position_and_removes_stale_duplicates(self):
+        """A core app may move from a system launcher to a Ming-managed launcher after an upgrade."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"app_id", "canonicalize_core_layout_item"}
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+
+        canonical = {
+            "ming-trash.desktop": {
+                "id": "canonical-trash",
+                "type": "app",
+                "path": "/home/user/Desktop/ming-trash.desktop",
+                "basename": "ming-trash.desktop",
+                "name": "回收站",
+            },
+        }
+        seen = set()
+        old = {
+            "id": "old-trash-position",
+            "type": "app",
+            "path": "/usr/share/applications/ming-trash.desktop",
+            "x": 218,
+            "y": 200,
+            "pinned": True,
+        }
+        migrated = namespace["canonicalize_core_layout_item"](old, canonical, seen)
+        duplicate = namespace["canonicalize_core_layout_item"](
+            {**old, "id": "second-trash", "path": "/home/user/.local/share/applications/ming-trash.desktop"},
+            canonical,
+            seen,
+        )
+
+        self.assertEqual("/home/user/Desktop/ming-trash.desktop", migrated["path"])
+        self.assertEqual("old-trash-position", migrated["id"])
+        self.assertEqual((218, 200), (migrated["x"], migrated["y"]))
+        self.assertIsNone(duplicate)
+
+    def test_legacy_settings_and_edge_aliases_migrate_to_one_canonical_launcher(self):
+        """Old Desktop copies must not survive as broker-rejected duplicate core tiles."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"app_id", "canonicalize_core_layout_item"}
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+
+        canonical = {
+            "ming-settings.desktop": {
+                "id": "canonical-settings", "type": "app",
+                "path": "/usr/share/applications/ming-settings.desktop",
+                "basename": "ming-settings.desktop", "name": "Ming 设置",
+            },
+            "ming-edge.desktop": {
+                "id": "canonical-edge", "type": "app",
+                "path": "/usr/share/applications/ming-edge.desktop",
+                "basename": "ming-edge.desktop", "name": "Microsoft Edge",
+            },
+        }
+        seen = set()
+        settings = namespace["canonicalize_core_layout_item"]({
+            "id": "old-settings", "type": "app",
+            "path": "/home/user/Desktop/ming-control-center.desktop",
+            "x": 218, "y": 200, "pinned": True,
+        }, canonical, seen)
+        edge = namespace["canonicalize_core_layout_item"]({
+            "id": "old-edge", "type": "app",
+            "path": "/home/user/.local/share/applications/microsoft-edge-stable.desktop",
+            "x": 320, "y": 200,
+        }, canonical, seen)
+        duplicate_settings = namespace["canonicalize_core_layout_item"]({
+            "id": "second-settings", "type": "app",
+            "path": "/usr/share/applications/ming-settings.desktop",
+        }, canonical, seen)
+
+        self.assertEqual("/usr/share/applications/ming-settings.desktop", settings["path"])
+        self.assertEqual((218, 200), (settings["x"], settings["y"]))
+        self.assertEqual("/usr/share/applications/ming-edge.desktop", edge["path"])
+        self.assertEqual((320, 200), (edge["x"], edge["y"]))
+        self.assertIsNone(duplicate_settings)
+
+    def test_core_discovery_prefers_the_protected_system_launcher_over_a_desktop_seed(self):
+        """Live-image Desktop copies are display aids, never the canonical broker target."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        block = source.split("def add_core_app(apps_by_basename, basename):", 1)[1].split(
+            "\ndef load_apps", 1
+        )[0]
+        self.assertIn("SYSTEM_APPLICATION_DIR / basename", block)
+        self.assertIn("DESKTOP_DIR / basename", block)
+        self.assertLess(
+            block.index("SYSTEM_APPLICATION_DIR / basename"),
+            block.index("DESKTOP_DIR / basename"),
+        )
+        self.assertLess(
+            block.index("CORE_FALLBACKS.get"),
+            block.index("DESKTOP_DIR / basename"),
+        )
 
     def test_layout_save_is_atomic_and_bad_primary_keeps_last_good(self):
         source = PHONE_DESKTOP.read_text(encoding="utf-8")
@@ -736,6 +863,13 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("item_key", self.phone)
         self.assertIn("event_time == previous_event_time", self.phone)
 
+    def test_desktop_has_one_ming_trash_tile_and_filters_wrapper_aliases(self):
+        self.assertIn('"ming-trash.desktop"', self.phone)
+        self.assertIn('"ming-control-center.desktop"', self.phone)
+        self.assertIn("DESKTOP_WRAPPER_ALIASES", self.phone)
+        self.assertIn("user-trash", self.desktop)
+        self.assertIn("trash:///", self.desktop)
+
     def test_launch_feedback_has_a_bounded_window_aware_lifetime(self):
         self.assertIn("LAUNCH_FEEDBACK_TIMEOUT_MS = 4000", self.phone)
         self.assertIn("class LaunchFeedbackOverlay", self.phone)
@@ -748,9 +882,28 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("GLib.idle_add(self.apply_window_probe", self.phone)
         self.assertIn("self.launch_feedback.set_sensitive(False)", self.phone)
 
+    def test_launch_feedback_reveals_and_hides_with_a_bounded_transition(self):
+        """A successful click must retain visible launch feedback instead of popping in and out."""
+        overlay = self.phone[
+            self.phone.index("class LaunchFeedbackOverlay"):
+            self.phone.index("class StatusSlider")
+        ]
+        self.assertIn("Gtk.Revealer()", overlay)
+        self.assertIn("set_transition_duration(180)", overlay)
+        self.assertIn("set_reveal_child(True)", overlay)
+        self.assertIn("set_reveal_child(False)", overlay)
+
     def test_render_keeps_idle_launch_feedback_hidden(self):
         self.assertIn("if not self.launch_feedback.item:", self.phone)
         self.assertIn("self.launch_feedback.hide()", self.phone)
+
+    def test_desktop_launch_error_dialog_is_an_opaque_feedback_surface(self):
+        open_item = self.phone[
+            self.phone.index("    def open_item(self, item):"):
+            self.phone.index("    def show_folder", self.phone.index("    def open_item(self, item):"))
+        ]
+        self.assertIn('add_class("ming-launch-error-dialog")', open_item)
+        self.assertIn(".ming-launch-error-dialog", self.phone)
 
     def test_status_widget_exposes_radio_battery_and_settings(self):
         self.assertIn("class StatusWidget", self.phone)

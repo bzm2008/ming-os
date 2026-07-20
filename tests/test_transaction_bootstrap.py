@@ -1,4 +1,9 @@
+import importlib.util
+import json
+import os
 import pathlib
+import stat
+import tempfile
 import unittest
 
 
@@ -7,6 +12,13 @@ POSTINST = ROOT / "assets" / "bootstrap" / "ming-ota-bootstrap.postinst"
 PRERM = ROOT / "assets" / "bootstrap" / "ming-ota-bootstrap.prerm"
 BUILDER = ROOT / "tools" / "build-ming-ota-bootstrap.sh"
 CAPABILITY = ROOT / "assets" / "ming-ota-bootstrap-capability.py"
+
+
+def load_capability():
+    spec = importlib.util.spec_from_file_location("ming_ota_capability_test", CAPABILITY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class TransactionBootstrapTests(unittest.TestCase):
@@ -99,6 +111,27 @@ class TransactionBootstrapTests(unittest.TestCase):
         self.assertIn("--write-marker", source)
         self.assertIn("write_capability_marker", source)
         self.assertIn("detect_capability", source)
+
+    @unittest.skipIf(os.name == "nt", "Windows does not expose POSIX file-mode semantics")
+    def test_capability_marker_is_readable_by_the_unprivileged_json_client(self):
+        """The marker is integrity metadata, not a secret; `ming-update status` runs as the desktop user."""
+        capability = load_capability()
+        original_detect = capability.detect_capability
+        capability.detect_capability = lambda *_args, **_kwargs: {"available": True}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                capability.write_capability_marker(root)
+                marker = root / "var" / "lib" / "ming-update" / "capability.json"
+                self.assertTrue(marker.is_file(), "capability.json must be written")
+                mode = stat.S_IMODE(os.stat(marker).st_mode)
+                self.assertEqual(mode, 0o644)
+                # The desktop user must be able to read the marker.
+                with open(marker, encoding="utf-8") as handle:
+                    data = json.load(handle)
+                self.assertEqual(data["schema"], "ming.bootstrap-capability.v1")
+        finally:
+            capability.detect_capability = original_detect
 
 
 if __name__ == "__main__":

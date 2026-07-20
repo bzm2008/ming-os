@@ -646,6 +646,11 @@ fi
         self.assertIn("self._height_animation", PHONE)
         self.assertIn("animate_collapsed_state", PHONE)
         self.assertIn("content_revealer.set_reveal_child", PHONE)
+
+    def test_expanded_status_widget_keeps_controls_top_aligned(self):
+        """The expanded card must not reserve a blank compact-row-sized strip above its content."""
+        self.assertIn("box.set_valign(Gtk.Align.START)", PHONE)
+        self.assertIn("expanded.set_valign(Gtk.Align.START)", PHONE)
         self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
 
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):

@@ -22,6 +22,22 @@ echo "[INFO] ISO_VOLUME_ID=${ISO_VOLUME_ID}"
 echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
+seed_resume_package_installer() {
+    local source="/tmp/ming-build/assets/ming-package-installer.py"
+    if ! chroot_exec test -s "${source}"; then
+        log_error "resume 构建缺少受控的 ming-package-installer 资产"
+        return 1
+    fi
+    if ! chroot_exec install -m 0755 "${source}" /usr/local/sbin/ming-package-installer; then
+        log_error "resume 构建无法部署当前 ming-package-installer"
+        return 1
+    fi
+    if ! chroot_exec python3 -m py_compile /usr/local/sbin/ming-package-installer; then
+        log_error "resume 构建部署的 ming-package-installer 语法校验失败"
+        return 1
+    fi
+}
+
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
     # Interrupted b43 installer postinst scripts download from GitHub and can
@@ -145,6 +161,7 @@ resume_main() {
 
     # 同步最新的 assets（含壁纸、图标、settings.py）
     prepare_chroot_scripts
+    seed_resume_package_installer
     ensure_resume_runtime_packages
 
     # 执行剩余模块（03 及之后）

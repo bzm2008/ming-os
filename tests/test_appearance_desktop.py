@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ import base64
 import struct
 import threading
 import time
+import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -72,7 +74,7 @@ class AppearanceControlTests(unittest.TestCase):
     def run_control(self, home, *args):
         env = dict(os.environ, HOME=str(home), MING_APPEARANCE_NO_APPLY="1")
         return subprocess.run(
-            ["python", str(CONTROL), *args, "--json"], env=env, text=True,
+            [sys.executable, str(CONTROL), *args, "--json"], env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
 
@@ -384,14 +386,19 @@ class DeploymentContractTests(unittest.TestCase):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         self.assertIn("retired ming-scale must not mutate appearance settings", build)
 
-    def test_compact_status_widget_shows_only_time_and_date(self):
+    def test_compact_status_widget_keeps_a_visible_shared_header_and_expand_affordance(self):
         phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
-        compact = phone[phone.index("self.compact_button = Gtk.Button()"):
-                        phone.index("header = Gtk.Box", phone.index("self.compact_button = Gtk.Button()"))]
-        self.assertIn("compact_time_label", compact)
-        self.assertIn("compact_date_label", compact)
-        self.assertNotIn("展开 ▾", compact)
-        self.assertNotIn("Gtk.Label(label=\"|\")", compact)
+        status = phone[phone.index("class StatusWidget"):
+                       phone.index("class WallpaperCanvas", phone.index("class StatusWidget"))]
+        self.assertIn('STATUS_WIDGET_COMPACT_HEIGHT = 58', phone)
+        self.assertIn('STATUS_WIDGET_EXPANDED_HEIGHT = 248', phone)
+        self.assertIn('self.status_toggle_label = Gtk.Label(label="展开 ▾")', status)
+        self.assertIn("self.status_toggle_label.set_text", status)
+        self.assertIn("self.set_valign(Gtk.Align.START)", status)
+        self.assertIn("box.set_vexpand(False)", status)
+        self.assertIn("self.pack_start(box, False, False, 0)", status)
+        self.assertIn("box.pack_start(header, False, False, 0)", status)
+        self.assertNotIn("self.compact_button = Gtk.Button()", status)
 
     def test_build_gate_rejects_duplicate_shell_runtimes(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
@@ -620,6 +627,72 @@ class MingFilesIconBehaviorTests(unittest.TestCase):
         self.assertIn("load_icon_pixbuf", setter)
         self.assertIn("set_from_pixbuf", setter)
         self.assertNotIn("set_from_file", setter)
+
+
+class FeedbackSurfaceReadabilityTests(unittest.TestCase):
+    def render_phone_css(self, profile):
+        path = ROOT / "assets/ming-phone-desktop.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "css_for_appearance"
+        )
+
+        class Common:
+            @staticmethod
+            def shell_visual_profile(_appearance):
+                return dict(profile)
+
+        namespace = {"COMMON": Common}
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                str(path),
+                "exec",
+            ),
+            namespace,
+        )
+        return namespace["css_for_appearance"]({}).decode("utf-8")
+
+    def test_feedback_surfaces_stay_opaque_when_desktop_glass_is_enabled(self):
+        """Readable feedback must not inherit the optional desktop glass alpha."""
+        opaque = "#f8faf9"
+        css = self.render_phone_css({
+            "theme": "light",
+            "surface_alpha": 0.35,
+            "surface_base": "#eef2ef",
+            "surface_raised": opaque,
+            "surface_sunken": "#e7eee9",
+            "border_soft": "#bdc9c0",
+            "text_primary": "#101814",
+            "text_secondary": "#354238",
+            "accent": "#238a72",
+        })
+        for selector in (
+            ".clock-widget, .status-widget, .launch-feedback",
+            ".status-compact-pill",
+            ".notification-panel",
+        ):
+            block = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css, re.S)
+            self.assertIsNotNone(block, selector)
+            self.assertIn("background-color: " + opaque, block.group(1))
+            self.assertNotRegex(block.group(1), r"background(?:-color)?:\s*rgba\(")
+
+    def test_notification_backends_do_not_reduce_feedback_opacity(self):
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        profile = desktop.split("cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'", 1)[1].split("PICOMCFG", 1)[0]
+        self.assertIn("notification = { shadow = true; opacity = 1.0; };", profile)
+        self.assertIn('<property name="initial-opacity" type="double" value="1.0"/>', desktop)
+
+    def test_settings_feedback_dialog_styles_cover_the_adwaita_window_and_content_nodes(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        for selector in (
+            "window.ming-feedback-dialog",
+            "window.ming-feedback-dialog .dialog-vbox",
+            "window.ming-feedback-dialog .dialog-action-area",
+        ):
+            self.assertIn(selector, settings)
+        self.assertIn("background-image: none", settings)
 
 
 if __name__ == "__main__":

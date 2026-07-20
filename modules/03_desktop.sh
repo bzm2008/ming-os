@@ -70,7 +70,7 @@ install_ming_settings() {
     local lib_dir="/usr/local/lib/ming-os"
     mkdir -p "${lib_dir}" /usr/local/bin
 
-    for asset in ming-settings.py ming-settings-backend.py ming-display-control.py; do
+    for asset in ming-settings.py ming-settings-backend.py ming-display-control.py ming-storage-status.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming Settings asset: ${asset}" >&2
             return 1
@@ -80,6 +80,7 @@ install_ming_settings() {
     install -m 0755 "${asset_dir}/ming-settings.py" /usr/local/bin/ming-settings
     install -m 0755 "${asset_dir}/ming-settings-backend.py" "${lib_dir}/ming-settings-backend"
     install -m 0755 "${asset_dir}/ming-display-control.py" /usr/local/bin/ming-display-control
+    install -m 0755 "${asset_dir}/ming-storage-status.py" /usr/local/bin/ming-storage-status
     cat > /usr/local/bin/ming-control-center << 'MINGCONTROLWRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -483,7 +484,21 @@ Categories=System;FileManager;
 MimeType=inode/directory;application/x-gnome-saved-search;
 StartupNotify=true
 MINGFILESDESKTOP
+    cat > /usr/share/applications/ming-trash.desktop << 'MINGTRASHDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=回收站
+Name[zh_CN]=回收站
+Comment=查看和还原已删除的文件
+Comment[zh_CN]=查看和还原已删除的文件
+Exec=/usr/local/bin/ming-files trash:///
+Icon=user-trash
+Terminal=false
+Categories=System;FileManager;
+StartupNotify=true
+MINGTRASHDESKTOP
     cp /usr/share/applications/ming-files.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-trash.desktop "/home/${MING_USER}/.local/share/applications/"
     python3 - "/home/${MING_USER}/.config/mimeapps.list" << 'MINGMIMEAPPS'
 import configparser
 from pathlib import Path
@@ -508,6 +523,7 @@ with path.open("w", encoding="utf-8") as handle:
 MINGMIMEAPPS
     chown -R "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.local/share/applications/ming-files.desktop" \
+        "/home/${MING_USER}/.local/share/applications/ming-trash.desktop" \
         "/home/${MING_USER}/.config/mimeapps.list"
 }
 
@@ -2803,9 +2819,11 @@ for window in payload.get("windows", []):
         "，".join(state) or "可管理",
     ))
 PY
-)"
+    )"
     [[ -n "${rows}" ]] || {
-        zenity --info --title="正在运行" --text="没有可管理的 X11 应用窗口。" 2>/dev/null || true
+        # A clean Live desktop only has shell/Dock surfaces, which are
+        # deliberately filtered above.  An empty list is normal, not an X11
+        # application failure, so leave this Dock action as a quiet no-op.
         return 0
     }
     dialog=(--list --title="正在运行" --text="选择要恢复、聚焦或关闭的窗口。" \
@@ -2891,11 +2909,12 @@ plank_mapping_snapshot() {
     if [[ ! -r "${dock_settings}" ]]; then
         dock_settings="/etc/skel/.config/plank/dock1/settings"
     fi
-    if grep -qx 'PinOnly=false' "${dock_settings}" 2>/dev/null; then
+    if grep -qx 'PinOnly=true' "${dock_settings}" 2>/dev/null; then
+        dock_pin_only=true
+        dock_pin_only_valid=true
+    elif grep -qx 'PinOnly=false' "${dock_settings}" 2>/dev/null; then
         dock_pin_only=false
         dock_pin_only_valid=true
-    elif grep -qx 'PinOnly=true' "${dock_settings}" 2>/dev/null; then
-        dock_pin_only=true
     fi
 
     bamfdaemon_available=false
@@ -4041,7 +4060,7 @@ compositor_profile() {
     settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" 2>/dev/null | head -n1)"
     # An existing 26.3.2 software preference wins over a newly created
     # appearance file that still contains only the default auto profile.
-    if [[ "${profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software ) ]]; then
+    if [[ "${profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software || "${settings_profile}" == off ) ]]; then
         profile="${settings_profile}"
     fi
     [[ -n "${profile}" ]] || profile="${settings_profile}"
@@ -4841,7 +4860,7 @@ case "${1:-}" in
         info "本机内存约 ${mem_mb}MB。\n\nMing OS 会自动启用 zram、低内存桌面策略和微信省内存模式。\n\n${profile}"
         ;;
     install-os)
-        exec /usr/local/bin/ming-live-installer.sh
+        exec env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh
         ;;
     *)
         info "请选择 Ming 设置中的按钮来完成操作。"
@@ -5175,7 +5194,7 @@ wintypes:
   dropdown_menu = { shadow = true; opacity = 1.0; };
   popup_menu = { shadow = true; opacity = 1.0; };
   utility = { shadow = true; opacity = 1.0; };
-  notification = { shadow = true; opacity = 0.95; };
+  notification = { shadow = true; opacity = 1.0; };
 };
 
 detect-rounded-corners = true;
@@ -5266,7 +5285,7 @@ write_runtime_profile() {
 appearance_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${appearance_file}" 2>/dev/null | head -n1)"
 settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings_file}" 2>/dev/null | head -n1)"
 compositor_profile="${appearance_profile:-${settings_profile:-auto}}"
-if [[ "${appearance_profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software ) ]]; then
+if [[ "${appearance_profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software || "${settings_profile}" == off ) ]]; then
     compositor_profile="${settings_profile}"
 fi
 [[ "${compositor_profile}" == software ]] && compositor_profile=compat
@@ -5364,7 +5383,7 @@ configure_notification_filter() {
 <channel name="xfce4-notifyd" version="1.0">
   <property name="notify-location" type="uint" value="3"/>
   <property name="theme" type="string" value="Smoke"/>
-  <property name="initial-opacity" type="double" value="0.95"/>
+  <property name="initial-opacity" type="double" value="1.0"/>
   <property name="expire-timeout" type="int" value="3"/>
   <property name="do-fadeout" type="bool" value="true"/>
   <property name="do-slideout" type="bool" value="true"/>
@@ -5802,7 +5821,8 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 FIRSTRUN
 
-    # Calamares Live 安装器
+    # Keep a disabled compatibility entry so upgrades cannot leave an old
+    # autostarted installer behind. Live mode exposes a desktop tile instead.
     cat > "${autostart_dir}/calamares-live.desktop" << CALAMARES
 [Desktop Entry]
 Type=Application
@@ -5810,9 +5830,9 @@ Name=Install Ming OS
 Name[zh_CN]=安装 Ming OS
 Comment=系统安装程序
 Exec=/usr/local/bin/ming-live-installer.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
 CALAMARES
 
     rm -f \
@@ -6334,12 +6354,60 @@ DEBINSTALLER
 
 deploy_live_installer() {
     local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
-    if [[ ! -s "${verifier_source}" ]]; then
-        echo "ERROR: missing installer verification asset: ${verifier_source}" >&2
+    local installer_icon_source=/tmp/ming-build/assets/ming-live-install.svg
+    local receipt_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt
+    if [[ ! -s "${verifier_source}" || ! -s "${installer_icon_source}" ]]; then
+        echo "ERROR: missing installer verification or icon asset" >&2
         return 1
     fi
     install -d -m 0755 /usr/local/sbin
     install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+    install -d -m 0755 "${receipt_module}" /etc/calamares/modules
+    cat > "${receipt_module}/module.desc" << 'TARGETRECEIPTDESC'
+---
+type: "job"
+name: "ming-installer-target-receipt"
+interface: "python"
+script: "main.py"
+TARGETRECEIPTDESC
+    cat > "${receipt_module}/main.py" << 'TARGETRECEIPTPY'
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import pathlib
+
+import libcalamares
+
+
+VERIFIER_PATH = pathlib.Path("/usr/local/sbin/ming-installer-verify")
+LOADER = importlib.machinery.SourceFileLoader("ming_installer_verify", str(VERIFIER_PATH))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+VERIFIER = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(VERIFIER)
+
+
+def run():
+    root_mount_point = libcalamares.globalstorage.value("rootMountPoint")
+    try:
+        VERIFIER.capture_target_receipt(root_mount_point)
+    except VERIFIER.TargetReceiptError as exc:
+        return "Ming installer target receipt failed", str(exc)
+    return None
+TARGETRECEIPTPY
+    chmod 0644 "${receipt_module}/main.py"
+    cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
+---
+TARGETRECEIPTCONF
+    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+---
+dontChroot: true
+timeout: 10
+script:
+  - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
+TARGETRECEIPTRESETCONF
+    install -d -m 0755 /usr/share/icons/hicolor/scalable/apps
+    install -m 0644 "${installer_icon_source}" /usr/share/icons/hicolor/scalable/apps/ming-os-install.svg
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
 #!/usr/bin/env bash
@@ -6363,6 +6431,11 @@ ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>>"${LOG}" || true
 printf 'Asia/Shanghai\n' > /etc/timezone 2>>"${LOG}" || true
 timeout 5 timedatectl set-timezone Asia/Shanghai >> "${LOG}" 2>&1 || true
 
+if ! /usr/local/sbin/ming-installer-verify receipt --begin-attempt >> "${LOG}" 2>&1; then
+    log "ERROR: cannot begin a fresh authoritative Calamares target receipt attempt"
+    exit 2
+fi
+
 mkdir -p /etc/calamares/modules
 
 cat > /etc/calamares/settings.conf <<'SETTINGS'
@@ -6375,6 +6448,12 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
@@ -6401,7 +6480,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -6510,7 +6591,7 @@ cat > /etc/calamares/modules/ming-installed-desktop-gate.conf <<'INSTALLEDDESKTO
 dontChroot: true
 timeout: 30
 script:
-  - "/usr/local/sbin/ming-installer-verify installed /target"
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
 INSTALLEDDESKTOPGATECONF
 
 cat > /etc/default/locale <<'DEFAULTLOCALE'
@@ -6630,6 +6711,12 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
@@ -6655,7 +6742,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -6679,7 +6768,7 @@ STATICCALASETTINGS
 dontChroot: true
 timeout: 30
 script:
-  - "/usr/local/sbin/ming-installer-verify installed /target"
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
 STATICDESKTOPGATECONF
 
     cat > /etc/calamares/modules/partition.conf << 'STATICPARTCONF'
@@ -6832,15 +6921,6 @@ is_live_environment() {
     return 1
 }
 
-# Ming OS is an installer-only image. When booted with ming.installer=1 the
-# session launches Calamares immediately and full-screen; the live desktop is
-# only a thin host for the installer, never a destination of its own.
-is_installer_boot() {
-    grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null && return 0
-    grep -qw "install" /proc/cmdline 2>/dev/null && return 0
-    return 1
-}
-
 prepare_installer_disks() {
     mkdir -p /tmp/ming-installer
     chmod 1777 /tmp/ming-installer 2>/dev/null || true
@@ -6880,31 +6960,61 @@ prepare_calamares_runtime() {
     fi
 }
 
-sleep 2
-
-if is_live_environment || is_installer_boot; then
-    if [ -z "${DISPLAY}" ]; then
-        export DISPLAY=:0
-    fi
-    mkdir -p /tmp/ming-installer
-    chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
-
-    if command -v calamares &>/dev/null; then
-        # -style/maximize handled by calamares window manager hint; keep retrying
-        # if the X session is not ready yet.
-        for _try in 1 2 3 4 5; do
-            if /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1; then
-                break
-            fi
-            sleep 2
-        done &
-    else
-        zenity --error --title="安装错误" --text="找不到 Calamares 安装程序。" 2>/dev/null || true
-    fi
+if ! is_live_environment; then
+    zenity --info --title="Ming OS" --text="安装程序只能在 Live 模式中运行。" 2>/dev/null || true
+    exit 1
 fi
+
+# A normal Live session must remain a desktop.  This also makes stale or
+# accidentally re-enabled autostart entries harmless: only the dedicated
+# installer boot entry or a Ming-owned launcher may enter Calamares.
+if ! grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null \
+   && [ "${MING_LIVE_INSTALL_REQUEST:-}" != "1" ]; then
+    zenity --info --title="Ming OS" \
+        --text="Live 模式不会自动打开安装程序。请点击桌面的“安装 Ming OS”图标。" \
+        2>/dev/null || true
+    exit 0
+fi
+
+exec /usr/local/bin/ming-calamares-launcher
 LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
+
+    # Live mode deliberately starts a normal desktop. This labelled launcher is
+    # first in the phone-desktop order and uses a dedicated high-contrast icon.
+    install -d -m 0755 /usr/share/applications "/home/${MING_USER}/Desktop" /etc/skel/Desktop
+    cat > "/usr/share/applications/Install Ming OS.desktop" << 'LIVEINSTALLDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=安装 Ming OS
+Name[zh_CN]=安装 Ming OS
+Comment=将 Ming OS 安装到这台电脑
+Comment[zh_CN]=将 Ming OS 安装到这台电脑
+Exec=env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh
+Icon=ming-os-install
+Terminal=false
+StartupNotify=true
+Categories=System;Settings;
+X-Ming-Managed=true
+X-Ming-Live-Only=true
+X-Ming-Featured=true
+LIVEINSTALLDESKTOP
+    cp "/usr/share/applications/Install Ming OS.desktop" "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+    cp "/usr/share/applications/Install Ming OS.desktop" "/etc/skel/Desktop/Install Ming OS.desktop"
+    chmod 0755 "/usr/share/applications/Install Ming OS.desktop" \
+        "/home/${MING_USER}/Desktop/Install Ming OS.desktop" \
+        "/etc/skel/Desktop/Install Ming OS.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+
+    # This launcher is created by the image build rather than a Debian package.
+    # The launch broker accepts such system entries only when a root-owned,
+    # read-only receipt binds the exact desktop file path.
+    install -d -m 0755 /var/lib/ming-os/trusted-desktops
+    printf '%s\n' '/usr/share/applications/Install Ming OS.desktop' \
+        > "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
+    chown root:root "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
+    chmod 0644 "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
 
     # Dedicated installer session with a minimal WM for reliable keyboard and
     # mouse focus. Calamares is maximized and automatically restarted on exit.
@@ -6991,9 +7101,7 @@ KISOSESS
 Description=Ming OS Live Installer
 After=lightdm.service display-manager.service
 Wants=lightdm.service
-ConditionKernelCommandLine=|boot=live
-ConditionKernelCommandLine=|live-config
-ConditionKernelCommandLine=|ming.installer=1
+ConditionKernelCommandLine=ming.installer=1
 
 [Service]
 Type=oneshot

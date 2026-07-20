@@ -150,12 +150,38 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
+    def test_rootfs_gate_accepts_valid_dock_items_in_a_nonlegacy_order(self):
+        """Papyrus may be prepended after its verified installation."""
+        strict_prefix = (
+            'plank_settings = require_file('
+            '"home/user/.config/plank/dock1/settings", '
+            '"DockItems=ming-settings.dockitem")'
+        )
+        self.assertNotIn(strict_prefix, self.build)
+        self.assertIn(
+            'plank_settings = require_file('
+            '"home/user/.config/plank/dock1/settings", "DockItems=")',
+            self.build,
+        )
+        self.assertIn("dock_item_lines", self.build)
+        self.assertIn("required_dock_items", self.build)
+        for item in (
+            "ming-settings.dockitem",
+            "ming-app-library.dockitem",
+            "ming-running-apps.dockitem",
+            "ming-files.dockitem",
+            "ming-edge.dockitem",
+            "papyrus.dockitem",
+        ):
+            self.assertIn(item, self.build)
+
     def test_static_calamares_fallback_contains_installed_desktop_gate(self):
         """The build-time Calamares fallback must be complete before Live preflight runs."""
         fallback = self.desktop.split("cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'", 1)[1]
         fallback = fallback.split("cat > /etc/calamares/modules/partition.conf", 1)[0]
         self.assertIn("cat > /etc/calamares/modules/ming-installed-desktop-gate.conf", fallback)
-        self.assertIn('/usr/local/sbin/ming-installer-verify installed /target', fallback)
+        self.assertIn('/usr/local/sbin/ming-installer-verify installed --receipt', fallback)
+        self.assertIn("ming-installer-target-receipt@ming-installer-target-receipt", fallback)
 
     def test_build_inputs_survive_debian_tmp_cleanup(self):
         """Module sources live outside /tmp and the legacy path is recreated per module."""
@@ -301,6 +327,18 @@ class ReleaseGateContracts(unittest.TestCase):
         modules = resume.split("local modules=(", 1)[1].split(")", 1)[0]
         self.assertIn('"02_apps.sh"', modules)
         self.assertLess(modules.index('"02_apps.sh"'), modules.index('"03_desktop.sh"'))
+
+    def test_resume_seeds_the_current_deb_installer_before_replaying_apps(self):
+        """A resumed build must not use a stale installer from an old chroot."""
+        resume = RESUME.read_text(encoding="utf-8")
+        self.assertIn("seed_resume_package_installer()", resume)
+        main = resume.split("resume_main() {", 1)[1].split("resume_main \"$@\"", 1)[0]
+        expected_order = (
+            "prepare_chroot_scripts\n"
+            "    seed_resume_package_installer\n"
+            "    ensure_resume_runtime_packages"
+        )
+        self.assertIn(expected_order, main)
 
     def test_resume_settles_every_module_and_rejects_dpkg_audit_output(self):
         resume = RESUME.read_text(encoding="utf-8")

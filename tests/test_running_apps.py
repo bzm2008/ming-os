@@ -10,6 +10,11 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 def generated_script(source, start_marker, end_marker):
@@ -105,7 +110,7 @@ class RunningAppsContracts(unittest.TestCase):
         self.assertIn('window_is_manageable "${properties}"', require_window)
         self.assertIn("可管理的应用窗口", require_window)
 
-    def test_dock_has_a_running_apps_item_with_non_pin_only_runtime_settings(self):
+    def test_dock_has_a_running_apps_item_while_pinned_launchers_stay_unique(self):
         self.assertIn("ming-running-apps.dockitem", self.source)
         self.assertIn("ming-running-apps.desktop", self.source)
         self.assertIn("Exec=/usr/local/bin/ming-running-apps menu", self.source)
@@ -124,6 +129,13 @@ class RunningAppsContracts(unittest.TestCase):
             refresh,
             r'ming-running-apps\)\s+exec_line="/usr/local/bin/ming-running-apps menu"',
         )
+
+    def test_empty_running_apps_menu_is_a_quiet_noop_not_a_technical_x11_error(self):
+        """A fresh Live session normally has no application windows to manage."""
+        menu = self.running_apps.split("show_menu() {", 1)[1].split("\n}\n\ncase", 1)[0]
+        self.assertIn('[[ -n "${rows}" ]] || {', menu)
+        self.assertIn("return 0", menu)
+        self.assertNotIn("没有可管理的 X11 应用窗口", menu)
 
     def test_running_apps_dock_health_requires_the_managed_proxy_chain(self):
         """A stray dockitem file must not make the recovery entry look usable."""
@@ -181,7 +193,7 @@ class RunningAppsContracts(unittest.TestCase):
         self.assertTrue(self.running_apps, "ming-running-apps entry is missing")
         for script in (self.running_apps, self.healthcheck, self.watchdog):
             result = subprocess.run(
-                ["bash", "-n"], input=script.replace("\r", "").encode("utf-8")
+                [BASH, "-n"], input=script.replace("\r", "").encode("utf-8")
             )
             self.assertEqual(0, result.returncode)
 
@@ -191,7 +203,7 @@ class RunningAppsContracts(unittest.TestCase):
             root = pathlib.Path(temporary)
             script, environment = self.runtime_fixture(root)
             result = subprocess.run(
-                ["bash", str(script), "list", "--json"],
+                [BASH, str(script), "list", "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -236,7 +248,7 @@ class RunningAppsContracts(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                ["bash", str(script), "list", "--json"],
+                [BASH, str(script), "list", "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -255,7 +267,7 @@ class RunningAppsContracts(unittest.TestCase):
             action_log = pathlib.Path(environment["MING_ACTION_LOG"])
 
             invalid = subprocess.run(
-                ["bash", str(script), "focus", "--window-id", "not-an-x11-id"],
+                [BASH, str(script), "focus", "--window-id", "not-an-x11-id"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -266,7 +278,7 @@ class RunningAppsContracts(unittest.TestCase):
 
             for action in ("restore", "focus", "close"):
                 result = subprocess.run(
-                    ["bash", str(script), action, "--window-id", "0x01000005"],
+                    [BASH, str(script), action, "--window-id", "0x01000005"],
                     capture_output=True,
                     text=True,
                     env=environment,
@@ -296,7 +308,7 @@ class RunningAppsContracts(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                ["bash", str(script), "list", "--json"],
+                [BASH, str(script), "list", "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -311,7 +323,7 @@ class RunningAppsContracts(unittest.TestCase):
             )
             proxy.write_text("[Desktop Entry]\nExec=/usr/bin/false\n", encoding="utf-8")
             result = subprocess.run(
-                ["bash", str(script), "list", "--json"],
+                [BASH, str(script), "list", "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -325,7 +337,7 @@ class RunningAppsContracts(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                ["bash", str(script), "list", "--json"],
+                [BASH, str(script), "list", "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -392,7 +404,7 @@ printf '[Desktop Entry]\\nExec=/usr/local/bin/ming-running-apps menu\\n' > "${MI
                 }
             )
             result = subprocess.run(
-                ["bash"],
+                [BASH],
                 input=harness,
                 capture_output=True,
                 text=True,
@@ -418,7 +430,7 @@ printf '[Desktop Entry]\\nExec=/usr/local/bin/ming-running-apps menu\\n' > "${MI
             action_log = pathlib.Path(environment["MING_CONTROL_ACTION_LOG"])
 
             rejected = subprocess.run(
-                ["bash", str(control), "close", "--window-id", "0x01000007"],
+                [BASH, str(control), "close", "--window-id", "0x01000007"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -428,7 +440,7 @@ printf '[Desktop Entry]\\nExec=/usr/local/bin/ming-running-apps menu\\n' > "${MI
             self.assertFalse(action_log.exists())
 
             accepted = subprocess.run(
-                ["bash", str(control), "close", "--window-id", "0x01000001"],
+                [BASH, str(control), "close", "--window-id", "0x01000001"],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -448,7 +460,7 @@ printf '[Desktop Entry]\\nExec=/usr/local/bin/ming-running-apps menu\\n' > "${MI
             environment["MING_WINDOW_CONTROL_BIN"] = str(root / "bin" / "ming-window-control")
 
             result = subprocess.run(
-                ["bash", str(health_path), "--json"],
+                [BASH, str(health_path), "--json"],
                 capture_output=True,
                 text=True,
                 env=environment,

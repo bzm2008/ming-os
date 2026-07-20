@@ -194,6 +194,21 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn('["ming-update", "check", "--json"]', update)
         self.assertNotIn('"ming-transaction-diagnostics"', update)
 
+    def test_2640_embedded_runtime_failure_never_looks_like_a_bootstrap_download(self):
+        presenter = ota_presenter(self.settings)
+        result = presenter({
+            "schema": "ming.update.cli.v1",
+            "ok": False,
+            "state": "failed",
+            "action": "none",
+            "error_code": "E_BOOTSTRAP_VERSION",
+            "update": {"current_version": "26.4.0", "delivery": "transactional-slot-v1"},
+        })
+
+        self.assertEqual("内置 OTA 更新组件异常", result["title"])
+        self.assertIn("不会下载额外组件", result["detail"])
+        self.assertEqual("check", result["button_state"])
+
     def test_settings_refuses_missing_or_unknown_cli_schema(self):
         presenter = ota_presenter(self.settings)
         actionable = {

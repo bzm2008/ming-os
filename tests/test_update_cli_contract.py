@@ -45,13 +45,13 @@ class UpdateCliContractTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def controller(self, *, capability, discovery, active_root="/"):
+    def controller(self, *, capability, discovery, active_root="/", current_version="26.3.2"):
         return self.cli.UpdateController(
             state_root=self.root / "state",
             cache_root=self.root / "cache",
             keyring=self.keyring,
             key_policy=self.policy,
-            current_version="26.3.2",
+            current_version=current_version,
             architecture="amd64",
             kernel_release="6.12.0-amd64",
             capability_loader=lambda: capability,
@@ -101,6 +101,38 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertIn("bootstrap", value)
         self.assertNotIn("recovery", json.dumps(value).lower())
         self.assertNotIn("iso", json.dumps(value).lower())
+        self.assert_schema(value)
+
+    def test_2640_missing_embedded_runtime_never_offers_legacy_bootstrap_download(self):
+        """Only 26.3.2 may receive the one-time signed bootstrap guidance."""
+        controller = self.controller(
+            capability={"available": False, "capability": None},
+            current_version="26.4.0",
+            discovery={
+                "schema": "ming.update.discovery.v1",
+                "available": True,
+                "current_version": "26.4.0",
+                "architecture": "amd64",
+                "capability": None,
+                "delivery": "bootstrap",
+                "bootstrap": {
+                    "url": "https://updates.example/objects/bootstrap.deb",
+                    "sha256": "a" * 64,
+                    "signature_url": "https://updates.example/objects/bootstrap.deb.sig",
+                    "fingerprint": "A" * 40,
+                },
+            },
+        )
+
+        value = controller.check()
+
+        self.assert_envelope(value, "check")
+        self.assertFalse(value["ok"])
+        self.assertEqual(value["error_code"], "E_BOOTSTRAP_VERSION")
+        self.assertEqual(value["state"], "failed")
+        self.assertEqual(value["action"], "none")
+        self.assertEqual(value["update"]["delivery"], "transactional-slot-v1")
+        self.assertNotIn("bootstrap", value)
         self.assert_schema(value)
 
     def test_bootstrapped_2632_accepts_only_a_transactional_locator_response(self):

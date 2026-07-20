@@ -3,12 +3,51 @@
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 
 
 VERSION = "1.0"
+STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
+
+
+def run_local_partition_snapshot():
+    """Read the authoritative local partition view without blocking GTK."""
+    try:
+        completed = subprocess.run(
+            [STORAGE_STATUS_HELPER, "partitions", "--json"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=4,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "partitions": [], "error": "本机分区检测超时。"}
+    except OSError as error:
+        return {"ok": False, "partitions": [], "error": str(error)}
+    if completed.returncode != 0:
+        return {
+            "ok": False,
+            "partitions": [],
+            "error": completed.stderr.strip() or completed.stdout.strip()
+            or "本机分区检测工具没有返回结果。",
+        }
+    try:
+        result = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return {"ok": False, "partitions": [], "error": "本机分区检测返回了无效数据。"}
+    partitions = result.get("partitions") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or result.get("ok") is not True or not isinstance(partitions, list):
+        return {
+            "ok": False,
+            "partitions": [],
+            "error": (result.get("error") if isinstance(result, dict) else "")
+            or "本机分区检测没有返回分区列表。",
+        }
+    return {"ok": True, "partitions": partitions, "error": ""}
 
 
 def _load_model_module():
@@ -113,6 +152,8 @@ if GTK_AVAILABLE:
             self.current_popover = None
             self.volume_monitor = Gio.VolumeMonitor.get()
             self.volume_signal_ids = []
+            self.local_partition_generation = 0
+            self.local_partition_rows = []
             self._build_ui()
             self._install_css()
             self._watch_volumes()
@@ -381,6 +422,7 @@ if GTK_AVAILABLE:
             widget.add_controller(long_press)
 
         def refresh_sidebar(self):
+            self.local_partition_generation += 1
             while True:
                 row = self.sidebar.get_row_at_index(0)
                 if row is None:
@@ -396,14 +438,7 @@ if GTK_AVAILABLE:
             for name, icon in BUILTIN_LOCATIONS:
                 uri = MODEL.TRASH_URI if name == "Trash" else Gio.File.new_for_path(str(special[name])).get_uri()
                 self.sidebar.append(self._sidebar_row(name, icon, uri=uri))
-            separator = Gtk.ListBoxRow(selectable=False, activatable=False)
-            section = Gtk.Label(label="设备与网络位置", xalign=0)
-            section.add_css_class("heading")
-            section.set_margin_start(14)
-            section.set_margin_top(12)
-            section.set_margin_bottom(6)
-            separator.set_child(section)
-            self.sidebar.append(separator)
+            self.sidebar.append(self._sidebar_heading("设备与网络位置"))
             mounted_volumes = set()
             for mount in self.volume_monitor.get_mounts():
                 volume = mount.get_volume()
@@ -428,8 +463,95 @@ if GTK_AVAILABLE:
                         )
                     )
 
-        def _sidebar_row(self, name, icon, uri=None, mount=None, volume=None):
-            row = Gtk.ListBoxRow()
+            self.sidebar.append(self._sidebar_heading("本机分区"))
+            loading = self._sidebar_row(
+                "正在读取本机分区",
+                "drive-harddisk-symbolic",
+                subtitle="将显示已挂载和未挂载的本机分区。",
+            )
+            self.sidebar.append(loading)
+            self.local_partition_rows = [loading]
+            self._refresh_local_partitions()
+
+        @staticmethod
+        def _sidebar_heading(title):
+            separator = Gtk.ListBoxRow(selectable=False, activatable=False)
+            section = Gtk.Label(label=title, xalign=0)
+            section.add_css_class("heading")
+            section.set_margin_start(14)
+            section.set_margin_top(12)
+            section.set_margin_bottom(6)
+            separator.set_child(section)
+            return separator
+
+        def _refresh_local_partitions(self):
+            generation = self.local_partition_generation
+
+            def worker():
+                snapshot = run_local_partition_snapshot()
+                GLib.idle_add(self._apply_local_partitions, generation, snapshot)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _apply_local_partitions(self, generation, snapshot):
+            if generation != self.local_partition_generation:
+                return False
+            for row in self.local_partition_rows:
+                if row.get_parent() is self.sidebar:
+                    self.sidebar.remove(row)
+            self.local_partition_rows = []
+
+            if not snapshot.get("ok"):
+                row = self._sidebar_row(
+                    "无法读取本机分区",
+                    "dialog-warning-symbolic",
+                    subtitle=snapshot.get("error") or "请刷新文件管理器后重试。",
+                )
+                self.sidebar.append(row)
+                self.local_partition_rows.append(row)
+                return False
+
+            partitions = snapshot.get("partitions") or []
+            if not partitions:
+                row = self._sidebar_row(
+                    "未检测到可显示分区",
+                    "drive-harddisk-symbolic",
+                    subtitle="系统没有返回本机块设备。",
+                )
+                self.sidebar.append(row)
+                self.local_partition_rows.append(row)
+                return False
+
+            state_labels = {
+                "mounted": "已挂载",
+                "unmounted": "未挂载",
+                "swap": "交换空间",
+            }
+            for partition in partitions:
+                path = str(partition.get("path") or "未知设备")
+                label = str(partition.get("label") or "").strip()
+                title = "%s（%s）" % (label, path) if label else path
+                mounts = [str(item) for item in partition.get("mountpoints", []) if item]
+                mount = next((item for item in mounts if item.startswith("/")), "")
+                state = state_labels.get(partition.get("state"), "状态未知")
+                fstype = str(partition.get("fstype") or "未格式化")
+                subtitle = "%s · %s" % (fstype, state)
+                if mount:
+                    subtitle += " · %s" % mount
+                uri = Gio.File.new_for_path(mount).get_uri() if mount else None
+                row = self._sidebar_row(
+                    title,
+                    "drive-harddisk-symbolic",
+                    uri=uri,
+                    subtitle=subtitle,
+                )
+                self.sidebar.append(row)
+                self.local_partition_rows.append(row)
+            return False
+
+        def _sidebar_row(self, name, icon, uri=None, mount=None, volume=None, subtitle=""):
+            active = bool(uri or mount is not None or volume is not None)
+            row = Gtk.ListBoxRow(selectable=active, activatable=active)
             row.location_uri = uri
             row.mount_object = mount
             row.volume_object = volume
@@ -439,9 +561,15 @@ if GTK_AVAILABLE:
             box.set_margin_top(8)
             box.set_margin_bottom(8)
             box.append(Gtk.Image.new_from_icon_name(icon))
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            labels.set_hexpand(True)
             label = Gtk.Label(label=name, xalign=0, ellipsize=3)
-            label.set_hexpand(True)
-            box.append(label)
+            labels.append(label)
+            if subtitle:
+                detail = Gtk.Label(label=subtitle, xalign=0, ellipsize=3)
+                detail.add_css_class("dim-label")
+                labels.append(detail)
+            box.append(labels)
             if mount:
                 button = self._icon_button("media-eject-symbolic", "卸载或弹出")
                 button.connect("clicked", lambda _button: self._show_mount_menu(row, button))

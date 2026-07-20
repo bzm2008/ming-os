@@ -18,6 +18,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMMON_PATH = ROOT / "assets" / "ming-shell-common.py"
 LAUNCH_PATH = ROOT / "assets" / "ming-launch.py"
 PHONE_PATH = ROOT / "assets" / "ming-phone-desktop.py"
+FINALIZE_PATH = ROOT / "modules" / "07_finalize.sh"
+BUILD_PATH = ROOT / "build_onion_os.sh"
 
 
 def load_common():
@@ -205,6 +207,30 @@ class TrustedDesktopActivationTests(unittest.TestCase):
                     desktop: protected_regular_file(),
                 }),
             ))
+
+    def test_finalizer_trusts_only_fixed_ming_core_system_launchers(self):
+        """Generated core launchers need a receipt before the broker may run them."""
+        finalizer = FINALIZE_PATH.read_text(encoding="utf-8")
+        self.assertIn("seed_trusted_core_desktop_receipts()", finalizer)
+        for desktop in (
+                "ming-settings.desktop", "ming-edge.desktop",
+                "ming-files.desktop", "ming-terminal.desktop"):
+            self.assertIn('"{}"'.format(desktop), finalizer)
+        self.assertIn("/var/lib/ming-os/trusted-desktops", finalizer)
+        self.assertIn("chown root:root", finalizer)
+        self.assertIn("chmod 0644", finalizer)
+        self.assertIn("seed_trusted_core_desktop_receipts", finalizer)
+
+    def test_rootfs_gate_requires_core_launch_broker_receipts(self):
+        build = BUILD_PATH.read_text(encoding="utf-8")
+        self.assertIn("# MING_TRUSTED_CORE_DESKTOP_RECEIPTS_VALIDATOR_BEGIN", build)
+        self.assertIn("trusted_core_launchers", build)
+        for desktop in (
+                "ming-settings.desktop", "ming-edge.desktop",
+                "ming-files.desktop", "ming-terminal.desktop"):
+            self.assertIn('"{}"'.format(desktop), build)
+        self.assertIn('root / "var/lib/ming-os/trusted-desktops" / name', build)
+        self.assertIn('expected = f"/usr/share/applications/{name}"', build)
 
     def test_rejects_user_desktop_entry_even_when_stat_looks_protected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -511,7 +537,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
         self.assertTrue(received[0].accepted)
 
     def test_managed_package_wrapper_copy_retains_its_canonical_broker_source(self):
-        """A friendly Desktop filename must not turn a system wrapper into a broken duplicate."""
+        """A friendly Desktop filename must not turn a system launcher into a broken duplicate."""
         source = PHONE_PATH.read_text(encoding="utf-8")
         self.assertIn("X-Ming-Source-Desktop", source)
         self.assertIn("def trusted_wrapper_source_path", source)
@@ -553,7 +579,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
             system_wrapper = applications / "store-wrapper.desktop"
             system_wrapper.write_text(
                 "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
-                "Exec=sh -c 'exec /opt/store-wrapper/run'\nIcon=store-wrapper\n",
+                "Exec=/usr/local/bin/store-wrapper\nIcon=store-wrapper\n",
                 encoding="utf-8",
             )
 
@@ -561,7 +587,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
                 name = "Store Wrapper"
                 icon = "store-wrapper"
                 categories = ("Utility",)
-                argv = ()
+                argv = ("/usr/local/bin/store-wrapper",)
                 diagnostic = ""
 
             class Common:

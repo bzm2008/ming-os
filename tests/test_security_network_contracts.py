@@ -14,6 +14,22 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def host_bash():
+    """Prefer Git Bash over the Windows WSL compatibility shim for file tests."""
+    if os.name == "nt":
+        candidate = pathlib.Path("C:/Program Files/Git/bin/bash.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("bash")
+
+
+def host_shell_path(value):
+    value = str(value)
+    if os.name == "nt" and len(value) > 2 and value[1] == ":":
+        return "/%s%s" % (value[0].lower(), value[2:].replace(os.sep, "/"))
+    return value
+
+
 def load_asset(filename, module_name):
     path = ROOT / "assets" / filename
     if not path.is_file():
@@ -125,18 +141,13 @@ class SecurityBuildContracts(unittest.TestCase):
         self.assertNotIn("pkexec /bin/bash", self.desktop)
 
     def test_skipped_password_migration_is_strictly_one_shot(self):
-        bash = shutil.which("bash")
+        bash = host_bash()
         if not bash:
             self.skipTest("Git Bash is unavailable")
         script = self.ota.split(
             "cat > /usr/local/bin/ming-account-password-migration << 'PASSWORDMIGRATION'", 1
         )[1].split("PASSWORDMIGRATION", 1)[0]
         script = script.replace("\r\n", "\n")
-        def shell_path(value):
-            value = str(value)
-            if os.name == "nt" and len(value) > 2 and value[1] == ":":
-                return "/mnt/%s%s" % (value[0].lower(), value[2:].replace(os.sep, "/"))
-            return value
         with tempfile.TemporaryDirectory() as tempdir:
             root = pathlib.Path(tempdir)
             marker = root / "home" / "alice" / ".config" / "ming-os" / "oobe-account-done"
@@ -147,10 +158,10 @@ class SecurityBuildContracts(unittest.TestCase):
             account = root / "account-control"
             with account.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> %s\n" % (
-                    "%s", shlex.quote(shell_path(calls))))
+                    "%s", shlex.quote(host_shell_path(calls))))
             with account.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write("printf '%%s\\n' migrated-passwordless > %s\n" %
-                             shlex.quote(shell_path(marker)))
+                             shlex.quote(host_shell_path(marker)))
             pkexec = root / "pkexec"
             with pkexec.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write("#!/usr/bin/env bash\nexec \"$@\"\n")
@@ -158,20 +169,20 @@ class SecurityBuildContracts(unittest.TestCase):
             pkexec.chmod(0o755)
             script = script.replace(
                 'marker="${MING_MARKER:-${HOME}/.config/ming-os/oobe-account-done}"',
-                "marker=%s" % shlex.quote(shell_path(marker)))
+                "marker=%s" % shlex.quote(host_shell_path(marker)))
             script = script.replace(
                 'ACCOUNT_CONTROL="${MING_ACCOUNT_CONTROL:-/usr/local/sbin/ming-account-control}"',
-                "ACCOUNT_CONTROL=%s" % shlex.quote(shell_path(account)))
+                "ACCOUNT_CONTROL=%s" % shlex.quote(host_shell_path(account)))
             script = script.replace(
                 'PKEXEC="${MING_PKEXEC:-pkexec}"',
-                "PKEXEC=%s" % shlex.quote(shell_path(pkexec)))
+                "PKEXEC=%s" % shlex.quote(host_shell_path(pkexec)))
             script = script.replace('user_name="$(id -un)"', 'user_name="alice"')
             migration = root / "migration.sh"
             with migration.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(script)
             for _attempt in range(2):
                 result = subprocess.run(
-                    [bash, shell_path(migration)], capture_output=True, text=True)
+                    [bash, host_shell_path(migration)], capture_output=True, text=True)
                 self.assertEqual(0, result.returncode, result.stderr)
             self.assertTrue(calls.is_file(), result.stderr)
             self.assertEqual(1, len(calls.read_text(encoding="utf-8").splitlines()))

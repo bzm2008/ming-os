@@ -329,15 +329,42 @@ def load_icon_pixbuf(icon_theme, icon, size, fallback="application-x-executable"
     """Load an icon through GdkPixbuf/Gtk while containing all decoder errors."""
     resolved = resolve_icon(icon, fallback=fallback)
     size = max(16, min(512, int(size)))
+
+    def fit_theme_pixbuf(pixbuf):
+        """GTK may return the nearest native size; enforce the requested box."""
+        if pixbuf is None:
+            return None
+        try:
+            width = int(pixbuf.get_width())
+            height = int(pixbuf.get_height())
+        except (AttributeError, TypeError, ValueError):
+            return pixbuf
+        if width == size and height == size:
+            return pixbuf
+        try:
+            from gi.repository import GdkPixbuf
+            interpolation = GdkPixbuf.InterpType.BILINEAR
+        except Exception:
+            # Unit-test doubles and minimal runtimes may not expose GI here;
+            # GdkPixbuf accepts the numeric enum value as a fallback.
+            interpolation = 2
+        try:
+            return pixbuf.scale_simple(size, size, interpolation) or pixbuf
+        except Exception:
+            return pixbuf
+
+    def load_theme_icon(name):
+        return fit_theme_pixbuf(icon_theme.load_icon(name, size, 0))
+
     try:
         if pathlib.Path(resolved).is_absolute():
             from gi.repository import GdkPixbuf
             return GdkPixbuf.Pixbuf.new_from_file_at_scale(resolved, size, size, True)
-        return icon_theme.load_icon(resolved, size, 0)
+        return load_theme_icon(resolved)
     except Exception:
         if resolved != fallback:
             try:
-                return icon_theme.load_icon(fallback, size, 0)
+                return load_theme_icon(fallback)
             except Exception:
                 pass
         return None

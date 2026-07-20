@@ -127,21 +127,39 @@ SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
 APP_DIRS = [DESKTOP_DIR, SYSTEM_APPLICATION_DIR, HOME / ".local/share/applications"]
 APP_CATALOG_FINGERPRINT_VERSION = 1
 CORE_NAMES = {
+    "Install Ming OS.desktop",
     "ming-settings.desktop",
     "ming-files.desktop",
+    "ming-trash.desktop",
     "ming-terminal.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
     "papyrus.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
+    "Install Ming OS.desktop",
     "ming-settings.desktop",
     "ming-files.desktop",
+    "ming-trash.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
     "papyrus.desktop",
     "ming-terminal.desktop",
 ])}
+DESKTOP_WRAPPER_ALIASES = {
+    "ming-control-center.desktop": "ming-settings.desktop",
+    "ming-dock-ming-settings.desktop": "ming-settings.desktop",
+    "ming-dock-ming-files.desktop": "ming-files.desktop",
+    "ming-dock-ming-edge.desktop": "ming-edge.desktop",
+    "ming-dock-ming-terminal.desktop": "ming-terminal.desktop",
+    "ming-dock-spark-store.desktop": "spark-store.desktop",
+}
+CORE_LAYOUT_ALIASES = {
+    **DESKTOP_WRAPPER_ALIASES,
+    "microsoft-edge.desktop": "ming-edge.desktop",
+    "microsoft-edge-stable.desktop": "ming-edge.desktop",
+    "ming-install-spark-store.desktop": "spark-store.desktop",
+}
 CORE_FALLBACKS = {
     "ming-edge.desktop": ["microsoft-edge.desktop", "microsoft-edge-stable.desktop"],
     "spark-store.desktop": ["ming-install-spark-store.desktop"],
@@ -149,6 +167,7 @@ CORE_FALLBACKS = {
 CORE_GENERATED = {
     "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-control-center", "Settings;System;"),
     "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
+    "ming-trash.desktop": ("回收站", "ming-files trash:///", "user-trash", "System;FileManager;"),
     "ming-terminal.desktop": ("Ming 终端", "ming-terminal", "ming-terminal", "System;TerminalEmulator;"),
     "ming-edge.desktop": ("Microsoft Edge", "ming-edge", "microsoft-edge", "Network;WebBrowser;"),
 }
@@ -189,6 +208,8 @@ ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
 CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
+STATUS_WIDGET_COMPACT_HEIGHT = 58
+STATUS_WIDGET_EXPANDED_HEIGHT = 248
 WALLPAPER_PATHS = [
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
     Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"),
@@ -329,6 +350,10 @@ def css_for_appearance(appearance):
     else:
         raised = profile["surface_raised"]
         sunken = profile["surface_sunken"]
+    # Desktop cards may retain optional glass, but feedback, status, and
+    # notification surfaces must remain legible on every wallpaper.
+    feedback_raised = profile["surface_raised"]
+    feedback_sunken = profile["surface_sunken"]
     shadow = "0 10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
     font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
     return ("""
@@ -340,26 +365,29 @@ window.ming-desktop { background-color: %(base)s; font-family: "%(font)s"; }
 .folder-title { color: %(text)s; font-size: 18px; font-weight: 700; }
 .folder-panel { background: %(raised)s; border: 1px solid %(border)s; border-radius: 8px; padding: 18px; }
 .folder-action { border-radius: 6px; padding: 7px 10px; }
-.clock-widget, .status-widget, .launch-feedback { border-radius: 8px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; }
+.clock-widget, .status-widget, .launch-feedback { border-radius: 8px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; }
 .clock-widget { padding: 9px 13px; }
 .status-widget { padding: 12px 14px; }
 .status-widget-compact { padding: 0; background: transparent; border: 0; box-shadow: none; }
-.status-compact-pill { min-height: 54px; border-radius: 8px; padding: 8px 14px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
-.status-compact-pill:hover, .status-button:hover { background: %(sunken)s; }
+.status-compact-pill { min-height: 54px; border-radius: 8px; padding: 8px 14px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
+.status-compact-pill:hover, .status-button:hover { background-color: %(feedback_sunken)s; }
 .clock-time, .status-compact-time, .notification-title, .launch-title { color: %(text)s; font-weight: 800; }
 .clock-time { font-size: 26px; }
 .clock-date, .status-compact-date { color: %(accent)s; font-weight: 700; }
 .clock-subdate, .notification-body, .launch-detail { color: %(secondary)s; }
-.status-button { border-radius: 6px; padding: 4px 7px; background: %(raised)s; border: 1px solid %(border)s; color: %(text)s; }
+.status-button { border-radius: 6px; padding: 4px 7px; background-color: %(feedback_raised)s; border: 1px solid %(border)s; color: %(text)s; }
 .status-scale trough { min-height: 7px; border-radius: 4px; background: %(border)s; border: 0; }
 .status-scale highlight, .status-scale fill, .status-scale progress, .status-scale trough > highlight, .status-scale trough > fill, .status-scale trough > progress { min-height: 7px; border-radius: 4px; background: %(accent)s; }
-.status-scale slider { min-width: 12px; min-height: 12px; margin: -3px; background: %(raised)s; border: 1px solid %(accent)s; border-radius: 6px; box-shadow: none; }
-.status-scale:disabled trough { background: %(sunken)s; }
+.status-scale slider { min-width: 12px; min-height: 12px; margin: -3px; background-color: %(feedback_raised)s; border: 1px solid %(accent)s; border-radius: 6px; box-shadow: none; }
+.status-scale:disabled trough { background-color: %(feedback_sunken)s; }
 .status-scale:disabled highlight, .status-scale:disabled fill, .status-scale:disabled progress { background: %(border)s; }
-.status-scale:disabled slider { background: %(sunken)s; border-color: %(border)s; }
-.notification-panel { padding: 12px; background: %(raised)s; }
+.status-scale:disabled slider { background-color: %(feedback_sunken)s; border-color: %(border)s; }
+popover.ming-notification-popover, popover.ming-notification-popover > contents, .notification-panel { padding: 12px; background-color: %(feedback_raised)s; background-image: none; }
+window.ming-launch-error-dialog, window.ming-launch-error-dialog .dialog-vbox, window.ming-launch-error-dialog .dialog-action-area { background-color: %(feedback_raised)s; background-image: none; color: %(text)s; opacity: 1; }
+window.ming-launch-error-dialog label { color: %(text)s; opacity: 1; }
 """ % {
         "base": profile["surface_base"], "raised": raised, "sunken": sunken,
+        "feedback_raised": feedback_raised, "feedback_sunken": feedback_sunken,
         "border": profile["border_soft"], "text": profile["text_primary"],
         "secondary": profile["text_secondary"], "accent": profile["accent"], "shadow": shadow,
         "font": font,
@@ -473,6 +501,29 @@ class InteractionState:
 
 def app_id(path):
     return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+def canonicalize_core_layout_item(item, canonical_by_basename, seen):
+    """Move legacy core launcher paths to one current launcher without losing placement."""
+    if not isinstance(item, dict) or item.get("type") == "folder":
+        return dict(item) if isinstance(item, dict) else item
+    path = item.get("path")
+    if not isinstance(path, (str, os.PathLike)):
+        return dict(item)
+    basename = Path(path).name
+    canonical_basename = CORE_LAYOUT_ALIASES.get(basename, basename)
+    canonical = canonical_by_basename.get(canonical_basename)
+    if canonical_basename not in CORE_NAMES or not isinstance(canonical, dict):
+        return dict(item)
+    if canonical_basename in seen:
+        return None
+    seen.add(canonical_basename)
+    restored = dict(canonical)
+    restored["id"] = item.get("id") or restored.get("id") or app_id(restored.get("path", path))
+    restored["x"] = item.get("x", PAD_X)
+    restored["y"] = item.get("y", PAD_Y)
+    restored["pinned"] = bool(item.get("pinned", False))
+    return restored
 
 
 def app_catalog_fingerprint(paths=None):
@@ -740,6 +791,8 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
     if not item:
         return False
     basename = item["basename"]
+    if basename in DESKTOP_WRAPPER_ALIASES or basename.startswith("ming-dock-"):
+        return False
     if default_only and basename not in CORE_NAMES:
         return False
     if basename in apps_by_basename:
@@ -749,8 +802,12 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
 
 
 def add_core_app(apps_by_basename, basename):
-    candidates = [DESKTOP_DIR / basename, Path("/usr/share/applications") / basename]
-    candidates.extend(Path("/usr/share/applications") / alt for alt in CORE_FALLBACKS.get(basename, []))
+    # The Desktop directory contains user-visible copies seeded by the Live
+    # image. The launch broker deliberately does not trust those copies, so
+    # always choose the protected catalog entry as the canonical tile source.
+    candidates = [SYSTEM_APPLICATION_DIR / basename]
+    candidates.extend(SYSTEM_APPLICATION_DIR / alt for alt in CORE_FALLBACKS.get(basename, []))
+    candidates.append(DESKTOP_DIR / basename)
     for candidate in candidates:
         if add_app_from_path(apps_by_basename, candidate):
             return True
@@ -992,6 +1049,10 @@ def sync_layout(width=1366):
         if isinstance(path, (str, os.PathLike))
     } if catalog_is_initialized else set()
     apps_by_path = {str(app["path"]): app for app in apps}
+    canonical_core_apps = {
+        app["basename"]: app for app in apps
+        if app.get("basename") in CORE_NAMES
+    }
     # First-run layouts should remain deliberately compact.  Subsequent
     # catalog changes append only newly installed applications, while all
     # existing app tiles keep their saved coordinates and folders.
@@ -1002,6 +1063,7 @@ def sync_layout(width=1366):
     ]
     items = []
     known = set()
+    core_seen = set()
     for item in layout.get("items", []):
         if item.get("type") == "folder":
             if item.get("pinned"):
@@ -1016,6 +1078,9 @@ def sync_layout(width=1366):
                 items.append(folder)
                 known.update(children)
         elif item.get("path"):
+            item = canonicalize_core_layout_item(item, canonical_core_apps, core_seen)
+            if item is None:
+                continue
             path = str(item["path"])
             basename = Path(path).name
             fresh = apps_by_path.get(path)
@@ -1087,7 +1152,7 @@ def _mark_desktop_file(path):
 
 
 def trusted_wrapper_source_path(path):
-    """Return a protected package wrapper source suitable for a Ming proxy."""
+    """Return a protected system source suitable for a Ming-managed proxy."""
     checker = getattr(COMMON, "is_system_desktop_activation_candidate", None)
     diagnose = getattr(COMMON, "diagnose_desktop_file", None)
     if not callable(checker) or not callable(diagnose):
@@ -1100,7 +1165,7 @@ def trusted_wrapper_source_path(path):
         entry = diagnose(source)
     except (AttributeError, OSError, TypeError, ValueError):
         return None
-    if entry is None or getattr(entry, "diagnostic", "") or getattr(entry, "argv", ()):
+    if entry is None or getattr(entry, "diagnostic", ""):
         return None
     return source
 
@@ -1559,6 +1624,10 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         self.generation = 0
         self.probe_running = False
         self.probe_generation = 0
+        self.revealer = Gtk.Revealer()
+        self.revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.revealer.set_transition_duration(180)
+        self.revealer.set_reveal_child(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.get_style_context().add_class("launch-feedback")
         self.icon = Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.DIALOG)
@@ -1577,7 +1646,8 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         text_box.pack_start(self.detail, False, False, 0)
         box.pack_start(text_box, True, True, 0)
         box.pack_start(self.spinner, False, False, 0)
-        self.add(box)
+        self.revealer.add(box)
+        self.add(self.revealer)
         self.hide()
 
     def begin(self, item):
@@ -1591,6 +1661,7 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         self.detail.set_text("正在准备应用窗口…")
         self.spinner.start()
         self.show_all()
+        self.revealer.set_reveal_child(True)
         GLib.timeout_add(120, self.poll, generation)
 
     def poll(self, generation):
@@ -1629,7 +1700,13 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
             return False
         self.spinner.stop()
         self.item = None
-        self.hide()
+        self.revealer.set_reveal_child(False)
+        GLib.timeout_add(180, self.hide_after_transition, self.generation)
+        return False
+
+    def hide_after_transition(self, generation):
+        if generation == self.generation and not self.item:
+            self.hide()
         return False
 
 
@@ -1829,6 +1906,9 @@ class StatusWidget(Gtk.Box):
         # target.  Gtk.EventBox creates an input window around the whole card,
         # which prevents GtkRange's native drag handling from seeing motion.
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_valign(Gtk.Align.START)
+        self.set_vexpand(False)
+        self.get_style_context().add_class("status-widget")
         self.collapsed = load_widget_state()["collapsed"]
         self.metric_mode = load_metric_mode()
         self.refreshing = False
@@ -1853,25 +1933,15 @@ class StatusWidget(Gtk.Box):
         self.action_starts = {}
         self._height_animation = None
         self._height_animation_source = 0
-        self._display_height = 54 if self.collapsed else 286
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        box.get_style_context().add_class("status-widget")
+        self._display_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_valign(Gtk.Align.START)
+        box.set_vexpand(False)
         box.set_halign(Gtk.Align.FILL)
         box.set_hexpand(True)
         self.widget_box = box
-
-        self.compact_button = Gtk.Button()
-        self.compact_button.get_style_context().add_class("status-compact-pill")
-        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.compact_time_label = Gtk.Label()
-        self.compact_time_label.get_style_context().add_class("status-compact-time")
-        compact.pack_start(self.compact_time_label, False, False, 0)
-        self.compact_date_label = Gtk.Label()
-        self.compact_date_label.get_style_context().add_class("status-compact-date")
-        compact.pack_start(self.compact_date_label, False, False, 0)
-        self.compact_button.add(compact)
-        self.compact_button.set_tooltip_text("展开快捷组件")
-        self.compact_button.connect("clicked", lambda _button: self.set_collapsed(False))
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.time_label = Gtk.Label()
@@ -1883,10 +1953,13 @@ class StatusWidget(Gtk.Box):
         self.date_label.get_style_context().add_class("clock-date")
         self.date_label.set_halign(Gtk.Align.END)
         header.pack_start(self.date_label, False, False, 0)
-        self.collapse_button = Gtk.Button(label="收起 ▴")
-        self.collapse_button.get_style_context().add_class("status-button")
-        self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
-        header.pack_start(self.collapse_button, False, False, 0)
+        self.status_toggle_button = Gtk.Button()
+        self.status_toggle_label = Gtk.Label(label="展开 ▾")
+        self.status_toggle_button.add(self.status_toggle_label)
+        self.status_toggle_button.get_style_context().add_class("status-button")
+        self.status_toggle_button.connect(
+            "clicked", lambda _button: self.set_collapsed(not self.collapsed))
+        header.pack_start(self.status_toggle_button, False, False, 0)
 
         actions = Gtk.Grid()
         actions.set_column_spacing(6)
@@ -1959,16 +2032,16 @@ class StatusWidget(Gtk.Box):
         controls.attach(self.brightness_scale, 0, 3, 3, 1)
 
         expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        expanded.pack_start(header, False, False, 0)
+        expanded.set_valign(Gtk.Align.START)
         expanded.pack_start(controls, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
         self.content_revealer = Gtk.Revealer()
         self.content_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.content_revealer.set_transition_duration(180)
         self.content_revealer.add(expanded)
-        box.pack_start(self.compact_button, False, False, 0)
+        box.pack_start(header, False, False, 0)
         box.pack_start(self.content_revealer, False, False, 0)
-        self.add(box)
+        self.pack_start(box, False, False, 0)
         self.apply_collapsed_state(animate=False)
         self.refresh()
         self.metric_timer = GLib.timeout_add_seconds(5, self.refresh_metrics)
@@ -1989,15 +2062,14 @@ class StatusWidget(Gtk.Box):
 
     def apply_collapsed_state(self, animate=False):
         timing = COMMON.shell_animation_timing(load_appearance())
-        style = self.widget_box.get_style_context()
-        if self.collapsed:
-            style.add_class("status-widget-compact")
-        else:
-            style.remove_class("status-widget-compact")
-        self.compact_button.set_visible(self.collapsed)
+        self.status_toggle_label.set_text("展开 ▾" if self.collapsed else "收起 ▴")
+        self.status_toggle_button.set_tooltip_text(
+            "展开快捷组件" if self.collapsed else "收起快捷组件")
         self.content_revealer.set_transition_duration(timing["duration_ms"])
         self.content_revealer.set_reveal_child(not self.collapsed)
-        target_height = 54 if self.collapsed else 286
+        target_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
         if animate:
             self.animate_collapsed_state(target_height)
         else:
@@ -2307,6 +2379,7 @@ class StatusWidget(Gtk.Box):
 
     def open_notifications(self, button):
         popover = Gtk.Popover.new(button)
+        popover.get_style_context().add_class("ming-notification-popover")
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         panel.set_size_request(320, 330)
         panel.get_style_context().add_class("notification-panel")
@@ -2442,8 +2515,6 @@ class StatusWidget(Gtk.Box):
         date_text = "%s %s" % (weekdays[now.weekday()], now.strftime("%m/%d"))
         self.time_label.set_text(time_text)
         self.date_label.set_text(date_text)
-        self.compact_time_label.set_text(time_text)
-        self.compact_date_label.set_text(date_text)
         if not self.refreshing:
             self.refreshing = True
             threading.Thread(target=self.collect_status, daemon=True).start()
@@ -3266,6 +3337,7 @@ class PhoneDesktop(Gtk.Window):
                         buttons=Gtk.ButtonsType.CLOSE,
                         text="无法打开此应用",
                     )
+                    dialog.get_style_context().add_class("ming-launch-error-dialog")
                     detail = str(item.get("diagnostic") or "启动失败，详细信息已写入桌面日志。")
                     dialog.format_secondary_text(detail)
                     dialog.run()

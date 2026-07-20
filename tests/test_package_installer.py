@@ -33,6 +33,12 @@ class FakeRunner:
         return response.pop(0) if isinstance(response, list) else response
 
 
+def metadata_output(package_name, version="1.2.3", architecture="amd64"):
+    return (
+        "Package: {}\nVersion: {}\nArchitecture: {}\n".format(
+            package_name, version, architecture))
+
+
 def successful_install_runner(package_file, package_name, desktop_paths=()):
     metadata = (
         "dpkg-deb", "--field", str(package_file),
@@ -46,7 +52,7 @@ def successful_install_runner(package_file, package_name, desktop_paths=()):
     refresh_desktops = ("update-desktop-database", "/usr/share/applications")
     refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
     responses = {
-        metadata: (0, "{}\n1.2.3\namd64\n".format(package_name), ""),
+        metadata: (0, metadata_output(package_name), ""),
         apt_install: (0, "", ""),
         verify: (0, "ii ", ""),
         refresh_desktops: (0, "", ""),
@@ -81,6 +87,33 @@ def configured_package_installer(module, application_dir, **kwargs):
 
 
 class PackageInstallerInspectTests(unittest.TestCase):
+    def test_inspect_accepts_standard_labeled_dpkg_deb_metadata(self):
+        """dpkg-deb labels every line when multiple fields are requested."""
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"not-a-real-deb-but-a-regular-file")
+            command = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            runner = FakeRunner({command: (
+                0,
+                "Package: sample-app\nVersion: 1:2.3\nArchitecture: amd64\n",
+                "",
+            )})
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).inspect(package)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("sample-app", result["package"])
+        self.assertEqual("1:2.3", result["version"])
+        self.assertEqual("amd64", result["architecture"])
+        self.assertEqual([command], runner.commands)
+
     def test_inspect_returns_verified_amd64_deb_metadata(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
@@ -90,7 +123,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            runner = FakeRunner({command: (0, "sample-app\n1.2.3\namd64\n", "")})
+            runner = FakeRunner({command: (0, metadata_output("sample-app"), "")})
 
             result = installer.PackageInstaller(
                 runner=runner,
@@ -114,7 +147,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            runner = FakeRunner({metadata: (0, "foreign-app\n1.0\ni386\n", "")})
+            runner = FakeRunner({metadata: (0, metadata_output("foreign-app", "1.0", "i386"), "")})
             result = installer.PackageInstaller(
                 runner=runner,
                 uid_getter=lambda: (_ for _ in ()).throw(AssertionError("must not need root")),
@@ -136,7 +169,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             result = installer.PackageInstaller(
-                runner=FakeRunner({metadata: (0, "foreign-app\n1.0\ni386\n", "")}),
+                runner=FakeRunner({metadata: (0, metadata_output("foreign-app", "1.0", "i386"), "")}),
                 log_path=pathlib.Path(directory) / "installer.log",
             ).inspect(package)
 
@@ -154,7 +187,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             result = installer.PackageInstaller(
-                runner=FakeRunner({metadata: (0, "shared-data\n1.0\nall\n", "")}),
+                runner=FakeRunner({metadata: (0, metadata_output("shared-data", "1.0", "all"), "")}),
                 log_path=pathlib.Path(directory) / "installer.log",
             ).inspect(package)
 
@@ -221,7 +254,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
-                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                metadata: (0, metadata_output("sample-app"), ""),
                 apt_install: (0, "", ""),
                 verify: (0, "ii ", ""),
                 refresh_desktops: (0, "", ""),
@@ -540,7 +573,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
-                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                metadata: (0, metadata_output("sample-app"), ""),
                 apt_install: [(100, "", "unmet dependencies"), (0, "", "")],
                 fix_dependencies: (0, "", ""),
                 verify: (0, "ii ", ""),
@@ -576,7 +609,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            runner = FakeRunner({metadata: (0, "sample-app\n1.2.3\namd64\n", "")})
+            runner = FakeRunner({metadata: (0, metadata_output("sample-app"), "")})
 
             result = installer.PackageInstaller(
                 runner=runner,
@@ -602,7 +635,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             runner = FakeRunner({
-                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                metadata: (0, metadata_output("sample-app"), ""),
                 apt_install: (0, "", ""),
                 verify: (0, "hi ", ""),
             })
@@ -1033,7 +1066,7 @@ class PackageInstallerCliTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             service = installer.PackageInstaller(
-                runner=FakeRunner({metadata: (0, "sample-app\n1.2.3\namd64\n", "")}),
+                runner=FakeRunner({metadata: (0, metadata_output("sample-app"), "")}),
                 log_path=pathlib.Path(directory) / "installer.log",
             )
             stdout = io.StringIO()

@@ -1,3 +1,4 @@
+import os
 import pathlib
 import re
 import subprocess
@@ -7,6 +8,11 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 class DockLifecycleContracts(unittest.TestCase):
@@ -191,7 +197,7 @@ class DockLifecycleContracts(unittest.TestCase):
     def test_generated_runtime_scripts_are_valid_bash(self):
         for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):
             result = subprocess.run(
-                ["bash", "-n"], input=script.replace("\r", "").encode("utf-8")
+                [BASH, "-n"], input=script.replace("\r", "").encode("utf-8")
             )
             self.assertEqual(0, result.returncode)
 
@@ -264,7 +270,7 @@ export MING_PICOM_FALLBACK_CONF="${work}/fallback.conf"
 export MING_PICOM_LOWMEM_CONF="${work}/lowmem.conf"
 export MING_PICOM_BIN="${work}/fake-picom"
 '''
-        result = subprocess.run(["bash"], input=(harness + wrapper).encode(), capture_output=True)
+        result = subprocess.run([BASH], input=(harness + wrapper).encode(), capture_output=True)
         self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
         output = result.stdout.decode(errors="replace")
         self.assertIn("--config ", output)
@@ -283,15 +289,17 @@ export MING_PICOM_BIN="${work}/fake-picom"
             "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
         harness = r'''work="$(mktemp -d)"
 printf '{"compositor_profile":"off"}' >"${work}/settings.json"
+printf '{}' >"${work}/appearance.json"
 cat >"${work}/fake-picom" <<'EOF'
 #!/usr/bin/env bash
 printf 'unexpected-start\n'
 EOF
 chmod +x "${work}/fake-picom"
 export MING_COMPOSITOR_SETTINGS="${work}/settings.json"
+export MING_APPEARANCE_SETTINGS="${work}/appearance.json"
 export MING_PICOM_BIN="${work}/fake-picom"
 '''
-        result = subprocess.run(["bash"], input=(harness + wrapper).encode(), capture_output=True)
+        result = subprocess.run([BASH], input=(harness + wrapper).encode(), capture_output=True)
         self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
         self.assertNotIn("unexpected-start", result.stdout.decode(errors="replace"))
 

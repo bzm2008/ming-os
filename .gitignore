@@ -36,6 +36,13 @@ __pycache__/
 /rebrand_to_ming.py
 /Calamares
 
+# Verified Papyrus release payloads are staged locally for ISO builds and are
+# intentionally not source-controlled.
+/assets/papyrus-assets/*.deb
+/assets/papyrus-assets/*.DEB
+/assets/papyrus-assets/*.AppImage
+/assets/papyrus-assets/*.appimage
+
 # Release vault private material (public receipts and trust files remain tracked)
 .age
 *.age

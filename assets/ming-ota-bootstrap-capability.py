@@ -178,12 +178,23 @@ def write_capability_marker(root="/"):
         "verified_at": _timestamp(),
     }
     temporary = marker.with_name(f".{marker.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # The marker contains only verified bootstrap metadata.  The desktop-side
+    # `ming-update status --json` client must read it without root privileges.
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     try:
+        # Creation mode is filtered by umask; enforce the post-install
+        # readability contract explicitly before the atomic replacement.
+        os.fchmod(descriptor, 0o644)
         with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
             handle.write(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+    except OSError as exc:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise BootstrapError("E_STATE_DURABILITY", "capability marker cannot be made readable") from exc
     finally:
         os.close(descriptor)
     os.replace(temporary, marker)

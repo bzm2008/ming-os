@@ -97,6 +97,24 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertIn("OnBootSec=90s", APPS)
         self.assertIn("After=graphical.target", service)
 
+    def test_vendor_spark_notifier_is_masked_after_every_store_install(self):
+        """The vendor notifier is not allowed into the graphical boot chain."""
+        installer = APPS.split(
+            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
+            1,
+        )[1].split("SPARKINSTALL", 1)[0]
+        self.assertIn("mask_spark_update_notifier", installer)
+        self.assertIn(
+            "rm -f /etc/systemd/system/multi-user.target.wants/spark-update-notifier.service",
+            installer,
+        )
+        self.assertIn(
+            "ln -sfn /dev/null /etc/systemd/system/spark-update-notifier.service",
+            installer,
+        )
+        self.assertLess(installer.index("mask_spark_update_notifier"), installer.index("target_user"))
+        self.assertIn("spark-update-notifier.service", BUILD)
+
     def test_modem_manager_is_disabled_by_default_but_has_explicit_opt_in(self):
         network = BASE.split("configure_network() {", 1)[1].split(
             "deploy_time_sync() {", 1

@@ -476,6 +476,18 @@ class MingFilesUiSourceTests(unittest.TestCase):
         ]:
             self.assertIn(marker, self.source)
 
+    def test_sidebar_also_lists_unmounted_local_partitions_from_the_read_only_helper(self):
+        """GVfs alone omits fixed internal volumes which are not mounted yet."""
+        for marker in [
+            "ming-storage-status",
+            "本机分区",
+            "def _refresh_local_partitions",
+            "def _apply_local_partitions",
+            "run_local_partition_snapshot",
+            "threading.Thread(target=worker, daemon=True).start()",
+        ]:
+            self.assertIn(marker, self.source)
+
     def test_toolbar_and_views_cover_primary_file_workflows(self):
         for marker in [
             "Gtk.SearchEntry",

@@ -254,23 +254,58 @@ prepare_chroot_scripts() {
             return 1
         }
         local required_asset
-        for required_asset in ming-installer-verify.py wallpaper-ming-2640-abstract.png; do
+        for required_asset in ming-installer-verify.py ming-live-install.svg wallpaper-ming-2640-abstract.png; do
             if [[ ! -s "${CHROOT_DIR}${CHROOT_BUILD_DIR}/assets/${required_asset}" ]]; then
                 log_error "构建资源缺失或未复制: assets/${required_asset}"
                 return 1
             fi
         done
     fi
-    # Stage an optional local Papyrus release explicitly; arbitrary host paths
-    # are never passed into chroot/module environment.
+    # Stage only the pinned Papyrus release asset. The chroot never receives
+    # an arbitrary host path, and release builds refuse to omit the app.
+    local papyrus_asset=""
+    local papyrus_asset_dir="${PAPYRUS_ASSET_DIR:-${SCRIPT_DIR}/assets/papyrus-assets}"
+    local papyrus_expected_sha=""
+    local papyrus_actual_sha=""
+    local candidate
     if [[ -n "${PAPYRUS_ASSET:-}" && -f "${PAPYRUS_ASSET}" ]]; then
+        papyrus_asset="${PAPYRUS_ASSET}"
+    else
+        for candidate in \
+            "${papyrus_asset_dir}/Papyrus_1.0.0_amd64.deb" \
+            "${papyrus_asset_dir}/Papyrus_1.0.0_amd64.AppImage"; do
+            if [[ -f "${candidate}" ]]; then
+                papyrus_asset="${candidate}"
+                break
+            fi
+        done
+    fi
+    if [[ -n "${papyrus_asset}" ]]; then
+        case "$(basename "${papyrus_asset}")" in
+            Papyrus_1.0.0_amd64.deb)
+                papyrus_expected_sha="993A100E4F88190EAF833BEA3456E38C60322E24A3A553B4935E5B2550C9D368"
+                ;;
+            Papyrus_1.0.0_amd64.AppImage)
+                papyrus_expected_sha="8B86F8CB1F9E6E39F0A3FEF9E7B36C57EB8700F7899AD4FEBD8344D0D05531B4"
+                ;;
+            *)
+                log_error "Papyrus 资产文件名不受信任: $(basename "${papyrus_asset}")"
+                return 1
+                ;;
+        esac
+        papyrus_actual_sha="$(sha256sum "${papyrus_asset}" | awk '{print $1}' | tr '[:lower:]' '[:upper:]')" || {
+            log_error "无法计算 Papyrus 资产校验值"
+            return 1
+        }
+        if [[ "${papyrus_actual_sha}" != "${papyrus_expected_sha}" ]]; then
+            log_error "Papyrus 资产 SHA256 不匹配，拒绝写入镜像"
+            return 1
+        fi
         mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets"
-        cp -f "${PAPYRUS_ASSET}" "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/"
-    elif [[ -n "${PAPYRUS_ASSET_DIR:-}" && -d "${PAPYRUS_ASSET_DIR}" ]]; then
-        mkdir -p "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets"
-        find "${PAPYRUS_ASSET_DIR}" -maxdepth 1 -type f \
-            \( -iname '*.deb' -o -iname '*.DEB' -o -iname '*.AppImage' -o -iname '*.appimage' \) \
-            -exec cp -f {} "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/" \;
+        cp -f "${papyrus_asset}" "${CHROOT_DIR}${CHROOT_BUILD_DIR}/papyrus-assets/"
+    elif [[ "${MING_RELEASE_MODE:-development}" == "release" ]]; then
+        log_error "发布构建必须提供已校验的 Papyrus 1.0.0 资产"
+        return 1
     fi
 
     # 部署可执行的 apt-build wrapper，供模块脚本里 timeout 直接调用。
@@ -423,7 +458,11 @@ PY
         grep -Fxq "GRUB_DEFAULT=saved" /etc/default/grub.d/40-ming-transaction.cfg
         grep -Fxq "saved_entry=ming-legacy" <(grub-editenv /boot/grub/grubenv list)
         latest="$(ls -1t /boot/initrd.img-* | head -n 1)"
-        lsinitramfs "${latest}" | grep -Fxq scripts/local-bottom/ming-transaction
+        # Read the entire archive before matching.  With pipefail, grep -q
+        # otherwise closes the pipe after its match and makes zstd report a
+        # SIGPIPE as a false initramfs validation failure.
+        initramfs_listing="$(lsinitramfs "${latest}")"
+        grep -Fxq scripts/local-bottom/ming-transaction <<< "${initramfs_listing}"
         test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-health.service
         test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service
         grep -Fxq "OnFailure=ming-transaction-rollback-reboot.service" /etc/systemd/system/ming-transaction-health.service
@@ -577,7 +616,9 @@ for phase in settings.get("sequence", []) or []:
         exec_steps = phase.get("exec") or []
 expected_steps = [
     "shellprocess@ming-ota-preflight", "ming-ota-target-guard@ming-ota-target-guard",
-    "partition", "mount", "unpackfs", "machineid", "fstab", "networkcfg",
+    "partition", "shellprocess@ming-installer-target-receipt-reset", "mount",
+    "ming-installer-target-receipt@ming-installer-target-receipt",
+    "unpackfs", "machineid", "fstab", "networkcfg",
     "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity",
     "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader",
     "umount",
@@ -591,6 +632,12 @@ if all(step in exec_steps for step in ["shellprocess@ming-ota-preflight", "parti
 if all(step in exec_steps for step in ["ming-ota-target-guard@ming-ota-target-guard", "partition"]):
     if exec_steps.index("ming-ota-target-guard@ming-ota-target-guard") > exec_steps.index("partition"):
         errors.append("OTA target disk guard must run before the destructive partition step")
+if all(step in exec_steps for step in ["partition", "shellprocess@ming-installer-target-receipt-reset", "mount", "ming-installer-target-receipt@ming-installer-target-receipt", "unpackfs"]):
+    if exec_steps.index("partition") > exec_steps.index("shellprocess@ming-installer-target-receipt-reset") \
+            or exec_steps.index("shellprocess@ming-installer-target-receipt-reset") > exec_steps.index("mount") \
+            or exec_steps.index("mount") > exec_steps.index("ming-installer-target-receipt@ming-installer-target-receipt") \
+            or exec_steps.index("ming-installer-target-receipt@ming-installer-target-receipt") > exec_steps.index("unpackfs"):
+        errors.append("fresh receipt reset must run before mount and capture immediately after mount")
 if all(step in exec_steps for step in ["shellprocess@ming-identity", "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader"]):
     if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-installed-desktop-gate"):
         errors.append("installed identity and root UUID must be finalized before desktop verification")
@@ -620,6 +667,10 @@ if not any(isinstance(item, dict) and item.get("id") == "ming-ota-preflight" for
     errors.append("settings.conf missing ming-ota-preflight instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-ota-target-guard" for item in instances):
     errors.append("settings.conf missing ming-ota-target-guard instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt-reset" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt-reset instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
     errors.append("settings.conf missing ming-identity instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-installed-desktop-gate" for item in instances):
@@ -678,9 +729,26 @@ if "dictcheck=0" not in libpwquality_text or "enforcing=0" not in libpwquality_t
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True:
-    errors.append("installed desktop gate must inspect /target from the Live environment")
-if "/usr/local/sbin/ming-installer-verify installed /target" not in (desktop_gate.get("script") or []):
-    errors.append("installed desktop gate must validate the target before bootloader installation")
+    errors.append("installed desktop gate must inspect the mounted target from the Live environment")
+if "/usr/local/sbin/ming-installer-verify installed --receipt" not in (desktop_gate.get("script") or []):
+    errors.append("installed desktop gate must use the authoritative Calamares target receipt before bootloader installation")
+
+receipt_module = root / "usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt"
+if not (receipt_module / "module.desc").is_file() or not (receipt_module / "main.py").is_file():
+    errors.append("authoritative Calamares target receipt module is missing")
+if not (root / "etc/calamares/modules/ming-installer-target-receipt.conf").is_file():
+    errors.append("authoritative Calamares target receipt config is missing")
+receipt_reset = load_yaml("etc/calamares/modules/ming-installer-target-receipt-reset.conf")
+if receipt_reset.get("dontChroot") is not True \
+        or "/usr/local/sbin/ming-installer-verify receipt --begin-attempt" not in (receipt_reset.get("script") or []):
+    errors.append("authoritative Calamares target receipt reset must clear stale state before mount")
+for preflight_relative in [
+    "usr/local/sbin/ming-ota-preflight",
+    "usr/local/sbin/ming-calamares-preflight",
+]:
+    preflight_path = root / preflight_relative
+    if not preflight_path.is_file() or "ming-installer-verify receipt --begin-attempt" not in preflight_path.read_text(encoding="utf-8", errors="replace"):
+        errors.append(f"{preflight_relative} must begin a fresh Calamares target receipt attempt before partitioning")
 
 grub_install = root / "usr/sbin/grub-install"
 if not grub_install.is_file():
@@ -787,12 +855,12 @@ validate_iso_grub_config() {
             exit 1
         fi
     done
-    if ! grep -Fq 'Ming OS' "${grub_cfg}"; then
-        log_error "ISO GRUB must expose Ming OS installer entries"
+    if ! grep -Fq '体验 Ming OS' "${grub_cfg}"; then
+        log_error "ISO GRUB must expose the default Ming OS Live entry"
         exit 1
     fi
     if ! grep -Fq 'ming.installer=1' "${grub_cfg}"; then
-        log_error "ISO GRUB must boot the installer session"
+        log_error "ISO GRUB must retain the direct installer entry"
         exit 1
     fi
     if ! grep -Fq 'nomodeset' "${grub_cfg}"; then
@@ -813,14 +881,14 @@ validate_iso_grub_config() {
             exit 1
         fi
     done
-    # The first installer entry is the default and must leave i915/KMS and
+    # The first Live entry is the default and must leave i915/KMS and
     # PCI power management untouched.  Only the explicitly labelled Safe
     # Graphics entry may carry nomodeset for emergency software rendering.
     local default_entry
     default_entry=$(awk '/^menuentry /{entry=$0; body=""; in_entry=1; next} in_entry{body=body $0 "\n"} in_entry && /^}/{if (entry !~ /Safe Graphics/ && entry !~ /安全显卡模式/ && body ~ /linux \/live\/vmlinuz/) {print body; exit}}' "${grub_cfg}")
     for forbidden in nomodeset i915.modeset=0 pcie_aspm=off pci=nomsi acpi_osi=Linux; do
         if grep -Eq "(^|[[:space:]])${forbidden}([[:space:]]|$)" <<< "${default_entry}"; then
-            log_error "default installer GRUB entry must not force ${forbidden}"
+            log_error "default Live GRUB entry must not force ${forbidden}"
             exit 1
         fi
     done
@@ -828,7 +896,7 @@ validate_iso_grub_config() {
         log_error "ISO GRUB must directly load /live/vmlinuz and /live/initrd"
         exit 1
     fi
-    log_info "ISO GRUB installer-menu validation passed"
+    log_info "ISO GRUB Live/installer menu validation passed"
 }
 
 validate_isolinux_fallback() {
@@ -847,7 +915,7 @@ validate_isolinux_fallback() {
         log_error "isolinux fallback must boot Linux directly, not chain-load GRUB"
         return 1
     fi
-    for marker in 'DEFAULT install' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1' 'ming.safe_graphics=1' 'nomodeset'; do
+    for marker in 'DEFAULT live' 'LABEL live' 'LABEL install' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1' 'ming.safe_graphics=1' 'nomodeset'; do
         if ! grep -Fq "${marker}" "${cfg}"; then
             log_error "isolinux fallback missing marker: ${marker}"
             return 1
@@ -962,6 +1030,24 @@ validate_required_desktop_runtime() {
 
     if ! chroot_exec python3 -c "import runpy; runpy.run_path('/usr/local/bin/ming-settings', run_name='ming_runtime_check')"; then
         log_error "Ming Settings runtime import check failed"
+        return 1
+    fi
+    local storage_status storage_status_rc
+    storage_status=""
+    if storage_status="$(chroot_exec /usr/local/bin/ming-storage-status partitions --json)"; then
+        storage_status_rc=0
+    else
+        storage_status_rc=$?
+    fi
+    # The clean build chroot deliberately has no sysfs mount.  The helper uses
+    # exit status 2 for that valid, structured diagnostic; validate its JSON
+    # contract without masking other execution failures.
+    if [[ "${storage_status_rc}" -ne 0 && "${storage_status_rc}" -ne 2 ]]; then
+        log_error "Ming storage-status runtime check failed (exit ${storage_status_rc})"
+        return 1
+    fi
+    if ! printf '%s\n' "${storage_status}" | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if isinstance(value.get("ok"), bool) and isinstance(value.get("partitions"), list) and isinstance(value.get("error"), str) else 1)'; then
+        log_error "Ming storage-status JSON runtime check failed"
         return 1
     fi
     if ! chroot_exec /usr/local/bin/ming-files --check-runtime; then
@@ -1103,6 +1189,55 @@ if errors:
 PY
     then
         log_error "core desktop launcher validation failed"
+        return 1
+    fi
+
+    if ! python3 - "${CHROOT_DIR}" <<'PY'
+# MING_TRUSTED_CORE_DESKTOP_RECEIPTS_VALIDATOR_BEGIN
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+trusted_core_launchers = [
+    "ming-settings.desktop",
+    "ming-control-center.desktop",
+    "ming-files.desktop",
+    "ming-terminal.desktop",
+    "ming-edge.desktop",
+    "ming-app-library.desktop",
+    "ming-running-apps.desktop",
+    "ming-trash.desktop",
+    "ming-status-center.desktop",
+]
+errors = []
+for name in trusted_core_launchers:
+    desktop_path = root / "usr/share/applications" / name
+    receipt_path = root / "var/lib/ming-os/trusted-desktops" / name
+    expected = f"/usr/share/applications/{name}"
+    if not desktop_path.is_file() or desktop_path.is_symlink():
+        errors.append(f"trusted core desktop entry is missing or unsafe: {name}")
+        continue
+    desktop_metadata = desktop_path.stat()
+    if desktop_metadata.st_uid != 0 or desktop_metadata.st_mode & 0o022:
+        errors.append(f"trusted core desktop entry permissions are unsafe: {name}")
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        errors.append(f"missing launch-broker receipt: var/lib/ming-os/trusted-desktops/{name}")
+        continue
+    receipt_metadata = receipt_path.stat()
+    if receipt_metadata.st_uid != 0 or stat.S_IMODE(receipt_metadata.st_mode) != 0o644:
+        errors.append(f"launch-broker receipt permissions are unsafe: {name}")
+        continue
+    if receipt_path.read_text(encoding="utf-8", errors="replace").strip() != expected:
+        errors.append(f"launch-broker receipt has an unexpected target: {name}")
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+# MING_TRUSTED_CORE_DESKTOP_RECEIPTS_VALIDATOR_END
+PY
+    then
+        log_error "trusted core desktop receipt validation failed"
         return 1
     fi
 
@@ -1302,7 +1437,28 @@ for marker in (
     if marker not in session_health_autostart:
         errors.append(f"ming-session-healthcheck autostart missing {marker}")
 
-plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
+plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=")
+dock_item_lines = [
+    line.partition("=")[2]
+    for line in plank_settings.splitlines()
+    if line.startswith("DockItems=")
+]
+if len(dock_item_lines) != 1:
+    errors.append("Plank settings must contain exactly one DockItems entry")
+    dock_items = set()
+else:
+    dock_items = {item for item in dock_item_lines[0].split(";;") if item}
+required_dock_items = {
+    "ming-settings.dockitem",
+    "ming-app-library.dockitem",
+    "ming-running-apps.dockitem",
+    "ming-files.dockitem",
+    "ming-edge.dockitem",
+    "papyrus.dockitem",
+}
+missing_dock_items = sorted(required_dock_items - dock_items)
+if missing_dock_items:
+    errors.append("Plank settings missing required DockItems: " + ", ".join(missing_dock_items))
 dpkg_status = require_file("var/lib/dpkg/status", "Package: bamfdaemon")
 if "Package: bamfdaemon\n" not in dpkg_status:
     errors.append("Dock runtime dependency is not installed: bamfdaemon")
@@ -1337,6 +1493,7 @@ for path, marker in [
     ("usr/local/bin/ming-audio-session", "audio-repair-playback"),
     ("usr/local/sbin/ming-package-installer", "PackageInstaller"),
     ("usr/local/bin/ming-hardware-status", "HardwareStatus"),
+    ("usr/local/bin/ming-storage-status", "parse_partitions"),
     ("usr/local/bin/ming-files", "ming-files.py"),
     ("usr/local/lib/ming-os/ming-files.py", "class MingFiles"),
     ("usr/local/lib/ming-os/ming-files-model.py", "LocationModel"),
@@ -1499,6 +1656,21 @@ for relative_path in [
     "etc/systemd/system/ming-appstore-ready.timer",
 ]:
     validate_systemd_unit(relative_path)
+spark_notifier_mask = root / "etc/systemd/system/spark-update-notifier.service"
+try:
+    spark_notifier_is_masked = (
+        spark_notifier_mask.is_symlink()
+        and str(spark_notifier_mask.readlink()) == "/dev/null"
+    )
+except OSError:
+    spark_notifier_is_masked = False
+if not spark_notifier_is_masked:
+    errors.append("Spark Store vendor notifier must be masked outside the boot chain")
+spark_notifier_wants = root / (
+    "etc/systemd/system/multi-user.target.wants/spark-update-notifier.service"
+)
+if spark_notifier_wants.exists() or spark_notifier_wants.is_symlink():
+    errors.append("Spark Store vendor notifier must not remain enabled")
 for relative_path, marker in [
     ("etc/systemd/system/ming-rfkill.service", "After=NetworkManager.service"),
     ("etc/systemd/system/ming-device-tune.service", "After=local-fs.target"),
@@ -1595,6 +1767,7 @@ validate_generated_executable("usr/local/bin/ming-ota-yield", "bash")
 for relative_path in [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
+    "usr/local/bin/ming-storage-status",
     "usr/local/sbin/ming-performance-status",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
@@ -2075,10 +2248,10 @@ normal_grub_match = re.search(r"menuentry 'Ming OS'.*?\n}\n", hard_disk_grub, re
 if normal_grub_match and re.search(r"(?:^|\s)(?:nomodeset|i915\.modeset=0|pcie_aspm=off|pci=nomsi|acpi_osi=Linux)(?:\s|$)", normal_grub_match.group(0)):
     errors.append("installed hard-disk default GRUB entry must use i915/KMS without forced safe-mode flags")
 
-lightdm_autologin = require_file("etc/lightdm/lightdm.conf.d/60-ming-autologin.conf", "autologin-session=ming-installer")
-for marker in ["user-session=ming-installer", "greeter-session=lightdm-gtk-greeter", "allow-guest=false"]:
+lightdm_autologin = require_file("etc/lightdm/lightdm.conf.d/60-ming-autologin.conf", "autologin-session=xfce")
+for marker in ["user-session=xfce", "greeter-session=lightdm-gtk-greeter", "allow-guest=false"]:
     if marker not in lightdm_autologin:
-        errors.append(f"Live LightDM installer session missing {marker}")
+        errors.append(f"Live LightDM desktop session missing {marker}")
 
 installed_identity = require_file("usr/local/sbin/ming-fix-installed-identity", "autologin-session=xfce")
 if "user-session=xfce" not in installed_identity:
@@ -2225,6 +2398,21 @@ display_manager = root / "etc/systemd/system/display-manager.service"
 if not (display_manager.exists() or display_manager.is_symlink()):
     errors.append("LightDM is installed but display-manager.service is not enabled")
 require_file("usr/share/xsessions/ming-installer.desktop", "Exec=/usr/local/bin/ming-installer-session")
+live_launcher = require_file("home/user/Desktop/Install Ming OS.desktop", "X-Ming-Live-Only=true")
+for marker in [
+    "Icon=ming-os-install",
+    "Exec=env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh",
+    "X-Ming-Managed=true",
+]:
+    if marker not in live_launcher:
+        errors.append(f"Live installer desktop launcher missing {marker}")
+live_launcher_receipt = require_file(
+    "var/lib/ming-os/trusted-desktops/Install Ming OS.desktop",
+    "/usr/share/applications/Install Ming OS.desktop",
+)
+if live_launcher_receipt.strip() != "/usr/share/applications/Install Ming OS.desktop":
+    errors.append("Live installer launch-broker receipt must bind the exact system desktop file")
+require_path("usr/share/icons/hicolor/scalable/apps/ming-os-install.svg")
 calamares_launcher = require_file("usr/local/bin/ming-calamares-launcher", "ming-calamares.lock")
 if "flock -n 9" not in calamares_launcher:
     errors.append("Calamares launcher must enforce a single installer instance")
@@ -2346,28 +2534,33 @@ set gfxmode=auto
 set default=0
 set timeout=8
 
+menuentry "体验 Ming OS ${MING_OS_VERSION} (Live Mode)" {
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1
+    initrd /live/initrd
+}
+
 menuentry "安装 Ming OS ${MING_OS_VERSION} (Install Ming OS)" {
  linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
     initrd /live/initrd
 }
 
-menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphics)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 ming.safe_graphics=1 nomodeset vga=791
+menuentry "体验 Ming OS ${MING_OS_VERSION} (安全显卡 Live 模式 / Safe Graphics)" {
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.safe_graphics=1 nomodeset vga=791
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 radeon.modeset=1 amdgpu.modeset=0
     initrd /live/initrd
 }
 
 menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /live/initrd
 }
 
@@ -2376,7 +2569,7 @@ menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
 # intel_idle.max_cstate=1 防止老Atom/IvyBridge挂起后不醒；
 # acpi_mask_gpe=0x6e 处理 Surface 特定 ACPI GPE 事件风暴
 menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
     initrd /live/initrd
 }
 
@@ -2384,7 +2577,7 @@ menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
 # acpi_osi=Darwin 让 BIOS 暴露 Mac 专用 ACPI 表；
 # reboot=pci 解决 Mac 重启后停在黑屏问题
 menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
+ linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 acpi_osi=Darwin reboot=pci
     initrd /live/initrd
 }
 
@@ -2535,10 +2728,16 @@ build_iso_manual() {
         cat > "${iso_workdir}/isolinux/isolinux.cfg" << 'ISOLINUXCFG'
 # Ming OS BIOS/Rufus fallback. Boot Linux directly instead of chain-loading GRUB.
 UI menu.c32
-DEFAULT install
+DEFAULT live
 PROMPT 0
 TIMEOUT 80
 MENU TITLE Ming OS Installer
+
+LABEL live
+  MENU LABEL Try Ming OS (Live Mode)
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1
 
 LABEL install
   MENU LABEL Install Ming OS
@@ -2556,7 +2755,7 @@ LABEL oldpc
   MENU LABEL Ming OS Old PC Compatibility
   KERNEL /live/vmlinuz
   INITRD /live/initrd
-  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1
 ISOLINUXCFG
         log_info "isolinux direct Linux fallback written for Rufus BIOS mode"
     else

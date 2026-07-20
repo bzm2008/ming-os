@@ -11,17 +11,38 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "assets" / "ming-ota-backup.sh"
 OTA_MODULE = ROOT / "modules" / "06_ota_update.sh"
 BASE_MODULE = ROOT / "modules" / "01_base.sh"
+WSL_RUNNER = ["wsl.exe", "-d", "Ubuntu", "--cd", "/", "--"]
+
+
+def wsl_path(value):
+    value = str(value)
+    if len(value) > 2 and value[1] == ":":
+        return f"/mnt/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
+    return value
+
+
+def wsl_can_access(path):
+    # WSL-mounted path tests are opt-in on Windows because a broken /mnt/c
+    # mount can terminate the native unittest host before it reports a skip.
+    if (os.name != "nt" or os.environ.get("MING_TEST_WSL") != "1"
+            or not shutil.which("wsl.exe")):
+        return False
+    probe = subprocess.run(
+        [*WSL_RUNNER, "test", "-r", wsl_path(path)],
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode == 0
 
 
 class OtaBackupTests(unittest.TestCase):
     @staticmethod
     def shell_path(value):
-        value = str(value)
-        if os.name == "nt" and len(value) > 2 and value[1] == ":":
-            return f"/mnt/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
-        return value
+        return wsl_path(value)
 
     def setUp(self):
+        if os.name == "nt" and not wsl_can_access(tempfile.gettempdir()):
+            self.skipTest("WSL cannot access Windows temporary directories required for OTA backup tests")
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="ming-ota-backup-"))
         self.source = self.tmp / "source"
         self.backup = self.tmp / "backup"
@@ -33,7 +54,7 @@ class OtaBackupTests(unittest.TestCase):
         link = self.source / "note-link"
         if os.name == "nt":
             subprocess.run(
-                ["wsl.exe", "ln", "-s", "Documents/note.txt", self.shell_path(link)],
+                [*WSL_RUNNER, "ln", "-s", "Documents/note.txt", self.shell_path(link)],
                 check=True,
                 capture_output=True,
             )
@@ -63,7 +84,7 @@ class OtaBackupTests(unittest.TestCase):
         command = ["bash", self.shell_path(SCRIPT), *cli_args]
         process_env = os.environ.copy()
         if os.name == "nt":
-            command = ["wsl.exe", "env", *assignments, *command]
+            command = [*WSL_RUNNER, "env", *assignments, *command]
         else:
             process_env.update(overrides)
         return subprocess.run(
@@ -393,7 +414,9 @@ class OtaModuleContracts(unittest.TestCase):
                 return f"/mnt/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
             return value
 
-        runner = ["wsl.exe"] if os.name == "nt" else []
+        if os.name == "nt" and not wsl_can_access(OTA_MODULE):
+            self.skipTest("WSL cannot access the OTA module")
+        runner = WSL_RUNNER if os.name == "nt" else []
         module_check = subprocess.run(
             [*runner, "bash", "-n", shell_path(OTA_MODULE)],
             text=True,

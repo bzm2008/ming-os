@@ -21,6 +21,7 @@ HOME = os.path.expanduser("~")
 SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
+STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
 SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
     "/usr/local/lib/ming-os/ming-device-control.py",
@@ -340,7 +341,7 @@ OTA_ERROR_MESSAGES = {
     "E_STATE_DURABILITY": "无法安全保存更新状态，操作已中止。",
     "E_STATE_RECONCILE": "无法安全恢复更新状态，请保留日志并联系支持人员。",
     "E_BOOTSTRAP_SIGNATURE": "bootstrap 签名校验失败，未执行安装。",
-    "E_BOOTSTRAP_VERSION": "bootstrap 版本不兼容，未执行安装。",
+    "E_BOOTSTRAP_VERSION": "内置 OTA 更新运行时不完整或已损坏；26.4 已自带该组件，不会下载额外组件。请导出诊断后通过系统修复或官方安装介质处理。",
     "E_PROTOCOL_UNSUPPORTED": "当前系统不支持事务型 OTA，请先完成官方 bootstrap。",
     "E_KEY_POLICY": "更新签名密钥不符合当前信任策略，操作已拒绝。",
     "E_BUSY": "已有更新事务正在运行，请等待当前事务结束。",
@@ -434,6 +435,9 @@ def ota_status_presentation(status):
             detail_parts.append("签名文件：%s" % bootstrap["signature_url"])
         if bootstrap.get("fingerprint"):
             detail_parts.append("公钥指纹：%s" % bootstrap["fingerprint"])
+    elif error_code == "E_BOOTSTRAP_VERSION":
+        title = "内置 OTA 更新组件异常"
+        default_action = "check"
 
     if state == "rolled_back" and error_code.startswith("E_HEALTH_"):
         detail_parts = ["更新未通过健康检查，系统已自动回滚。"]
@@ -683,6 +687,31 @@ def hardware_status_snapshot():
     return {"ok": True, "error": "", "devices": devices, "broadcom": broadcom}
 
 
+def storage_partition_snapshot():
+    """Read the complete local partition list through a bounded JSON helper."""
+    rc, output, error = run(
+        [STORAGE_STATUS_HELPER, "partitions", "--json"], timeout=4)
+    if rc != 0:
+        return {
+            "ok": False,
+            "partitions": [],
+            "error": error or output or "本机分区检测工具没有返回结果。",
+        }
+    try:
+        result = json.loads(output)
+    except (TypeError, ValueError):
+        return {"ok": False, "partitions": [], "error": "本机分区检测返回了无效数据。"}
+    partitions = result.get("partitions") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or result.get("ok") is not True or not isinstance(partitions, list):
+        return {
+            "ok": False,
+            "partitions": [],
+            "error": (result.get("error") if isinstance(result, dict) else "")
+            or "本机分区检测没有返回分区列表。",
+        }
+    return {"ok": True, "partitions": partitions, "error": ""}
+
+
 def hardware_export_snapshot():
     rc, output, error = run(["ming-hardware-status", "export"], timeout=35)
     if rc != 0 or not output:
@@ -865,6 +894,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
         self.pointer_probe_state = GenerationState()
+        self.storage_partition_probe_state = GenerationState()
         self.pointer_mutations = PointerMutationSerial()
         self.connect("close-request", self.on_close_request)
         self.install_css()
@@ -1060,10 +1090,15 @@ class MingSettings(Adw.ApplicationWindow):
             color: #53615A;
         }
 
+        window.ming-feedback-dialog,
+        window.ming-feedback-dialog .dialog-vbox,
+        window.ming-feedback-dialog .dialog-action-area,
         .ming-feedback-dialog {
-            background: #10201D;
+            background-color: #10201D;
+            background-image: none;
             color: #FFFFFF;
             border: 2px solid #FFFFFF;
+            opacity: 1;
         }
 
         .ming-feedback-dialog label,
@@ -1073,18 +1108,30 @@ class MingSettings(Adw.ApplicationWindow):
             opacity: 1;
         }
 
+        window.ming-feedback-dialog.feedback-info,
+        window.ming-feedback-dialog.feedback-info .dialog-vbox,
+        window.ming-feedback-dialog.feedback-info .dialog-action-area,
         .ming-feedback-dialog.feedback-info {
-            background: #123B35;
+            background-color: #123B35;
+            background-image: none;
             border-color: #7DE2D1;
         }
 
+        window.ming-feedback-dialog.feedback-warning,
+        window.ming-feedback-dialog.feedback-warning .dialog-vbox,
+        window.ming-feedback-dialog.feedback-warning .dialog-action-area,
         .ming-feedback-dialog.feedback-warning {
-            background: #5A2F00;
+            background-color: #5A2F00;
+            background-image: none;
             border-color: #FFD166;
         }
 
+        window.ming-feedback-dialog.feedback-error,
+        window.ming-feedback-dialog.feedback-error .dialog-vbox,
+        window.ming-feedback-dialog.feedback-error .dialog-action-area,
         .ming-feedback-dialog.feedback-error {
-            background: #651E1E;
+            background-color: #651E1E;
+            background-image: none;
             border-color: #FFB4AB;
         }
         """
@@ -1121,6 +1168,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.playback_audio_probe_state.invalidate()
         self.time_sync_probe_state.invalidate()
         self.pointer_probe_state.invalidate()
+        self.storage_partition_probe_state.invalidate()
         return False
 
     # ---- 通用 UI 助手 ----
@@ -1947,11 +1995,12 @@ class MingSettings(Adw.ApplicationWindow):
             "info" if result.get("ok") else "error")
         return False
 
-    # ---- 3. 存储可视化（合并后空间使用率） ----
+    # ---- 3. 存储可视化（空间使用率 + 只读分区清单） ----
     def build_storage(self):
         sc, box = self.page_scroller()
-        grp = Adw.PreferencesGroup(title="存储空间",
-                                   description="Ming OS 已把多块硬盘合并为一个空间，您无需关心分区。")
+        grp = Adw.PreferencesGroup(
+            title="存储空间",
+            description="显示当前空间使用情况；不会修改硬盘或分区。")
         box.append(grp)
 
         # 读取 P2 写下的合并盘信息；回退到 / 的 df
@@ -1989,11 +2038,81 @@ class MingSettings(Adw.ApplicationWindow):
             row.add_suffix(bar)
             grp.add(row)
 
+        self.storage_partition_group = Adw.PreferencesGroup(
+            title="本机分区",
+            description="完整列出本机已挂载和未挂载的分区；只读显示，不会自动挂载或更改数据。")
+        self.storage_partition_rows = []
+        loading = Adw.ActionRow(
+            title="正在读取本机分区",
+            subtitle="将显示 EFI、恢复、数据和系统分区。")
+        self.storage_partition_group.add(loading)
+        self.storage_partition_rows.append(loading)
+        box.append(self.storage_partition_group)
+
         refresh = Gtk.Button(label="刷新")
         refresh.set_margin_top(12)
-        refresh.connect("clicked", lambda _b: self.toast("已是最新空间使用情况。"))
+        refresh.connect("clicked", lambda _b: self.refresh_storage_partitions())
         box.append(refresh)
+        self.storage_page = sc
+        self.refresh_storage_partitions()
         return sc
+
+    def refresh_storage_partitions(self):
+        generation = self.storage_partition_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.storage_partition_probe_state.accept(generation):
+                return False
+            if self.storage_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {
+                "ok": False,
+                "partitions": [],
+                "error": error or "本机分区检测失败。",
+            }
+            for row in self.storage_partition_rows:
+                self.storage_partition_group.remove(row)
+            self.storage_partition_rows = []
+
+            if not snapshot.get("ok"):
+                row = Adw.ActionRow(
+                    title="无法读取本机分区",
+                    subtitle=snapshot.get("error") or "请刷新后重试。")
+                self.storage_partition_group.add(row)
+                self.storage_partition_rows.append(row)
+                return False
+
+            partitions = snapshot.get("partitions") or []
+            if not partitions:
+                row = Adw.ActionRow(
+                    title="未检测到可显示分区",
+                    subtitle="系统没有返回本机块设备；这不会影响已挂载的系统空间。")
+                self.storage_partition_group.add(row)
+                self.storage_partition_rows.append(row)
+                return False
+
+            state_labels = {
+                "mounted": "已挂载",
+                "unmounted": "未挂载",
+                "swap": "交换空间",
+            }
+            for partition in partitions:
+                path = str(partition.get("path") or "未知设备")
+                label = str(partition.get("label") or "").strip()
+                title = "%s（%s）" % (label or path, path) if label else path
+                fstype = str(partition.get("fstype") or "未格式化")
+                mounts = [str(item) for item in partition.get("mountpoints", []) if item]
+                state = state_labels.get(partition.get("state"), "状态未知")
+                location = " · 挂载于：%s" % "、".join(mounts) if mounts else ""
+                row = Adw.ActionRow(
+                    title=title,
+                    subtitle="%s · %s · %s%s" % (
+                        self._hsize(partition.get("size", 0)), fstype, state, location))
+                self.storage_partition_group.add(row)
+                self.storage_partition_rows.append(row)
+            return False
+
+        run_task_async(storage_partition_snapshot, done)
 
     def _hsize(self, n):
         for unit in ["B", "KB", "MB", "GB", "TB"]:

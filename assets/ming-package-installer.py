@@ -144,6 +144,25 @@ class PackageInstaller:
             return None, "只能安装 .deb 软件包。"
         return resolved, ""
 
+    @staticmethod
+    def _metadata_fields(output):
+        """Parse the exact labeled fields emitted by multi-field dpkg-deb."""
+        expected = ("Package", "Version", "Architecture")
+        values = {}
+        for line in output.splitlines():
+            field, separator, value = line.partition(":")
+            value = value.strip()
+            if (
+                    not separator
+                    or field not in expected
+                    or field in values
+                    or not value):
+                return None
+            values[field] = value
+        if set(values) != set(expected):
+            return None
+        return tuple(values[field] for field in expected)
+
     def inspect(self, package_file):
         path, error = self._package_file(package_file)
         if error:
@@ -157,8 +176,8 @@ class PackageInstaller:
                 state="validation_failed",
                 error="无法读取 DEB 软件包元数据：%s" % (command_error.strip() or "dpkg-deb 失败"),
             )
-        fields = [line.strip() for line in output.splitlines()]
-        if len(fields) != 3 or not all(fields):
+        fields = self._metadata_fields(output)
+        if fields is None:
             return self._result(
                 False, file=str(path), state="validation_failed",
                 error="DEB 软件包元数据不完整。")

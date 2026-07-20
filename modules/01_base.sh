@@ -2004,6 +2004,11 @@ mkdir -p /tmp/ming-installer /run
 exec >>"${log}" 2>&1
 rm -f "${marker}"
 
+/usr/local/sbin/ming-installer-verify receipt --begin-attempt || {
+    echo "cannot begin a fresh authoritative Calamares target receipt attempt"
+    exit 31
+}
+
 cmdline_value() {
     local key="$1" token
     for token in $(cat /proc/cmdline 2>/dev/null); do
@@ -2051,26 +2056,76 @@ MINGOTAPREFLIGHT
 #!/usr/bin/env bash
 set -uo pipefail
 
-target="${1:-}"
 version="${MING_OS_VERSION:-26.4.0}"
-
-find_target_root() {
-    local candidate
-    for candidate in "${target}" /target /tmp/calamares-root-* /; do
-        [[ -n "${candidate}" ]] || continue
-        [[ -d "${candidate}" ]] || continue
-        if [[ "${candidate}" == "/" || -d "${candidate}/etc" ]]; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
+target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || {
+    echo "ERROR: authoritative Calamares target receipt is missing or invalid" >&2
+    exit 30
+}
+root_source="$(/usr/local/sbin/ming-installer-verify receipt --field source)" || {
+    echo "ERROR: authoritative Calamares root source receipt is missing or invalid" >&2
+    exit 30
+}
+root_fstype="$(/usr/local/sbin/ming-installer-verify receipt --field fstype)" || {
+    echo "ERROR: authoritative Calamares root filesystem receipt is missing or invalid" >&2
+    exit 30
+}
+root_uuid="$(/usr/local/sbin/ming-installer-verify receipt --field uuid)" || {
+    echo "ERROR: root UUID receipt is missing or invalid" >&2
+    exit 30
+}
+[[ "${target}" != "/" && -d "${target}/etc" && -d "${target}/boot" ]] || {
+    echo "ERROR: authoritative Calamares target is not an unpacked installed root" >&2
+    exit 30
+}
+case "${root_source}" in /dev/*) ;; *) echo "ERROR: root source receipt is not a block device" >&2; exit 30 ;; esac
+case "${root_fstype}" in ""|overlay|tmpfs|squashfs) echo "ERROR: root filesystem receipt is not persistent" >&2; exit 30 ;; esac
+[[ "${root_uuid}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+    echo "ERROR: root UUID receipt is missing or invalid" >&2
+    exit 30
 }
 
-target="$(find_target_root)"
-if [[ "${target}" != "/" ]]; then
-    target="${target%/}"
-fi
+has_authoritative_root_fstab() {
+    local fstab="$1"
+    [[ -f "${fstab}" ]] || return 1
+    awk -v expected_uuid="UUID=${root_uuid}" -v expected_fstype="${root_fstype}" '
+        /^[[:space:]]*#/ || NF < 3 { next }
+        $2 == "/" && $1 == expected_uuid && $3 == expected_fstype { found=1 }
+        END { exit found ? 0 : 1 }
+    ' "${fstab}"
+}
+
+ensure_persistent_root_fstab() {
+    local fstab temporary
+    fstab="${target}/etc/fstab"
+    if has_authoritative_root_fstab "${fstab}"; then
+        return 0
+    fi
+
+    mkdir -p "${target}/etc"
+    temporary="$(mktemp "${fstab}.ming.XXXXXX")" || return 1
+    if [[ -f "${fstab}" ]]; then
+        if ! awk '/^[[:space:]]*#/ || NF < 3 || $2 != "/" { print }' "${fstab}" > "${temporary}"; then
+            rm -f -- "${temporary}"
+            echo "ERROR: failed to preserve non-root fstab entries" >&2
+            return 1
+        fi
+    else
+        : > "${temporary}"
+    fi
+    if ! printf 'UUID=%s / %s defaults 0 1\n' "${root_uuid}" "${root_fstype}" >> "${temporary}"; then
+        rm -f -- "${temporary}"
+        echo "ERROR: failed to append authoritative root fstab entry" >&2
+        return 1
+    fi
+    if ! chmod 0644 "${temporary}" || ! mv -f "${temporary}" "${fstab}"; then
+        rm -f -- "${temporary}"
+        echo "ERROR: failed to atomically replace fstab" >&2
+        return 1
+    fi
+    echo "Rebuilt authoritative root fstab entry: UUID=${root_uuid} / ${root_fstype}" >&2
+}
+
+ensure_persistent_root_fstab || exit 30
 
 write_file() {
     local path="$1"
@@ -2402,17 +2457,22 @@ EOF
 TARGETGRUBENTRY
 chmod 0755 "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
 
-root_uuid="$(findmnt -n -o UUID --target "${target}" 2>/dev/null | head -n 1 || true)"
-if [[ -z "${root_uuid}" ]]; then
-    root_source_for_uuid="$(findmnt -n -o SOURCE --target "${target}" 2>/dev/null | head -n 1 || true)"
-    if [[ -n "${root_source_for_uuid}" ]]; then
-        root_uuid="$(blkid -s UUID -o value "${root_source_for_uuid}" 2>/dev/null | head -n 1 || true)"
-    fi
+grub_template="${target}/etc/grub.d/09_ming_os"
+if [[ ! -s "${grub_template}" ]] || ! grep -Fq '__MING_ROOT_UUID__' "${grub_template}"; then
+    echo "ERROR: Ming GRUB template is missing the required root UUID placeholder" >&2
+    exit 30
 fi
-if [[ -n "${root_uuid}" ]]; then
-    sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
-else
-    sed -i 's/search --no-floppy --set=root --file \/vmlinuz/search --no-floppy --set=root --file \/vmlinuz/; s/root=UUID=__MING_ROOT_UUID__ //' "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
+if ! sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_template}"; then
+    echo "ERROR: failed to write the authoritative root UUID into the Ming GRUB template" >&2
+    exit 30
+fi
+if grep -Fq '__MING_ROOT_UUID__' "${grub_template}"; then
+    echo "ERROR: Ming GRUB template still contains __MING_ROOT_UUID__" >&2
+    exit 30
+fi
+if ! grep -Fq "root=UUID=${root_uuid}" "${grub_template}"; then
+    echo "ERROR: Ming GRUB template does not contain the authoritative root UUID" >&2
+    exit 30
 fi
 
 for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
@@ -2474,19 +2534,38 @@ greeter-session=lightdm-gtk-greeter
 allow-guest=false
 LIGHTDM
 
-# The installed system should boot directly to the graphical desktop. Some
-# installer paths leave systemd on multi-user.target, which is why a healthy
-# install can still land on tty1 after reboot.
-if chroot "${target}" systemctl list-unit-files lightdm.service >/dev/null 2>&1; then
+# The installed system should boot directly to the graphical desktop. Calamares
+# invokes this while the target is offline, so write stable unit links instead
+# of treating an offline systemctl query as proof that LightDM is unavailable.
+find_systemd_unit() {
+    local name="$1" candidate
+    for candidate in "/lib/systemd/system/${name}" "/usr/lib/systemd/system/${name}"; do
+        if [[ -f "${target}${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_graphical_boot_chain() {
+    local graphical_unit lightdm_unit
+    graphical_unit="$(find_systemd_unit graphical.target)" || {
+        echo "ERROR: graphical.target is missing from the installed system" >&2
+        return 1
+    }
+    lightdm_unit="$(find_systemd_unit lightdm.service)" || {
+        echo "ERROR: LightDM service is missing from the installed system" >&2
+        return 1
+    }
+    mkdir -p "${target}/etc/systemd/system/graphical.target.wants"
+    ln -sfn "${graphical_unit}" "${target}/etc/systemd/system/default.target"
+    ln -sfn "${lightdm_unit}" "${target}/etc/systemd/system/display-manager.service"
+    ln -sfn "${lightdm_unit}" "${target}/etc/systemd/system/graphical.target.wants/lightdm.service"
     chroot "${target}" systemctl enable lightdm.service >/dev/null 2>&1 || true
-    mkdir -p "${target}/etc/systemd/system"
-    ln -sfn /lib/systemd/system/lightdm.service "${target}/etc/systemd/system/display-manager.service" 2>/dev/null || true
-fi
-if chroot "${target}" systemctl list-unit-files graphical.target >/dev/null 2>&1; then
-    chroot "${target}" systemctl set-default graphical.target >/dev/null 2>&1 || true
-else
-    ln -sfn /lib/systemd/system/graphical.target "${target}/etc/systemd/system/default.target" 2>/dev/null || true
-fi
+}
+
+ensure_graphical_boot_chain || exit 30
 
 rm -f "${target}/etc/sudoers.d/user"
 
@@ -2500,10 +2579,17 @@ fi
 rm -f \
     "${target}/usr/share/applications/calamares.desktop" \
     "${target}/usr/share/applications/calamares-install-debian.desktop" \
+    "${target}/usr/share/applications/Install Ming OS.desktop" \
+    "${target}/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop" \
     "${target}/usr/share/xsessions/ming-installer.desktop" \
+    "${target}/usr/share/icons/hicolor/scalable/apps/ming-os-install.svg" \
     "${target}/usr/local/sbin/sfdisk" \
     "${target}/etc/systemd/system/ming-live-installer.service" \
     "${target}/etc/systemd/system/graphical.target.wants/ming-live-installer.service" \
+    "${target}"/home/*/.config/ming-os/desktop-layout.json \
+    "${target}"/home/*/.config/ming-os/desktop-layout.last-good.json \
+    "${target}/etc/skel/.config/ming-os/desktop-layout.json" \
+    "${target}/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
     2>/dev/null || true
 
 for installer_entry in \
@@ -2512,19 +2598,15 @@ for installer_entry in \
     "${target}"/home/*/Desktop/install-debian.desktop \
     "${target}"/home/*/Desktop/"Install Debian.desktop" \
     "${target}"/home/*/Desktop/"安装 Debian.desktop" \
+    "${target}"/home/*/Desktop/"Install Ming OS.desktop" \
     "${target}"/etc/skel/.config/autostart/calamares-live.desktop \
     "${target}"/etc/skel/Desktop/calamares.desktop \
     "${target}"/etc/skel/Desktop/install-debian.desktop \
     "${target}"/etc/skel/Desktop/"Install Debian.desktop" \
-    "${target}"/etc/skel/Desktop/"安装 Debian.desktop"; do
+    "${target}"/etc/skel/Desktop/"安装 Debian.desktop" \
+    "${target}/etc/skel/Desktop/Install Ming OS.desktop"; do
     [[ -e "${installer_entry}" ]] && rm -f "${installer_entry}" 2>/dev/null || true
 done
-
-if [[ -x "${target}/usr/sbin/update-grub" ]]; then
-    chroot "${target}" /usr/sbin/update-grub >/tmp/ming-update-grub.log 2>&1 || true
-elif [[ -x "${target}/usr/sbin/grub-mkconfig" ]]; then
-    chroot "${target}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/tmp/ming-update-grub.log 2>&1 || true
-fi
 
 # NetworkManager is the sole network owner in a newly installed target.
 chroot "${target}" systemctl disable networking.service systemd-networkd.service 2>/dev/null || true
@@ -2614,22 +2696,45 @@ echo "==== Ming bootloader install $(date -Is) ===="
 echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
 lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true
 
-find_root() {
-    local candidate
-    for candidate in /tmp/calamares-root-* /target; do
-        [ -d "${candidate}" ] || continue
-        [ -d "${candidate}/boot" ] || continue
-        [ -f "${candidate}/etc/fstab" ] || continue
-        printf '%s\n' "${candidate}"
-        return 0
-    done
-    return 1
+resolve_verified_target() {
+    local result candidate receipt_target
+    result="$(/usr/local/sbin/ming-installer-verify installed --receipt)" || {
+        printf '%s\n' "${result}" >&2
+        return 1
+    }
+    candidate="$(printf '%s' "${result}" | python3 -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+target = payload.get("target")
+if not payload.get("ok") or not isinstance(target, str) or not target or target == "/":
+    raise SystemExit(1)
+print(target)
+')" || return 1
+    receipt_target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || return 1
+    [[ "${candidate}" == "${receipt_target}" ]] || {
+        echo "ERROR: installed verifier target does not match the authoritative receipt" >&2
+        return 1
+    }
+    [[ -d "${candidate}/boot" && -f "${candidate}/etc/fstab" ]] || return 1
+    printf '%s\n' "${candidate}"
 }
 
-root="$(find_root)"
+root="$(resolve_verified_target)" || exit 20
 echo "target_root=${root}"
 
-root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
+root_source="$(/usr/local/sbin/ming-installer-verify receipt --field source)" || exit 20
+root_uuid="$(/usr/local/sbin/ming-installer-verify receipt --field uuid)" || exit 20
+current_root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
+[[ "${current_root_source}" == "${root_source}" ]] || {
+    echo "ERROR: authoritative receipt source no longer matches the mounted target"
+    exit 20
+}
+if ! grep -Fq "root=UUID=${root_uuid}" "${root}/etc/grub.d/09_ming_os" \
+    || grep -Fq '__MING_ROOT_UUID__' "${root}/etc/grub.d/09_ming_os"; then
+    echo "ERROR: target GRUB template does not contain the authoritative root UUID"
+    exit 20
+fi
 echo "root_source=${root_source}"
 resolve_boot_disk() {
     local root_source="$1" name type
@@ -2660,6 +2765,29 @@ boot_disk=""
 resolve_boot_disk "${root_source}" || exit 20
 echo "boot_disk=${boot_disk}"
 
+# The identity helper runs before this final bootloader stage and may not see
+# Calamares' target mount in every installation environment. Resolve the UUID
+# from the verified root block device here, immediately before GRUB generation.
+root_uuid="$(blkid -s UUID -o value "${root_source}" 2>/dev/null | head -n 1 || true)"
+if [[ ! "${root_uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]]; then
+    root_uuid="$(awk '$2 == "/" && $1 ~ /^UUID=/ {sub(/^UUID=/, "", $1); print $1; exit}' "${root}/etc/fstab" 2>/dev/null || true)"
+fi
+if [[ ! "${root_uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]]; then
+    echo "ERROR: cannot resolve installed root UUID for GRUB"
+    exit 22
+fi
+grub_custom_entry="${root}/etc/grub.d/09_ming_os"
+if [ ! -f "${grub_custom_entry}" ]; then
+    echo "ERROR: Ming custom GRUB entry is missing"
+    exit 22
+fi
+sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_custom_entry}"
+if grep -Fq '__MING_ROOT_UUID__' "${grub_custom_entry}"; then
+    echo "ERROR: Ming custom GRUB entry still contains a root UUID placeholder"
+    exit 22
+fi
+echo "root_uuid=${root_uuid}"
+
 for mountpoint in dev proc sys run; do
     mkdir -p "${root}/${mountpoint}"
 done
@@ -2669,6 +2797,33 @@ mountpoint -q "${root}/sys" || mount -t sysfs sysfs "${root}/sys"
 mountpoint -q "${root}/run" || mount --bind /run "${root}/run"
 
 mkdir -p "${root}/boot/grub"
+
+remove_live_grub_fragments() {
+    local fragment name
+    rm -f -- "${root}/boot/grub/loopback.cfg" "${root}/boot/grub/grub-live.cfg"
+    [[ -d "${root}/etc/grub.d" ]] || return 0
+    while IFS= read -r -d '' fragment; do
+        name="$(basename "${fragment}")"
+        case "${name}" in
+            09_ming_os|40_ming_transaction) continue ;;
+        esac
+        if grep -Eq 'boot=live|ming\.installer=1|Live Mode|Install Ming OS' "${fragment}"; then
+            echo "Removing inherited Live GRUB fragment: ${name}"
+            rm -f -- "${fragment}"
+        fi
+    done < <(find "${root}/etc/grub.d" -maxdepth 1 -type f -print0)
+}
+
+reject_live_grub_entries() {
+    local grub_cfg="$1"
+    if grep -Eq 'boot=live|ming\.installer=1|Live Mode|Install Ming OS' "${grub_cfg}"; then
+        echo "ERROR: installed GRUB configuration still contains Live or installer entries"
+        return 1
+    fi
+    return 0
+}
+
+remove_live_grub_fragments
 
 install_uefi_grub() {
     [ -d /sys/firmware/efi ] || return 1
@@ -2772,9 +2927,93 @@ else
         >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
 fi
 
+if [ -e "${root}/boot/grub/grub.cfg.new" ]; then
+    echo "ERROR: uncommitted grub.cfg.new remains after GRUB generation"
+    exit 22
+fi
+if ! reject_live_grub_entries "${root}/boot/grub/grub.cfg"; then
+    exit 22
+fi
+
+validate_final_grub_root_uuid() {
+    local grub_cfg="$1"
+    awk -v expected="root=UUID=${root_uuid}" '
+        /^[[:space:]]*linux[[:space:]]+\/vmlinuz([[:space:]]|$)/ {
+            ming_linux_count++
+            root_count=0
+            for (field = 1; field <= NF; field++) {
+                if ($field ~ /^root=/) {
+                    root_count++
+                    if ($field != expected) {
+                        printf "ERROR: Ming linux stanza %d has unexpected %s\n", NR, $field > "/dev/stderr"
+                        invalid=1
+                    }
+                }
+            }
+            if (root_count != 1) {
+                printf "ERROR: Ming linux stanza %d must contain exactly one root=UUID argument\n", NR > "/dev/stderr"
+                invalid=1
+            }
+        }
+        END {
+            if (ming_linux_count == 0) {
+                print "ERROR: final grub.cfg has no Ming linux /vmlinuz stanzas" > "/dev/stderr"
+                exit 1
+            }
+            exit invalid ? 1 : 0
+        }
+    ' "${grub_cfg}"
+}
+
+prepare_transaction_grubenv() {
+    # A fresh target may receive a new GRUB environment during grub-install.
+    # Recreate the known-safe default before declaring its embedded OTA
+    # runtime ready; this is independent of the legacy recovery ISO path.
+    chroot "${root}" grub-editenv /boot/grub/grubenv create || return 1
+    chroot "${root}" grub-editenv /boot/grub/grubenv set saved_entry=ming-legacy || return 1
+    chroot "${root}" grub-editenv /boot/grub/grubenv list \
+        | grep -Fxq 'saved_entry=ming-legacy'
+}
+
+verify_embedded_ota_runtime() {
+    local capability="/usr/local/lib/ming-update/ming-ota-bootstrap-capability.py"
+
+    [[ -x "${root}${capability}" ]] || {
+        echo "ERROR: embedded transactional OTA capability verifier is missing"
+        return 1
+    }
+    prepare_transaction_grubenv || {
+        echo "ERROR: cannot initialize the transactional GRUB environment"
+        return 1
+    }
+    chroot "${root}" "${capability}" --write-marker || {
+        echo "ERROR: embedded transactional OTA runtime is incomplete"
+        return 1
+    }
+    MING_OTA_RUN_IN_SLICE=1 chroot "${root}" /usr/local/bin/ming-update status --json \
+        | python3 -c '
+import json
+import sys
+value = json.load(sys.stdin)
+if value.get("schema") != "ming.update.cli.v1":
+    raise SystemExit("embedded OTA status schema is invalid")
+if value.get("ok") is not True or value.get("error_code") is not None:
+    raise SystemExit("embedded OTA runtime did not become ready")
+if value.get("bootstrap_required"):
+    raise SystemExit("fresh image must not require an OTA bootstrap")
+' || {
+        echo "ERROR: embedded transactional OTA status readback failed"
+        return 1
+    }
+}
+
 if [ ! -s "${root}/boot/grub/grub.cfg" ] \
     || grep -Fq '__MING_ROOT_UUID__' "${root}/boot/grub/grub.cfg"; then
     echo "ERROR: final grub.cfg is missing, empty, or still contains a placeholder"
+    exit 22
+fi
+if ! validate_final_grub_root_uuid "${root}/boot/grub/grub.cfg"; then
+    echo "ERROR: all Ming linux stanzas must use the authoritative root UUID"
     exit 22
 fi
 if [ -x "${root}/usr/bin/grub-script-check" ]; then
@@ -2782,6 +3021,7 @@ if [ -x "${root}/usr/bin/grub-script-check" ]; then
 elif command -v grub-script-check >/dev/null 2>&1; then
     grub-script-check "${root}/boot/grub/grub.cfg" || exit 22
 fi
+verify_embedded_ota_runtime || exit 24
 echo "grub.cfg OK: $(wc -l < "${root}/boot/grub/grub.cfg") lines"
 echo "Ming bootloader install completed"
 MINGBOOTLOADER
@@ -2882,6 +3122,26 @@ timeout: 120
 script:
   - "/usr/local/sbin/ming-fix-installed-identity"
 IDENTITYCONF
+
+    cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
+---
+TARGETRECEIPTCONF
+
+    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+---
+dontChroot: true
+timeout: 10
+script:
+  - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
+TARGETRECEIPTRESETCONF
+
+    cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'INSTALLEDDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+INSTALLEDDESKTOPGATECONF
 
     cat > /etc/calamares/modules/ming-ota-preflight.conf << PREFLIGHTCONF
 ---
@@ -3094,9 +3354,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -3120,7 +3389,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -3129,6 +3400,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -3146,6 +3418,7 @@ Comment[zh_CN]=将 Ming OS 安装到这台电脑
 Exec=/usr/local/bin/ming-calamares-launcher
 Icon=calamares
 Terminal=false
+NoDisplay=true
 Categories=System;
 StartupNotify=true
 CALAMARESDESKTOP
@@ -4072,8 +4345,8 @@ STATICGRUB
 [Seat:*]
 autologin-user=user
 autologin-user-timeout=0
-autologin-session=ming-installer
-user-session=ming-installer
+autologin-session=xfce
+user-session=xfce
 greeter-session=lightdm-gtk-greeter
 allow-guest=false
 STATICLIGHTDM

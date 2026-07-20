@@ -1,5 +1,8 @@
 #!/bin/sh
-set -eu
+# grub-mkconfig_lib deliberately probes optional variables. A fresh installed
+# target does not define all of them, so nounset would leave grub.cfg.new
+# behind instead of committing the regenerated configuration.
+set -e
 
 prefix=/usr
 exec_prefix=/usr

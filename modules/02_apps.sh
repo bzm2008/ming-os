@@ -31,6 +31,9 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     gir1.2-gtk-4.0
     gir1.2-adw-1
     libadwaita-1-0
+    # Papyrus uses the Debian WebKitGTK 4.1 ABI.  Keep this in the required
+    # runtime set so a visible launcher cannot ship without its ELF runtime.
+    libwebkit2gtk-4.1-0
     gvfs
     gvfs-backends
     brightnessctl
@@ -1772,6 +1775,20 @@ else
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
+
+# Spark Store currently ships an enabled notifier with invalid restart fields
+# and an unbounded network wait. Keep the vendor file intact, but prevent it
+# from entering the boot transaction; Ming's delayed readiness timer owns this.
+mask_spark_update_notifier() {
+    if [[ ! -f /usr/lib/systemd/system/spark-update-notifier.service \
+        && ! -f /lib/systemd/system/spark-update-notifier.service ]]; then
+        return 0
+    fi
+    mkdir -p /etc/systemd/system
+    rm -f /etc/systemd/system/multi-user.target.wants/spark-update-notifier.service
+    ln -sfn /dev/null /etc/systemd/system/spark-update-notifier.service
+}
+mask_spark_update_notifier
 
 # A graphical user may already be logged in while a package is installed.
 # Trigger a bounded catalog sync; the drawer also rescans when it opens.

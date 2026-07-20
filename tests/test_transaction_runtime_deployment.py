@@ -59,6 +59,16 @@ class TransactionRuntimeDeploymentTests(unittest.TestCase):
         self.assertIn("ming-recovery-manual", self.build)
         self.assertIn("generate_initramfs", self.build)
 
+    def test_build_gate_reads_the_full_initramfs_listing_before_matching_the_transaction_hook(self):
+        """A grep -q pipeline can make zstd fail under pipefail after a valid match."""
+        start = self.build.index("validate_transactional_ota_runtime() {")
+        end = self.build.index("# ======================== ISO", start)
+        runtime_gate = self.build[start:end]
+
+        self.assertIn('initramfs_listing="$(lsinitramfs "${latest}")"', runtime_gate)
+        self.assertIn('grep -Fxq scripts/local-bottom/ming-transaction <<< "${initramfs_listing}"', runtime_gate)
+        self.assertNotIn('lsinitramfs "${latest}" | grep -Fxq', runtime_gate)
+
     def test_build_gate_requires_the_display_manager_health_and_rollback_guard(self):
         start = self.build.index("validate_transactional_ota_runtime() {")
         end = self.build.index("# ======================== ISO", start)

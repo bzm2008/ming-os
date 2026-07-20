@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess
 import unittest
@@ -5,6 +6,11 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 class EdgeVideoContracts(unittest.TestCase):
@@ -26,7 +32,7 @@ ffprobe() {
 '''
         script = (harness + function + "\ngenerate_edge_video_samples\n" +
                   'wc -c "${sample_root}/h264.mp4" "${sample_root}/vp9.webm"\n')
-        result = subprocess.run(["bash"], input=script.encode(), capture_output=True)
+        result = subprocess.run([BASH], input=script.encode(), capture_output=True)
         self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
         output = result.stdout.decode(errors="replace")
         self.assertIn("libx264", output)
@@ -40,7 +46,7 @@ ffprobe() {
         function = APPS[start:end]
         harness = 'MING_EDGE_SAMPLE_DIR="$(mktemp -d)"\nffmpeg() { return 1; }\nffprobe() { return 0; }\n'
         result = subprocess.run(
-            ["bash"], input=(harness + function + "\ngenerate_edge_video_samples\n").encode())
+            [BASH], input=(harness + function + "\ngenerate_edge_video_samples\n").encode())
         self.assertNotEqual(0, result.returncode)
 
     def test_edge_always_uses_x11_and_avoids_unstable_forced_features(self):

@@ -560,6 +560,18 @@ class UpdateController:
         _atomic_json(self.cache_root / "discovery.json", discovery)
 
     def _bootstrap_response(self, command, discovery=None):
+        # The signed bootstrap is a one-time migration path for 26.3.2 only.
+        # Every later image ships the complete transaction runtime.  Offering
+        # bootstrap on a later release would conceal an incomplete install and
+        # incorrectly direct the user to download a component it already owns.
+        if self.current_version != "26.3.2":
+            return self._failure(
+                command,
+                UpdateError("E_BOOTSTRAP_VERSION", "embedded transaction update runtime is incomplete"),
+                state="failed",
+                action="none",
+                update=self._base_update(delivery="transactional-slot-v1"),
+            )
         bootstrap = None
         if discovery:
             try:
@@ -580,6 +592,11 @@ class UpdateController:
 
     def check(self):
         capability = self._capability()
+        if (
+            (not capability.get("available") or capability.get("capability") != "transactional-slot-v1")
+            and self.current_version != "26.3.2"
+        ):
+            return self._bootstrap_response("check")
         discovery = None
         try:
             discovery = self.discovery_fetcher()
@@ -862,6 +879,8 @@ class UpdateController:
 
     def doctor(self):
         capability = self._capability()
+        if not capability.get("available") or capability.get("capability") != "transactional-slot-v1":
+            return self._bootstrap_response("doctor")
         active = None
         try:
             active = _read_json(self.state_root / "active-transaction.json")
@@ -869,10 +888,10 @@ class UpdateController:
             pass
         return self._response(
             "doctor",
-            ok=bool(capability.get("available")),
-            state="idle" if capability.get("available") else "bootstrap-required",
-            action="none" if capability.get("available") else "bootstrap",
-            error_code=None if capability.get("available") else "E_BOOTSTRAP_REQUIRED",
+            ok=True,
+            state="idle",
+            action="none",
+            error_code=None,
             transaction=self._transaction(active.get("transaction_id")) if active else None,
             message_key="update.status.doctor",
         )

@@ -1,3 +1,4 @@
+import hashlib
 import pathlib
 import re
 import unittest
@@ -6,10 +7,14 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build_onion_os.sh"
 PAPYRUS = ROOT / "modules" / "04_papyrus.sh"
+APPS = ROOT / "modules" / "02_apps.sh"
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
 FINALIZE = ROOT / "modules" / "07_finalize.sh"
 RESUME = ROOT / "resume_build.sh"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
+PAPYRUS_ASSET = ROOT / "assets" / "papyrus-assets" / "Papyrus_1.0.0_amd64.deb"
+PAPYRUS_DEB_SHA256 = "993A100E4F88190EAF833BEA3456E38C60322E24A3A553B4935E5B2550C9D368"
+PAPYRUS_APPIMAGE_SHA256 = "8B86F8CB1F9E6E39F0A3FEF9E7B36C57EB8700F7899AD4FEBD8344D0D05531B4"
 
 
 class PapyrusIntegrationTests(unittest.TestCase):
@@ -17,6 +22,7 @@ class PapyrusIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.build = BUILD.read_text(encoding="utf-8")
         cls.papyrus = PAPYRUS.read_text(encoding="utf-8") if PAPYRUS.exists() else ""
+        cls.apps = APPS.read_text(encoding="utf-8")
         cls.desktop = DESKTOP.read_text(encoding="utf-8")
         cls.finalize = FINALIZE.read_text(encoding="utf-8")
         cls.resume = RESUME.read_text(encoding="utf-8")
@@ -58,6 +64,22 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn('install -d -m 0755 "$(dirname "${PAPYRUS_MARKER}")"', self.papyrus)
         self.assertIn('rollback_papyrus "${backup}" "${artifact_backup}"', self.papyrus)
 
+    def test_release_asset_is_pinned_and_post_install_refreshes_phone_desktop(self):
+        """A release must never silently omit Papyrus or trust an arbitrary payload."""
+        self.assertIn(PAPYRUS_DEB_SHA256, self.papyrus)
+        self.assertIn(PAPYRUS_APPIMAGE_SHA256, self.papyrus)
+        self.assertIn(PAPYRUS_DEB_SHA256, self.build)
+        self.assertIn("sha256sum", self.papyrus)
+        self.assertIn("ming-phone-desktop --sync", self.papyrus)
+        self.assertIn("MING_RELEASE_MODE", self.build)
+        self.assertIn("发布构建必须提供已校验的 Papyrus 1.0.0 资产", self.build)
+
+    def test_pinned_deb_asset_matches_the_release_hash(self):
+        """The staged binary must be the exact payload the installer verifies."""
+        self.assertTrue(PAPYRUS_ASSET.is_file())
+        digest = hashlib.sha256(PAPYRUS_ASSET.read_bytes()).hexdigest().upper()
+        self.assertEqual(PAPYRUS_DEB_SHA256, digest)
+
     def test_optional_ui_entries_are_gated_on_installed_desktop(self):
         self.assertIn("papyrus.dockitem", self.desktop)
         self.assertIn("papyrus.desktop", self.desktop)
@@ -74,6 +96,44 @@ class PapyrusIntegrationTests(unittest.TestCase):
         self.assertIn("trusted-desktops", launch)
         self.assertIn("papyrus.desktop", self.papyrus)
         self.assertIn("trusted-desktops", self.papyrus)
+
+    def test_papyrus_payload_is_searchable_and_executable_by_the_desktop_user(self):
+        """mktemp creates mode 0700; moving it to /opt must not keep Papyrus inaccessible."""
+        self.assertIn('chmod 0755 "${stage}"', self.papyrus)
+        self.assertIn('find "${stage}" -type d -exec chmod 0755 {} +', self.papyrus)
+
+    def test_deb_payload_requires_webkit_runtime_and_rejects_missing_linkage(self):
+        """A visible Papyrus launcher is not sufficient when its ELF dependencies are absent."""
+        packages = self.apps.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0]
+        self.assertIn("libwebkit2gtk-4.1-0", packages)
+        self.assertIn("verify_papyrus_runtime() {", self.papyrus)
+        self.assertIn("ldd", self.papyrus)
+        self.assertIn("not found", self.papyrus)
+        self.assertIn("verify_papyrus_runtime", self.papyrus[
+            self.papyrus.index("install_papyrus_asset() {"):self.papyrus.index("main() {")
+        ])
+
+    def test_papyrus_launcher_bounds_only_an_unmaximized_first_x11_window_to_the_workarea(self):
+        """The first launch fits small displays without undoing a user's window state."""
+        self.assertIn("ming-papyrus-window", self.papyrus)
+        self.assertIn("--fit-pid", self.papyrus)
+        self.assertIn("wmctrl -lp", self.papyrus)
+        self.assertIn("wmctrl -lG", self.papyrus)
+        self.assertIn("wmctrl -i -r", self.papyrus)
+        self.assertIn("xrandr --current", self.papyrus)
+        self.assertIn("preserves_user_window_state", self.papyrus)
+        self.assertIn("FULLSCREEN|MAXIMIZED_VERT|MAXIMIZED_HORZ", self.papyrus)
+        self.assertIn("(( current_width > width", self.papyrus)
+        self.assertNotIn("remove,maximized_vert,maximized_horz", self.papyrus)
+        self.assertIn("wait \"${child}\"", self.papyrus)
+
+    def test_papyrus_launcher_remains_posix_sh_compatible(self):
+        launcher = self.papyrus.split("cat > /usr/bin/papyrus <<'PAPYRUSLAUNCHER'", 1)[1].split(
+            "PAPYRUSLAUNCHER", 1
+        )[0]
+        self.assertIn("#!/bin/sh", launcher)
+        self.assertIn("shift", launcher)
+        self.assertNotIn("${@:2}", launcher)
 
 
 if __name__ == "__main__":
