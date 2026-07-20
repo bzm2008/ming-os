@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shlex
 import stat
 import tempfile
 import types
@@ -85,7 +86,7 @@ def make_opt_app(root, package="com.example.app", name="example.desktop"):
         "Name=Example App\n"
         "Icon=example\n"
         "Categories=Utility;\n"
-        "Exec=python --open %%U\n",
+        "Exec=%s --open %%U\n" % shlex.quote(str(executable)),
         encoding="utf-8",
     )
     source.chmod(0o644)
@@ -480,7 +481,7 @@ class OptAppsProxyLaunchTests(unittest.TestCase):
                 command_runner=Runner("com.example.app", source),
             )
             self.assertEqual("desktop_proxy", request.mode)
-            self.assertEqual(("python", "--open", "%U"), request.argv)
+            self.assertEqual((str(_executable), "--open"), request.argv)
             self.assertNotIn(opt_root, launch.allowed_application_dirs())
 
     def test_launcher_rechecks_source_desktop_visibility(self):
@@ -592,7 +593,7 @@ class OptAppsProxyLaunchTests(unittest.TestCase):
             )
 
             self.assertTrue(broker.launch(request))
-            self.assertEqual([("python", "--open", "%U")], calls)
+            self.assertEqual([(str(_executable), "--open")], calls)
 
     def test_launcher_rejects_tampered_proxy_and_manifest_source_mismatch(self):
         launch = load_module(LAUNCH_PATH, "ming_launch_opt_manifest")
