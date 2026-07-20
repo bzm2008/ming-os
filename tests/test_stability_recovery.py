@@ -200,6 +200,7 @@ class ApplicationCatalogRefreshTests(unittest.TestCase):
         wanted_assignments = {
             "APP_CATALOG_FINGERPRINT_VERSION",
             "APP_CATALOG_MAX_ROOTS",
+            "APP_CATALOG_MAX_DIRECTORY_ENTRIES",
             "APP_CATALOG_MAX_LAUNCHERS",
             "APP_CATALOG_LAUNCHER_HASH_BYTES",
             "APP_CATALOG_TOTAL_HASH_BYTES",
