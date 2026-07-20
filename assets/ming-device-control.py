@@ -476,6 +476,37 @@ class NetworkManagerBackend:
                 continue
         return devices
 
+    def wifi_radio_status(self):
+        if not self.available():
+            return network_result(False, "unavailable", "libnm_unavailable",
+                                  "NetworkManager D-Bus 不可用。", True, enabled=False)
+        try:
+            getter = getattr(self.client, "wireless_get_enabled", None)
+            if getter is None:
+                getter = getattr(self.client, "get_wireless_enabled", None)
+            enabled = bool(getter())
+            return network_result(True, "enabled" if enabled else "disabled",
+                                  "enabled" if enabled else "disabled",
+                                  "无线网络已开启。" if enabled else "无线网络已关闭。",
+                                  False, enabled=enabled)
+        except Exception as exc:
+            return network_result(False, "error", "networkmanager_error", str(exc), True,
+                                  enabled=False)
+
+    def wifi_radio(self, enabled):
+        if not self.available():
+            return network_result(False, "unavailable", "libnm_unavailable",
+                                  "NetworkManager D-Bus 不可用。", True, enabled=False)
+        try:
+            setter = getattr(self.client, "wireless_set_enabled", None)
+            if setter is None:
+                setter = getattr(self.client, "set_wireless_enabled", None)
+            setter(bool(enabled))
+            return self.wifi_radio_status()
+        except Exception as exc:
+            return network_result(False, "error", "networkmanager_error", str(exc), True,
+                                  enabled=not bool(enabled))
+
     def _ethernet_devices(self):
         if not self.available():
             return []
@@ -1799,6 +1830,38 @@ class DeviceController:
         return "\n".join(
             line for line in (output or "").splitlines() if pattern.search(line))
 
+    def wifi_radio_status(self):
+        backend = self._get_network_backend()
+        if backend is not None:
+            return backend.wifi_radio_status()
+        rc, output, error = self._run_c(["nmcli", "radio", "wifi"])
+        enabled = output.strip().lower() == "enabled"
+        if rc != 0:
+            reason = error or output or "NetworkManager 不可用。"
+            return network_result(False, "unavailable", "networkmanager_unavailable",
+                                  reason, True, enabled=False, error=reason)
+        return network_result(True, "enabled" if enabled else "disabled",
+                              "enabled" if enabled else "disabled",
+                              "无线网络已开启。" if enabled else "无线网络已关闭。",
+                              False, enabled=enabled, error="")
+
+    def wifi_radio(self, enabled):
+        backend = self._get_network_backend()
+        if backend is not None:
+            return backend.wifi_radio(bool(enabled))
+        target = "on" if enabled else "off"
+        rc, output, error = self._run_c(["nmcli", "radio", "wifi", target])
+        if rc != 0:
+            reason = error or output or "NetworkManager 不可用。"
+            return network_result(False, "error", "radio_change_failed", reason, True,
+                                  enabled=not bool(enabled), error=reason)
+        status = self.wifi_radio_status()
+        if status.get("enabled") != bool(enabled):
+            return network_result(False, "error", "radio_readback_failed",
+                                  "无线开关状态未能确认。", True,
+                                  enabled=status.get("enabled", False), error="无线开关状态未能确认。")
+        return status
+
     def wifi_status(self):
         backend = self._get_network_backend()
         if backend is not None:
@@ -2484,6 +2547,11 @@ def build_parser():
     status.add_argument("--json", action="store_true")
     wifi_scan = subparsers.add_parser("wifi-scan")
     wifi_scan.add_argument("--json", action="store_true")
+    wifi_radio_status = subparsers.add_parser("wifi-radio-status")
+    wifi_radio_status.add_argument("--json", action="store_true")
+    wifi_radio = subparsers.add_parser("wifi-radio")
+    wifi_radio.add_argument("state", choices=("on", "off"))
+    wifi_radio.add_argument("--json", action="store_true")
     wifi_connect = subparsers.add_parser("wifi-connect")
     wifi_connect.add_argument("--network-id")
     # Kept as a migration-only compatibility path for older Settings builds;
@@ -2531,6 +2599,10 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.status()
     elif args.action == "wifi-scan":
         result = controller.wifi_scan()
+    elif args.action == "wifi-radio-status":
+        result = controller.wifi_radio_status()
+    elif args.action == "wifi-radio":
+        result = controller.wifi_radio(args.state == "on")
     elif args.action == "wifi-connect":
         password = None
         if args.password_stdin:
@@ -2568,7 +2640,9 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
-    return 0 if args.action in {"status", "bluetooth-status", "ethernet-status", "audio-status"} or result.get("ok") else 2
+    return 0 if args.action in {
+        "status", "wifi-radio-status", "bluetooth-status", "ethernet-status", "audio-status"
+    } or result.get("ok") else 2
 
 
 if __name__ == "__main__":

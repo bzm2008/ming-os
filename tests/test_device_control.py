@@ -904,6 +904,56 @@ class WifiCliTests(unittest.TestCase):
     def setUpClass(cls):
         cls.device = load_device_control()
 
+    def test_wifi_radio_cli_forwards_structured_status_and_requested_state(self):
+        calls = []
+
+        class RadioController:
+            def wifi_radio_status(self):
+                calls.append(("status",))
+                return self.device_result(True)
+
+            def wifi_radio(self, enabled):
+                calls.append(("set", enabled))
+                return self.device_result(True, enabled=enabled)
+
+            @staticmethod
+            def device_result(ok, enabled=True):
+                return {
+                    "ok": ok,
+                    "state": "enabled" if enabled else "disabled",
+                    "reason_code": "enabled" if enabled else "disabled",
+                    "reason_text": "ok",
+                    "retryable": False,
+                    "enabled": enabled,
+                }
+
+        status_output = io.StringIO()
+        self.assertEqual(
+            0,
+            self.device.main(
+                ["wifi-radio-status", "--json"],
+                controller=RadioController(), stdout=status_output),
+        )
+        on_output = io.StringIO()
+        self.assertEqual(
+            0,
+            self.device.main(
+                ["wifi-radio", "on", "--json"],
+                controller=RadioController(), stdout=on_output),
+        )
+        self.assertEqual([("status",), ("set", True)], calls)
+        self.assertTrue(json.loads(on_output.getvalue())["enabled"])
+
+    def test_wifi_radio_fallback_uses_utf8_c_locale_and_reads_back(self):
+        command = ("env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi")
+        runner = FakeRunner({command: (0, "enabled\n", "")})
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "nmcli")
+        result = controller.wifi_radio_status()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["enabled"])
+        self.assertEqual([command], runner.commands)
+
     def test_scan_keeps_same_ssid_on_two_bssids_and_bands(self):
         scan_command = (
             "nmcli", "-t", "-f",

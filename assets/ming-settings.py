@@ -1689,12 +1689,22 @@ class MingSettings(Adw.ApplicationWindow):
         GLib.idle_add(self.refresh_time_sync_status)
         GLib.idle_add(self.refresh_ethernet_status)
 
-        def wifi_radio_done(rc, output, _error):
-            if rc == 0:
-                self.wifi_switch.set_active(output.strip() == "enabled")
+        def wifi_radio_done(rc, output, error):
+            try:
+                result = json.loads(output) if output else {}
+            except ValueError:
+                result = {}
+            if rc == 0 and isinstance(result.get("enabled"), bool):
+                self.wifi_switch.set_active(result["enabled"])
+            elif error or result.get("reason_text"):
+                self.toast(
+                    "无线网络状态读取失败：%s" %
+                    (result.get("reason_text") or error), "warning")
             self.loading_wifi_state = False
 
-        run_capture_async(["env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
+        run_capture_async(
+            device_control_cli_command("wifi-radio-status", "--json"),
+            timeout=6, on_done=wifi_radio_done)
         return sc
 
     def refresh_ethernet_status(self):
@@ -1795,12 +1805,30 @@ class MingSettings(Adw.ApplicationWindow):
     def on_wifi_toggle(self, sw, _p):
         if self.loading_wifi_state:
             return
-        state = "on" if sw.get_active() else "off"
+        requested = bool(sw.get_active())
+        state = "on" if requested else "off"
+        self.loading_wifi_state = True
+        sw.set_sensitive(False)
+
+        def done(rc, output, error):
+            try:
+                result = json.loads(output) if output else {}
+            except ValueError:
+                result = {}
+            confirmed = result.get("enabled")
+            if rc != 0 or confirmed is not requested:
+                sw.set_active(not requested if not isinstance(confirmed, bool) else confirmed)
+                self.toast(
+                    "无线网络切换失败：%s" %
+                    (result.get("reason_text") or error or "NetworkManager 不可用"),
+                    "warning")
+            self.loading_wifi_state = False
+            sw.set_sensitive(bool(self.wifi_diagnostic.get("present")))
+            return False
+
         run_capture_async(
-            ["env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi", state], timeout=8,
-            on_done=lambda rc, _output, error: (
-                self.toast("无线网络切换失败：%s" % (error or "NetworkManager 不可用"))
-                if rc != 0 else None))
+            device_control_cli_command("wifi-radio", state, "--json"),
+            timeout=8, on_done=done)
 
     def on_wifi_status_refresh(self, _button):
         generation = self.wifi_probe_state.begin()

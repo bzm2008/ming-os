@@ -278,6 +278,12 @@ class NetworkReliabilityContracts(unittest.TestCase):
         source = (ROOT / "assets" / "ming-connection-notify.py").read_text(encoding="utf-8")
         self.assertIn('["env", "LC_ALL=C.UTF-8", "nmcli", "monitor"]', source)
 
+    def test_settings_radio_toggle_uses_device_control_json_not_direct_nmcli(self):
+        source = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
+        self.assertNotIn("nmcli", source)
+        self.assertIn("wifi-radio-status", source)
+        self.assertIn("wifi-radio", source)
+
 
 if __name__ == "__main__":
     unittest.main()
