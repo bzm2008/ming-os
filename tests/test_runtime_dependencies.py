@@ -390,6 +390,41 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("以管理员身份打开", final_menu)
         self.assertNotIn("Garlic Claw", final_menu)
 
+    def test_full_build_uses_the_same_immutable_installer_runtime_as_resume(self):
+        marker = "deploy_package_installer_runtime() {"
+        self.assertIn(marker, APPS)
+        full_runtime = APPS.split(marker, 1)[1].split(
+            "\ndeploy_spark_security_boundary() {", 1)[0]
+        resume_runtime = RESUME.split("seed_resume_package_installer() {", 1)[1].split(
+            "\nseed_resume_spark_security() {", 1)[0]
+        required_markers = (
+            'runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"',
+            'current_link="/usr/local/lib/ming-os/package-installer-current"',
+            'node.targets[0].id in {"PACKAGE_INSTALLER_CONTRACT", "REQUIRED_COMMON_SHA256"}',
+            'target="${runtime_root}/${contract}"',
+            'mktemp -d "${runtime_root}/.stage.XXXXXX"',
+            '"${stage}/ming-package-installer"',
+            '"${stage}/ming-shell-common.py"',
+            '"${target}/ming-package-installer"',
+            '"${target}/ming-shell-common.py"',
+            '"${current_link}/ming-package-installer"',
+            '"${current_link}/ming-shell-common.py"',
+            '/usr/local/sbin/.ming-package-installer.new',
+            '/usr/local/lib/ming-os/.ming-shell-common.py.new',
+        )
+        for expected in required_markers:
+            with self.subTest(marker=expected):
+                self.assertIn(expected, full_runtime)
+                self.assertIn(expected, resume_runtime)
+        boundary = APPS.split("deploy_spark_security_boundary() {", 1)[1].split(
+            "\ninstall_app_store() {", 1)[0]
+        self.assertIn("deploy_package_installer_runtime || return 1", boundary)
+        self.assertNotIn(
+            'install -m 0755 "${asset_dir}/ming-package-installer.py" '
+            '/usr/local/sbin/ming-package-installer',
+            boundary,
+        )
+
     def test_package_install_gui_distinguishes_installation_from_launch_readiness(self):
         gui = package_install_gui_source()
 

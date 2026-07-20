@@ -1772,6 +1772,113 @@ MINGSPARKMODE
     chmod 0755 "${target}" || return 1
 }
 
+deploy_package_installer_runtime() {
+    local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
+    local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
+    local current_link="/usr/local/lib/ming-os/package-installer-current"
+    local stage contract required_common_sha actual_common_sha actual_installer_sha target
+    local target_dir_meta target_installer_meta target_common_meta
+    local target_installer_sha target_common_sha
+    if [[ ! -s "${installer_source}" || ! -s "${common_source}" ]]; then
+        echo "[ERROR] full build is missing the controlled package installer runtime assets" >&2
+        return 1
+    fi
+    contract="$(python3 - "${installer_source}" <<'PY'
+import ast
+import pathlib
+import sys
+
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+values = {
+    node.targets[0].id: ast.literal_eval(node.value)
+    for node in tree.body
+    if isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+    and node.targets[0].id in {"PACKAGE_INSTALLER_CONTRACT", "REQUIRED_COMMON_SHA256"}
+}
+print(values.get("PACKAGE_INSTALLER_CONTRACT", ""))
+print(values.get("REQUIRED_COMMON_SHA256", ""))
+PY
+)" || return 1
+    required_common_sha="$(printf '%s\n' "${contract}" | sed -n '2p')"
+    contract="$(printf '%s\n' "${contract}" | sed -n '1p')"
+    if [[ ! "${contract}" =~ ^[a-z0-9.-]+$ \
+        || ! "${required_common_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "[ERROR] full build package installer contract is invalid" >&2
+        return 1
+    fi
+    actual_common_sha="$(sha256sum "${common_source}" | awk '{print $1}')" || return 1
+    if [[ "${actual_common_sha}" != "${required_common_sha}" ]]; then
+        echo "[ERROR] full build rejected an unmatched ming-shell-common runtime" >&2
+        return 1
+    fi
+    actual_installer_sha="$(sha256sum "${installer_source}" | awk '{print $1}')" || return 1
+    if [[ ! "${actual_installer_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "[ERROR] full build cannot verify ming-package-installer" >&2
+        return 1
+    fi
+
+    mkdir -p "${runtime_root}" /usr/local/sbin || return 1
+    stage="$(mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
+    if ! install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
+        || ! install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
+        || ! chmod 0755 "${stage}" \
+        || ! python3 -m py_compile "${stage}/ming-package-installer" \
+        || ! python3 "${stage}/ming-package-installer" --help >/dev/null; then
+        rm -rf "${stage}" || true
+        echo "[ERROR] full build package installer runtime validation failed" >&2
+        return 1
+    fi
+
+    target="${runtime_root}/${contract}"
+    if [[ -e "${target}" || -L "${target}" ]]; then
+        target_dir_meta="$(stat -c '%a:%u:%g' "${target}" 2>/dev/null || true)"
+        target_installer_meta="$(stat -c '%a:%u:%g' \
+            "${target}/ming-package-installer" 2>/dev/null || true)"
+        target_common_meta="$(stat -c '%a:%u:%g' \
+            "${target}/ming-shell-common.py" 2>/dev/null || true)"
+        target_installer_sha="$(sha256sum "${target}/ming-package-installer" \
+            2>/dev/null | awk '{print $1}' || true)"
+        target_common_sha="$(sha256sum "${target}/ming-shell-common.py" \
+            2>/dev/null | awk '{print $1}' || true)"
+        if [[ -L "${target}" || ! -d "${target}" \
+            || -L "${target}/ming-package-installer" \
+            || ! -f "${target}/ming-package-installer" \
+            || -L "${target}/ming-shell-common.py" \
+            || ! -f "${target}/ming-shell-common.py" \
+            || "${target_dir_meta}" != "755:0:0" \
+            || "${target_installer_meta}" != "755:0:0" \
+            || "${target_common_meta}" != "644:0:0" \
+            || "${target_installer_sha}" != "${actual_installer_sha}" \
+            || "${target_common_sha}" != "${required_common_sha}" ]]; then
+            rm -rf "${stage}" || true
+            echo "[ERROR] full build refused an unsafe installer runtime: ${target}" >&2
+            return 1
+        fi
+        rm -rf "${stage}"
+    else
+        mv -T "${stage}" "${target}" || return 1
+    fi
+
+    ln -sfn "${target}" "${current_link}.new" || return 1
+    mv -Tf "${current_link}.new" "${current_link}" || return 1
+    ln -sfn \
+        "${current_link}/ming-package-installer" \
+        /usr/local/sbin/.ming-package-installer.new || return 1
+    mv -Tf \
+        /usr/local/sbin/.ming-package-installer.new \
+        /usr/local/sbin/ming-package-installer || return 1
+    ln -sfn \
+        "${current_link}/ming-shell-common.py" \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new || return 1
+    mv -Tf \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new \
+        /usr/local/lib/ming-os/ming-shell-common.py || return 1
+    python3 -m py_compile /usr/local/sbin/ming-package-installer || return 1
+}
+
 deploy_spark_security_boundary() {
     local asset_dir="/tmp/ming-build/assets"
     local asset
@@ -1782,8 +1889,7 @@ deploy_spark_security_boundary() {
         fi
     done
     install -d -m 0755 /usr/local/sbin /usr/local/lib/ming-os
-    install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
-    install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/lib/ming-os/ming-shell-common.py
+    deploy_package_installer_runtime || return 1
     install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
     install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
     python3 -m py_compile \
