@@ -5,6 +5,9 @@
 
 set -uo pipefail
 
+MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-${MING_OS_VERSION:-26.4.0}}"
+MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE:-development}"
+
 readonly OTA_CONFIG_DIR="/etc/ming-update"
 readonly OTA_CACHE_DIR="/var/cache/ming-update"
 readonly OTA_UPDATE_SERVER="https://ming.scallion.uno"
@@ -1949,16 +1952,20 @@ OTAGUIREDIRECT
 create_version_file() {
     echo "Creating Ming OS version files..."
 
-    echo "${MING_OS_VERSION}" > /etc/ming-version
+    echo "${MING_OS_UPDATE_VERSION}" > /etc/ming-version
+    echo "${MING_OS_VERSION}" > /etc/ming-display-version
     chmod 644 /etc/ming-version
+    chmod 644 /etc/ming-display-version
 
     cat > /etc/ming-release << RELEASEFILE
 NAME="Ming OS"
-VERSION="${MING_OS_VERSION} Home Edition"
+VERSION="${MING_OS_VERSION} 正式版"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${MING_OS_VERSION} Home Edition"
-VERSION_ID="${MING_OS_VERSION}"
+PRETTY_NAME="Ming OS ${MING_OS_VERSION} 正式版"
+VERSION_ID="${MING_OS_UPDATE_VERSION}"
+MING_DISPLAY_VERSION="${MING_OS_VERSION}"
+MING_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}"
 HOME_URL="https://scallion.uno"
 SUPPORT_URL="https://scallion.uno/support"
 BUG_REPORT_URL="https://scallion.uno/bugs"

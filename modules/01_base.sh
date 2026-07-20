@@ -24,6 +24,12 @@
 
 set -uo pipefail
 
+# Keep the user-facing release label separate from the monotonic transactional
+# version used by the OTA verifier.  Older callers that only provide
+# MING_OS_VERSION continue to build with that value for development images.
+MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-${MING_OS_VERSION:-26.4.0}}"
+MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE:-development}"
+
 # ======================== APT 源配置 ========================
 
 configure_apt_sources() {
@@ -1893,11 +1899,13 @@ configure_os_identity() {
     # 设置 Ming OS 品牌标识
     cat > /etc/os-release << OSRELEASE
 NAME="Ming OS"
-VERSION="${MING_OS_VERSION} Home Edition"
+VERSION="${MING_OS_VERSION} 正式版"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${MING_OS_VERSION} Home Edition"
-VERSION_ID="${MING_OS_VERSION}"
+PRETTY_NAME="Ming OS ${MING_OS_VERSION} 正式版"
+VERSION_ID="${MING_OS_UPDATE_VERSION}"
+MING_DISPLAY_VERSION="${MING_OS_VERSION}"
+MING_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}"
 HOME_URL="https://scallion.uno"
 SUPPORT_URL="https://scallion.uno/support"
 BUG_REPORT_URL="https://scallion.uno/bugs"
@@ -1907,12 +1915,12 @@ OSRELEASE
 
     # 更新 issue 文件（控制台登录提示）
     cat > /etc/issue << ISSUE
-Ming OS ${MING_OS_VERSION} Home Edition - 层层精简，层层用心
+Ming OS ${MING_OS_VERSION} 正式版 - 层层精简，层层用心
 
 ISSUE
 
     cat > /etc/issue.net << ISSUENET
-Ming OS ${MING_OS_VERSION} Home Edition
+Ming OS ${MING_OS_VERSION} 正式版
 ISSUENET
 
     # 自定义 lsb_release 信息
@@ -1920,16 +1928,16 @@ ISSUENET
     mkdir -p /etc/lsb-release.d
     cat > /etc/lsb-release << LSBRELEASE
 DISTRIB_ID=MingOS
-DISTRIB_RELEASE=${MING_OS_VERSION}
+DISTRIB_RELEASE=${MING_OS_UPDATE_VERSION}
 DISTRIB_CODENAME=ming
-DISTRIB_DESCRIPTION="Ming OS ${MING_OS_VERSION} Home Edition"
+DISTRIB_DESCRIPTION="Ming OS ${MING_OS_VERSION} 正式版"
 LSBRELEASE
 
     # 确保 /etc/debian_version 显示 Debian 13 (Trixie)，而非历史遗留的12
     echo "trixie/sid" > /etc/debian_version
 
     cat > /etc/ming-release << RELEASE
-Ming OS ${MING_OS_VERSION} Home Edition
+Ming OS ${MING_OS_VERSION} 正式版
 RELEASE
     mkdir -p /usr/share /etc/default/grub.d /boot/grub/themes/ming
     ln -sf /etc/ming-release /usr/share/ming-release
@@ -2057,6 +2065,8 @@ MINGOTAPREFLIGHT
 set -uo pipefail
 
 version="${MING_OS_VERSION:-26.4.0}"
+update_version="${MING_OS_UPDATE_VERSION:-26.4.0.1}"
+release_stage="${MING_OS_RELEASE_STAGE:-stable}"
 target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || {
     echo "ERROR: authoritative Calamares target receipt is missing or invalid" >&2
     exit 30
@@ -2328,11 +2338,13 @@ restore_ota_home() {
 
 write_file /etc/os-release <<OSRELEASE
 NAME="Ming OS"
-VERSION="${version} Home Edition"
+VERSION="${version} 正式版"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${version} Home Edition"
-VERSION_ID="${version}"
+PRETTY_NAME="Ming OS ${version} 正式版"
+VERSION_ID="${update_version}"
+MING_DISPLAY_VERSION="${version}"
+MING_RELEASE_STAGE="${release_stage}"
 HOME_URL="https://scallion.uno"
 SUPPORT_URL="https://scallion.uno/support"
 BUG_REPORT_URL="https://scallion.uno/bugs"
@@ -2342,22 +2354,22 @@ OSRELEASE
 
 write_file /etc/lsb-release <<LSBRELEASE
 DISTRIB_ID=MingOS
-DISTRIB_RELEASE=${version}
+DISTRIB_RELEASE=${update_version}
 DISTRIB_CODENAME=ming
-DISTRIB_DESCRIPTION="Ming OS ${version} Home Edition"
+DISTRIB_DESCRIPTION="Ming OS ${version} 正式版"
 LSBRELEASE
 
 write_file /etc/issue <<ISSUE
-Ming OS ${version} Home Edition - 层层精简，层层用心
+Ming OS ${version} 正式版 - 层层精简，层层用心
 
 ISSUE
 
 write_file /etc/issue.net <<ISSUENET
-Ming OS ${version} Home Edition
+Ming OS ${version} 正式版
 ISSUENET
 
 write_file /etc/ming-release <<MINGRELEASE
-Ming OS ${version} Home Edition
+Ming OS ${version} 正式版
 MINGRELEASE
 
 echo "trixie/sid" > "${target}/etc/debian_version" 2>/dev/null || true

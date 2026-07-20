@@ -28,7 +28,9 @@ set -euo pipefail
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
 readonly MING_OS_VERSION="26.4.0"
-readonly MING_OS_BUILD_SUFFIX=""
+readonly MING_OS_UPDATE_VERSION="26.4.0.1"
+readonly MING_OS_RELEASE_STAGE="stable"
+readonly MING_OS_BUILD_SUFFIX="formal"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2640"
@@ -202,6 +204,8 @@ chroot_exec() {
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin" \
         TERM="linux" \
         MING_OS_VERSION="${MING_OS_VERSION}" \
+        MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION}" \
+        MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}" \
         MING_USER="${MING_USER}" \
         "$@" </dev/null
 }
