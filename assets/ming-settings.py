@@ -916,6 +916,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.page_builders = {}
         self.hardware_probe_state = GenerationState()
         self.wifi_probe_state = GenerationState()
+        self.wifi_repair_state = GenerationState()
         self.wifi_connect_state = GenerationState()
         self.bluetooth_probe_state = GenerationState()
         self.audio_probe_state = GenerationState()
@@ -1190,6 +1191,7 @@ class MingSettings(Adw.ApplicationWindow):
     def on_close_request(self, _window):
         self.hardware_probe_state.invalidate()
         self.wifi_probe_state.invalidate()
+        self.wifi_repair_state.invalidate()
         self.wifi_connect_state.invalidate()
         self.bluetooth_probe_state.invalidate()
         self.audio_probe_state.invalidate()
@@ -3363,17 +3365,17 @@ class MingSettings(Adw.ApplicationWindow):
                 self.hardware_network_row):
             hardware_grp.add(row)
 
-        net_grp = Adw.PreferencesGroup(title="网络修复", description="优先使用更稳的 wpa_supplicant；如果某台机器更适合 iwd，可以一键切换。")
+        net_grp = Adw.PreferencesGroup(
+            title="网络修复",
+            description="固定使用 wpa_supplicant；修复只作用于选定的无线接口，不重启 NetworkManager。")
         box.append(net_grp)
         wpa = Gtk.Button(label="修复无线网络（推荐）")
         wpa.add_css_class("suggested-action")
-        wpa.connect("clicked", lambda _b: self.run_helper(self.pkexec_cmd("ming-network-repair", "--use-wpa"), "网络修复"))
-        iwd = Gtk.Button(label="切换为 iwd 后端")
-        iwd.connect("clicked", lambda _b: self.run_helper(self.pkexec_cmd("ming-network-repair", "--use-iwd"), "网络修复"))
+        wpa.connect("clicked", self.on_wifi_repair)
         scan = Gtk.Button(label="查看驱动检测")
         scan.connect("clicked", lambda _b: self.run_helper(["ming-driver-diagnose"], "驱动检测"))
-        net_grp.add(self.button_row("无线网络修复", "解除 rfkill、重启网络服务、显示缺失固件提示。", wpa))
-        net_grp.add(self.button_row("无线后端切换", "少数新机器可尝试 iwd；老机器建议保持推荐模式。", iwd))
+        net_grp.add(self.button_row(
+            "无线网络修复", "重新扫描并连接当前无线接口，不影响有线连接。", wpa))
         net_grp.add(self.button_row("驱动检测", "查看显卡、声卡、无线网卡和缺失 firmware 线索。", scan))
 
         broadcom_grp = Adw.PreferencesGroup(
@@ -3429,6 +3431,63 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_page = sc
         self.refresh_hardware_status()
         return sc
+
+    def on_wifi_repair(self, button):
+        """Repair one Wi-Fi interface after a structured status readback."""
+        generation = self.wifi_repair_state.begin()
+        button.set_sensitive(False)
+        button.set_label("正在检测接口...")
+
+        def status_done(status, error):
+            if not self.wifi_repair_state.accept(generation):
+                return False
+            if self.hardware_page.get_root() is not self:
+                return False
+            status = status or {}
+            devices = status.get("devices") or []
+            ifname = ""
+            for item in devices:
+                if isinstance(item, str):
+                    candidate = item
+                elif isinstance(item, dict):
+                    candidate = item.get("ifname") or item.get("device") or ""
+                else:
+                    candidate = ""
+                if candidate and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}", candidate):
+                    ifname = candidate
+                    break
+            if not ifname:
+                button.set_label("修复无线网络（推荐）")
+                button.set_sensitive(True)
+                self.toast(
+                    "无线修复未执行：未检测到可用的无线接口。%s" %
+                    ("请先刷新无线状态。" if not error else error), "warning")
+                return False
+
+            button.set_label("正在修复...")
+
+            def repair_done(rc, _output, repair_error):
+                if not self.wifi_repair_state.accept(generation):
+                    return False
+                if self.hardware_page.get_root() is not self:
+                    return False
+                button.set_label("修复无线网络（推荐）")
+                button.set_sensitive(True)
+                if rc == 0:
+                    self.toast("无线接口 %s 已重新检查。" % ifname, "info")
+                else:
+                    self.toast(
+                        "无线接口 %s 修复失败：%s" %
+                        (ifname, repair_error or "NetworkManager 未能重新连接。"), "error")
+                self.refresh_hardware_status()
+                return False
+
+            run_capture_async(
+                self.pkexec_cmd("ming-network-repair", "--ifname", ifname),
+                timeout=30, on_done=repair_done)
+            return False
+
+        run_task_async(wifi_diagnostic_snapshot, status_done)
 
     def refresh_hardware_status(self):
         generation = self.hardware_probe_state.begin()

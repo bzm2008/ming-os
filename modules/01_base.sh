@@ -839,35 +839,20 @@ configure_network() {
         bluez \
         ifupdown
 
-    apt install -y --no-install-recommends iwd || true
-
     mkdir -p /etc/NetworkManager/conf.d
     cat > /etc/NetworkManager/conf.d/wifi-backend.conf << NMWIFICFG
 [device]
-# Ming OS r4 defaults to wpa_supplicant because it is still the safer choice
-# for first/second/third-generation Intel-era laptops and old Broadcom/Atheros
-# cards. Users can switch to iwd from Ming Settings if their machine prefers it.
+# Keep one deterministic Wi-Fi backend. NetworkManager owns activation and
+# delegates supplicant work to the Debian wpa_supplicant package.
 wifi.backend=wpa_supplicant
 wifi.scan-rand-mac-address=no
 NMWIFICFG
 
-    mkdir -p /etc/iwd
-    cat > /etc/iwd/main.conf << IWDCFG
-[General]
-EnableNetworkConfiguration=true
-UseDefaultInterface=true
-
-[Network]
-EnableIPv6=true
-NameResolvingService=systemd
-
-[Scan]
-DisableRoamingScan=false
-IWDCFG
-
-    # Keep the default backend deterministic for older Wi-Fi hardware. iwd is
-    # installed as an opt-in alternative, but must never run with wpa_supplicant.
+    # Keep the default backend deterministic for older Wi-Fi hardware. Runtime
+    # repair never changes this selection or restarts NetworkManager.
     systemctl disable --now iwd.service 2>/dev/null || true
+    systemctl mask iwd.service 2>/dev/null || true
+    systemctl unmask wpa_supplicant.service 2>/dev/null || true
     systemctl enable --now wpa_supplicant.service 2>/dev/null || true
 
     mkdir -p /etc/network
@@ -1469,166 +1454,98 @@ deploy_hardware_diagnostics() {
     cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'
 #!/usr/bin/env bash
 set -uo pipefail
-LOG="/tmp/ming-network-repair.log"
-BACKEND="${1:-}"
-mkdir -p /tmp
-exec > >(tee "${LOG}") 2>&1
+export LC_ALL=C.UTF-8
 
-echo "Ming OS network repair"
-date
-echo
+LOG=/var/log/ming-os/network-repair.log
+IFNAME_PATTERN='^[[:alnum:]_][[:alnum:]_.-]{0,14}$'
 
-switch_backend() {
-    local backend="$1"
-    local old_service new_service config_path config_tmp config_backup config_existed=false
-    config_path=/etc/NetworkManager/conf.d/wifi-backend.conf
-    case "${backend}" in
-        iwd)
-            old_service=wpa_supplicant.service
-            new_service=iwd.service
-            if ! systemctl list-unit-files iwd.service --no-legend 2>/dev/null | grep -q '^iwd\.service'; then
-                echo "iwd is not installed; keep wpa_supplicant active." >&2
-                return 1
-            fi
-            ;;
-        wpa_supplicant)
-            old_service=iwd.service
-            new_service=wpa_supplicant.service
-            ;;
-        *)
-            echo "Unknown Wi-Fi backend: ${backend}" >&2
-            return 2
-            ;;
-    esac
-
-    mkdir -p /etc/NetworkManager/conf.d || return 1
-    config_backup="$(mktemp "${config_path}.backup.XXXXXX")" || return 1
-    if [[ -f "${config_path}" ]]; then
-        if ! cp -p "${config_path}" "${config_backup}"; then
-            rm -f "${config_backup}"
-            return 1
-        fi
-        config_existed=true
-    fi
-
-    rollback_backend() {
-        echo "Rolling back Wi-Fi backend switch." >&2
-        if ! systemctl disable --now "${new_service}"; then
-            echo "Cannot stop ${new_service}; refusing to start ${old_service}." >&2
-            return 1
-        fi
-        if [[ "${config_existed}" == true ]]; then
-            if ! cp -pf "${config_backup}" "${config_path}"; then
-                echo "Cannot restore ${config_path}; refusing to start ${old_service}." >&2
-                return 1
-            fi
-        else
-            if ! rm -f "${config_path}"; then
-                echo "Cannot remove ${config_path}; refusing to start ${old_service}." >&2
-                return 1
-            fi
-        fi
-        if ! systemctl enable --now "${old_service}"; then
-            echo "Cannot restore ${old_service}; both Wi-Fi backends remain stopped." >&2
-            return 1
-        fi
-        if ! systemctl restart NetworkManager; then
-            echo "Cannot restart NetworkManager after rollback." >&2
-            return 1
-        fi
-        return 0
-    }
-
-    if ! systemctl disable --now "${old_service}"; then
-        echo "Cannot stop ${old_service}; backend was not changed." >&2
-        rm -f "${config_backup}"
-        return 1
-    fi
-    if ! systemctl enable --now "${new_service}"; then
-        echo "Cannot start ${new_service}; restoring ${old_service}." >&2
-        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
-        rm -f "${config_backup}"
-        return 1
-    fi
-
-    config_tmp="$(mktemp "${config_path}.XXXXXX")" || {
-        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
-        rm -f "${config_backup}"
-        return 1
-    }
-    if [[ "${backend}" == "iwd" ]]; then
-        cat > "${config_tmp}" <<'EOF'
-[device]
-wifi.backend=iwd
-wifi.iwd.autoconnect=yes
-wifi.scan-rand-mac-address=no
-EOF
-    else
-        cat > "${config_tmp}" <<'EOF'
-[device]
-wifi.backend=wpa_supplicant
-wifi.scan-rand-mac-address=no
-EOF
-    fi
-    if ! mv -f "${config_tmp}" "${config_path}"; then
-        rm -f "${config_tmp}"
-        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
-        rm -f "${config_backup}"
-        return 1
-    fi
-    if ! systemctl restart NetworkManager; then
-        echo "NetworkManager restart failed; restoring the previous backend." >&2
-        rollback_backend || echo "Wi-Fi backend rollback was incomplete; ${old_service} was not started over ${new_service}." >&2
-        rm -f "${config_backup}"
-        return 1
-    fi
-    rm -f "${config_backup}"
-    echo "Selected Wi-Fi backend: ${backend}"
+usage() {
+    echo "Usage: ming-network-repair --ifname IFACE" >&2
 }
 
-case "${BACKEND}" in
-    --use-iwd)
-        switch_backend iwd || exit $?
-        ;;
-    --use-wpa|"")
-        switch_backend wpa_supplicant || exit $?
-        ;;
-    *)
-        echo "Unknown option: ${BACKEND}" >&2
-        exit 2
-        ;;
-esac
-
-rfkill unblock all 2>/dev/null || true
-sleep 2
-
-echo
-echo "== radios =="
-nmcli radio 2>/dev/null || true
-rfkill list 2>/dev/null || true
-
-echo
-echo "== devices =="
-nmcli device status 2>/dev/null || true
-
-echo
-echo "== Wi-Fi hardware =="
-lspci -nn 2>/dev/null | grep -Ei 'network|wireless|wifi|802\.11|ethernet' || true
-lsusb 2>/dev/null | grep -Ei 'network|wireless|wifi|802\.11|bluetooth|realtek|atheros|broadcom|intel|ralink|mediatek' || true
-
-echo
-echo "== Bluetooth hardware =="
-bluetoothctl list 2>/dev/null || true
-btmgmt info 2>/dev/null || true
-systemctl --no-pager --full status bluetooth 2>/dev/null | sed -n '1,60p' || true
-
-echo
-echo "== missing firmware hints =="
-dmesg 2>/dev/null | grep -Ei 'firmware|iwlwifi|ath|brcm|b43|rtl|rt2|mt76|btusb|bluetooth|failed|missing' | tail -100 || true
-
-if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
-    zenity --text-info --title="Ming OS 网络修复结果" --width=820 --height=620 --filename="${LOG}" 2>/dev/null || true
+if [[ "${1:-}" == "--ifname" ]] && [[ "$#" -eq 2 ]]; then
+    IFNAME="$2"
+else
+    usage
+    exit 2
 fi
+
+if [[ ! "${IFNAME}" =~ ${IFNAME_PATTERN} ]]; then
+    echo "Invalid network interface name." >&2
+    exit 2
+fi
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Network repair requires an authorised local administrator." >&2
+    exit 4
+fi
+
+install -d -m 0755 "$(dirname "${LOG}")"
+touch "${LOG}" || exit 4
+chmod 0600 "${LOG}" 2>/dev/null || true
+exec > >(tee -a "${LOG}") 2>&1
+
+echo "Ming OS interface-scoped Wi-Fi repair"
+date -Is
+printf 'interface=%s\n' "${IFNAME}"
+
+if ! command -v nmcli >/dev/null 2>&1; then
+    echo "NetworkManager client is unavailable." >&2
+    exit 4
+fi
+
+if ! device_rows="$(timeout 5s nmcli -t -f DEVICE,TYPE device status)"; then
+    echo "NetworkManager did not return device status." >&2
+    exit 4
+fi
+if ! printf '%s\n' "${device_rows}" | awk -F: -v ifname="${IFNAME}" '
+    $1 == ifname { type = $2; if (type == "wifi") found = 1 }
+    END { exit found ? 0 : 1 }
+'; then
+    echo "${IFNAME} is missing or is not a Wi-Fi interface." >&2
+    exit 3
+fi
+
+read_state() {
+    timeout 5s nmcli -g GENERAL.STATE device show "${IFNAME}" 2>/dev/null \
+        | sed -n '1p'
+}
+
+is_connected() {
+    local state="$1"
+    [[ "${state}" == 100* ]]
+}
+
+# Request a fresh scan only for the selected Wi-Fi interface. A driver may
+# reject active scanning while associated; that must not tear down a good link.
+if timeout 10s nmcli --wait 8 device wifi rescan ifname "${IFNAME}"; then
+    echo "scan=complete"
+else
+    echo "scan=unavailable"
+fi
+
+state="$(read_state || true)"
+if is_connected "${state}"; then
+    echo "state=connected"
+    echo "The selected Wi-Fi interface is already healthy."
+    exit 0
+fi
+
+# `device connect` activates an existing compatible profile for this device.
+# It does not cycle the Wi-Fi radio or disturb an active wired connection.
+if ! timeout 22s nmcli --wait 20 device connect "${IFNAME}"; then
+    echo "NetworkManager could not reconnect ${IFNAME}." >&2
+    exit 5
+fi
+
+state="$(read_state || true)"
+if ! is_connected "${state}"; then
+    echo "Reconnect finished without a connected readback for ${IFNAME}." >&2
+    exit 5
+fi
+
+echo "state=connected"
+echo "The selected Wi-Fi interface was reconnected."
 NETREPAIR
     chmod 0755 /usr/local/bin/ming-network-repair
 
@@ -1867,7 +1784,7 @@ collect dmesg bash -c 'dmesg | tail -500'
 for src in \
     /tmp/ming-installer \
     /tmp/calamares.log \
-    /tmp/ming-network-repair.log \
+    /var/log/ming-os/network-repair.log \
     /tmp/ming-driver-diagnose.log \
     /var/log/calamares.log \
     /var/log/installer \

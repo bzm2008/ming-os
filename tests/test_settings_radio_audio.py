@@ -127,6 +127,21 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn('["pkexec", "ming-radio-repair", "bluetooth"]', repair)
         self.assertIn("refresh_bluetooth_status()", repair)
 
+    def test_hardware_wifi_repair_is_interface_scoped_without_backend_switch(self):
+        page = function_source("build_hardware", "MingSettings")
+        repair = function_source("on_wifi_repair", "MingSettings")
+
+        self.assertIn("固定使用 wpa_supplicant", page)
+        self.assertNotIn("切换为 iwd", page)
+        self.assertNotIn("--use-iwd", page)
+        self.assertNotIn("--use-wpa", page)
+        self.assertIn("wifi_diagnostic_snapshot", repair)
+        self.assertIn('"--ifname", ifname', repair)
+        self.assertIn("run_capture_async", repair)
+        self.assertIn("wifi_repair_state.accept", repair)
+        self.assertIn("self.wifi_repair_state = GenerationState()", SETTINGS_SOURCE)
+        self.assertIn("self.wifi_repair_state.invalidate()", SETTINGS_SOURCE)
+
     def test_audio_actions_use_the_device_controller_and_present_readable_result(self):
         advanced = function_source("build_advanced", "MingSettings")
         status = function_source("refresh_call_audio_status", "MingSettings")
