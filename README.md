@@ -11,13 +11,13 @@ Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, fami
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
 | ISO | `ming-os-26.4.0-home-amd64.iso` |
-| Size | Build pending; fill from the final ISO |
-| SHA256 | Build pending; fill from the final ISO |
-| Release state | Source and OTA metadata prepared; ISO build pending approval |
+| Size | 1,977,778,176 bytes |
+| SHA256 | `ab76033a215b13debb89eec8bb43a72a43d095ddd85ca1e563067680b4d5f11d` |
+| Release state | ISO and website download published; transactional OTA held for signed metadata |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
-Planned download path after approval and a successful build:
+Official download path:
 
 ```text
 https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download
@@ -45,7 +45,7 @@ parity, and signed discovery responses. Enabling a transport fallback does not
 change manifest, payload, content-index, version, architecture, or signature
 checks; the OTA schema identifiers continue to use the primary contract name.
 
-Planned GitHub release:
+GitHub release:
 
 ```text
 https://github.com/bzm2008/ming-os/releases/tag/v26.4.0
@@ -71,7 +71,7 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.4.0
 - Enables Fcitx5 pinyin input by default for GTK, Qt, and X11 applications.
 - Hardens Wi-Fi and Bluetooth support with NetworkManager, wpa_supplicant, ModemManager, BlueZ, Blueman, RF kill unblocking, and broad firmware coverage.
 - Keeps the desktop installer branded as Ming OS instead of Debian.
-- Publishes OTA metadata only after the final ISO size and SHA256 are known.
+- Publishes transactional OTA metadata only after signed manifest, content index, payload and bootstrap are available; the current discovery endpoint fails closed with `delivery:none`.
 - Keeps older 64-bit CPUs such as first/second/third-generation i3/i5 and E3 V1/V2 class machines in the support target.
 
 ## Core Experience
@@ -113,7 +113,7 @@ ming-update check
 sudo ming-update apply
 ```
 
-Expected public OTA response:
+Legacy website download response (transactional discovery remains separate):
 
 ```json
 {
@@ -125,20 +125,20 @@ Expected public OTA response:
   "download_url": "https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download",
   "checksum": "<FINAL_ISO_SHA256_AFTER_BUILD>",
   "checksum_type": "sha256",
-  "size": "<FINAL_ISO_SIZE_AFTER_BUILD>"
+  "size": 1977778176,
+  "transactional_available": false,
+  "ota_status": "signed-metadata-pending"
 }
 ```
 
 ### 26.3.2 Transition
 
-The 26.3.2 client first installs the official signed bootstrap once. After the
-bootstrap is verified, the existing Ming Settings update button can validate,
-download, stage, and commit 26.4.0 through the transactional path. The
-manifest must explicitly contain `from_versions: ["26.3.2"]`; no manual GRUB
-selection or recovery ISO is required for this supported bridge. Internally
-the transaction engine uses a one-time `grub-reboot` entry and restores the
-normal default after health confirmation. Recovery ISO
-updates retain their independent-backup-media safety gate.
+The 26.3.2 client must first install the official signed bootstrap. The
+transactional path remains unavailable until the release owner publishes and
+verifies a manifest with `from_versions: ["26.3.2"]`, a matching content index,
+payload and detached signatures. Until then the discovery endpoint returns
+`delivery:none`; no manual GRUB or recovery-ISO shortcut is offered. Recovery
+ISO updates retain their independent-backup-media safety gate.
 
 ## GitHub Assets
 
