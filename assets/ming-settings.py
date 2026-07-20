@@ -349,6 +349,13 @@ OTA_ERROR_MESSAGES = {
 }
 
 
+def public_release_version(value):
+    """Hide the fourth, transactional build component from product labels."""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+", text)
+    return match.group(1) if match else text
+
+
 def ota_status_presentation(status):
     """Return a stable presentation model for one frozen CLI JSON response."""
     status = status if isinstance(status, dict) else {}
@@ -392,6 +399,15 @@ def ota_status_presentation(status):
         or message_args.get("version")
         or ""
     )
+    version_formatter = globals().get("public_release_version")
+    if not callable(version_formatter):
+        def version_formatter(value):
+            text = str(value or "")
+            parts = text.split(".")
+            return ".".join(parts[:3]) if len(parts) == 4 and all(
+                part.isdigit() for part in parts) else text
+    current_version = version_formatter(current_version)
+    version = version_formatter(version)
     release_id = str(
         status.get("release_id")
         or transaction.get("release_id")
@@ -2128,8 +2144,12 @@ class MingSettings(Adw.ApplicationWindow):
         try:
             with open("/etc/os-release", encoding="utf-8") as handle:
                 for line in handle:
-                    if line.startswith("VERSION_ID="):
+                    if line.startswith("MING_DISPLAY_VERSION="):
                         cur = line.split("=", 1)[1].strip().strip('"')
+                        break
+                    if line.startswith("VERSION_ID=") and cur == "未知":
+                        cur = public_release_version(
+                            line.split("=", 1)[1].strip().strip('"'))
         except OSError:
             pass
 

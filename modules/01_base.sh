@@ -2372,6 +2372,14 @@ write_file /etc/ming-release <<MINGRELEASE
 Ming OS ${version} 正式版
 MINGRELEASE
 
+write_file /etc/ming-version <<MINGVERSION
+${update_version}
+MINGVERSION
+
+write_file /etc/ming-display-version <<MINGDISPLAYVERSION
+${version}
+MINGDISPLAYVERSION
+
 echo "trixie/sid" > "${target}/etc/debian_version" 2>/dev/null || true
 echo "ming-os" > "${target}/etc/hostname" 2>/dev/null || true
 ln -sf /usr/share/zoneinfo/Asia/Shanghai "${target}/etc/localtime" 2>/dev/null || true

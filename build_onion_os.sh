@@ -2961,7 +2961,7 @@ run_release_preflight() {
 main() {
     echo -e "${GREEN}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║     Ming OS ${MING_OS_VERSION} Home Edition         ║"
+    echo "  ║     Ming OS ${MING_OS_VERSION} 正式版               ║"
     echo "  ║     层层精简，层层用心                    ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"

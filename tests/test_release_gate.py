@@ -256,10 +256,12 @@ class ReleaseGateContracts(unittest.TestCase):
         """Release-critical checks cannot depend on ignored local scratch files."""
         self.assertTrue(SMOKE.is_file())
         self.assertIn('readonly MING_OS_VERSION="26.4.0"', self.build)
+        self.assertIn('readonly MING_OS_UPDATE_VERSION="26.4.0.1"', self.build)
         self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2640"', self.build)
         readme = README.read_text(encoding="utf-8")
-        self.assertIn("# Ming OS 26.4.0 Home Edition", readme)
-        self.assertIn("ming-os-26.4.0-home-amd64.iso", readme)
+        self.assertIn("# Ming OS 26.4.0 正式版", readme)
+        self.assertIn("ming-os-26.4.0-home-amd64-formal.iso", readme)
+        self.assertIn("releases/tag/v26.4.0.1", readme)
 
     def test_release_preflight_is_before_iso_creation(self):
         marker = "ming-release-vault.py preflight --mode release"
@@ -269,14 +271,16 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("MING_RELEASE_PREFLIGHT_CONFIG", self.build)
         self.assertNotRegex(self.build, r"(?:--private-key|--password|MING_RELEASE_PASSWORD)")
 
-    def test_readme_ota_example_is_actionable_and_declares_the_2632_transition_limit(self):
+    def test_readme_ota_example_is_actionable_and_declares_the_transactional_transition(self):
         readme = README.read_text(encoding="utf-8")
         for marker in (
             '"has_update": true',
             '"ready": true',
             '"update_type": "major"',
             "26.3.2",
-            "grub-reboot",
+            '"version": "26.4.0.1"',
+            'from_versions: ["26.3.2", "26.3.3", "26.4.0"]',
+            "no manual GRUB",
         ):
             self.assertIn(marker, readme)
 

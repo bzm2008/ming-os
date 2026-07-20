@@ -1957,7 +1957,7 @@ create_version_file() {
     chmod 644 /etc/ming-version
     chmod 644 /etc/ming-display-version
 
-    cat > /etc/ming-release << RELEASEFILE
+    cat > /etc/os-release << RELEASEOS
 NAME="Ming OS"
 VERSION="${MING_OS_VERSION} 正式版"
 ID=ming-os
@@ -1973,8 +1973,8 @@ VERSION_CODENAME=ming
 DEBIAN_CODENAME=trixie
 OTA_ENABLED=true
 OTA_VERSION=1.2.0
-RELEASEFILE
-    chmod 644 /etc/ming-release
+RELEASEOS
+    install -m 0644 /etc/os-release /etc/ming-release
 }
 
 deploy_passwordless_oobe_migration() {

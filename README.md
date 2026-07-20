@@ -1,4 +1,4 @@
-# Ming OS 26.4.0 Home Edition
+# Ming OS 26.4.0 正式版
 
 Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current release target is `26.4.0`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a stable Ming desktop experience.
 
@@ -6,21 +6,21 @@ Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, fami
 
 | Item | Value |
 | --- | --- |
-| Version | 26.4.0 Home Edition |
+| Version | 26.4.0 正式版（事务版本 26.4.0.1） |
 | Base | Debian 13 / Trixie |
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
-| ISO | `ming-os-26.4.0-home-amd64.iso` |
-| Size | 1,977,778,176 bytes |
-| SHA256 | `ab76033a215b13debb89eec8bb43a72a43d095ddd85ca1e563067680b4d5f11d` |
-| Release state | ISO and website download published; transactional OTA held for signed metadata |
+| ISO | `ming-os-26.4.0-home-amd64-formal.iso` |
+| Size | `<FINAL_ISO_SIZE_AFTER_BUILD>` |
+| SHA256 | `<FINAL_ISO_SHA256_AFTER_BUILD>` |
+| Release state | Formal candidate; website and transactional OTA remain disabled until signed release validation passes |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
 Official download path:
 
 ```text
-https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download
+https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64-formal.download
 ```
 
 OTA endpoint:
@@ -48,7 +48,7 @@ checks; the OTA schema identifiers continue to use the primary contract name.
 GitHub release:
 
 ```text
-https://github.com/bzm2008/ming-os/releases/tag/v26.4.0
+https://github.com/bzm2008/ming-os/releases/tag/v26.4.0.1
 ```
 
 ## What Ming OS Is
@@ -99,7 +99,7 @@ Supported test paths:
 - Direct disk write with `dd`
 
 ```bash
-sudo dd if=ming-os-26.4.0-home-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=ming-os-26.4.0-home-amd64-formal.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 Live/installer mode should enter the Ming OS installer without stopping at a Debian-branded desktop or a username/password prompt. If an old machine fails, record whether it stops before GRUB, at GRUB, while loading the kernel, or inside Calamares.
@@ -118,11 +118,11 @@ Legacy website download response (transactional discovery remains separate):
 ```json
 {
   "has_update": true,
-  "version": "26.4.0",
+  "version": "26.4.0.1",
   "ready": true,
   "status": "ready",
   "update_type": "major",
-  "download_url": "https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64.download",
+  "download_url": "https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64-formal.download",
   "checksum": "<FINAL_ISO_SHA256_AFTER_BUILD>",
   "checksum_type": "sha256",
   "size": 1977778176,
@@ -135,9 +135,10 @@ Legacy website download response (transactional discovery remains separate):
 
 The 26.3.2 client must first install the official signed bootstrap. The
 transactional path remains unavailable until the release owner publishes and
-verifies a manifest with `from_versions: ["26.3.2"]`, a matching content index,
+verifies a manifest with `from_versions: ["26.3.2", "26.3.3", "26.4.0"]`,
+target `version: "26.4.0.1"`, and a matching content index,
 payload and detached signatures. Until then the discovery endpoint returns
-`delivery:none`; no manual GRUB or recovery-ISO shortcut is offered. Recovery
+`delivery:none`; no manual GRUB step or recovery-ISO shortcut is offered. Recovery
 ISO updates retain their independent-backup-media safety gate.
 
 ## GitHub Assets
@@ -145,15 +146,15 @@ ISO updates retain their independent-backup-media safety gate.
 If the ISO is split for GitHub Release assets, merge the parts before writing to USB.
 
 ```bash
-cat ming-os-26.4.0-home-amd64.iso.part* > ming-os-26.4.0-home-amd64.iso
-sha256sum -c ming-os-26.4.0-home-amd64.iso.sha256
+cat ming-os-26.4.0-home-amd64-formal.iso.part* > ming-os-26.4.0-home-amd64-formal.iso
+sha256sum -c ming-os-26.4.0-home-amd64-formal.iso.sha256
 ```
 
 Windows PowerShell:
 
 ```powershell
-cmd /c copy /b ming-os-26.4.0-home-amd64.iso.part01+ming-os-26.4.0-home-amd64.iso.part02 ming-os-26.4.0-home-amd64.iso
-Get-FileHash ming-os-26.4.0-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.4.0-home-amd64-formal.iso.part01+ming-os-26.4.0-home-amd64-formal.iso.part02 ming-os-26.4.0-home-amd64-formal.iso
+Get-FileHash ming-os-26.4.0-home-amd64-formal.iso -Algorithm SHA256
 ```
 
 The merged file must match the SHA256 generated after the final build and

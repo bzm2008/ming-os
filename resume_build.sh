@@ -271,7 +271,13 @@ resume_main() {
     if [[ "${SCRIPT_DIR}" == /mnt/* ]]; then
         local win_output="${SCRIPT_DIR}/output"
         mkdir -p "${win_output}"
-        local iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
+        local suffix="${MING_OS_BUILD_SUFFIX}"
+        local iso_name
+        if [[ -n "${suffix}" ]]; then
+            iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${suffix}.iso"
+        else
+            iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
+        fi
         if [[ -f "${OUTPUT_DIR}/${iso_name}" ]]; then
             cp "${OUTPUT_DIR}/${iso_name}" "${win_output}/${iso_name}"
             log_info "ISO 已复制到 Windows: ${win_output}/${iso_name}"

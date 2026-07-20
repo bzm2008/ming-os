@@ -105,6 +105,23 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         }.items():
             result = presenter({"schema": "ming.update.cli.v1", "state": state})
             self.assertEqual(expected, result["title"])
+
+    def test_formal_build_revision_is_not_exposed_as_a_product_version(self):
+        presenter = ota_presenter(self.settings)
+        result = presenter({
+            "schema": "ming.update.cli.v1",
+            "ok": True,
+            "state": "new",
+            "current_version": "26.4.0.1",
+            "available_version": "26.4.0.2",
+            "available": True,
+            "ready": False,
+        })
+
+        self.assertIn("当前版本：Ming OS 26.4.0", result["detail"])
+        self.assertIn("目标版本：Ming OS 26.4.0", result["detail"])
+        self.assertNotIn("26.4.0.1", result["detail"])
+        self.assertNotIn("26.4.0.2", result["detail"])
         self.assertNotEqual(
             "更新已完成",
             presenter({"schema": "ming.update.cli.v1", "state": "staged"})["title"],
