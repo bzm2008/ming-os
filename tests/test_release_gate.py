@@ -340,6 +340,23 @@ class ReleaseGateContracts(unittest.TestCase):
         )
         self.assertIn(expected_order, main)
 
+    def test_resume_atomically_seeds_a_matching_installer_and_common_runtime(self):
+        resume = RESUME.read_text(encoding="utf-8")
+        seed = resume.split("seed_resume_package_installer() {", 1)[1].split(
+            "\n}\n\nensure_resume_runtime_packages", 1
+        )[0]
+
+        self.assertIn("ming-package-installer.py", seed)
+        self.assertIn("ming-shell-common.py", seed)
+        self.assertIn("REQUIRED_COMMON_SHA256", seed)
+        self.assertIn("mktemp -d", seed)
+        self.assertIn("mv -T", seed)
+        main = resume.split("resume_main() {", 1)[1].split("resume_main \"$@\"", 1)[0]
+        self.assertLess(
+            main.index("seed_resume_package_installer"),
+            main.index('"02_apps.sh"'),
+        )
+
     def test_resume_settles_every_module_and_rejects_dpkg_audit_output(self):
         resume = RESUME.read_text(encoding="utf-8")
         module_loop = resume.split('for mod in "${modules[@]}"; do', 1)[1].split("done", 1)[0]

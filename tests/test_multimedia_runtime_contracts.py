@@ -55,6 +55,27 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertIn("ming-package-installer install", installer)
         self.assertIn("ming-phone-desktop --sync", installer)
         self.assertIn("update-desktop-database", installer)
+
+    def test_spark_launcher_uses_only_the_vendor_wrapper(self):
+        wrapper = APPS.split(
+            "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'", 1
+        )[1].split("MINGSPARK", 1)[0]
+
+        self.assertIn("/usr/local/bin/spark-store", wrapper)
+        self.assertNotIn("/usr/bin/spark-store", wrapper)
+        self.assertNotIn("/opt/spark-store", wrapper)
+
+    def test_spark_install_rejects_json_without_launch_readiness(self):
+        installer = APPS.split(
+            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'", 1
+        )[1].split("SPARKINSTALL", 1)[0]
+
+        self.assertIn('result.get("launch_ready") is True', installer)
+        self.assertIn("E_LAUNCH_NOT_READY", installer)
+        self.assertLess(
+            installer.index('result.get("launch_ready") is True'),
+            installer.index('echo "Spark Store installed."'),
+        )
         self.assertIn("target_user=", installer)
         self.assertIn("getent passwd", installer)
 

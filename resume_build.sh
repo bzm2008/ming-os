@@ -23,19 +23,79 @@ echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
 seed_resume_package_installer() {
-    local source="/tmp/ming-build/assets/ming-package-installer.py"
-    if ! chroot_exec test -s "${source}"; then
-        log_error "resume 构建缺少受控的 ming-package-installer 资产"
+    local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
+    local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
+    local current_link="/usr/local/lib/ming-os/package-installer-current"
+    local stage contract required_common_sha actual_common_sha target
+    if ! chroot_exec test -s "${installer_source}" \
+        || ! chroot_exec test -s "${common_source}"; then
+        log_error "resume 构建缺少受控的 ming-package-installer/ming-shell-common 资产"
         return 1
     fi
-    if ! chroot_exec install -m 0755 "${source}" /usr/local/sbin/ming-package-installer; then
-        log_error "resume 构建无法部署当前 ming-package-installer"
+    contract="$(chroot_exec python3 - "${installer_source}" <<'PY'
+import ast
+import pathlib
+import sys
+
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+values = {
+    node.targets[0].id: ast.literal_eval(node.value)
+    for node in tree.body
+    if isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+    and node.targets[0].id in {"PACKAGE_INSTALLER_CONTRACT", "REQUIRED_COMMON_SHA256"}
+}
+print(values.get("PACKAGE_INSTALLER_CONTRACT", ""))
+print(values.get("REQUIRED_COMMON_SHA256", ""))
+PY
+)" || return 1
+    required_common_sha="$(printf '%s\n' "${contract}" | sed -n '2p')"
+    contract="$(printf '%s\n' "${contract}" | sed -n '1p')"
+    if [[ ! "${contract}" =~ ^[a-z0-9.-]+$ \
+        || ! "${required_common_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        log_error "resume 构建的安装器版本契约无效"
         return 1
     fi
-    if ! chroot_exec python3 -m py_compile /usr/local/sbin/ming-package-installer; then
-        log_error "resume 构建部署的 ming-package-installer 语法校验失败"
+    actual_common_sha="$(chroot_exec sha256sum "${common_source}" | awk '{print $1}')"
+    if [[ "${actual_common_sha}" != "${required_common_sha}" ]]; then
+        log_error "resume 构建拒绝旧版或不匹配的 ming-shell-common"
         return 1
     fi
+
+    chroot_exec mkdir -p "${runtime_root}" /usr/local/sbin
+    stage="$(chroot_exec mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
+    if ! chroot_exec install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
+        || ! chroot_exec install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
+        || ! chroot_exec python3 -m py_compile "${stage}/ming-package-installer" \
+        || ! chroot_exec python3 "${stage}/ming-package-installer" --help >/dev/null; then
+        chroot_exec rm -rf "${stage}" || true
+        log_error "resume 构建的安装器运行时校验失败"
+        return 1
+    fi
+
+    target="${runtime_root}/${contract}"
+    if chroot_exec test -e "${target}"; then
+        chroot_exec rm -rf "${stage}"
+    else
+        chroot_exec mv -T "${stage}" "${target}"
+    fi
+    chroot_exec ln -sfn "${target}" "${current_link}.new"
+    chroot_exec mv -Tf "${current_link}.new" "${current_link}"
+    chroot_exec ln -sfn \
+        "${current_link}/ming-package-installer" \
+        /usr/local/sbin/.ming-package-installer.new
+    chroot_exec mv -Tf \
+        /usr/local/sbin/.ming-package-installer.new \
+        /usr/local/sbin/ming-package-installer
+    chroot_exec ln -sfn \
+        "${current_link}/ming-shell-common.py" \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new
+    chroot_exec mv -Tf \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new \
+        /usr/local/lib/ming-os/ming-shell-common.py
+    chroot_exec python3 -m py_compile /usr/local/sbin/ming-package-installer
 }
 
 ensure_resume_runtime_packages() {

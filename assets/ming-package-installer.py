@@ -3,6 +3,7 @@
 
 import argparse
 import configparser
+import hashlib
 import importlib.util
 import json
 import pathlib
@@ -21,6 +22,15 @@ VERSION_PATTERN = re.compile(r"^[0-9A-Za-z.+:~\-]+$")
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 SHELL_WRAPPER_REJECTION = "shell command wrappers are not allowed"
 PACKAGE_INSTALLER_PATH = "/usr/local/sbin/ming-package-installer"
+PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v1"
+REQUIRED_COMMON_SHA256 = "cc2e34b62e6ab9cac74164dd51c2b5218d016f42500f80017931ce7d6f3b6ad1"
+PACKAGE_MANAGER_LOCK = "/run/lock/ming-package-manager.lock"
+PACKAGE_MANAGER_LOCK_TIMEOUT = 30
+DPKG_LOCK_TIMEOUT = 60
+PACKAGE_MANAGER_BUSY_EXIT = 75
+E_PACKAGE_BUSY = "E_PACKAGE_BUSY"
+E_RESOLVER_FAILED = "E_RESOLVER_FAILED"
+E_LAUNCH_NOT_READY = "E_LAUNCH_NOT_READY"
 
 
 def _common_paths(program_path=None, install_prefix=None):
@@ -39,6 +49,9 @@ def _load_common(program_path=None, install_prefix=None):
         try:
             path = path.resolve(strict=True)
             if not path.is_file():
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != REQUIRED_COMMON_SHA256:
                 continue
             spec = importlib.util.spec_from_file_location(
                 "ming_shell_common_for_package_installer", path)
@@ -97,6 +110,7 @@ class PackageInstaller:
             "version": "",
             "architecture": "",
             "error": "",
+            "error_code": "",
             "state": "",
             "log_path": str(self.log_path),
             "launchers": [],
@@ -206,19 +220,39 @@ class PackageInstaller:
         )
 
     @staticmethod
+    def _locked_apt_command(*arguments):
+        return (
+            "flock", "--exclusive", "--timeout", str(PACKAGE_MANAGER_LOCK_TIMEOUT),
+            "--conflict-exit-code", str(PACKAGE_MANAGER_BUSY_EXIT),
+            PACKAGE_MANAGER_LOCK,
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            "-o", "DPkg::Lock::Timeout=%s" % DPKG_LOCK_TIMEOUT,
+            *tuple(str(value) for value in arguments),
+        )
+
+    @staticmethod
     def _apt_install_command(package_file):
-        return ("apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package_file))
+        return PackageInstaller._locked_apt_command("install", package_file)
 
     @staticmethod
     def _apt_fix_command():
-        return ("apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-f", "install")
+        return PackageInstaller._locked_apt_command("-f", "install")
 
     @staticmethod
     def _apt_reinstall_command(package):
-        return (
-            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
-            "install", package,
+        return PackageInstaller._locked_apt_command("--reinstall", "install", package)
+
+    @staticmethod
+    def _apt_failure_code(returncode, output="", error=""):
+        detail = "%s\n%s" % (output or "", error or "")
+        lock_markers = (
+            "could not get lock", "unable to acquire the dpkg frontend lock",
+            "package manager lock is busy", "resource temporarily unavailable",
         )
+        if int(returncode) == PACKAGE_MANAGER_BUSY_EXIT or any(
+                marker in detail.casefold() for marker in lock_markers):
+            return E_PACKAGE_BUSY
+        return E_RESOLVER_FAILED
 
     def _installed(self, package):
         command = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", package)
@@ -521,21 +555,25 @@ class PackageInstaller:
             )
 
         command = self._apt_install_command(inspected["file"])
-        returncode, _output, error = self._call(command, timeout=180)
+        returncode, output, error = self._call(command, timeout=180)
         dependency_repair_attempted = False
-        if returncode != 0:
+        failure_code = self._apt_failure_code(returncode, output, error)
+        if returncode != 0 and failure_code != E_PACKAGE_BUSY:
             dependency_repair_attempted = True
-            fix_code, _fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
+            fix_code, fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
             if fix_code == 0:
-                returncode, _output, error = self._call(command, timeout=180)
+                returncode, output, error = self._call(command, timeout=180)
             else:
+                returncode, output = fix_code, fix_output
                 error = fix_error or error
         if returncode != 0:
+            failure_code = self._apt_failure_code(returncode, output, error)
             self._log("install failed for %s: %s" % (inspected["file"], error.strip()))
             return self._result(
                 False,
                 action="install",
                 state="install_failed",
+                error_code=failure_code,
                 dependency_repair_attempted=dependency_repair_attempted,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
                 error="安装 DEB 软件包失败：%s" % (error.strip() or "apt-get 失败"),
@@ -573,6 +611,7 @@ class PackageInstaller:
             launchers=launchers,
             launcher_warnings=launcher_warnings,
             error=launch_error,
+            error_code=E_LAUNCH_NOT_READY if not launch_ready else "",
             repair_argv=(self._repair_argv(inspected["package"])
                          if not launch_ready else []),
             **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
@@ -596,21 +635,25 @@ class PackageInstaller:
                 error="修复软件包需要管理员权限。",
             )
         command = self._apt_reinstall_command(package)
-        returncode, _output, error = self._call(command, timeout=180)
+        returncode, output, error = self._call(command, timeout=180)
         dependency_repair_attempted = False
-        if returncode != 0:
+        failure_code = self._apt_failure_code(returncode, output, error)
+        if returncode != 0 and failure_code != E_PACKAGE_BUSY:
             dependency_repair_attempted = True
-            fix_code, _fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
+            fix_code, fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
             if fix_code == 0:
-                returncode, _output, error = self._call(command, timeout=180)
+                returncode, output, error = self._call(command, timeout=180)
             else:
+                returncode, output = fix_code, fix_output
                 error = fix_error or error
         if returncode != 0:
+            failure_code = self._apt_failure_code(returncode, output, error)
             self._log("repair failed for %s: %s" % (package, error.strip()))
             return self._result(
                 False,
                 action="repair",
                 state="repair_failed",
+                error_code=failure_code,
                 package=package,
                 dependency_repair_attempted=dependency_repair_attempted,
                 error="修复软件包失败：%s" % (error.strip() or "apt-get 失败"),
@@ -648,6 +691,7 @@ class PackageInstaller:
             launchers=launchers,
             launcher_warnings=launcher_warnings,
             error=launch_error,
+            error_code=E_LAUNCH_NOT_READY if not launch_ready else "",
             repair_argv=self._repair_argv(package) if not launch_ready else [],
         )
 

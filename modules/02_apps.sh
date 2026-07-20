@@ -1766,7 +1766,37 @@ fi
 # refreshes desktop/icon caches.  During the early image build 03_desktop has
 # not deployed it yet, so retain a strictly verified bootstrap fallback.
 if [[ -x /usr/local/sbin/ming-package-installer ]]; then
-    /usr/local/sbin/ming-package-installer install "${deb}" | tee -a "${log}"
+    result_file="$(mktemp /tmp/ming-spark-install-result.XXXXXX)"
+    if ! /usr/local/sbin/ming-package-installer install "${deb}" >"${result_file}"; then
+        cat "${result_file}" | tee -a "${log}" >&2
+        rm -f "${result_file}"
+        exit 1
+    fi
+    cat "${result_file}" >>"${log}"
+    if ! python3 - "${result_file}" <<'SPARKRESULTPY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as stream:
+        result = json.load(stream)
+except (OSError, TypeError, ValueError):
+    result = {}
+if not isinstance(result, dict) or result.get("ok") is not True:
+    print(str(result.get("error_code") or "E_RESOLVER_FAILED"), file=sys.stderr)
+    raise SystemExit(1)
+if result.get("launch_ready") is True:
+    raise SystemExit(0)
+print(str(result.get("error_code") or "E_LAUNCH_NOT_READY"), file=sys.stderr)
+raise SystemExit(1)
+SPARKRESULTPY
+    then
+        cat "${result_file}" >&2
+        rm -f "${result_file}"
+        exit 1
+    fi
+    cat "${result_file}"
+    rm -f "${result_file}"
 else
     apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1 \
         || { apt-get -y -o Dpkg::Use-Pty=0 -f install >>"${log}" 2>&1 && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1; }
@@ -1816,15 +1846,9 @@ set -u
 MING_SPARK_LOG="${HOME}/.cache/ming-os/spark-store.log"
 mkdir -p "$(dirname "${MING_SPARK_LOG}")" 2>/dev/null || MING_SPARK_LOG="/tmp/ming-spark-store.log"
 
-spark_bin=""
-for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do
-    if [[ -x "${candidate}" ]]; then
-        spark_bin="${candidate}"
-        break
-    fi
-done
+spark_bin="/usr/local/bin/spark-store"
 
-if [[ -z "${spark_bin}" ]]; then
+if [[ ! -x "${spark_bin}" ]]; then
     notify-send -i dialog-error "星火应用商店" "应用商店尚未安装，请从应用库运行“修复星火应用商店”。" 2>/dev/null || true
     printf '[%s] Spark Store binary is missing\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
     if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/bin/ming-install-spark-store ]]; then

@@ -39,14 +39,23 @@ def metadata_output(package_name, version="1.2.3", architecture="amd64"):
             package_name, version, architecture))
 
 
+def locked_apt_command(*arguments):
+    return (
+        "flock", "--exclusive", "--timeout", "30",
+        "--conflict-exit-code", "75",
+        "/run/lock/ming-package-manager.lock",
+        "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+        "-o", "DPkg::Lock::Timeout=60",
+        *tuple(str(value) for value in arguments),
+    )
+
+
 def successful_install_runner(package_file, package_name, desktop_paths=()):
     metadata = (
         "dpkg-deb", "--field", str(package_file),
         "Package", "Version", "Architecture",
     )
-    apt_install = (
-        "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package_file),
-    )
+    apt_install = locked_apt_command("install", package_file)
     verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", package_name)
     list_files = ("dpkg-query", "-L", package_name)
     refresh_desktops = ("update-desktop-database", "/usr/share/applications")
@@ -229,6 +238,62 @@ class PackageInstallerInspectTests(unittest.TestCase):
         self.assertIn("超时", result["error"])
 
 
+class PackageInstallerTransactionTests(unittest.TestCase):
+    def test_all_apt_commands_share_the_ming_package_manager_lock(self):
+        installer = load_installer()
+        commands = (
+            installer.PackageInstaller._apt_install_command("/tmp/sample.deb"),
+            installer.PackageInstaller._apt_fix_command(),
+            installer.PackageInstaller._apt_reinstall_command("sample-app"),
+        )
+
+        for command in commands:
+            self.assertEqual("flock", command[0])
+            self.assertIn("/run/lock/ming-package-manager.lock", command)
+            self.assertIn("DPkg::Lock::Timeout=60", command)
+            self.assertIn("apt-get", command)
+
+    def test_launch_problem_has_a_stable_machine_error_code(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "data-only-app.deb"
+            package.write_bytes(b"local package")
+            result = installer.PackageInstaller(
+                runner=successful_install_runner(package, "data-only-app"),
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["launch_ready"])
+        self.assertEqual("E_LAUNCH_NOT_READY", result["error_code"])
+
+    def test_package_lock_conflict_is_not_reported_as_a_resolver_failure(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "busy-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = installer.PackageInstaller._apt_install_command(package)
+            runner = FakeRunner({
+                metadata: (0, metadata_output("busy-app"), ""),
+                apt_install: (75, "", "package manager lock is busy"),
+            })
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("E_PACKAGE_BUSY", result["error_code"])
+        self.assertNotIn(installer.PackageInstaller._apt_fix_command(), runner.commands)
+
+
 class PackageInstallerInstallTests(unittest.TestCase):
     def test_install_reports_a_readable_launcher_warning_when_exec_is_missing(self):
         installer = load_installer()
@@ -246,9 +311,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
-            )
+            apt_install = locked_apt_command("install", package)
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
@@ -562,12 +625,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
-            )
-            fix_dependencies = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-f", "install",
-            )
+            apt_install = locked_apt_command("install", package)
+            fix_dependencies = locked_apt_command("-f", "install")
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
@@ -630,9 +689,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "dpkg-deb", "--field", str(package),
                 "Package", "Version", "Architecture",
             )
-            apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
-            )
+            apt_install = locked_apt_command("install", package)
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             runner = FakeRunner({
                 metadata: (0, metadata_output("sample-app"), ""),
@@ -924,10 +981,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
     def test_repair_reinstalls_package_and_refreshes_desktop_entries(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
-            reinstall = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
-                "install", "sample-app",
-            )
+            reinstall = locked_apt_command("--reinstall", "install", "sample-app")
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
@@ -964,10 +1018,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
                 "Exec=/opt/sample-app/missing\n",
                 encoding="utf-8",
             )
-            reinstall = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
-                "install", "sample-app",
-            )
+            reinstall = locked_apt_command("--reinstall", "install", "sample-app")
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
@@ -1003,12 +1054,27 @@ class PackageInstallerLauncherTests(unittest.TestCase):
             program.parent.mkdir(parents=True)
             common.parent.mkdir(parents=True)
             program.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            common.write_text("loaded_from_installed_library = True\n", encoding="utf-8")
+            common.write_bytes((ROOT / "assets" / "ming-shell-common.py").read_bytes())
 
             loaded = installer._load_common(program_path=program, install_prefix=prefix)
 
         self.assertIsNotNone(loaded)
-        self.assertTrue(loaded.loaded_from_installed_library)
+        self.assertTrue(callable(loaded.parse_desktop_file))
+
+    def test_common_loader_rejects_an_old_unmatched_library_copy(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = pathlib.Path(directory) / "usr" / "local"
+            program = prefix / "sbin" / "ming-package-installer"
+            common = prefix / "lib" / "ming-os" / "ming-shell-common.py"
+            program.parent.mkdir(parents=True)
+            common.parent.mkdir(parents=True)
+            program.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            common.write_text("old_contract = True\n", encoding="utf-8")
+
+            loaded = installer._load_common(program_path=program, install_prefix=prefix)
+
+        self.assertIsNone(loaded)
 
     def test_normal_direct_launcher_is_marked_ready_for_direct_activation(self):
         installer = load_installer()
