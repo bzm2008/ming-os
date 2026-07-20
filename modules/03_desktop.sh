@@ -220,14 +220,39 @@ MINGMIGRATEAUTO
 install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
+    local installer_contract="ming-package-installer-26.4.0-v4"
+    local installer_target="/usr/local/lib/ming-os/package-installer-runtimes/${installer_contract}/ming-package-installer"
+    local installer_asset="${asset_dir}/ming-package-installer.py"
+    local installer_resolved installer_meta installer_expected_sha installer_actual_sha
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
         fi
     done
+
+    if [[ ! -s "${installer_asset}" || -L "${installer_asset}" ]]; then
+        echo "ERROR: missing controlled Ming package installer asset" >&2
+        return 1
+    fi
+    if [[ ! -L /usr/local/sbin/ming-package-installer ]]; then
+        echo "ERROR: Ming package installer versioned symlink is missing" >&2
+        return 1
+    fi
+    installer_resolved="$(readlink -f -- /usr/local/sbin/ming-package-installer 2>/dev/null || true)"
+    installer_meta="$(stat -c '%a:%u:%g' -- "${installer_target}" 2>/dev/null || true)"
+    installer_expected_sha="$(sha256sum -- "${installer_asset}" 2>/dev/null | awk '{print $1}')"
+    installer_actual_sha="$(sha256sum -- "${installer_target}" 2>/dev/null | awk '{print $1}')"
+    if [[ "${installer_resolved}" != "${installer_target}" \
+        || ! -f "${installer_target}" || -L "${installer_target}" \
+        || "${installer_meta}" != "755:0:0" \
+        || ! "${installer_expected_sha}" =~ ^[a-f0-9]{64}$ \
+        || "${installer_actual_sha}" != "${installer_expected_sha}" ]]; then
+        echo "ERROR: Ming package installer versioned runtime is unsafe" >&2
+        return 1
+    fi
 
     install -m 0644 "${asset_dir}/ming-shell-common.py" "${lib_dir}/ming-shell-common.py"
     install -m 0644 "${asset_dir}/ming-notifications.py" "${lib_dir}/ming-notifications.py"
@@ -243,7 +268,6 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
-    install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
     install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
     install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
     install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync

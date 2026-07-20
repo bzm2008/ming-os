@@ -373,7 +373,7 @@ os.readlink = _ming_test_readlink
 
 class RequiredRuntimeDependencyContracts(unittest.TestCase):
     def test_package_installer_is_deployed_and_final_thunar_menu_offers_deb_install(self):
-        self.assertIn("ming-package-installer.py", DESKTOP)
+        self.assertIn("ming-package-installer-26.4.0-v4", DESKTOP)
         self.assertIn("/usr/local/sbin/ming-package-installer", DESKTOP)
         self.assertIn("/usr/local/bin/ming-package-install-gui", DESKTOP)
         self.assertIn("zenity --info", DESKTOP)
@@ -389,6 +389,38 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("以管理员身份编辑", final_menu)
         self.assertIn("以管理员身份打开", final_menu)
         self.assertNotIn("Garlic Claw", final_menu)
+
+    def test_desktop_module_preserves_the_versioned_package_installer_symlink(self):
+        function = DESKTOP.split("install_ming_shell_components() {", 1)[1].split(
+            "\n# ========================", 1)[0]
+
+        self.assertNotIn(
+            'install -m 0755 "${asset_dir}/ming-package-installer.py" '
+            '/usr/local/sbin/ming-package-installer',
+            function,
+        )
+        self.assertNotIn(
+            "ming-package-installer.py ming-spark-package-helper.py", function)
+        for marker in (
+            'installer_contract="ming-package-installer-26.4.0-v4"',
+            'installer_target="/usr/local/lib/ming-os/package-installer-runtimes/'
+            '${installer_contract}/ming-package-installer"',
+            '! -L /usr/local/sbin/ming-package-installer',
+            'readlink -f -- /usr/local/sbin/ming-package-installer',
+            '"${installer_resolved}" != "${installer_target}"',
+            '! -f "${installer_target}" || -L "${installer_target}"',
+            'stat -c \'%a:%u:%g\' -- "${installer_target}"',
+            '"${installer_meta}" != "755:0:0"',
+            'sha256sum -- "${installer_asset}"',
+            'sha256sum -- "${installer_target}"',
+            '"${installer_actual_sha}" != "${installer_expected_sha}"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, function)
+        self.assertIn(
+            'install -m 0755 "${asset_dir}/ming-spark-package-helper.py"', function)
+        self.assertIn(
+            "cat > /usr/local/bin/ming-package-install-gui", function)
 
     def test_full_build_uses_the_same_immutable_installer_runtime_as_resume(self):
         marker = "deploy_package_installer_runtime() {"

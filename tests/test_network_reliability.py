@@ -1,8 +1,10 @@
 import base64
 import importlib.util
+import inspect
 import json
 import pathlib
 import os
+import re
 import types
 import unittest
 import tempfile
@@ -18,6 +20,51 @@ def load_device_control():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def async_timeout_backend(device_module):
+    state = types.SimpleNamespace(
+        timeout_callback=None,
+        timeout_id=73,
+        removed=[],
+        callback=None,
+        cancellable=None,
+        cancel_calls=0,
+        finisher_calls=0,
+        quit_calls=0,
+    )
+
+    class Cancellable:
+        def cancel(self):
+            state.cancel_calls += 1
+
+    cancellable = Cancellable()
+
+    class Loop:
+        def run(self):
+            state.timeout_callback()
+
+        def quit(self):
+            state.quit_calls += 1
+
+    def timeout_add(_milliseconds, callback):
+        state.timeout_callback = callback
+        return state.timeout_id
+
+    def source_remove(source_id):
+        state.removed.append(source_id)
+        return True
+
+    backend = device_module.NetworkManagerBackend()
+    backend.client = types.SimpleNamespace(get_manager_running=lambda: True)
+    backend.GLib = types.SimpleNamespace(
+        MainLoop=Loop,
+        timeout_add=timeout_add,
+        source_remove=source_remove,
+    )
+    backend.Gio = types.SimpleNamespace(
+        Cancellable=types.SimpleNamespace(new=lambda: cancellable))
+    return backend, state
 
 
 class NetworkReliabilityContracts(unittest.TestCase):
@@ -93,6 +140,80 @@ class NetworkReliabilityContracts(unittest.TestCase):
                  "channel": None}]
         networks = self.device.DeviceController._normalise_wifi_rows(rows)
         self.assertEqual(36, networks[0]["channel"])
+
+    def test_libnm_timeout_cancels_operation_and_self_removes_timeout_source(self):
+        backend, state = async_timeout_backend(self.device)
+
+        def starter(callback, cancellable):
+            state.callback = callback
+            state.cancellable = cancellable
+
+        def finisher(_result):
+            state.finisher_calls += 1
+            return "late-success"
+
+        result = backend._run_async(starter, finisher, timeout=0.01)
+
+        self.assertFalse(result[0])
+        self.assertIn("超时", result[1])
+        self.assertEqual(1, state.cancel_calls)
+        self.assertEqual([], state.removed)
+        self.assertIsNotNone(state.cancellable)
+
+    def test_libnm_success_removes_the_still_pending_timeout_source(self):
+        backend, state = async_timeout_backend(self.device)
+
+        def starter(callback, cancellable):
+            state.callback = callback
+            state.cancellable = cancellable
+            callback(None, object(), None)
+
+        def finisher(_result):
+            state.finisher_calls += 1
+            return "connected"
+
+        result = backend._run_async(starter, finisher, timeout=1)
+
+        self.assertEqual((True, "connected"), result)
+        self.assertEqual(1, state.finisher_calls)
+        self.assertEqual(0, state.cancel_calls)
+        self.assertEqual([state.timeout_id], state.removed)
+
+    def test_libnm_late_callback_after_timeout_cannot_finish_or_change_result(self):
+        backend, state = async_timeout_backend(self.device)
+
+        def starter(callback, cancellable):
+            state.callback = callback
+            state.cancellable = cancellable
+
+        def finisher(_result):
+            state.finisher_calls += 1
+            return "late-success"
+
+        result = backend._run_async(starter, finisher, timeout=0.01)
+        self.assertIsNotNone(state.callback)
+        state.callback(None, object(), None)
+
+        self.assertEqual((False, "NetworkManager 操作超时"), result)
+        self.assertEqual(0, state.finisher_calls)
+        self.assertEqual(1, state.cancel_calls)
+        self.assertEqual([], state.removed)
+
+    def test_every_libnm_async_starter_receives_the_same_cancellable(self):
+        scan = inspect.getsource(self.device.NetworkManagerBackend.wifi_scan)
+        wifi = inspect.getsource(self.device.NetworkManagerBackend.wifi_connect)
+        ethernet = inspect.getsource(self.device.NetworkManagerBackend.ethernet_repair)
+        scan = re.sub(r"\s+", "", scan)
+        wifi = re.sub(r"\s+", "", wifi)
+        ethernet = re.sub(r"\s+", "", ethernet)
+
+        self.assertIn("requester({},cancellable,done,None)", scan)
+        self.assertIn(
+            "connection,device,ap.get_path(),cancellable,done,None", wifi)
+        self.assertIn(
+            "activate_connection_async(remote,device,None,cancellable,done,None)",
+            ethernet,
+        )
 
     def test_wifi_connect_uses_network_id_and_secret_only_on_stdin(self):
         class Backend:
@@ -192,7 +313,7 @@ class NetworkReliabilityContracts(unittest.TestCase):
             "_ap": FakeAccessPoint(),
         }]
         backend._run_async = lambda starter, _finisher, timeout=30: (
-            starter(lambda *_args: None) or (True, object()))
+            starter(lambda *_args: None, object()) or (True, object()))
         backend._wait_device_connected = lambda _device, timeout=30: (True, "")
         network_id = self.device.make_network_id("wlan0", bssid, raw_ssid)
 

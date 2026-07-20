@@ -401,18 +401,21 @@ class NetworkManagerBackend:
         self.sysfs_root = Path(sysfs_root)
         self.NM = None
         self.GLib = None
+        self.Gio = None
         self.client = None
         self._carrier_snapshots = {}
         try:
             import gi
             gi.require_version("NM", "1.0")
-            from gi.repository import GLib, NM
+            from gi.repository import Gio, GLib, NM
             self.NM = NM
             self.GLib = GLib
+            self.Gio = Gio
             self.client = NM.Client.new(None)
         except Exception:
             self.NM = None
             self.GLib = None
+            self.Gio = None
             self.client = None
 
     def available(self):
@@ -564,7 +567,8 @@ class NetworkManagerBackend:
                 continue
             try:
                 self._run_async(
-                    lambda done, requester=requester: requester({}, None, done, None),
+                    lambda done, cancellable, requester=requester: requester(
+                        {}, cancellable, done, None),
                     lambda result, finisher=finisher: finisher(result), timeout=5)
             except Exception:
                 pass
@@ -626,31 +630,65 @@ class NetworkManagerBackend:
         return default, "NetworkManager 未返回可读原因", True
 
     def _run_async(self, starter, finisher, timeout=30):
-        if not self.available() or self.GLib is None:
+        if not self.available() or self.GLib is None or self.Gio is None:
             return False, "libnm unavailable"
-        loop = self.GLib.MainLoop()
-        result = {"done": False, "value": None, "error": ""}
+        try:
+            cancellable = self.Gio.Cancellable.new()
+            loop = self.GLib.MainLoop()
+        except Exception as exc:
+            return False, str(exc)
+        result = {"terminal": False, "value": None, "error": ""}
+        timeout_source = None
+        timeout_fired = False
+
+        def cancel():
+            try:
+                cancellable.cancel()
+            except Exception:
+                pass
 
         def finish(_source, async_result, _user_data=None):
+            if result["terminal"]:
+                return
             try:
                 result["value"] = finisher(async_result)
             except Exception as exc:  # pragma: no cover - GI version dependent
                 result["error"] = str(exc)
-            result["done"] = True
-            loop.quit()
+            finally:
+                result["terminal"] = True
+                loop.quit()
 
         def expire():
-            if not result["done"]:
-                result["error"] = "NetworkManager 操作超时"
-                loop.quit()
+            nonlocal timeout_fired
+            timeout_fired = True
+            if result["terminal"]:
+                return False
+            result["terminal"] = True
+            result["error"] = "NetworkManager 操作超时"
+            cancel()
+            loop.quit()
             return False
 
         try:
-            starter(finish)
-            self.GLib.timeout_add(int(timeout * 1000), expire)
-            loop.run()
+            timeout_source = self.GLib.timeout_add(int(timeout * 1000), expire)
+            starter(finish, cancellable)
+            if not result["terminal"]:
+                loop.run()
+            if not result["terminal"]:
+                result["terminal"] = True
+                result["error"] = "NetworkManager 操作未完成"
+                cancel()
         except Exception as exc:
-            result["error"] = str(exc)
+            if not result["terminal"]:
+                result["terminal"] = True
+                result["error"] = str(exc)
+                cancel()
+        finally:
+            if timeout_source is not None and not timeout_fired:
+                try:
+                    self.GLib.source_remove(timeout_source)
+                except Exception:
+                    pass
         if result["error"]:
             return False, result["error"]
         return True, result["value"]
@@ -719,9 +757,9 @@ class NetworkManagerBackend:
             device = target["_device"]
             ap = target["_ap"]
 
-            def start(done):
+            def start(done, cancellable):
                 self.client.add_and_activate_connection_async(
-                    connection, device, ap.get_path(), None, done, None)
+                    connection, device, ap.get_path(), cancellable, done, None)
 
             def finish(async_result):
                 return self.client.add_and_activate_connection_finish(async_result)
@@ -882,8 +920,9 @@ class NetworkManagerBackend:
             return network_result(False, "disconnected", "profile_missing", "该接口没有可自动连接的网络配置。", True,
                                   devices=[])
         try:
-            def start(done):
-                self.client.activate_connection_async(remote, device, None, None, done, None)
+            def start(done, cancellable):
+                self.client.activate_connection_async(
+                    remote, device, None, cancellable, done, None)
             def finish(async_result):
                 return self.client.activate_connection_finish(async_result)
             ok, value = self._run_async(start, finish, timeout=8)
