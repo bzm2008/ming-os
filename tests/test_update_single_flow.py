@@ -119,7 +119,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         })
 
         self.assertIn("当前版本：Ming OS 26.4.0", result["detail"])
-        self.assertIn("目标版本：Ming OS 26.4.0", result["detail"])
+        self.assertIn("目标版本：Ming OS 26.4.0 正式版维护更新", result["detail"])
         self.assertNotIn("26.4.0.1", result["detail"])
         self.assertNotIn("26.4.0.2", result["detail"])
         self.assertNotEqual(

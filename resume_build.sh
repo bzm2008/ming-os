@@ -234,23 +234,70 @@ ensure_resume_runtime_packages() {
 
 verify_resume_release_identity() {
     local os_release="${CHROOT_DIR}/etc/os-release"
+    local ming_release="${CHROOT_DIR}/etc/ming-release"
+    local lsb_release="${CHROOT_DIR}/etc/lsb-release"
     local update_version_file="${CHROOT_DIR}/etc/ming-version"
     local display_version_file="${CHROOT_DIR}/etc/ming-display-version"
+    local issue_file="${CHROOT_DIR}/etc/issue"
+    local issue_net_file="${CHROOT_DIR}/etc/issue.net"
     local file
-    for file in "${os_release}" "${update_version_file}" "${display_version_file}"; do
+    for file in "${os_release}" "${ming_release}" "${lsb_release}" \
+        "${update_version_file}" "${display_version_file}" \
+        "${issue_file}" "${issue_net_file}"; do
         if [[ ! -f "${file}" || -L "${file}" ]]; then
             log_error "resume rootfs release identity is missing or unsafe: ${file}"
             return 1
         fi
     done
-    grep -Fqx "VERSION_ID=\"${MING_OS_UPDATE_VERSION}\"" "${os_release}" \
-        && grep -Fqx "MING_DISPLAY_VERSION=\"${MING_OS_VERSION}\"" "${os_release}" \
-        && grep -Fqx "${MING_OS_UPDATE_VERSION}" "${update_version_file}" \
-        && grep -Fqx "${MING_OS_VERSION}" "${display_version_file}" \
-        || {
+    if ! python3 - "${os_release}" "${ming_release}" "${lsb_release}" \
+        "${update_version_file}" "${display_version_file}" \
+        "${issue_file}" "${issue_net_file}" "${MING_OS_VERSION}" \
+        "${MING_OS_UPDATE_VERSION}" "${MING_OS_RELEASE_STAGE}" \
+        "${MING_OS_RELEASE_LABEL}" <<'PY'
+import pathlib
+import sys
+
+
+def parse_unique(path):
+    values = {}
+    for raw in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+        if not raw or raw.startswith("#"):
+            continue
+        key, separator, value = raw.partition("=")
+        if not separator or key in values:
+            raise ValueError("duplicate or malformed release key")
+        values[key] = value.strip().strip('"')
+    return values
+
+
+os_path, ming_path, lsb_path, update_path, display_path, issue_path, issue_net_path = sys.argv[1:8]
+display_version, update_version, stage, label = sys.argv[8:12]
+expected = {
+    "VERSION_ID": update_version,
+    "MING_DISPLAY_VERSION": display_version,
+    "MING_RELEASE_STAGE": stage,
+    "PRETTY_NAME": f"Ming OS {display_version} {label}",
+}
+for path in (os_path, ming_path):
+    values = parse_unique(path)
+    if any(values.get(key) != value for key, value in expected.items()):
+        raise SystemExit(1)
+lsb = parse_unique(lsb_path)
+if lsb.get("DISTRIB_RELEASE") != display_version:
+    raise SystemExit(1)
+if pathlib.Path(update_path).read_text(encoding="utf-8").strip() != update_version:
+    raise SystemExit(1)
+if pathlib.Path(display_path).read_text(encoding="utf-8").strip() != display_version:
+    raise SystemExit(1)
+expected_issue = f"Ming OS {display_version} {label}"
+for path in (issue_path, issue_net_path):
+    if expected_issue not in pathlib.Path(path).read_text(encoding="utf-8"):
+        raise SystemExit(1)
+PY
+    then
             log_error "resume rootfs release identity does not match this formal build"
             return 1
-        }
+    fi
 }
 
 resume_main() {
@@ -263,7 +310,7 @@ resume_main() {
     # replaying every package module; this is intentionally opt-in so normal
     # recovery remains a full deterministic replay.
     if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]; then
-        if [[ "${MING_RELEASE_MODE:-development}" != "development" ]]; then
+        if [[ "${MING_RELEASE_MODE}" != "development" ]]; then
             log_error "正式发布禁止跳过模块重放"
             return 1
         fi

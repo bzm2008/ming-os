@@ -117,15 +117,15 @@ Legacy website download response (transactional discovery remains separate):
 
 ```json
 {
-  "has_update": true,
+  "has_update": false,
   "version": "26.4.0.1",
-  "ready": true,
-  "status": "ready",
+  "ready": false,
+  "status": "signed-metadata-pending",
   "update_type": "major",
-  "download_url": "https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64-formal.download",
-  "checksum": "<FINAL_ISO_SHA256_AFTER_BUILD>",
+  "download_url": null,
+  "checksum": null,
   "checksum_type": "sha256",
-  "size": 1977778176,
+  "size": null,
   "transactional_available": false,
   "ota_status": "signed-metadata-pending"
 }

@@ -399,6 +399,8 @@ def ota_status_presentation(status):
         or message_args.get("version")
         or ""
     )
+    current_internal_version = current_version
+    target_internal_version = version
     version_formatter = globals().get("public_release_version")
     if not callable(version_formatter):
         def version_formatter(value):
@@ -408,6 +410,12 @@ def ota_status_presentation(status):
                 part.isdigit() for part in parts) else text
     current_version = version_formatter(current_version)
     version = version_formatter(version)
+    maintenance_update = bool(
+        current_internal_version
+        and target_internal_version
+        and current_internal_version != target_internal_version
+        and current_version == version
+    )
     release_id = str(
         status.get("release_id")
         or transaction.get("release_id")
@@ -479,7 +487,8 @@ def ota_status_presentation(status):
         default_action = "apply"
 
     if version and state not in {"committed", "rolled_back"}:
-        detail_parts.insert(0, "目标版本：Ming OS %s" % version)
+        target_label = "%s 正式版维护更新" % version if maintenance_update else version
+        detail_parts.insert(0, "目标版本：Ming OS %s" % target_label)
     if current_version:
         detail_parts.append("当前版本：Ming OS %s" % current_version)
     if notes and (default_action == "apply" or available):
@@ -518,6 +527,7 @@ def ota_status_presentation(status):
         "transaction_id": str(transaction.get("id") or status.get("transaction_id") or ""),
         "release_id": release_id,
         "manifest_sha256": manifest_sha256,
+        "maintenance_update": maintenance_update,
         "log_path": log_path,
     }
 

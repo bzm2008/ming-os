@@ -5,8 +5,21 @@
 
 set -uo pipefail
 
-MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-${MING_OS_VERSION:-26.4.0}}"
 MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE:-development}"
+case "${MING_OS_RELEASE_STAGE}" in
+    stable)
+        MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-26.4.0.1}"
+        MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL:-正式版}"
+        ;;
+    development)
+        MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-26.4.0.1-development}"
+        MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL:-开发构建}"
+        ;;
+    *)
+        echo "[06_ota_update][ERROR] invalid MING_OS_RELEASE_STAGE" >&2
+        exit 2
+        ;;
+esac
 
 readonly OTA_CONFIG_DIR="/etc/ming-update"
 readonly OTA_CACHE_DIR="/var/cache/ming-update"
@@ -1959,10 +1972,10 @@ create_version_file() {
 
     cat > /etc/os-release << RELEASEOS
 NAME="Ming OS"
-VERSION="${MING_OS_VERSION} 正式版"
+VERSION="${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${MING_OS_VERSION} 正式版"
+PRETTY_NAME="Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"
 VERSION_ID="${MING_OS_UPDATE_VERSION}"
 MING_DISPLAY_VERSION="${MING_OS_VERSION}"
 MING_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}"

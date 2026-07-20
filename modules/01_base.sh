@@ -27,8 +27,21 @@ set -uo pipefail
 # Keep the user-facing release label separate from the monotonic transactional
 # version used by the OTA verifier.  Older callers that only provide
 # MING_OS_VERSION continue to build with that value for development images.
-MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-${MING_OS_VERSION:-26.4.0}}"
 MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE:-development}"
+case "${MING_OS_RELEASE_STAGE}" in
+    stable)
+        MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-26.4.0.1}"
+        MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL:-正式版}"
+        ;;
+    development)
+        MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION:-26.4.0.1-development}"
+        MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL:-开发构建}"
+        ;;
+    *)
+        echo "[01_base][ERROR] invalid MING_OS_RELEASE_STAGE" >&2
+        exit 2
+        ;;
+esac
 
 # ======================== APT 源配置 ========================
 
@@ -1899,10 +1912,10 @@ configure_os_identity() {
     # 设置 Ming OS 品牌标识
     cat > /etc/os-release << OSRELEASE
 NAME="Ming OS"
-VERSION="${MING_OS_VERSION} 正式版"
+VERSION="${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${MING_OS_VERSION} 正式版"
+PRETTY_NAME="Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"
 VERSION_ID="${MING_OS_UPDATE_VERSION}"
 MING_DISPLAY_VERSION="${MING_OS_VERSION}"
 MING_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}"
@@ -1915,12 +1928,12 @@ OSRELEASE
 
     # 更新 issue 文件（控制台登录提示）
     cat > /etc/issue << ISSUE
-Ming OS ${MING_OS_VERSION} 正式版 - 层层精简，层层用心
+Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL} - 层层精简，层层用心
 
 ISSUE
 
     cat > /etc/issue.net << ISSUENET
-Ming OS ${MING_OS_VERSION} 正式版
+Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}
 ISSUENET
 
     # 自定义 lsb_release 信息
@@ -1930,14 +1943,14 @@ ISSUENET
 DISTRIB_ID=MingOS
 DISTRIB_RELEASE=${MING_OS_VERSION}
 DISTRIB_CODENAME=ming
-DISTRIB_DESCRIPTION="Ming OS ${MING_OS_VERSION} 正式版"
+DISTRIB_DESCRIPTION="Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"
 LSBRELEASE
 
     # 确保 /etc/debian_version 显示 Debian 13 (Trixie)，而非历史遗留的12
     echo "trixie/sid" > /etc/debian_version
 
     cat > /etc/ming-release << RELEASE
-Ming OS ${MING_OS_VERSION} 正式版
+Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}
 RELEASE
     mkdir -p /usr/share /etc/default/grub.d /boot/grub/themes/ming
     ln -sf /etc/ming-release /usr/share/ming-release
@@ -2064,9 +2077,30 @@ MINGOTAPREFLIGHT
 #!/usr/bin/env bash
 set -uo pipefail
 
-version="${MING_OS_VERSION:-26.4.0}"
-update_version="${MING_OS_UPDATE_VERSION:-26.4.0.1}"
-release_stage="${MING_OS_RELEASE_STAGE:-stable}"
+release_field() {
+    local key="$1"
+    awk -F= -v key="${key}" '$1 == key {value=substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", value); print value; exit}' \
+        /etc/os-release 2>/dev/null
+}
+
+version="${MING_OS_VERSION:-$(release_field MING_DISPLAY_VERSION)}"
+update_version="${MING_OS_UPDATE_VERSION:-$(release_field VERSION_ID)}"
+release_stage="${MING_OS_RELEASE_STAGE:-$(release_field MING_RELEASE_STAGE)}"
+version="${version:-26.4.0}"
+case "${release_stage}" in
+    stable)
+        update_version="${update_version:-26.4.0.1}"
+        release_label="正式版"
+        ;;
+    development)
+        update_version="${update_version:-26.4.0.1-development}"
+        release_label="开发构建"
+        ;;
+    *)
+        echo "ERROR: live release stage is invalid" >&2
+        exit 30
+        ;;
+esac
 target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || {
     echo "ERROR: authoritative Calamares target receipt is missing or invalid" >&2
     exit 30
@@ -2338,10 +2372,10 @@ restore_ota_home() {
 
 write_file /etc/os-release <<OSRELEASE
 NAME="Ming OS"
-VERSION="${version} 正式版"
+VERSION="${version} ${release_label}"
 ID=ming-os
 ID_LIKE=debian
-PRETTY_NAME="Ming OS ${version} 正式版"
+PRETTY_NAME="Ming OS ${version} ${release_label}"
 VERSION_ID="${update_version}"
 MING_DISPLAY_VERSION="${version}"
 MING_RELEASE_STAGE="${release_stage}"
@@ -2356,20 +2390,29 @@ write_file /etc/lsb-release <<LSBRELEASE
 DISTRIB_ID=MingOS
 DISTRIB_RELEASE=${version}
 DISTRIB_CODENAME=ming
-DISTRIB_DESCRIPTION="Ming OS ${version} 正式版"
+DISTRIB_DESCRIPTION="Ming OS ${version} ${release_label}"
 LSBRELEASE
 
 write_file /etc/issue <<ISSUE
-Ming OS ${version} 正式版 - 层层精简，层层用心
+Ming OS ${version} ${release_label} - 层层精简，层层用心
 
 ISSUE
 
 write_file /etc/issue.net <<ISSUENET
-Ming OS ${version} 正式版
+Ming OS ${version} ${release_label}
 ISSUENET
 
 write_file /etc/ming-release <<MINGRELEASE
-Ming OS ${version} 正式版
+NAME="Ming OS"
+VERSION="${version} ${release_label}"
+ID=ming-os
+ID_LIKE=debian
+PRETTY_NAME="Ming OS ${version} ${release_label}"
+VERSION_ID="${update_version}"
+MING_DISPLAY_VERSION="${version}"
+MING_RELEASE_STAGE="${release_stage}"
+VERSION_CODENAME=ming
+DEBIAN_CODENAME=trixie
 MINGRELEASE
 
 write_file /etc/ming-version <<MINGVERSION

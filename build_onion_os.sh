@@ -28,9 +28,29 @@ set -euo pipefail
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
 readonly MING_OS_VERSION="26.4.0"
-readonly MING_OS_UPDATE_VERSION="26.4.0.1"
-readonly MING_OS_RELEASE_STAGE="stable"
-readonly MING_OS_BUILD_SUFFIX="formal"
+readonly MING_RELEASE_MODE="${MING_RELEASE_MODE:-development}"
+case "${MING_RELEASE_MODE}" in
+    release)
+        _MING_UPDATE_VERSION="26.4.0.1"
+        _MING_RELEASE_STAGE="stable"
+        _MING_RELEASE_LABEL="正式版"
+        _MING_BUILD_SUFFIX="formal"
+        ;;
+    development)
+        _MING_UPDATE_VERSION="26.4.0.1-development"
+        _MING_RELEASE_STAGE="development"
+        _MING_RELEASE_LABEL="开发构建"
+        _MING_BUILD_SUFFIX="development"
+        ;;
+    *)
+        echo "[ERROR] MING_RELEASE_MODE must be development or release" >&2
+        exit 2
+        ;;
+esac
+readonly MING_OS_UPDATE_VERSION="${_MING_UPDATE_VERSION}"
+readonly MING_OS_RELEASE_STAGE="${_MING_RELEASE_STAGE}"
+readonly MING_OS_RELEASE_LABEL="${_MING_RELEASE_LABEL}"
+readonly MING_OS_BUILD_SUFFIX="${_MING_BUILD_SUFFIX}"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2640"
@@ -206,6 +226,7 @@ chroot_exec() {
         MING_OS_VERSION="${MING_OS_VERSION}" \
         MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION}" \
         MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}" \
+        MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL}" \
         MING_USER="${MING_USER}" \
         "$@" </dev/null
 }
@@ -2961,7 +2982,7 @@ run_release_preflight() {
 main() {
     echo -e "${GREEN}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║     Ming OS ${MING_OS_VERSION} 正式版               ║"
+    echo "  ║     Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}               ║"
     echo "  ║     层层精简，层层用心                    ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"

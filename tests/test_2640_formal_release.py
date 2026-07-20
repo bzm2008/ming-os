@@ -13,15 +13,22 @@ RESUME = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
 class FormalReleaseIdentityContracts(unittest.TestCase):
     def test_display_and_transaction_versions_are_separate(self):
         self.assertIn('readonly MING_OS_VERSION="26.4.0"', BUILD)
-        self.assertIn('readonly MING_OS_UPDATE_VERSION="26.4.0.1"', BUILD)
-        self.assertIn('readonly MING_OS_RELEASE_STAGE="stable"', BUILD)
+        self.assertIn('readonly MING_RELEASE_MODE="${MING_RELEASE_MODE:-development}"', BUILD)
+        self.assertIn('_MING_UPDATE_VERSION="26.4.0.1"', BUILD)
+        self.assertIn('_MING_RELEASE_STAGE="stable"', BUILD)
+        self.assertIn('_MING_RELEASE_LABEL="正式版"', BUILD)
+        self.assertIn('_MING_BUILD_SUFFIX="formal"', BUILD)
         self.assertIn('MING_OS_UPDATE_VERSION="${MING_OS_UPDATE_VERSION}"', BUILD)
         self.assertIn('MING_OS_RELEASE_STAGE="${MING_OS_RELEASE_STAGE}"', BUILD)
+        self.assertIn('MING_OS_RELEASE_LABEL="${MING_OS_RELEASE_LABEL}"', BUILD)
 
     def test_os_release_uses_transaction_version_without_exposing_preview_label(self):
         for source in (BASE, OTA):
             self.assertIn('VERSION_ID="${MING_OS_UPDATE_VERSION}"', source)
-            self.assertIn('PRETTY_NAME="Ming OS ${MING_OS_VERSION} 正式版"', source)
+            self.assertIn(
+                'PRETTY_NAME="Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}"',
+                source,
+            )
         self.assertIn('echo "${MING_OS_UPDATE_VERSION}" > /etc/ming-version', OTA)
 
     def test_resume_and_installed_identity_refresh_every_version_file(self):
@@ -36,8 +43,10 @@ class FormalReleaseIdentityContracts(unittest.TestCase):
             skip.index("verify_resume_release_identity"),
             skip.index("build_iso"),
         )
-        self.assertIn('MING_RELEASE_MODE:-development', skip)
+        self.assertIn('"${MING_RELEASE_MODE}" != "development"', skip)
         self.assertIn("正式发布禁止跳过模块重放", skip)
+        self.assertIn("MING_RELEASE_STAGE", RESUME)
+        self.assertIn("PRETTY_NAME", RESUME)
 
     def test_settings_uses_the_public_version_label(self):
         self.assertIn("def public_release_version(value):", SETTINGS)
@@ -51,7 +60,7 @@ class FormalReleaseIdentityContracts(unittest.TestCase):
         self.assertNotIn("DISTRIB_RELEASE=${update_version}", BASE)
 
     def test_formal_iso_identity_is_immutable_and_distinct_from_preview(self):
-        self.assertIn('readonly MING_OS_BUILD_SUFFIX="formal"', BUILD)
+        self.assertIn('readonly MING_OS_BUILD_SUFFIX="${_MING_BUILD_SUFFIX}"', BUILD)
         self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2640"', BUILD)
         self.assertIn('MING_OS_RELEASE_STAGE', BUILD)
         self.assertIn('local suffix="${MING_OS_BUILD_SUFFIX}"', RESUME)

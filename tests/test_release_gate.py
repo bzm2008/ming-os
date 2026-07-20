@@ -256,7 +256,7 @@ class ReleaseGateContracts(unittest.TestCase):
         """Release-critical checks cannot depend on ignored local scratch files."""
         self.assertTrue(SMOKE.is_file())
         self.assertIn('readonly MING_OS_VERSION="26.4.0"', self.build)
-        self.assertIn('readonly MING_OS_UPDATE_VERSION="26.4.0.1"', self.build)
+        self.assertIn('_MING_UPDATE_VERSION="26.4.0.1"', self.build)
         self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2640"', self.build)
         readme = README.read_text(encoding="utf-8")
         self.assertIn("# Ming OS 26.4.0 正式版", readme)
@@ -274,8 +274,8 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_readme_ota_example_is_actionable_and_declares_the_transactional_transition(self):
         readme = README.read_text(encoding="utf-8")
         for marker in (
-            '"has_update": true',
-            '"ready": true',
+            '"has_update": false',
+            '"ready": false',
             '"update_type": "major"',
             "26.3.2",
             '"version": "26.4.0.1"',
