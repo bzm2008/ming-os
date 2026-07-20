@@ -132,6 +132,7 @@ APP_DIRS = [
 ]
 APP_CATALOG_FINGERPRINT_VERSION = 4
 APP_CATALOG_MAX_ROOTS = 8
+APP_CATALOG_MAX_DIRECTORY_ENTRIES = 4096
 APP_CATALOG_MAX_LAUNCHERS = 512
 APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
 APP_CATALOG_TOTAL_HASH_BYTES = 2 * 1024 * 1024
@@ -563,12 +564,15 @@ def app_catalog_fingerprint(paths=None):
     """Return a bounded, cheap stamp for application-directory changes.
 
     Directory metadata changes whenever dpkg or a store adds/removes a desktop
-    entry.  Deliberately do not recursively walk app directories; roots, files
-    and content hashing share one fixed budget across the complete snapshot.
+    entry.  Deliberately do not recursively walk app directories; roots,
+    directory entries, launchers and content hashing share fixed budgets across
+    the complete snapshot.
     """
     entries = [("version", APP_CATALOG_FINGERPRINT_VERSION)]
+    remaining_directory_entries = APP_CATALOG_MAX_DIRECTORY_ENTRIES
     remaining_launchers = APP_CATALOG_MAX_LAUNCHERS
     remaining_hash_bytes = APP_CATALOG_TOTAL_HASH_BYTES
+    directory_entry_limit_reached = False
     launcher_limit_reached = False
     for raw_path in tuple(paths or APP_DIRS)[:APP_CATALOG_MAX_ROOTS]:
         path = Path(raw_path)
@@ -589,6 +593,11 @@ def app_catalog_fingerprint(paths=None):
         try:
             with os.scandir(path) as directory:
                 for candidate in directory:
+                    if remaining_directory_entries <= 0:
+                        entries.append(("budget", "directory-entry-limit"))
+                        directory_entry_limit_reached = True
+                        break
+                    remaining_directory_entries -= 1
                     if not candidate.name.endswith(".desktop"):
                         continue
                     if remaining_launchers <= 0:
@@ -627,7 +636,7 @@ def app_catalog_fingerprint(paths=None):
         except OSError:
             continue
         entries.extend((str(path), "launcher", *metadata) for metadata in sorted(launchers))
-        if launcher_limit_reached:
+        if directory_entry_limit_reached or launcher_limit_reached:
             break
     return tuple(entries)
 

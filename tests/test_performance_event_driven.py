@@ -234,6 +234,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             and any(isinstance(target, ast.Name) and target.id in {
                 "APP_CATALOG_FINGERPRINT_VERSION",
                 "APP_CATALOG_MAX_ROOTS",
+                "APP_CATALOG_MAX_DIRECTORY_ENTRIES",
                 "APP_CATALOG_MAX_LAUNCHERS",
                 "APP_CATALOG_LAUNCHER_HASH_BYTES",
                 "APP_CATALOG_TOTAL_HASH_BYTES",
@@ -331,6 +332,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         }
         required = {
             "APP_CATALOG_MAX_ROOTS",
+            "APP_CATALOG_MAX_DIRECTORY_ENTRIES",
             "APP_CATALOG_MAX_LAUNCHERS",
             "APP_CATALOG_TOTAL_HASH_BYTES",
             "APP_CATALOG_LAUNCHER_HASH_BYTES",
@@ -382,6 +384,95 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         ]
         self.assertLessEqual(len(launcher_entries), 3)
         self.assertLessEqual(sum(requested_bytes), 10)
+
+    def test_catalog_fingerprint_caps_all_directory_entries_and_marks_truncation(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        assignments = {
+            target.id: node
+            for node in tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "app_catalog_fingerprint"
+        )
+        selected_names = {
+            "APP_CATALOG_FINGERPRINT_VERSION",
+            "APP_CATALOG_MAX_ROOTS",
+            "APP_CATALOG_MAX_DIRECTORY_ENTRIES",
+            "APP_CATALOG_MAX_LAUNCHERS",
+            "APP_CATALOG_TOTAL_HASH_BYTES",
+            "APP_CATALOG_LAUNCHER_HASH_BYTES",
+        }
+
+        inspected_names = []
+        scanned_roots = []
+
+        class FakeEntry:
+            def __init__(self, name):
+                self._name = name
+
+            @property
+            def name(self):
+                inspected_names.append(self._name)
+                return self._name
+
+        class FakeScan:
+            def __init__(self, names):
+                self._entries = [FakeEntry(name) for name in names]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter(self._entries)
+
+        with tempfile.TemporaryDirectory() as directory:
+            roots = []
+            entries_by_root = {}
+            for root_index, entry_count in enumerate((2, 8, 1)):
+                root = pathlib.Path(directory) / ("root-%d" % root_index)
+                root.mkdir()
+                roots.append(root)
+                entries_by_root[root] = [
+                    "ignored-%d.txt" % entry_index
+                    for entry_index in range(entry_count)
+                ]
+
+            def scandir(path):
+                resolved = pathlib.Path(path)
+                scanned_roots.append(resolved)
+                return FakeScan(entries_by_root[resolved])
+
+            namespace = {
+                "Path": pathlib.Path,
+                "os": types.SimpleNamespace(scandir=scandir),
+                "APP_CATALOG_MAX_DIRECTORY_ENTRIES": 3,
+            }
+            exec(compile(
+                ast.Module(
+                    body=[
+                        assignments[name]
+                        for name in selected_names
+                        if name in assignments
+                    ] + [function],
+                    type_ignores=[],
+                ),
+                str(PHONE),
+                "exec",
+            ), namespace)
+            namespace["APP_CATALOG_MAX_DIRECTORY_ENTRIES"] = 3
+            fingerprint = namespace["app_catalog_fingerprint"](roots)
+
+        marker = ("budget", "directory-entry-limit")
+        self.assertLessEqual(len(inspected_names), 3)
+        self.assertEqual(1, fingerprint.count(marker))
+        self.assertEqual(marker, fingerprint[-1])
+        self.assertEqual(roots[:2], scanned_roots)
+        self.assertIn("APP_CATALOG_MAX_DIRECTORY_ENTRIES", assignments)
 
     def test_catalog_gio_event_marks_dirty_before_debounced_refresh(self):
         tree = ast.parse(PHONE.read_text(encoding="utf-8"))
