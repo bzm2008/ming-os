@@ -530,7 +530,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "layout/appearance state events must not force an application rescan",
         )
 
-    def test_catalog_refresh_converges_after_sync_induced_monitor_event(self):
+    def test_external_catalog_event_with_stable_fingerprint_forces_one_sync(self):
         tree = ast.parse(PHONE.read_text(encoding="utf-8"))
         phone_class = next(
             node for node in tree.body
@@ -557,13 +557,12 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             def source_remove(_source):
                 return None
 
-        catalog_before = (("version", 4), ("external", "before"))
-        catalog_after = (("version", 4), ("external", "after"))
+        stable_catalog = (("version", 4), ("external", "stable"))
         sync_calls = []
         layout = {"version": 4, "items": []}
         namespace = {
             "GLib": FakeGLib,
-            "app_catalog_fingerprint": lambda: catalog_after,
+            "app_catalog_fingerprint": lambda: stable_catalog,
             "sync_layout": lambda width: sync_calls.append(width) or dict(layout),
             "load_layout": lambda: dict(layout),
             "layout_is_valid": lambda _layout, require_items=False: True,
@@ -578,7 +577,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         desktop = types.SimpleNamespace(
             _catalog_dirty=False,
             _catalog_debounce_source=0,
-            catalog_stamp=catalog_before,
+            catalog_stamp=stable_catalog,
             appearance_stamp=(0, 0),
             layout_stamp=0,
             layout=dict(layout),
@@ -593,21 +592,138 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         desktop.on_catalog_file_changed(None, None, None, None, True)
         _delay, callback, args = timers.pop(0)
         self.assertFalse(callback(*args))
-        self.assertEqual([1366], sync_calls, "the external catalog change must be reconciled")
-        self.assertEqual(catalog_after, desktop.catalog_stamp)
-
-        # Gio delivers the Desktop launcher write after sync_layout returns.
-        desktop.on_catalog_file_changed(None, None, None, None, True)
-        _delay, callback, args = timers.pop(0)
-        self.assertFalse(callback(*args))
-
         self.assertEqual(
             [1366],
             sync_calls,
-            "a sync-induced event with a stable fingerprint must not start another sync",
+            "a genuine Gio event is authoritative even when the bounded fingerprint is unchanged",
         )
         self.assertFalse(desktop._catalog_dirty)
+        self.assertFalse(desktop.refresh_if_apps_changed())
+        self.assertEqual([1366], sync_calls, "one external event must force exactly one sync")
         self.assertEqual([], timers)
+
+    def test_idempotent_managed_proxy_write_does_not_queue_repeat_catalog_sync(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        refresh_method = next(
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "refresh_if_apps_changed"
+        )
+        wanted = {
+            "safe_name",
+            "_desktop_has_marker",
+            "_mark_desktop_file",
+            "write_managed_wrapper_proxy",
+            "copy_desktop",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import)
+            and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        )
+        body.append(refresh_method)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE),
+        }
+        exec(compile(
+            ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
+            str(PHONE),
+            "exec",
+        ), namespace)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            applications = root / "applications"
+            desktop_dir = root / "Desktop"
+            applications.mkdir()
+            desktop_dir.mkdir()
+            source = applications / "store-wrapper.desktop"
+            source.write_text(
+                "[Desktop Entry]\nType=Application\nName=Store Wrapper\n"
+                "Exec=/usr/local/bin/store-wrapper\nIcon=store-wrapper\n",
+                encoding="utf-8",
+            )
+            namespace["trusted_wrapper_source_path"] = (
+                lambda path: pathlib.Path(path).resolve()
+            )
+            target = desktop_dir / "Store Wrapper.desktop"
+            catalog_before = (("version", 4), ("external", "before"))
+            catalog_after = (("version", 4), ("external", "after"))
+            sync_calls = []
+            pending_catalog_events = []
+            target_replacements = []
+            layout = {"version": 4, "items": []}
+            original_replace = os.replace
+
+            def observed_replace(source_path, target_path):
+                original_replace(source_path, target_path)
+                if pathlib.Path(target_path) == target:
+                    target_replacements.append(target)
+
+            def sync_layout(width):
+                sync_calls.append(width)
+                replacements_before = len(target_replacements)
+                copied = namespace["copy_desktop"](
+                    source, desktop_dir, name="Store Wrapper", managed=True)
+                self.assertEqual(target, copied)
+                if len(target_replacements) != replacements_before:
+                    pending_catalog_events.append(True)
+                return dict(layout)
+
+            namespace.update({
+                "app_catalog_fingerprint": lambda: catalog_after,
+                "sync_layout": sync_layout,
+                "load_layout": lambda: dict(layout),
+                "layout_is_valid": lambda _layout, require_items=False: True,
+                "LAYOUT_VERSION": 4,
+            })
+            fake_screen = types.SimpleNamespace(get_width=lambda: 1366)
+            desktop = types.SimpleNamespace(
+                _catalog_dirty=False,
+                _catalog_debounce_source=0,
+                catalog_stamp=catalog_before,
+                appearance_stamp=(0, 0),
+                layout_stamp=0,
+                layout=dict(layout),
+                current_layout_stamp=lambda: 0,
+                current_appearance_stamp=lambda: (0, 0),
+                get_screen=lambda: fake_screen,
+                render=lambda: None,
+            )
+            desktop.refresh_if_apps_changed = types.MethodType(
+                namespace["refresh_if_apps_changed"], desktop)
+
+            with mock.patch.object(os, "replace", side_effect=observed_replace):
+                self.assertFalse(desktop.refresh_if_apps_changed())
+                self.assertEqual([True], pending_catalog_events)
+                pending_catalog_events.pop()
+                desktop._catalog_dirty = True
+                self.assertFalse(desktop.refresh_if_apps_changed())
+                self.assertTrue(
+                    namespace["write_managed_wrapper_proxy"](target, source))
+
+        self.assertEqual(
+            [1366, 1366],
+            sync_calls,
+            "the first write event needs one idempotent sync and no third pass",
+        )
+        self.assertEqual([target], target_replacements)
+        self.assertEqual([], pending_catalog_events)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")

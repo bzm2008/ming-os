@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import struct
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -1266,38 +1267,66 @@ def managed_desktop_source_path(path):
 def write_managed_wrapper_proxy(target, source):
     """Replace a copied shell wrapper with a broker-only Desktop proxy."""
     target = Path(target)
+    temporary = None
     try:
         source = Path(source).resolve(strict=True)
-        text = target.read_text(encoding="utf-8")
+        original = target.read_bytes()
+        newline = "\r\n" if b"\r\n" in original else "\n"
+        text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         command = "Exec={} --desktop-file {} --source desktop".format(
             MING_LAUNCH_PATH, shlex.quote(str(source)))
         rewritten, count = re.subn(
             r"(?m)^\s*Exec\s*=.*$", lambda _match: command, text, count=1)
         if count != 1:
             return False
-        rewritten = re.sub(
-            r"(?im)^\s*{}\s*=.*(?:\r?\n|$)".format(re.escape(DESKTOP_SOURCE_MARKER)),
-            "", rewritten)
-        header = re.search(r"(?im)^\s*\[Desktop Entry\]\s*$", rewritten)
-        if not header:
-            return False
-        insert_at = header.end()
-        if rewritten.startswith("\r\n", insert_at):
-            insert_at += 2
-        elif insert_at < len(rewritten) and rewritten[insert_at] == "\n":
-            insert_at += 1
-        else:
-            rewritten = rewritten[:insert_at] + "\n" + rewritten[insert_at:]
-            insert_at += 1
-        rewritten = (
-            rewritten[:insert_at]
-            + "{}={}\n".format(DESKTOP_SOURCE_MARKER, source)
-            + rewritten[insert_at:]
-        )
-        target.write_text(rewritten, encoding="utf-8")
+        source_pattern = r"(?im)^\s*{}\s*=\s*(.*?)\s*$".format(
+            re.escape(DESKTOP_SOURCE_MARKER))
+        source_values = re.findall(source_pattern, rewritten)
+        if len(source_values) != 1 or source_values[0].strip() != str(source):
+            rewritten = re.sub(
+                r"(?im)^\s*{}\s*=.*(?:\r?\n|$)".format(
+                    re.escape(DESKTOP_SOURCE_MARKER)),
+                "", rewritten)
+            header = re.search(r"(?im)^\s*\[Desktop Entry\]\s*$", rewritten)
+            if not header:
+                return False
+            insert_at = header.end()
+            if rewritten.startswith("\r\n", insert_at):
+                insert_at += 2
+            elif insert_at < len(rewritten) and rewritten[insert_at] == "\n":
+                insert_at += 1
+            else:
+                rewritten = rewritten[:insert_at] + "\n" + rewritten[insert_at:]
+                insert_at += 1
+            rewritten = (
+                rewritten[:insert_at]
+                + "{}={}\n".format(DESKTOP_SOURCE_MARKER, source)
+                + rewritten[insert_at:]
+            )
+        desired = rewritten.replace("\n", newline).encode("utf-8")
+        if desired == original:
+            return True
+        with tempfile.NamedTemporaryFile(
+            prefix=".%s." % target.name,
+            suffix=".tmp",
+            dir=str(target.parent),
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(desired)
+            handle.flush()
+            os.fsync(handle.fileno())
+        shutil.copymode(target, temporary)
+        os.replace(str(temporary), str(target))
         return True
     except (OSError, UnicodeError, ValueError):
         return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _manifest_relative(path):
@@ -1369,7 +1398,8 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
     try:
         if src.resolve() == target.resolve():
             if managed and _desktop_has_marker(target):
-                target.chmod(0o755)
+                if target.stat().st_mode & 0o777 != 0o755:
+                    target.chmod(0o755)
             return target
         if target.exists() and not _desktop_has_marker(target):
             # Never overwrite an unrelated launcher with the same display
@@ -1381,17 +1411,38 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
                 candidate = target.with_name(f"{stem}-ming{suffix if suffix > 1 else ''}.desktop")
                 suffix += 1
             target = candidate
-        shutil.copy2(src, target)
-        if wrapper_source and not write_managed_wrapper_proxy(target, wrapper_source):
+        with tempfile.TemporaryDirectory(prefix="ming-desktop-stage-") as stage_dir:
+            staged = Path(stage_dir) / target.name
+            shutil.copy2(src, staged)
+            if wrapper_source and not write_managed_wrapper_proxy(staged, wrapper_source):
+                return None
+            if managed:
+                _mark_desktop_file(staged)
+            staged.chmod(0o755)
             try:
-                target.unlink()
+                unchanged = target.read_bytes() == staged.read_bytes()
             except OSError:
-                pass
-            return None
-        if managed:
-            _mark_desktop_file(target)
-        target.chmod(0o755)
-        return target
+                unchanged = False
+            if unchanged:
+                if target.stat().st_mode & 0o777 != 0o755:
+                    target.chmod(0o755)
+                return target
+            with tempfile.NamedTemporaryFile(
+                prefix=".%s." % target.name,
+                suffix=".tmp",
+                dir=str(target.parent),
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+            try:
+                shutil.copy2(staged, temporary)
+                os.replace(str(temporary), str(target))
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            return target
     except Exception:
         return None
 
@@ -3400,10 +3451,7 @@ class PhoneDesktop(Gtk.Window):
         appearance_stamp = self.current_appearance_stamp()
         appearance_changed = appearance_stamp != self.appearance_stamp
         layout_changed = stamp != self.layout_stamp
-        # Desktop launcher reconciliation writes into a monitored catalog root.
-        # Consume that wake-up without treating its stable fingerprint as a new change.
-        catalog_changed = catalog_stamp != self.catalog_stamp
-        self._catalog_dirty = False
+        catalog_changed = self._catalog_dirty or catalog_stamp != self.catalog_stamp
         if not layout_changed and not catalog_changed and not appearance_changed:
             return False
         if appearance_changed:
@@ -3423,6 +3471,7 @@ class PhoneDesktop(Gtk.Window):
             self.render()
         if catalog_changed:
             updated = sync_layout(self.get_screen().get_width())
+            self._catalog_dirty = False
         else:
             updated = load_layout()
         self.layout_stamp = self.current_layout_stamp()
