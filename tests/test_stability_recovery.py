@@ -197,8 +197,16 @@ class ApplicationCatalogRefreshTests(unittest.TestCase):
     @staticmethod
     def load_phone_catalog_functions():
         tree = ast.parse(PHONE)
-        wanted_assignments = {"APP_CATALOG_FINGERPRINT_VERSION"}
-        wanted_functions = {"app_catalog_fingerprint", "app_id", "read_app"}
+        wanted_assignments = {
+            "APP_CATALOG_FINGERPRINT_VERSION",
+            "APP_CATALOG_LAUNCHER_HASH_BYTES",
+        }
+        wanted_functions = {
+            "app_catalog_fingerprint",
+            "launcher_content_stamp",
+            "app_id",
+            "read_app",
+        }
         body = [
             node for node in tree.body
             if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)

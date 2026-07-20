@@ -225,7 +225,8 @@ install_ming_shell_components() {
     local installer_asset="${asset_dir}/ming-package-installer.py"
     local installer_resolved installer_meta installer_expected_sha installer_actual_sha
     local asset
-    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
+    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin \
+        /usr/local/share/applications "/home/${MING_USER}/.local/share/applications"
     for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2

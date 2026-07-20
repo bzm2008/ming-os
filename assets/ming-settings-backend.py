@@ -171,18 +171,22 @@ class SettingsBackend:
             return value
         raise ValueError("未知设置类型")
 
-    def _read_local(self):
+    def _read_local(self, strict=False):
         try:
             data = json.loads(self.local_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                return data
         except (OSError, ValueError):
-            return {}
+            pass
+        return None if strict else {}
 
     def _migrate_performance_defaults(self):
         """Move preview installs to the formal release's conservative default once."""
         if not self.local_path.is_file():
             return
-        data = self._read_local()
+        data = self._read_local(strict=True)
+        if data is None:
+            return
         try:
             version = int(data.get("_ming_performance_policy_version", 0) or 0)
         except (TypeError, ValueError):

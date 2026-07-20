@@ -38,6 +38,7 @@ class EventState:
         self.boosted: dict[tuple[int, str], float] = {}
         self.hidden: dict[str, dict[str, Any]] = {}
         self.backgrounded: set[tuple[int, str]] = set()
+        self.background_generations: dict[tuple[int, str], int] = {}
 
     def allow_boost(self, pid: int, starttime: str, now: float) -> bool:
         key = (int(pid), str(starttime))
@@ -98,6 +99,19 @@ class EventState:
     def is_backgrounded(self, pid: int, starttime: str) -> bool:
         return (int(pid), str(starttime)) in self.backgrounded
 
+    def next_background_generation(self, pid: int, starttime: str) -> int:
+        key = (int(pid), str(starttime))
+        for stale in tuple(self.background_generations):
+            if stale[0] == key[0] and stale != key:
+                self.background_generations.pop(stale, None)
+                self.backgrounded.discard(stale)
+        generation = max(
+            int(time.monotonic_ns()),
+            self.background_generations.get(key, 0) + 1,
+        )
+        self.background_generations[key] = generation
+        return generation
+
     def close(self, window_id: str) -> None:
         self.hidden.pop(str(window_id), None)
 
@@ -139,10 +153,12 @@ class PolicyClient:
         ])
 
     def background(self, pid: int, starttime: str, visible: bool) -> None:
+        generation = self.state.next_background_generation(pid, starttime)
         self._spawn([
             "ming-background-policy", "apply", "--pid", str(pid),
             "--starttime", str(starttime), "--desktop-file", TRUSTED_DESKTOP,
             "--visible", "true" if visible else "false", "--json",
+            "--generation", str(generation),
         ])
 
     def repair_window_manager(self):
@@ -284,6 +300,7 @@ class WnckResourceMonitor:
         self.windows[key] = window
         try:
             window.connect("state-changed", self.on_window_state_changed)
+            window.connect("workspace-changed", self.on_window_workspace_changed)
         except (AttributeError, TypeError):
             pass
         pid = self.pid(window)
@@ -354,6 +371,9 @@ class WnckResourceMonitor:
         return False
 
     def on_window_state_changed(self, window, *_args):
+        self.reconcile(window)
+
+    def on_window_workspace_changed(self, window, *_args):
         self.reconcile(window)
 
     def on_active_window_changed(self, _screen, _previous=None):

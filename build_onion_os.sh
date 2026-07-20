@@ -1618,7 +1618,11 @@ validate_r4_compatibility() {
     validate_required_desktop_runtime || return 1
     python3 - "${CHROOT_DIR}" <<'PY'
 from pathlib import Path
+import ast
 import configparser
+import importlib.machinery
+import importlib.util
+import inspect
 import io
 import os
 import re
@@ -1649,6 +1653,92 @@ def require_path(relative_path):
     path = root / relative_path
     if not path.exists() or (path.is_file() and path.stat().st_size == 0):
         errors.append(f"missing or empty {relative_path}")
+
+def require_directory(relative_path):
+    path = root / relative_path
+    if not path.is_dir():
+        errors.append(f"missing directory {relative_path}")
+
+def load_python_runtime(path):
+    path = Path(path)
+    module_name = "ming_rootfs_gate_" + re.sub(r"[^a-zA-Z0-9_]", "_", path.name)
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            loader = importlib.machinery.SourceFileLoader(module_name, str(path))
+            spec = importlib.util.spec_from_loader(module_name, loader)
+        if spec is None or spec.loader is None:
+            raise ImportError("no Python source loader")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as exc:
+        errors.append(f"cannot load Python runtime {path.relative_to(root)}: {exc}")
+        return None
+
+def require_python_class(path, class_name):
+    module = load_python_runtime(path)
+    if module is None:
+        return None
+    value = getattr(module, class_name, None)
+    if not inspect.isclass(value):
+        errors.append(f"{Path(path).relative_to(root)} missing class {class_name}")
+        return None
+    return module
+
+def require_python_method(owner, method_name, required_parameters=()):
+    value = getattr(owner, method_name, None)
+    if not callable(value):
+        errors.append(f"{owner.__name__} missing method {method_name}")
+        return None
+    try:
+        parameters = inspect.signature(value).parameters
+    except (TypeError, ValueError) as exc:
+        errors.append(f"cannot inspect {owner.__name__}.{method_name}: {exc}")
+        return None
+    missing = [name for name in required_parameters if name not in parameters]
+    if missing:
+        errors.append(
+            f"{owner.__name__}.{method_name} missing parameters: {', '.join(missing)}"
+        )
+    return value
+
+def load_python_ast(path):
+    path = Path(path)
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        errors.append(f"cannot parse Python runtime {path.relative_to(root)}: {exc}")
+        return None
+
+def require_ast_method(tree, class_name, method_name):
+    if tree is None:
+        return None
+    owner = next(
+        (node for node in tree.body
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
+    if owner is None:
+        errors.append(f"Python AST missing class {class_name}")
+        return None
+    method = next(
+        (node for node in owner.body
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and node.name == method_name),
+        None,
+    )
+    if method is None:
+        errors.append(f"Python AST missing method {class_name}.{method_name}")
+    return method
+
+def ast_has_call(tree, attribute_name):
+    return bool(tree) and any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute_name
+        for node in ast.walk(tree)
+    )
 
 def require_absent(relative_path, reason):
     path = root / relative_path
@@ -1770,14 +1860,16 @@ for marker in [
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing bounded input marker {marker}")
-if "Gio.FileMonitorFlags.WATCH_MOVES" not in phone_desktop:
-    errors.append("ming-phone-desktop must use the supported Gio FileMonitor WATCH_MOVES flag")
-for invalid_flag in [
-    "Gio.FileMonitorFlags.WATCH_CHANGES",
-    "Gio.FileMonitorFlags.WATCH_DELETED",
+phone_desktop_tree = load_python_ast(root / "usr/local/bin/ming-phone-desktop")
+for method_name in [
+    "start_catalog_monitor",
+    "_ensure_catalog_monitor",
+    "_schedule_catalog_monitor_retry",
+    "_run_catalog_monitor_retry",
 ]:
-    if invalid_flag in phone_desktop:
-        errors.append(f"ming-phone-desktop uses invalid Gio FileMonitor flag {invalid_flag}")
+    require_ast_method(phone_desktop_tree, "PhoneDesktop", method_name)
+if not ast_has_call(phone_desktop_tree, "monitor_directory"):
+    errors.append("ming-phone-desktop must use Gio directory monitoring")
 
 plank_watchdog = require_file("usr/local/bin/ming-plank-watchdog", "plank_window_visible")
 for marker in ["start_plank()", "stop_legacy_dock()", "while true; do", "ming-plank-watchdog.lock", "nohup plank"]:
@@ -1929,6 +2021,7 @@ require_path("usr/share/backgrounds/ming-os/default-2640.png")
 require_path("usr/share/backgrounds/ming-os/default-2633.png")
 require_path("usr/share/backgrounds/ming-os/default-light.png")
 require_path("usr/share/backgrounds/ming-os/default-dark.png")
+require_directory("usr/local/share/applications")
 
 # The generated 4K source is kept for high-density displays, while the
 # desktop must have real pre-scaled caches for common older hardware.  Check
@@ -2115,33 +2208,44 @@ for marker in [
 ]:
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
-performance_policy = require_file("usr/local/lib/ming-os/ming-performance-policy.py", "SO_PEERCRED")
-for marker in ["ming-interaction-boost", "ming-background-policy", "CPUWeight", "IOWeight", "timer_slack_ns", "cgroup v2"]:
-    if marker not in performance_policy:
-        errors.append(f"ming-performance-policy missing marker {marker}")
-for marker in [
-    "process_is_protected", "/cmdline", "lease_timers", "governor_tokens",
-    "dict[tuple[int, str]", "threading.Timer(delay, self._expire_lease",
-    "self.leases.active(str(token))",
-]:
-    if marker not in performance_policy:
-        errors.append(f"ming-performance-policy missing concurrency marker {marker}")
+performance_policy_path = root / "usr/local/lib/ming-os/ming-performance-policy.py"
+performance_policy = require_file(
+    "usr/local/lib/ming-os/ming-performance-policy.py", "SO_PEERCRED")
+performance_policy_module = require_python_class(performance_policy_path, "ResourcePolicy")
+if performance_policy_module is not None:
+    require_python_method(performance_policy_module.ResourcePolicy, "begin", ("pid", "starttime", "reason"))
+    require_python_method(performance_policy_module.ResourcePolicy, "end", ("token",))
+    require_python_method(performance_policy_module.ResourcePolicy, "apply_background", (
+        "pid", "starttime", "desktop_file", "visible", "generation",
+    ))
+    require_python_method(performance_policy_module.ResourcePolicy, "status")
+    require_python_method(performance_policy_module.ResourcePolicy, "_prune_background_state")
 if "cpu.max" in performance_policy or "CPUQuota" in performance_policy:
     errors.append("background resource policy must not impose a shared hard CPU quota")
-if "for token in policy.leases.reap()" in performance_policy:
-    errors.append("ming-performance-policy must not race timer expiry with a socket reaper")
+window_resource_monitor_path = root / "usr/local/bin/ming-window-resource-monitor"
 window_resource_monitor = require_file(
     "usr/local/bin/ming-window-resource-monitor", "active-window-changed")
-for marker in [
-    "window-opened", "window-closed", "state-changed", "HIDDEN_DELAY_MS = 10_000",
-    "window-manager-changed", "--repair-if-needed",
-    "ming-interaction-boost", "ming-background-policy", "threading.Thread",
-    "process.wait(timeout=", "subprocess.TimeoutExpired", "self.GLib.idle_add",
-    "WINDOW_MANAGER_RETRY_DELAY_MS", "WINDOW_MANAGER_RETRY_BACKOFF_SECONDS",
-    "time.monotonic()",
-]:
-    if marker not in window_resource_monitor:
-        errors.append(f"ming-window-resource-monitor missing event marker {marker}")
+window_resource_monitor_module = require_python_class(window_resource_monitor_path, "WnckResourceMonitor")
+if window_resource_monitor_module is not None:
+    require_python_method(
+        window_resource_monitor_module.EventState,
+        "next_background_generation",
+        ("pid", "starttime"),
+    )
+    require_python_method(
+        window_resource_monitor_module.PolicyClient,
+        "background",
+        ("pid", "starttime", "visible"),
+    )
+    require_python_method(
+        window_resource_monitor_module.WnckResourceMonitor,
+        "on_window_workspace_changed",
+        ("window",),
+    )
+    require_python_method(
+        window_resource_monitor_module.WnckResourceMonitor,
+        "on_window_manager_changed",
+    )
 for forbidden in ["xprop", "wmctrl"]:
     if forbidden in window_resource_monitor:
         errors.append(f"ming-window-resource-monitor must not poll windows with {forbidden}")

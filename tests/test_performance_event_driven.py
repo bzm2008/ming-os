@@ -1,8 +1,10 @@
+import ast
 import importlib.util
 import json
 import os
 import pathlib
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -48,6 +50,40 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             second = backend.SettingsBackend(home=home)
             self.assertTrue(second.get_value("background_throttle")["value"])
 
+    def test_malformed_settings_migration_preserves_user_file(self):
+        backend = load_module(BACKEND, "ming_settings_backend_malformed_migration_test")
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            config = home / ".config/ming-os/settings.json"
+            config.parent.mkdir(parents=True)
+            original = b'{"background_throttle": true, broken-json\n'
+            config.write_bytes(original)
+
+            backend.SettingsBackend(home=home)
+
+            self.assertEqual(original, config.read_bytes())
+
+    def test_unreadable_settings_migration_preserves_user_file(self):
+        backend = load_module(BACKEND, "ming_settings_backend_unreadable_migration_test")
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            config = home / ".config/ming-os/settings.json"
+            config.parent.mkdir(parents=True)
+            original = b'{"background_throttle": true}\n'
+            config.write_bytes(original)
+
+            original_read_text = backend.pathlib.Path.read_text
+
+            def deny_settings(path, *args, **kwargs):
+                if path == config:
+                    raise PermissionError("settings are temporarily unreadable")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(backend.pathlib.Path, "read_text", deny_settings):
+                backend.SettingsBackend(home=home)
+
+            self.assertEqual(original, config.read_bytes())
+
     def test_fresh_user_choice_persists_after_restart(self):
         backend = load_module(BACKEND, "ming_settings_backend_fresh_choice_test")
         with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +112,202 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         self.assertIn("mkdir(parents=True, exist_ok=True)", monitor)
         self.assertNotIn("WATCH_CHANGES", monitor)
         self.assertNotIn("WATCH_DELETED", monitor)
+
+    def test_missing_catalog_directory_retries_then_monitors_once(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        method_names = {
+            "start_catalog_monitor",
+            "_ensure_catalog_monitor",
+            "_schedule_catalog_monitor_retry",
+            "_run_catalog_monitor_retry",
+        }
+        methods = [
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef) and node.name in method_names
+        ]
+        self.assertEqual(method_names, {node.name for node in methods})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            missing = root / "applications"
+            state_dir = root / "state"
+            state_dir.mkdir()
+            timers = []
+            monitored = []
+
+            class FakeMonitor:
+                @staticmethod
+                def connect(*_args):
+                    return 1
+
+            class FakeFile:
+                def __init__(self, path):
+                    self.path = pathlib.Path(path)
+
+                def monitor_directory(self, _flags, _cancellable):
+                    if not self.path.is_dir():
+                        raise OSError("missing")
+                    monitored.append(str(self.path))
+                    return FakeMonitor()
+
+            class FakeGLib:
+                Error = OSError
+
+                @staticmethod
+                def timeout_add(delay, callback, *args):
+                    timers.append((delay, callback, args))
+                    return len(timers)
+
+            namespace = {
+                "APP_DIRS": (missing,),
+                "HOME": root,
+                "STATE_DIR": state_dir,
+                "Path": pathlib.Path,
+                "CATALOG_MONITOR_RETRY_DELAYS_MS": (250, 1000, 5000),
+                "Gio": types.SimpleNamespace(
+                    File=types.SimpleNamespace(new_for_path=lambda path: FakeFile(path)),
+                    FileMonitorFlags=types.SimpleNamespace(WATCH_MOVES=1),
+                ),
+                "GLib": FakeGLib,
+                "log": lambda _message: None,
+            }
+            exec(compile(ast.Module(body=methods, type_ignores=[]), str(PHONE), "exec"), namespace)
+
+            monitor = types.SimpleNamespace(
+                _catalog_monitors=[],
+                _catalog_monitor_paths=set(),
+                _catalog_retry_source=0,
+                _catalog_retry_attempt=0,
+                on_catalog_file_changed=lambda *_args: None,
+            )
+            for name in method_names:
+                function = namespace[name]
+                setattr(monitor, name, types.MethodType(function, monitor))
+
+            monitor.start_catalog_monitor()
+            self.assertNotIn(str(missing), monitored)
+            self.assertEqual(1, len(timers))
+            self.assertLessEqual(timers[0][0], 30_000)
+
+            missing.mkdir()
+            _delay, callback, args = timers.pop(0)
+            self.assertFalse(callback(*args))
+            self.assertEqual(1, monitored.count(str(missing)))
+            self.assertEqual(0, monitor._catalog_retry_source)
+
+            monitor.start_catalog_monitor()
+            self.assertEqual(1, monitored.count(str(missing)))
+
+    def test_shell_install_creates_and_gates_local_application_directory(self):
+        desktop = DESKTOP.read_text(encoding="utf-8")
+        install = desktop[
+            desktop.index("install_ming_shell_components() {"):
+            desktop.index("\ninstall_ming_files() {", desktop.index("install_ming_shell_components() {"))
+        ]
+        self.assertIn("/usr/local/share/applications", install)
+        build = BUILD.read_text(encoding="utf-8")
+        gate = build[
+            build.index("validate_r4_compatibility() {"):
+            build.index("write_grub_config() {")
+        ]
+        self.assertIn('require_directory("usr/local/share/applications")', gate)
+
+    def test_catalog_fingerprint_changes_when_existing_launcher_is_edited(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        assignments = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id in {
+                "APP_CATALOG_FINGERPRINT_VERSION",
+                "APP_CATALOG_LAUNCHER_HASH_BYTES",
+            } for target in node.targets)
+        ]
+        functions = {
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "app_catalog_fingerprint"
+        )
+        namespace = {"Path": pathlib.Path, "os": os, "hashlib": __import__("hashlib")}
+        exec(compile(
+            ast.Module(
+                body=[*assignments, functions["launcher_content_stamp"], function],
+                type_ignores=[],
+            ),
+            str(PHONE),
+            "exec",
+        ), namespace)
+
+        with tempfile.TemporaryDirectory() as directory:
+            applications = pathlib.Path(directory) / "applications"
+            applications.mkdir()
+            launcher = applications / "example.desktop"
+            launcher.write_text("[Desktop Entry]\nName=Before\nExec=example\n", encoding="utf-8")
+            before = namespace["app_catalog_fingerprint"]((applications,))
+            directory_stat = applications.stat()
+            launcher_stat = launcher.stat()
+            launcher.write_text("[Desktop Entry]\nName=After!\nExec=example\n", encoding="utf-8")
+            os.utime(
+                launcher,
+                ns=(launcher_stat.st_atime_ns, launcher_stat.st_mtime_ns + 1_000_000_000),
+            )
+            os.utime(
+                applications,
+                ns=(directory_stat.st_atime_ns, directory_stat.st_mtime_ns),
+            )
+            after = namespace["app_catalog_fingerprint"]((applications,))
+
+        self.assertNotEqual(before, after)
+
+    def test_catalog_fingerprint_uses_bounded_launcher_content_digest(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        functions = {
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("launcher_content_stamp", functions)
+        fingerprint = functions["app_catalog_fingerprint"]
+        self.assertTrue(any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "launcher_content_stamp"
+            for node in ast.walk(fingerprint)
+        ))
+        assignments = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name)
+                    and target.id == "APP_CATALOG_LAUNCHER_HASH_BYTES"
+                    for target in node.targets)
+        ]
+        self.assertEqual(1, len(assignments))
+        namespace = {"Path": pathlib.Path, "hashlib": __import__("hashlib")}
+        exec(compile(
+            ast.Module(
+                body=[assignments[0], functions["launcher_content_stamp"]],
+                type_ignores=[],
+            ),
+            str(PHONE),
+            "exec",
+        ), namespace)
+
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = pathlib.Path(directory) / "example.desktop"
+            launcher.write_bytes(b"[Desktop Entry]\nName=Before\n")
+            original = launcher.stat()
+            before = namespace["launcher_content_stamp"](launcher)
+            launcher.write_bytes(b"[Desktop Entry]\nName=After!\n")
+            os.utime(
+                launcher,
+                ns=(original.st_atime_ns, original.st_mtime_ns),
+            )
+            after = namespace["launcher_content_stamp"](launcher)
+
+        self.assertNotEqual(before, after)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")
@@ -224,7 +456,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("window-manager-changed", monitor_source)
         self.assertIn("--repair-if-needed", monitor_source)
-        self.assertIn('"window-manager-changed"', build)
+        self.assertIn('"on_window_manager_changed"', build)
         self.assertIn("polling window-manager watchdog autostart must be absent", build)
 
     def test_window_monitor_tracks_events_without_x11_polling(self):
@@ -317,21 +549,113 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             'window_watchdog = require_file("usr/local/bin/ming-window-manager-watchdog"',
             '"readonly SUPERVISOR_INTERVAL=30"',
             '"monotonic_seconds"',
-            '"process_is_protected"',
-            '"/cmdline"',
-            '"lease_timers"',
-            '"governor_tokens"',
-            '"dict[tuple[int, str]"',
+            "import ast",
+            "import inspect",
+            "import importlib.util",
+            "def load_python_runtime",
+            "def require_python_class",
+            "def require_python_method",
+            "ast.parse",
+            'require_python_class(performance_policy_path, "ResourcePolicy")',
+            'require_python_method(performance_policy_module.ResourcePolicy, "apply_background"',
+            'require_python_class(window_resource_monitor_path, "WnckResourceMonitor")',
+        ):
+            self.assertIn(marker, gate)
+        for fragile_marker in (
+            '"threading.Timer(delay, self._expire_lease"',
             '"self.leases.active(str(token))"',
             '"Gio.FileMonitorFlags.WATCH_MOVES"',
         ):
-            self.assertIn(marker, gate)
-        for invalid_flag in (
-            "Gio.FileMonitorFlags.WATCH_CHANGES",
-            "Gio.FileMonitorFlags.WATCH_DELETED",
-        ):
-            self.assertIn(invalid_flag, gate)
+            self.assertNotIn(fragile_marker, gate)
         self.assertNotIn("assets/ming-window-resource-monitor.py", gate)
+
+    def test_policy_client_orders_background_transitions_by_generation(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_generation_test",
+        )
+        state = module.EventState()
+        client = module.PolicyClient(state)
+        commands = []
+        with mock.patch.object(module.time, "monotonic_ns", return_value=1000), \
+                mock.patch.object(client, "_spawn", side_effect=lambda argv, **_kwargs: commands.append(argv)):
+            client.background(42, "100", False)
+            client.background(42, "100", True)
+            client.background(42, "200", False)
+
+        for command in commands:
+            self.assertIn("--generation", command)
+        generations = [
+            command[command.index("--generation") + 1]
+            for command in commands
+        ]
+        self.assertEqual(["1000", "1001", "1000"], generations)
+
+    def test_background_generation_survives_monitor_restart(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_restart_generation_test",
+        )
+        commands = []
+
+        def issue(state):
+            client = module.PolicyClient(state)
+            with mock.patch.object(
+                client, "_spawn", side_effect=lambda argv, **_kwargs: commands.append(argv)
+            ):
+                client.background(42, "100", False)
+
+        with mock.patch.object(module.time, "monotonic_ns", side_effect=(1000, 2000)):
+            issue(module.EventState())
+            issue(module.EventState())
+
+        generations = [
+            int(command[command.index("--generation") + 1])
+            for command in commands
+        ]
+        self.assertGreater(generations[1], generations[0])
+
+    def test_each_attached_window_subscribes_to_workspace_changes(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_workspace_test",
+        )
+
+        class FakeGLib:
+            @staticmethod
+            def timeout_add(*_args):
+                return 1
+
+        class FakeScreen:
+            @staticmethod
+            def get_active_workspace():
+                return None
+
+        class FakeClient:
+            def __init__(self):
+                self.state = module.EventState()
+
+        class FakeWindow:
+            def __init__(self):
+                self.signals = []
+
+            @staticmethod
+            def get_xid():
+                return 1
+
+            @staticmethod
+            def get_pid():
+                return 0
+
+            def connect(self, signal, callback):
+                self.signals.append((signal, callback))
+                return len(self.signals)
+
+        window = FakeWindow()
+        monitor = module.WnckResourceMonitor(FakeGLib, FakeScreen(), FakeClient())
+        monitor.attach(window)
+
+        self.assertIn("workspace-changed", [signal for signal, _callback in window.signals])
 
     def test_recovery_build_installs_and_verifies_the_wnck_runtime(self):
         resume = RESUME.read_text(encoding="utf-8")

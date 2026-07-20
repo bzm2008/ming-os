@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import pathlib
 import tempfile
 import threading
@@ -305,6 +306,71 @@ class ResourcePolicyTests(unittest.TestCase):
             policy.end(second["token"])
 
         restore_governors.assert_called_once_with(governor_base)
+
+    def test_stale_background_generation_cannot_rethrottle_visible_process(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        self.assertIn("generation", inspect.signature(policy.apply_background).parameters)
+        with mock.patch.object(self.module, "_validate_pid", return_value=(True, "")), \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                mock.patch.object(self.module, "_move_pid") as move_pid:
+            visible = policy.apply_background(
+                123, "100", "/usr/share/applications/app.desktop", True,
+                generation=2,
+            )
+            stale_hidden = policy.apply_background(
+                123, "100", "/usr/share/applications/app.desktop", False,
+                generation=1,
+            )
+
+        self.assertTrue(visible["ok"])
+        self.assertTrue(stale_hidden["ok"])
+        self.assertTrue(stale_hidden.get("stale"))
+        self.assertFalse(stale_hidden.get("applied"))
+        self.assertEqual({}, policy.background)
+        move_pid.assert_not_called()
+
+    def test_governor_restore_preserves_newer_external_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            governor = pathlib.Path(directory) / "scaling_governor"
+            snapshot = [(str(governor), "powersave", "performance")]
+
+            governor.write_text("schedutil\n", encoding="ascii")
+            try:
+                self.module._restore_governors(snapshot)
+            except ValueError as exc:
+                self.fail("governor snapshots must record the lease-set value: %s" % exc)
+            self.assertEqual("schedutil", governor.read_text(encoding="ascii").strip())
+
+            governor.write_text("performance\n", encoding="ascii")
+            self.module._restore_governors(snapshot)
+            self.assertEqual("powersave", governor.read_text(encoding="ascii").strip())
+
+    def test_status_prunes_exited_and_reused_pid_background_state(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        alive = (333, "300")
+        policy.background = {
+            (111, "100"): {"cgroup_path": None},
+            (222, "200"): {"cgroup_path": None},
+            alive: {"cgroup_path": None},
+        }
+        policy.background_generations = {
+            (111, "100"): 1,
+            (222, "200"): 2,
+            alive: 3,
+        }
+
+        def starttime(pid):
+            return {111: None, 222: "999", 333: "300"}[int(pid)]
+
+        with mock.patch.object(self.module, "process_starttime", side_effect=starttime), \
+                mock.patch.object(self.module, "cgroup_v2_root", return_value=None):
+            result = policy.status()
+
+        self.assertEqual(1, result["background_throttled"])
+        self.assertEqual({alive}, set(policy.background))
+        self.assertEqual({alive}, set(policy.background_generations))
 
 
 if __name__ == "__main__":

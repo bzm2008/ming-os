@@ -130,7 +130,9 @@ APP_DIRS = [
     Path("/usr/local/share/applications"),
     HOME / ".local/share/applications",
 ]
-APP_CATALOG_FINGERPRINT_VERSION = 2
+APP_CATALOG_FINGERPRINT_VERSION = 3
+APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
+CATALOG_MONITOR_RETRY_DELAYS_MS = (500, 2_000, 10_000, 30_000)
 CORE_NAMES = {
     "Install Ming OS.desktop",
     "ming-settings.desktop",
@@ -531,6 +533,24 @@ def canonicalize_core_layout_item(item, canonical_by_basename, seen):
     return restored
 
 
+def launcher_content_stamp(path):
+    """Hash a bounded launcher prefix so metadata-preserving edits are visible."""
+    digest = hashlib.blake2b(digest_size=16)
+    remaining = APP_CATALOG_LAUNCHER_HASH_BYTES
+    try:
+        with Path(path).open("rb") as handle:
+            while remaining > 0:
+                chunk = handle.read(min(8192, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+            digest.update(b"\x01" if handle.read(1) else b"\x00")
+        return digest.hexdigest()
+    except OSError:
+        return "unreadable"
+
+
 def app_catalog_fingerprint(paths=None):
     """Return a bounded, cheap stamp for application-directory changes.
 
@@ -563,10 +583,29 @@ def app_catalog_fingerprint(paths=None):
                     if len(launchers) >= 512:
                         entries.append((str(path), "launcher-limit"))
                         break
-                    launchers.append(candidate.name)
+                    try:
+                        launcher_stat = candidate.stat(follow_symlinks=False)
+                        launchers.append((
+                            candidate.name,
+                            getattr(
+                                launcher_stat,
+                                "st_mtime_ns",
+                                int(launcher_stat.st_mtime * 1000000000),
+                            ),
+                            getattr(
+                                launcher_stat,
+                                "st_ctime_ns",
+                                int(launcher_stat.st_ctime * 1000000000),
+                            ),
+                            launcher_stat.st_size,
+                            launcher_stat.st_mode,
+                            launcher_content_stamp(candidate.path),
+                        ))
+                    except OSError:
+                        launchers.append((candidate.name, "unreadable"))
         except OSError:
             continue
-        entries.extend((str(path), "launcher", name) for name in sorted(launchers))
+        entries.extend((str(path), "launcher", *metadata) for metadata in sorted(launchers))
     return tuple(entries)
 
 
@@ -2773,7 +2812,10 @@ class PhoneDesktop(Gtk.Window):
         self.appearance_stamp = self.current_appearance_stamp()
         self.catalog_stamp = app_catalog_fingerprint()
         self._catalog_monitors = []
+        self._catalog_monitor_paths = set()
         self._catalog_debounce_source = 0
+        self._catalog_retry_source = 0
+        self._catalog_retry_attempt = 0
         self.start_catalog_monitor()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
@@ -2800,16 +2842,48 @@ class PhoneDesktop(Gtk.Window):
                 directory.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 log("could not prepare watched directory %s: %s" % (directory, exc))
-        watched = set(APP_DIRS) | {STATE_DIR}
-        for directory in watched:
-            try:
-                monitor = Gio.File.new_for_path(str(directory)).monitor_directory(
-                    Gio.FileMonitorFlags.WATCH_MOVES,
-                    None)
-                monitor.connect("changed", self.on_catalog_file_changed)
-                self._catalog_monitors.append(monitor)
-            except (GLib.Error, OSError, TypeError, ValueError) as exc:
-                log("file monitor unavailable for %s: %s" % (directory, exc))
+        missing = False
+        for directory in set(APP_DIRS) | {STATE_DIR}:
+            if not self._ensure_catalog_monitor(directory):
+                missing = True
+        if missing:
+            self._schedule_catalog_monitor_retry()
+        else:
+            self._catalog_retry_attempt = 0
+
+    def _ensure_catalog_monitor(self, directory):
+        path = str(Path(directory))
+        if path in self._catalog_monitor_paths:
+            return True
+        try:
+            monitor = Gio.File.new_for_path(path).monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES,
+                None)
+            monitor.connect("changed", self.on_catalog_file_changed)
+            self._catalog_monitors.append(monitor)
+            self._catalog_monitor_paths.add(path)
+            return True
+        except (GLib.Error, OSError, TypeError, ValueError) as exc:
+            log("file monitor unavailable for %s: %s" % (directory, exc))
+            return False
+
+    def _schedule_catalog_monitor_retry(self):
+        if self._catalog_retry_source:
+            return
+        if self._catalog_retry_attempt >= len(CATALOG_MONITOR_RETRY_DELAYS_MS):
+            return
+        delay = CATALOG_MONITOR_RETRY_DELAYS_MS[self._catalog_retry_attempt]
+        self._catalog_retry_attempt += 1
+        try:
+            self._catalog_retry_source = GLib.timeout_add(
+                delay, self._run_catalog_monitor_retry)
+        except (AttributeError, TypeError, ValueError):
+            self._catalog_retry_source = 0
+
+    def _run_catalog_monitor_retry(self):
+        self._catalog_retry_source = 0
+        self.start_catalog_monitor()
+        return False
 
     def on_catalog_file_changed(self, *_args):
         """Debounce package/appearance bursts and refresh on the GTK main loop."""

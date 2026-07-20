@@ -373,7 +373,7 @@ def _timer_slack(pid: int, default: int = 50_000) -> int:
         return default
 
 
-def _governor_snapshot() -> list[tuple[str, str]]:
+def _governor_snapshot() -> list[tuple[str, str, str]]:
     global LAST_GOVERNOR_GATE
     power = _power_snapshot()
     thermal = _thermal_snapshot()
@@ -393,7 +393,7 @@ def _governor_snapshot() -> list[tuple[str, str]]:
             current = path.read_text(encoding="ascii").strip()
             if "performance" in available and current != "performance":
                 path.write_text("performance\n", encoding="ascii")
-                snapshots.append((str(path), current))
+                snapshots.append((str(path), current, "performance"))
         except OSError:
             continue
     return snapshots
@@ -553,10 +553,22 @@ def background_throttle_exemption(pid: int) -> tuple[bool, str]:
     return False, ""
 
 
-def _restore_governors(snapshots: list[tuple[str, str]] | None) -> None:
-    for path, value in snapshots or []:
+def _restore_governors(snapshots: list[tuple[str, ...]] | None) -> None:
+    for snapshot in snapshots or []:
+        if len(snapshot) == 2:
+            path, value = snapshot
+            lease_value = None
+        elif len(snapshot) == 3:
+            path, value, lease_value = snapshot
+        else:
+            continue
         try:
-            pathlib.Path(path).write_text(str(value) + "\n", encoding="ascii")
+            target = pathlib.Path(path)
+            if lease_value is not None:
+                current = target.read_text(encoding="ascii").strip()
+                if current != str(lease_value):
+                    continue
+            target.write_text(str(value) + "\n", encoding="ascii")
         except OSError:
             pass
 
@@ -583,6 +595,7 @@ class ResourcePolicy:
         self.leases = LeaseState()
         self.snapshots: dict[str, dict[str, Any]] = {}
         self.background: dict[tuple[int, str], dict[str, Any]] = {}
+        self.background_generations: dict[tuple[int, str], int] = {}
         self.lease_timers: dict[str, threading.Timer] = {}
         self.state_lock = threading.RLock()
         self.completed_tokens: dict[str, float] = {}
@@ -652,6 +665,17 @@ class ResourcePolicy:
             return value if isinstance(value, dict) else {}
         except (KeyError, OSError, ValueError):
             return {}
+
+    def _prune_background_state(self, preserve: tuple[int, str] | None = None) -> None:
+        keys = set(self.background) | set(self.background_generations)
+        for key in keys:
+            if preserve is not None and key == preserve:
+                continue
+            pid, starttime = key
+            if process_starttime(pid) == str(starttime):
+                continue
+            self.background.pop(key, None)
+            self.background_generations.pop(key, None)
 
     def begin(self, pid: int, starttime: str, reason: str) -> dict[str, Any]:
         if reason not in ALLOWED_REASONS:
@@ -762,7 +786,8 @@ class ResourcePolicy:
             self._log("lease_restored", pid=pid)
             return _json(True, token=str(token), restored=True)
 
-    def apply_background(self, pid: int, starttime: str, desktop_file: str, visible: bool) -> dict[str, Any]:
+    def apply_background(self, pid: int, starttime: str, desktop_file: str,
+                         visible: bool, generation: int | None = None) -> dict[str, Any]:
         ok, error = _validate_pid(pid, starttime, self.session_uid)
         if not ok:
             self._log("background_rejected", reason=error)
@@ -770,6 +795,31 @@ class ResourcePolicy:
         if not desktop_file_is_trusted(desktop_file, uid=self.session_uid):
             self._log("background_rejected", reason="desktop-file-not-allowlisted")
             return _json(False, error="desktop-file-not-allowlisted")
+        key = (int(pid), str(starttime))
+        with self.state_lock:
+            self._prune_background_state(preserve=key)
+            for stale_key in tuple(self.background_generations):
+                if stale_key[0] == key[0] and stale_key != key:
+                    self.background_generations.pop(stale_key, None)
+                    self.background.pop(stale_key, None)
+            latest = self.background_generations.get(key, 0)
+            try:
+                requested_generation = int(generation or 0)
+            except (TypeError, ValueError):
+                return _json(False, error="invalid-generation")
+            if requested_generation <= 0:
+                requested_generation = latest + 1
+            if requested_generation <= latest:
+                self._log(
+                    "background_stale", pid=int(pid), generation=requested_generation,
+                    latest_generation=latest,
+                )
+                return _json(
+                    True, pid=int(pid), visible=bool(visible), stale=True,
+                    applied=False, generation=requested_generation,
+                    latest_generation=latest,
+                )
+            self.background_generations[key] = requested_generation
         if not visible and self._settings().get("background_throttle", False) is False:
             self._log("background_skipped", pid=int(pid), reason="policy-disabled")
             return _json(True, pid=int(pid), visible=False, skipped=True, reason="policy-disabled")
@@ -780,7 +830,6 @@ class ResourcePolicy:
                 return _json(
                     True, pid=int(pid), visible=False, skipped=True, reason=exemption_reason
                 )
-        key = (int(pid), str(starttime))
         stale_keys = [item for item in self.background if item[0] == int(pid) and item != key]
         for stale_key in stale_keys:
             self.background.pop(stale_key, None)
@@ -812,6 +861,8 @@ class ResourcePolicy:
         return result
 
     def status(self) -> dict[str, Any]:
+        with self.state_lock:
+            self._prune_background_state()
         cgroup = cgroup_v2_root()
         if LAST_GOVERNOR_GATE.get("reason") == "not-checked":
             power = _power_snapshot()
@@ -893,7 +944,7 @@ def serve(uid: int, path: pathlib.Path = DEFAULT_SOCKET) -> int:
                     elif command == "end":
                         result = policy.end(request.get("token", ""))
                     elif command == "background":
-                        result = policy.apply_background(request.get("pid"), request.get("starttime", ""), request.get("desktop_file", ""), bool(request.get("visible")))
+                        result = policy.apply_background(request.get("pid"), request.get("starttime", ""), request.get("desktop_file", ""), bool(request.get("visible")), request.get("generation"))
                     elif command == "status":
                         result = policy.status()
                     else:
@@ -912,6 +963,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token", default="")
     parser.add_argument("--desktop-file", default="")
     parser.add_argument("--visible", choices=("true", "false"), default="false")
+    parser.add_argument("--generation", type=int, default=0)
     parser.add_argument("--uid", type=int, default=CURRENT_UID)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -923,7 +975,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "end":
         request["token"] = args.token
     elif args.command == "background":
-        request.update(pid=args.pid, starttime=args.starttime, desktop_file=args.desktop_file, visible=args.visible == "true")
+        request.update(
+            pid=args.pid, starttime=args.starttime, desktop_file=args.desktop_file,
+            visible=args.visible == "true", generation=args.generation,
+        )
     result = _send_request(request)
     if result.get("error") == "policy-daemon-unavailable" and args.command == "status":
         result = ResourcePolicy().status()
