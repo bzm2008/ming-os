@@ -29,6 +29,16 @@ def spark_installer_source():
     )[1].split("\nSPARKINSTALL", 1)[0]
 
 
+def deterministic_spark_mode_helper_source():
+    marker = "cat > \"${target}\" << 'MINGSPARKMODE'"
+    if marker not in APPS:
+        return ""
+    return (
+        APPS.split(marker, 1)[1].split("\nMINGSPARKMODE", 1)[0].lstrip("\n")
+        + "\n"
+    )
+
+
 def module_shell_function_source(name):
     module_prefix = APPS.split("install_app_store() {", 1)[0]
     marker = "%s() {" % name
@@ -61,8 +71,25 @@ def write_shell_executable(path, content):
 
 def spark_asset_gate_source(root):
     source = spark_installer_source().split("mkdir -p /root/.config", 1)[0]
-    mode_source = module_spark_mode_source()
-    if mode_source:
+    root_path = bash_path(root)
+    deterministic_mode_source = deterministic_spark_mode_helper_source()
+    if deterministic_mode_source:
+        helper = root / "ming-spark-build-mode"
+        helper.write_text(
+            deterministic_mode_source.replace(
+                "/etc/os-release",
+                root_path + "/etc/os-release",
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        helper.chmod(helper.stat().st_mode | 0o111)
+        source = source.replace(
+            "/usr/local/libexec/ming-spark-build-mode",
+            bash_path(helper),
+        )
+    else:
+        mode_source = module_spark_mode_source()
         source = mode_source + "\n\n" + source.replace(
             "/usr/local/libexec/ming-spark-build-mode",
             "resolve_spark_build_mode",
@@ -74,7 +101,6 @@ fi
 
 """
     source = source.replace(root_guard, "")
-    root_path = bash_path(root)
     replacements = {
         'readonly deb="/tmp/${deb_name}"':
             'readonly deb="%s/tmp/${deb_name}"' % root_path,
@@ -155,6 +181,7 @@ def run_apps_main(mode, os_release):
     harness = """
 run_required_step() { "$@"; }
 run_optional_step() { "$@" || true; }
+deploy_spark_build_mode_resolver() { return 0; }
 install_xfce_desktop() { return 0; }
 install_fonts() { return 0; }
 install_required_desktop_runtime() { return 0; }
@@ -172,11 +199,31 @@ install_utilities() { return 0; }
         root = pathlib.Path(directory)
         os_release_path = root / "os-release"
         os_release_path.write_text(os_release, encoding="utf-8")
+        deterministic_mode_source = deterministic_spark_mode_helper_source()
+        if deterministic_mode_source:
+            mode_helper = root / "ming-spark-build-mode"
+            mode_helper.write_text(
+                deterministic_mode_source.replace(
+                    "/etc/os-release",
+                    bash_path(os_release_path),
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            mode_helper.chmod(mode_helper.stat().st_mode | 0o111)
+            resolver_source = ""
+            main_source = apps_main_source().replace(
+                "/usr/local/libexec/ming-spark-build-mode",
+                bash_path(mode_helper),
+            )
+        else:
+            resolver_source = module_spark_mode_source()
+            main_source = apps_main_source()
         source = (
             harness
-            + module_spark_mode_source()
+            + resolver_source
             + "\n\n"
-            + apps_main_source()
+            + main_source
             + "\nmain\n"
         ).replace("/etc/os-release", bash_path(os_release_path))
         environment = dict(os.environ)
@@ -354,15 +401,15 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         )[0]
         installer = spark_installer_source()
         main = apps_main_source()
+        helper = deterministic_spark_mode_helper_source()
 
         self.assertNotIn('[[ "${MING_RELEASE_MODE:-}" == "release" ]]', app_store)
         self.assertNotIn("MING_RELEASE_MODE", main)
-        self.assertIn("resolve_spark_build_mode() {", module_prefix)
-        self.assertIn(
-            "declare -f spark_release_field resolve_spark_build_mode",
-            APPS,
-        )
+        self.assertTrue(helper)
+        self.assertIn("resolve_spark_build_mode() {", helper)
+        self.assertNotIn("declare -f", APPS)
         self.assertIn("/usr/local/libexec/ming-spark-build-mode", installer)
+        self.assertIn("/usr/local/libexec/ming-spark-build-mode", main)
         self.assertNotIn("resolve_build_mode() {", installer)
 
     def test_installer_requires_the_exact_installed_package_version(self):

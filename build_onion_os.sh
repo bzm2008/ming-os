@@ -1186,6 +1186,7 @@ validate_required_desktop_runtime() {
 # MING_DESKTOP_BACKEND_VALIDATOR_BEGIN
 from pathlib import Path
 import configparser
+import hashlib
 import io
 import os
 import posixpath
@@ -1241,6 +1242,54 @@ edge_backends = [
 ]
 if not any(path.is_file() and os.access(path, os.X_OK) for path in edge_backends):
     errors.append("missing Microsoft Edge browser backend behind ming-edge wrapper")
+
+spark_mode_helper = root / "usr/local/libexec/ming-spark-build-mode"
+try:
+    spark_mode_metadata = spark_mode_helper.lstat()
+except OSError as error:
+    errors.append(f"missing Spark Store mode resolver: {error}")
+else:
+    helper_metadata_valid = (
+        not spark_mode_helper.is_symlink()
+        and stat.S_ISREG(spark_mode_metadata.st_mode)
+        and spark_mode_metadata.st_uid == 0
+        and spark_mode_metadata.st_gid == 0
+        and stat.S_IMODE(spark_mode_metadata.st_mode) == 0o755
+    )
+    if not helper_metadata_valid:
+        errors.append("unsafe Spark Store mode resolver metadata")
+    else:
+        try:
+            spark_mode_bytes = spark_mode_helper.read_bytes()
+            spark_mode_text = spark_mode_bytes.decode("utf-8")
+        except (OSError, UnicodeError) as error:
+            errors.append(f"unreadable Spark Store mode resolver: {error}")
+        else:
+            helper_lines = spark_mode_text.splitlines()
+            required_policy_markers = (
+                "stable:26.4.0.1)",
+                'identity_mode="release"',
+                "development:26.4.0.1-development)",
+                'identity_mode="development"',
+                '[[ "${identity_mode}" == "release" ]] || return 1',
+            )
+            forbidden_policy_tokens = ("wget", "curl", "sh -c", "eval")
+            helper_policy_valid = (
+                helper_lines[:2] == ["#!/usr/bin/env bash", "set -uo pipefail"]
+                and bool(helper_lines)
+                and helper_lines[-1] == "resolve_spark_build_mode"
+                and spark_mode_text.count("spark_release_field() {") == 1
+                and spark_mode_text.count("resolve_spark_build_mode() {") == 1
+                and spark_mode_text.count("\nresolve_spark_build_mode\n") == 1
+                and all(spark_mode_text.count(marker) == 1 for marker in required_policy_markers)
+                and not any(token in spark_mode_text for token in forbidden_policy_tokens)
+            )
+            expected_helper_sha256 = (
+                "34c2836e1cd92299d43c56f8851bea6f515c93c23ca78be9d4cab1e2633838bc"
+            )
+            actual_helper_sha256 = hashlib.sha256(spark_mode_bytes).hexdigest()
+            if not helper_policy_valid or actual_helper_sha256 != expected_helper_sha256:
+                errors.append("tampered Spark Store mode resolver policy")
 
 spark_vendor_links = (
     (

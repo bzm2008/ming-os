@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import pathlib
@@ -13,6 +14,11 @@ APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 RESUME = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 def control_center_wrapper_source():
@@ -113,6 +119,58 @@ SPARK_VENDOR_PATHS = (
 )
 
 
+def module_shell_function_source(name):
+    module_prefix = APPS.split("install_app_store() {", 1)[0]
+    marker = "%s() {" % name
+    start = module_prefix.index(marker)
+    end = module_prefix.index("\n}", start) + 2
+    return module_prefix[start:end]
+
+
+@functools.lru_cache(maxsize=1)
+def spark_mode_helper_source():
+    static_marker = "cat > \"${target}\" << 'MINGSPARKMODE'"
+    if static_marker in APPS:
+        return (
+            APPS.split(static_marker, 1)[1].split("\nMINGSPARKMODE", 1)[0].lstrip("\n")
+            + "\n"
+        )
+    functions = "\n\n".join((
+        module_shell_function_source("spark_release_field"),
+        module_shell_function_source("resolve_spark_build_mode"),
+    ))
+    completed = subprocess.run(
+        [BASH],
+        input=(
+            functions
+            + "\ndeclare -f spark_release_field resolve_spark_build_mode\n"
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -uo pipefail\n\n"
+        + completed.stdout
+        + "\nresolve_spark_build_mode\n"
+    )
+
+
+def write_spark_mode_helper(root, content=None):
+    helper = root / "usr/local/libexec/ming-spark-build-mode"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        content or spark_mode_helper_source(),
+        encoding="utf-8",
+        newline="\n",
+    )
+    helper.chmod(helper.stat().st_mode | 0o111)
+    return helper
+
+
 def write_symlink(root, relative_path, target):
     path = root / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +254,7 @@ def write_core_desktops(root):
             encoding="utf-8",
         )
         write_executable(root, command.lstrip("/"))
+    write_spark_mode_helper(root)
 
 
 def run_backend_validator(
@@ -206,10 +265,14 @@ def run_backend_validator(
         first_link_uid=0,
         first_link_gid=0,
         second_link_uid=0,
-        second_link_gid=0):
+        second_link_gid=0,
+        helper_uid=0,
+        helper_gid=0,
+        helper_mode=0o755):
     final_path = root / SPARK_VENDOR_TARGET.lstrip("/")
     first_link_path = root / "usr/local/bin/spark-store"
     second_link_path = root / SPARK_VENDOR_LINK.lstrip("/")
+    helper_path = root / "usr/local/libexec/ming-spark-build-mode"
     registry = root / ".ming-test-symlinks.json"
     raw_links = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
     links = {str(root / path): target for path, target in raw_links.items()}
@@ -258,6 +321,9 @@ def _ming_test_lstat(path, *args, **kwargs):
             )
         return _MingTestStat(metadata, mode=stat.S_IFLNK | 0o777)
     if path_text == %r:
+        mode = metadata.st_mode & ~0o777 | %d
+        return _MingTestStat(metadata, mode=mode, uid=%d, gid=%d)
+    if path_text == %r:
         mode = metadata.st_mode & ~0o022
         mode = mode | 0o111 if %r else mode & ~0o111
         mode |= %d
@@ -286,6 +352,10 @@ os.readlink = _ming_test_readlink
         str(second_link_path),
         second_link_uid,
         second_link_gid,
+        str(helper_path),
+        helper_mode,
+        helper_uid,
+        helper_gid,
         str(final_path),
         final_executable,
         final_write_bits,
@@ -675,6 +745,49 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 with self.subTest(write_bits=oct(write_bits)):
                     result = run_backend_validator(root, final_write_bits=write_bits)
                     self.assertNotEqual(0, result.returncode, result.stderr)
+
+    def test_spark_mode_helper_gate_rejects_untrusted_runtime_policy(self):
+        cases = (
+            ("missing", {}, "missing"),
+            ("symlink", {}, "symlink"),
+            ("nonroot", {"helper_uid": 1000, "helper_gid": 1000}, None),
+            ("writable", {"helper_mode": 0o775}, None),
+            ("tampered", {}, "tampered"),
+        )
+        for label, validator_options, mutation in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                write_core_desktops(root)
+                write_executable(root, "usr/bin/microsoft-edge-stable")
+                write_executable(root, "usr/local/bin/ming-install-spark-store")
+                write_executable(
+                    root,
+                    "usr/local/bin/ming-spark-store",
+                    "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                )
+                write_vendor_spark_package(root)
+                helper = root / "usr/local/libexec/ming-spark-build-mode"
+                if mutation == "missing":
+                    helper.unlink()
+                elif mutation == "symlink":
+                    helper.unlink()
+                    write_symlink(
+                        root,
+                        "usr/local/libexec/ming-spark-build-mode",
+                        "/tmp/untrusted-mode-resolver",
+                    )
+                elif mutation == "tampered":
+                    write_spark_mode_helper(
+                        root,
+                        "#!/usr/bin/env bash\n"
+                        "set -uo pipefail\n"
+                        "resolve_spark_build_mode() { printf '%s\\n' development; }\n"
+                        "curl https://example.invalid/policy\n"
+                        "resolve_spark_build_mode\n",
+                    )
+
+                result = run_backend_validator(root, **validator_options)
+                self.assertNotEqual(0, result.returncode, result.stderr)
 
     def test_r4_validation_invokes_required_runtime_gate(self):
         validation = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]

@@ -1721,6 +1721,13 @@ MINGINPUTCONTROL
 
 # ======================== 应用商店 (星火应用商店) ========================
 
+deploy_spark_build_mode_resolver() {
+    local target="/usr/local/libexec/ming-spark-build-mode"
+    install -d -m 0755 "$(dirname "${target}")" || return 1
+    cat > "${target}" << 'MINGSPARKMODE'
+#!/usr/bin/env bash
+set -uo pipefail
+
 spark_release_field() {
     local key="$1"
     awk -F= -v key="${key}" \
@@ -1760,20 +1767,15 @@ resolve_spark_build_mode() {
     esac
 }
 
-deploy_spark_build_mode_resolver() {
-    local target="/usr/local/libexec/ming-spark-build-mode"
-    install -d -m 0755 "$(dirname "${target}")" || return 1
-    {
-        printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail' ''
-        declare -f spark_release_field resolve_spark_build_mode
-        printf '\n%s\n' resolve_spark_build_mode
-    } >"${target}" || return 1
+resolve_spark_build_mode
+MINGSPARKMODE
     chmod 0755 "${target}" || return 1
 }
 
 install_app_store() {
     local app_store_mode
-    if ! app_store_mode="$(resolve_spark_build_mode)"; then
+    deploy_spark_build_mode_resolver || return 1
+    if ! app_store_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
         echo "[ERROR] Spark Store build identity is invalid" >&2
         return 1
     fi
@@ -1785,8 +1787,6 @@ install_app_store() {
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
         libnotify-bin || return 1
-
-    deploy_spark_build_mode_resolver || return 1
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash
@@ -2327,7 +2327,8 @@ main() {
     echo "=====> [02_apps] 开始安装应用软件 <====="
 
     local app_store_mode
-    if ! app_store_mode="$(resolve_spark_build_mode)"; then
+    deploy_spark_build_mode_resolver || return 1
+    if ! app_store_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
         echo "[ERROR] [02_apps] Spark Store build identity is invalid" >&2
         return 1
     fi
