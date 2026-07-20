@@ -2,6 +2,8 @@
 """Single-instance application launch broker with bounded visual feedback."""
 
 import argparse
+import configparser
+import hashlib
 import importlib.util
 import json
 import os
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 
 ANIMATION_DURATION_MS = 200
@@ -25,6 +28,16 @@ SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 TRUSTED_DESKTOP_MARKER_DIR = pathlib.Path("/var/lib/ming-os/trusted-desktops")
 INTERACTION_BOOST = "/usr/local/bin/ming-interaction-boost"
 PREFETCH_HELPER = "/usr/local/bin/ming-prefetch"
+OPT_APPS_ROOT = pathlib.Path("/opt/apps")
+DESKTOP_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
+DESKTOP_PROXY_MANIFEST = pathlib.Path(
+    "/var/lib/ming-os/desktop-proxies/manifest-v1.json")
+DESKTOP_PROXY_SCHEMA_VERSION = 1
+DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
+PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,127}$")
+OPT_APP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$")
+DESKTOP_PROXY_NAME_PATTERN = re.compile(r"^ming-opt-[0-9a-f]{64}\.desktop$")
 
 
 def _load_common():
@@ -58,10 +71,11 @@ def record_launch_event(request, status, detail="", path=None):
 
 
 class LaunchRequest:
-    __slots__ = ("argv", "source", "rect", "desktop_file", "mode")
+    __slots__ = ("argv", "source", "rect", "desktop_file", "mode", "proxy_source")
 
-    def __init__(self, argv, source="unknown", rect=None, desktop_file="", mode="argv"):
-        if mode == "argv":
+    def __init__(self, argv, source="unknown", rect=None, desktop_file="", mode="argv",
+                 proxy_source=""):
+        if mode in {"argv", "desktop_proxy"}:
             if not isinstance(argv, (list, tuple)) or not argv or not all(
                 isinstance(item, str) and item and "\x00" not in item for item in argv
             ):
@@ -80,6 +94,7 @@ class LaunchRequest:
         self.rect = COMMON.Rect.from_mapping(rect) if rect is not None else None
         self.desktop_file = str(desktop_file or "")
         self.mode = mode
+        self.proxy_source = str(proxy_source or "")
 
     def to_message(self):
         return {
@@ -249,6 +264,242 @@ def verify_package_owned_system_desktop(
         return False
 
 
+def _protected_path_metadata(path, directory=False):
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return None
+    valid_type = (
+        stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode))
+    if (
+            not valid_type
+            or stat.S_ISLNK(metadata.st_mode)
+            or (os.name != "nt" and (
+                bool(metadata.st_mode & 0o022)
+                or int(getattr(metadata, "st_uid", -1)) != 0))):
+        return None
+    return metadata
+
+
+def _proxy_path_shape(path, proxy_dir=DESKTOP_PROXY_DIR):
+    try:
+        proxy = pathlib.Path(os.fspath(path))
+        directory = pathlib.Path(os.fspath(proxy_dir))
+    except TypeError as error:
+        raise ValueError("desktop proxy path is invalid") from error
+    if (
+            not proxy.is_absolute()
+            or not directory.is_absolute()
+            or proxy.parent != directory
+            or proxy.suffix != ".desktop"
+            or proxy.name in {"", ".desktop"}
+            or any(part in {".", ".."} for part in proxy.parts + directory.parts)):
+        raise ValueError("desktop proxy path is outside the managed directory")
+    return proxy, directory
+
+
+def _canonical_proxy_path(path, proxy_dir=DESKTOP_PROXY_DIR):
+    proxy, directory = _proxy_path_shape(path, proxy_dir)
+    if not DESKTOP_PROXY_NAME_PATTERN.fullmatch(proxy.name):
+        raise ValueError("desktop proxy filename is invalid")
+    return proxy, directory
+
+
+def _canonical_opt_apps_source(path, opt_apps_root=OPT_APPS_ROOT):
+    try:
+        source = pathlib.Path(os.fspath(path))
+        root = pathlib.Path(os.fspath(opt_apps_root))
+        relative = source.relative_to(root)
+    except (TypeError, ValueError) as error:
+        raise ValueError("desktop proxy source is outside /opt/apps") from error
+    parts = relative.parts
+    if (
+            not source.is_absolute()
+            or not root.is_absolute()
+            or len(parts) != 4
+            or parts[1:3] != ("entries", "applications")
+            or not OPT_APP_ID_PATTERN.fullmatch(parts[0])
+            or pathlib.PurePath(parts[3]).suffix != ".desktop"
+            or parts[3] in {"", ".desktop"}
+            or len(parts[3]) > 255
+            or any(ord(character) < 32 for character in parts[3])
+            or any(part in {".", ".."} for part in source.parts + root.parts)):
+        raise ValueError("desktop proxy source layout is invalid")
+    directories = (
+        root,
+        root / parts[0],
+        root / parts[0] / "entries",
+        root / parts[0] / "entries" / "applications",
+    )
+    if any(_protected_path_metadata(directory, directory=True) is None
+           for directory in directories):
+        raise ValueError("desktop proxy source directory is unsafe")
+    if _protected_path_metadata(source) is None:
+        raise ValueError("desktop proxy source is unsafe")
+    return source
+
+
+def _sha256_path(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _completed_query_runner(command_runner=None):
+    if command_runner is None:
+        return _run_dpkg_query
+
+    def run(arguments, timeout=2):
+        result = command_runner(tuple(arguments), timeout=timeout)
+        if isinstance(result, tuple) and len(result) == 3:
+            return types.SimpleNamespace(
+                returncode=result[0], stdout=result[1], stderr=result[2])
+        return result
+
+    return run
+
+
+def _read_proxy_manifest(path):
+    manifest = pathlib.Path(path)
+    if (
+            _protected_path_metadata(manifest) is None
+            or _protected_path_metadata(manifest.parent, directory=True) is None):
+        raise ValueError("desktop proxy manifest is unsafe")
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ValueError("desktop proxy manifest is invalid") from error
+    if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != DESKTOP_PROXY_SCHEMA_VERSION
+            or payload.get("generation") != DESKTOP_PROXY_GENERATION
+            or not isinstance(payload.get("entries"), list)
+            or len(payload["entries"]) > 1024):
+        raise ValueError("desktop proxy manifest schema is invalid")
+    seen = set()
+    for entry in payload["entries"]:
+        required = ("proxy_path", "source_path", "package", "source_sha256", "proxy_sha256")
+        if (
+                not isinstance(entry, dict)
+                or any(not isinstance(entry.get(key), str) for key in required)
+                or not pathlib.Path(entry.get("proxy_path", "")).is_absolute()
+                or not pathlib.Path(entry.get("source_path", "")).is_absolute()
+                or not PACKAGE_PATTERN.fullmatch(entry.get("package", ""))
+                or not re.fullmatch(r"[0-9a-f]{64}", entry.get("source_sha256", ""))
+                or not re.fullmatch(r"[0-9a-f]{64}", entry.get("proxy_sha256", ""))):
+            raise ValueError("desktop proxy manifest entry is invalid")
+        if entry["proxy_path"] in seen:
+            raise ValueError("desktop proxy manifest contains duplicate proxies")
+        seen.add(entry["proxy_path"])
+    return payload
+
+
+def _proxy_marker_matches(proxy, expected_argv):
+    try:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        with pathlib.Path(proxy).open("r", encoding="utf-8", errors="replace") as stream:
+            parser.read_file(stream)
+        section = parser["Desktop Entry"]
+        marker = section.get("X-Ming-Desktop-Proxy", "").strip().casefold()
+        package = section.get("X-Ming-Proxy-Package", "").strip()
+        source = section.get("X-Ming-Proxy-Source", "").strip()
+        entry = COMMON.parse_desktop_file(proxy)
+    except (AttributeError, KeyError, OSError, TypeError, ValueError, configparser.Error) as error:
+        raise ValueError("desktop proxy content is invalid") from error
+    if (
+            marker != "true"
+            or entry is None
+            or tuple(entry.argv) != tuple(expected_argv)
+            or not PACKAGE_PATTERN.fullmatch(package)
+            or not source):
+        raise ValueError("desktop proxy content does not match its contract")
+    return package, source
+
+
+def verify_desktop_proxy(
+        path, manifest_path=DESKTOP_PROXY_MANIFEST, opt_apps_root=OPT_APPS_ROOT,
+        proxy_dir=DESKTOP_PROXY_DIR, command_runner=None):
+    """Return a freshly parsed source only for an intact manifest-backed proxy."""
+    proxy, directory = _canonical_proxy_path(path, proxy_dir)
+    if (
+            _protected_path_metadata(directory, directory=True) is None
+            or _protected_path_metadata(proxy) is None):
+        raise ValueError("desktop proxy is not protected")
+    payload = _read_proxy_manifest(manifest_path)
+    matches = [
+        entry for entry in payload["entries"]
+        if isinstance(entry, dict) and entry.get("proxy_path") == str(proxy)
+    ]
+    if len(matches) != 1:
+        raise ValueError("desktop proxy is not uniquely listed in the manifest")
+    record = matches[0]
+    required = ("source_path", "package", "source_sha256", "proxy_sha256")
+    if any(not isinstance(record.get(key), str) for key in required):
+        raise ValueError("desktop proxy manifest entry is incomplete")
+    package = record["package"]
+    if (
+            not PACKAGE_PATTERN.fullmatch(package)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["source_sha256"])
+            or not re.fullmatch(r"[0-9a-f]{64}", record["proxy_sha256"])):
+        raise ValueError("desktop proxy manifest entry is invalid")
+    source = _canonical_opt_apps_source(record["source_path"], opt_apps_root)
+    expected_argv = (
+        MING_LAUNCH_PATH, "--desktop-file", str(proxy), "--source", "desktop")
+    marker_package, marker_source = _proxy_marker_matches(proxy, expected_argv)
+    if marker_package != package or marker_source != str(source):
+        raise ValueError("desktop proxy metadata does not match the manifest")
+    try:
+        if (
+                _sha256_path(proxy) != record["proxy_sha256"]
+                or _sha256_path(source) != record["source_sha256"]):
+            raise ValueError("desktop proxy or source hash is stale")
+    except OSError as error:
+        raise ValueError("desktop proxy content cannot be read") from error
+    owner_lookup = getattr(COMMON, "installed_package_owner", None)
+    if not callable(owner_lookup):
+        raise ValueError("desktop proxy ownership verifier is unavailable")
+    owner = owner_lookup(
+        source,
+        command_runner=_completed_query_runner(command_runner),
+        timeout=2,
+        expected_package=package,
+    )
+    if not owner or str(owner).split(":", 1)[0] != package.split(":", 1)[0]:
+        raise ValueError("desktop proxy source is not owned by the recorded package")
+    parser = getattr(COMMON, "parse_desktop_file", None)
+    diagnostic = getattr(COMMON, "desktop_launch_diagnostic", None)
+    if not callable(parser) or not callable(diagnostic):
+        raise ValueError("desktop proxy parser is unavailable")
+    try:
+        source_entry = parser(source, respect_desktop_environment=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("desktop proxy source is invalid") from error
+    if source_entry is None or diagnostic(source_entry.argv):
+        raise ValueError("desktop proxy source executable is unavailable")
+    return {
+        "manifest": payload,
+        "record": dict(record),
+        "source_path": str(source),
+        "source_entry": source_entry,
+    }
+
+
+def _is_desktop_proxy_candidate(path, proxy_dir=DESKTOP_PROXY_DIR):
+    try:
+        proxy, _directory = _proxy_path_shape(path, proxy_dir)
+        if proxy.name.startswith("ming-opt-"):
+            return True
+        return bool(re.search(
+            r"(?im)^\s*X-Ming-Desktop-Proxy\s*=\s*true\s*$",
+            proxy.read_text(encoding="utf-8", errors="replace"),
+        ))
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 def _is_system_catalog_desktop_file(path):
     try:
         desktop_path = pathlib.PurePosixPath(str(os.fspath(path)).replace("\\", "/"))
@@ -265,8 +516,37 @@ def _is_shell_wrapper_error(error):
 
 def request_from_desktop_file(
         desktop_file, source="unknown", rect=None, allowed_dirs=None,
-        candidate_verifier=None, trusted_verifier=None, defer_trusted_verification=False):
+        candidate_verifier=None, trusted_verifier=None, defer_trusted_verification=False,
+        proxy_manifest=DESKTOP_PROXY_MANIFEST, opt_apps_root=OPT_APPS_ROOT,
+        proxy_dir=DESKTOP_PROXY_DIR, command_runner=None):
+    try:
+        raw_desktop = pathlib.Path(os.fspath(desktop_file))
+        raw_proxy_dir = pathlib.Path(os.fspath(proxy_dir))
+        if (
+                raw_desktop.is_absolute()
+                and raw_desktop.parent == raw_proxy_dir
+                and raw_desktop.suffix == ".desktop"
+                and raw_desktop.is_symlink()):
+            raise ValueError("desktop proxy cannot be a symlink")
+    except TypeError as error:
+        raise ValueError("desktop file path is invalid") from error
     path = _allowed_desktop_path(desktop_file, allowed_dirs)
+    if _is_desktop_proxy_candidate(path, proxy_dir):
+        verified = verify_desktop_proxy(
+            path,
+            manifest_path=proxy_manifest,
+            opt_apps_root=opt_apps_root,
+            proxy_dir=proxy_dir,
+            command_runner=command_runner,
+        )
+        return LaunchRequest(
+            verified["source_entry"].argv,
+            source,
+            rect,
+            str(path),
+            mode="desktop_proxy",
+            proxy_source=verified["source_path"],
+        )
     system_catalog_entry = _is_system_catalog_desktop_file(path)
     try:
         entry = COMMON.parse_desktop_file(
@@ -295,7 +575,10 @@ def request_from_desktop_file(
     return LaunchRequest(entry.argv, source, rect, str(path))
 
 
-def request_from_message(message, allowed_dirs=None, defer_trusted_verification=False):
+def request_from_message(
+        message, allowed_dirs=None, defer_trusted_verification=False,
+        proxy_manifest=DESKTOP_PROXY_MANIFEST, opt_apps_root=OPT_APPS_ROOT,
+        proxy_dir=DESKTOP_PROXY_DIR, command_runner=None):
     allowed_keys = {"version", "action", "request_id", "desktop_file", "source", "rect"}
     if (
             not isinstance(message, dict)
@@ -313,6 +596,10 @@ def request_from_message(message, allowed_dirs=None, defer_trusted_verification=
         rect=message.get("rect"),
         allowed_dirs=allowed_dirs,
         defer_trusted_verification=defer_trusted_verification,
+        proxy_manifest=proxy_manifest,
+        opt_apps_root=opt_apps_root,
+        proxy_dir=proxy_dir,
+        command_runner=command_runner,
     )
 
 
@@ -443,7 +730,9 @@ class LaunchBroker:
     def __init__(
             self, spawn=None, animate=None, now=None, reduced_motion=None,
             workarea=None, probe=None, report_error=None, record_event=None,
-            desktop_activator=None, trusted_verifier=None):
+            desktop_activator=None, trusted_verifier=None,
+            proxy_manifest=DESKTOP_PROXY_MANIFEST, opt_apps_root=OPT_APPS_ROOT,
+            proxy_dir=DESKTOP_PROXY_DIR, command_runner=None):
         self.spawn = spawn or (lambda argv: subprocess.Popen(list(argv), shell=False))
         self.desktop_activator = desktop_activator or activate_desktop_app_info
         self.trusted_verifier = trusted_verifier or verify_package_owned_system_desktop
@@ -454,17 +743,57 @@ class LaunchBroker:
         self.probe = probe or probe_window_async
         self.report_error = report_error or report_launch_error
         self.record_event = record_event or record_launch_event
+        self.proxy_manifest = pathlib.Path(proxy_manifest)
+        self.opt_apps_root = pathlib.Path(opt_apps_root)
+        self.proxy_dir = pathlib.Path(proxy_dir)
+        self.command_runner = command_runner
         self._recent = {}
 
     def preflight(self, request):
         """Perform the final package check for protected system launchers."""
+        if request.mode == "desktop_proxy":
+            try:
+                verify_desktop_proxy(
+                    request.desktop_file,
+                    manifest_path=self.proxy_manifest,
+                    opt_apps_root=self.opt_apps_root,
+                    proxy_dir=self.proxy_dir,
+                    command_runner=self.command_runner,
+                )
+                return True
+            except Exception:
+                return False
         if (
                 request.mode != "desktop_app_info"
                 and not _is_system_catalog_desktop_file(request.desktop_file)):
             return True
         return bool(self.trusted_verifier(request.desktop_file))
 
+    def _refresh_proxy_request(self, request):
+        verified = verify_desktop_proxy(
+            request.desktop_file,
+            manifest_path=self.proxy_manifest,
+            opt_apps_root=self.opt_apps_root,
+            proxy_dir=self.proxy_dir,
+            command_runner=self.command_runner,
+        )
+        return LaunchRequest(
+            verified["source_entry"].argv,
+            request.source,
+            request.rect.to_dict() if request.rect is not None else None,
+            request.desktop_file,
+            mode="desktop_proxy",
+            proxy_source=verified["source_path"],
+        )
+
     def launch(self, request):
+        if request.mode == "desktop_proxy":
+            try:
+                request = self._refresh_proxy_request(request)
+            except Exception as exc:
+                self.record_event(request, "spawn_failed", exc)
+                self.report_error(request, exc)
+                return False
         moment = self.now()
         key = request.desktop_file or "\x1f".join(request.argv)
         previous = self._recent.get(key)
@@ -504,7 +833,9 @@ class LaunchBroker:
         return True
 
     def _launch_argv(self, request, key, moment):
-        if _is_system_catalog_desktop_file(request.desktop_file):
+        if (
+                request.mode == "desktop_proxy"
+                or _is_system_catalog_desktop_file(request.desktop_file)):
             try:
                 verified = self.preflight(request)
             except Exception as exc:

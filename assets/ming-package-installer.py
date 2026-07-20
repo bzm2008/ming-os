@@ -8,12 +8,14 @@ import importlib.util
 import json
 import pathlib
 import re
+import shlex
 import stat
 import subprocess
 import os
 import sys
+import tempfile
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -31,6 +33,14 @@ DPKG_LOCK_TIMEOUT = 60
 PACKAGE_MANAGER_BUSY_EXIT = 75
 DEFAULT_LOG_PATH = "/var/log/ming-os/package-installer.jsonl"
 SPARK_SOURCE_LIST = "/etc/apt/sources.list.d/ming-spark-store.list"
+OPT_APPS_ROOT = pathlib.Path("/opt/apps")
+DESKTOP_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
+DESKTOP_PROXY_MANIFEST = pathlib.Path(
+    "/var/lib/ming-os/desktop-proxies/manifest-v1.json")
+DESKTOP_PROXY_SCHEMA_VERSION = 1
+DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
+OPT_APP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$")
 E_PACKAGE_BUSY = "E_PACKAGE_BUSY"
 E_RESOLVER_FAILED = "E_RESOLVER_FAILED"
 E_LAUNCH_NOT_READY = "E_LAUNCH_NOT_READY"
@@ -144,7 +154,8 @@ def _run(command, timeout=20):
 class PackageInstaller:
     def __init__(
             self, runner=None, log_path=None, uid_getter=None, logger=None,
-            desktop_candidate_verifier=None):
+            desktop_candidate_verifier=None, opt_apps_root=None, proxy_dir=None,
+            proxy_manifest=None):
         self.runner = runner or _run
         self.log_path = pathlib.Path(log_path or DEFAULT_LOG_PATH)
         self.uid_getter = uid_getter or getattr(os, "geteuid", lambda: 1)
@@ -155,6 +166,9 @@ class PackageInstaller:
             or (lambda _path: False)
         )
         self.application_dir = SYSTEM_APPLICATION_DIR
+        self.opt_apps_root = pathlib.Path(opt_apps_root or OPT_APPS_ROOT)
+        self.proxy_dir = pathlib.Path(proxy_dir or DESKTOP_PROXY_DIR)
+        self.proxy_manifest = pathlib.Path(proxy_manifest or DESKTOP_PROXY_MANIFEST)
         desktop_ids = getattr(COMMON, "current_desktop_ids", None)
         try:
             self.current_desktops = set(desktop_ids()) if callable(desktop_ids) else {"xfce"}
@@ -178,12 +192,31 @@ class PackageInstaller:
             "state": "",
             "log_path": str(self.log_path),
             "launchers": [],
+            "desktop_proxies": [],
+            "proxy_paths": [],
+            "source_paths": [],
             "launcher_warnings": [],
             "launch_ready": False,
             "repair_argv": [],
         }
         result.update(values)
         return _redact_json_value(result)
+
+    @staticmethod
+    def _proxy_result_fields(launchers):
+        proxies = [
+            {
+                "proxy_path": str(record.get("proxy_path")),
+                "source_path": str(record.get("source_path")),
+            }
+            for record in launchers
+            if record.get("ok") and record.get("proxy_path") and record.get("source_path")
+        ]
+        return {
+            "desktop_proxies": proxies,
+            "proxy_paths": [item["proxy_path"] for item in proxies],
+            "source_paths": [item["source_path"] for item in proxies],
+        }
 
     def _log(self, message):
         line = json.dumps({
@@ -408,6 +441,419 @@ class PackageInstaller:
             stderr=error,
         )
 
+    @staticmethod
+    def _protected_metadata(path, directory=False):
+        try:
+            metadata = os.lstat(path)
+        except OSError:
+            return None
+        if directory:
+            valid_type = stat.S_ISDIR(metadata.st_mode)
+        else:
+            valid_type = stat.S_ISREG(metadata.st_mode)
+        if (
+                not valid_type
+                or stat.S_ISLNK(metadata.st_mode)
+                or (os.name != "nt" and (
+                    bool(metadata.st_mode & 0o022)
+                    or int(getattr(metadata, "st_uid", -1)) != 0))):
+            return None
+        return metadata
+
+    def _opt_apps_desktop_path(self, value):
+        """Accept only /opt/apps/<app>/entries/applications/<name>.desktop."""
+        try:
+            path = pathlib.Path(str(value).strip())
+            root = self.opt_apps_root
+            if not path.is_absolute() or not root.is_absolute():
+                return None
+            relative = path.relative_to(root)
+        except (TypeError, ValueError):
+            return None
+        parts = relative.parts
+        if (
+                len(parts) != 4
+                or parts[1:3] != ("entries", "applications")
+                or not OPT_APP_ID_PATTERN.fullmatch(parts[0])
+                or pathlib.PurePath(parts[3]).suffix != ".desktop"
+                or parts[3] in {"", ".desktop"}
+                or len(parts[3]) > 255
+                or any(ord(character) < 32 for character in parts[3])
+                or any(part in {".", ".."} for part in parts)):
+            return None
+        return path
+
+    def _safe_opt_apps_source(self, path):
+        path = self._opt_apps_desktop_path(path)
+        if path is None:
+            return False
+        try:
+            relative = path.relative_to(self.opt_apps_root)
+        except ValueError:
+            return False
+        package = relative.parts[0]
+        directories = (
+            self.opt_apps_root,
+            self.opt_apps_root / package,
+            self.opt_apps_root / package / "entries",
+            self.opt_apps_root / package / "entries" / "applications",
+        )
+        if any(self._protected_metadata(directory, directory=True) is None
+               for directory in directories):
+            return False
+        return self._protected_metadata(path) is not None
+
+    @staticmethod
+    def _sha256_file(path):
+        digest = hashlib.sha256()
+        with pathlib.Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _opt_proxy_path(self, source):
+        source = pathlib.Path(source)
+        source_id = hashlib.sha256(str(source).encode("utf-8")).hexdigest()
+        return self.proxy_dir / ("ming-opt-%s.desktop" % source_id)
+
+    @staticmethod
+    def _desktop_value(value, fallback=""):
+        return str(value or fallback).replace("\r", " ").replace("\n", " ").strip()
+
+    def _proxy_content(self, source, proxy, entry, package):
+        command = "%s --desktop-file %s --source desktop" % (
+            MING_LAUNCH_PATH, shlex.quote(str(proxy)))
+        lines = [
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=%s" % self._desktop_value(getattr(entry, "name", ""), source.stem),
+            "Exec=%s" % command,
+            "X-Ming-Desktop-Proxy=true",
+            "X-Ming-Proxy-Source=%s" % source,
+            "X-Ming-Proxy-Package=%s" % package,
+        ]
+        icon = self._desktop_value(getattr(entry, "icon", ""))
+        comment = self._desktop_value(getattr(entry, "comment", ""))
+        categories = ";".join(
+            self._desktop_value(value) for value in getattr(entry, "categories", ()) if value)
+        if icon:
+            lines.append("Icon=%s" % icon)
+        if comment:
+            lines.append("Comment=%s" % comment)
+        if categories:
+            lines.append("Categories=%s;" % categories.rstrip(";"))
+        return "\n".join(lines) + "\n"
+
+    def _ensure_proxy_dir(self):
+        try:
+            self.proxy_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.proxy_dir, 0o755)
+        except OSError as error:
+            raise OSError("desktop proxy directory is unavailable") from error
+        if self._protected_metadata(self.proxy_dir, directory=True) is None:
+            raise OSError("desktop proxy directory is unsafe")
+
+    @staticmethod
+    def _atomic_write(path, content, mode=0o644):
+        path = pathlib.Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
+        temporary = pathlib.Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content.encode("utf-8") if isinstance(content, str) else bytes(content))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, mode)
+            if os.name != "nt" and hasattr(os, "chown"):
+                os.chown(temporary, 0, 0)
+            os.replace(temporary, path)
+            os.chmod(path, mode)
+            if os.name != "nt" and hasattr(os, "chown"):
+                os.chown(path, 0, 0)
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+    def _read_proxy_manifest(self):
+        path = self.proxy_manifest
+        if not (path.exists() or path.is_symlink()):
+            return {
+                "schema_version": DESKTOP_PROXY_SCHEMA_VERSION,
+                "generation": DESKTOP_PROXY_GENERATION,
+                "entries": [],
+            }
+        if self._protected_metadata(path) is None:
+            raise ValueError("desktop proxy manifest is unsafe")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ValueError("desktop proxy manifest is invalid") from error
+        if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != DESKTOP_PROXY_SCHEMA_VERSION
+                or payload.get("generation") != DESKTOP_PROXY_GENERATION
+                or not isinstance(payload.get("entries"), list)
+                or len(payload["entries"]) > 1024):
+            raise ValueError("desktop proxy manifest schema is invalid")
+        for entry in payload["entries"]:
+            if not isinstance(entry, dict):
+                raise ValueError("desktop proxy manifest entry is invalid")
+            required = ("proxy_path", "source_path", "package", "source_sha256", "proxy_sha256")
+            if any(not isinstance(entry.get(key), str) for key in required):
+                raise ValueError("desktop proxy manifest entry is incomplete")
+            if (
+                    not pathlib.Path(entry["proxy_path"]).is_absolute()
+                    or not pathlib.Path(entry["source_path"]).is_absolute()
+                    or pathlib.Path(entry["proxy_path"]).parent != self.proxy_dir
+                    or not re.fullmatch(
+                        r"ming-opt-[0-9a-f]{64}\.desktop",
+                        pathlib.Path(entry["proxy_path"]).name,
+                    )
+                    or any(part in {".", ".."}
+                           for part in pathlib.Path(entry["proxy_path"]).parts)
+                    or self._opt_apps_desktop_path(entry["source_path"]) is None
+                    or not PACKAGE_PATTERN.fullmatch(entry["package"])
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", entry["source_sha256"])
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", entry["proxy_sha256"])):
+                raise ValueError("desktop proxy manifest entry is unsafe")
+        return payload
+
+    def _opt_launcher_record(self, path, package_paths, package):
+        source = pathlib.Path(path)
+        record = {
+            "path": str(source),
+            "source_path": str(source),
+            "proxy_path": "",
+            "name": source.stem,
+            "ok": False,
+            "error": "",
+            "visible": True,
+            "activation": "desktop_proxy",
+        }
+        if not self._safe_opt_apps_source(source):
+            record["error"] = "启动器源文件不安全。"
+            return record, None, None
+        if not self._package_owns_launcher(source, package_paths, package):
+            record["error"] = "启动器所有权无法验证。"
+            return record, None, None
+        record["visible"], catalog_error = self._catalog_entry_status(source)
+        if not record["visible"]:
+            record["error"] = catalog_error
+            return record, None, None
+        parser = getattr(COMMON, "parse_desktop_file", None)
+        diagnostic = getattr(COMMON, "desktop_launch_diagnostic", None)
+        if not callable(parser) or not callable(diagnostic):
+            record["error"] = "启动器校验组件不可用。"
+            return record, None, None
+        try:
+            entry = parser(source)
+        except (OSError, ValueError) as error:
+            record["error"] = self._parse_error(source, error)
+            return record, None, None
+        if entry is None:
+            record["error"] = "启动器不可见或配置无效。"
+            return record, None, None
+        launch_error = diagnostic(entry.argv)
+        if launch_error:
+            record["error"] = str(launch_error)
+            return record, None, None
+        try:
+            source_hash = self._sha256_file(source)
+            proxy = self._opt_proxy_path(source)
+            content = self._proxy_content(source, proxy, entry, package)
+            proxy_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        except (OSError, TypeError, ValueError) as error:
+            record["error"] = "无法生成启动器代理：%s" % error
+            return record, None, None
+        record.update(
+            path=str(proxy), proxy_path=str(proxy), source_path=str(source),
+            name=getattr(entry, "name", "") or source.stem, ok=True)
+        manifest_entry = {
+            "proxy_path": str(proxy),
+            "source_path": str(source),
+            "package": package,
+            "source_sha256": source_hash,
+            "proxy_sha256": proxy_hash,
+            "generated_by": DESKTOP_PROXY_GENERATION,
+        }
+        return record, content, manifest_entry
+
+    def _reserved_proxy_files(self):
+        try:
+            return sorted(self.proxy_dir.glob("ming-opt-*.desktop"), key=str)
+        except OSError as error:
+            raise OSError("desktop proxy directory cannot be enumerated") from error
+
+    def _snapshot_proxy_state(self):
+        snapshot = {}
+        for path in self._reserved_proxy_files():
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                snapshot[str(path)] = ("symlink", os.readlink(path), 0o777)
+            elif stat.S_ISREG(metadata.st_mode):
+                snapshot[str(path)] = (
+                    "file", path.read_bytes(), stat.S_IMODE(metadata.st_mode))
+            else:
+                raise OSError("reserved desktop proxy has an unsafe type")
+        return snapshot
+
+    def _quarantine_proxy(self, path):
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".retired-proxy-", dir=str(self.proxy_manifest.parent))
+        os.close(fd)
+        temporary = pathlib.Path(temporary_name)
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        os.replace(path, temporary)
+        return temporary
+
+    def _rollback_proxy_transaction(
+            self, snapshot, manifest_before, manifest_mode, referenced_paths,
+            quarantined):
+        try:
+            for path in self._reserved_proxy_files():
+                if str(path) not in snapshot:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            for path, state in snapshot.items():
+                if path not in referenced_paths:
+                    continue
+                target = pathlib.Path(path)
+                try:
+                    if state[0] == "file":
+                        type(self)._atomic_write(target, state[1], state[2] or 0o644)
+                    elif state[0] == "symlink":
+                        try:
+                            os.unlink(target)
+                        except OSError:
+                            pass
+                        os.symlink(state[1], target)
+                except OSError:
+                    pass
+            for original, temporary, was_referenced in quarantined:
+                if not was_referenced:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    if pathlib.Path(original).exists() or pathlib.Path(original).is_symlink():
+                        os.unlink(original)
+                    os.replace(temporary, original)
+                except OSError:
+                    pass
+            if manifest_before is None:
+                try:
+                    if self.proxy_manifest.exists() or self.proxy_manifest.is_symlink():
+                        os.unlink(self.proxy_manifest)
+                except OSError:
+                    pass
+            else:
+                type(self)._atomic_write(
+                    self.proxy_manifest, manifest_before, manifest_mode or 0o644)
+        except OSError:
+            pass
+
+    def _sync_desktop_proxies(self, package, source_paths):
+        manifest_exists = self.proxy_manifest.exists() or self.proxy_manifest.is_symlink()
+        if not source_paths and not manifest_exists:
+            return [], ""
+        try:
+            existing = self._read_proxy_manifest()
+            self._ensure_proxy_dir()
+            self.proxy_manifest.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.proxy_manifest.parent, 0o755)
+            if self._protected_metadata(self.proxy_manifest.parent, directory=True) is None:
+                raise OSError("desktop proxy manifest directory is unsafe")
+            manifest_before = None
+            manifest_mode = 0o644
+            if manifest_exists:
+                manifest_metadata = os.lstat(self.proxy_manifest)
+                manifest_before = self.proxy_manifest.read_bytes()
+                manifest_mode = stat.S_IMODE(manifest_metadata.st_mode) or 0o644
+            proxy_snapshot = self._snapshot_proxy_state()
+        except (OSError, ValueError) as error:
+            return [], "无法读取图形启动器代理清单：%s" % error
+        records = []
+        prepared = []
+        package_paths = {str(path) for path in source_paths}
+        for source in sorted({pathlib.Path(path) for path in source_paths}, key=str):
+            record, content, manifest_entry = self._opt_launcher_record(
+                source, package_paths, package)
+            records.append(record)
+            if record.get("ok"):
+                prepared.append((record, content, manifest_entry))
+        invalid_source = any(not record.get("ok") for record in records)
+        old_entries = [
+            entry for entry in existing.get("entries", [])
+            if entry.get("package") != package
+        ]
+        current_entries = [] if invalid_source else [item[2] for item in prepared]
+        desired_entries = sorted(
+            old_entries + current_entries, key=lambda item: item["proxy_path"])
+        desired_paths = {entry["proxy_path"] for entry in desired_entries}
+        referenced_paths = {
+            entry["proxy_path"] for entry in existing.get("entries", [])}
+        quarantined = []
+        try:
+            if not invalid_source:
+                for _record, content, _entry in prepared:
+                    self._atomic_write(_record["proxy_path"], content, mode=0o644)
+            for candidate in self._reserved_proxy_files():
+                if str(candidate) not in desired_paths:
+                    quarantined.append((
+                        str(candidate),
+                        self._quarantine_proxy(candidate),
+                        str(candidate) in referenced_paths,
+                    ))
+            payload = {
+                "schema_version": DESKTOP_PROXY_SCHEMA_VERSION,
+                "generation": DESKTOP_PROXY_GENERATION,
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "entries": desired_entries,
+            }
+            self._atomic_write(
+                self.proxy_manifest,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                mode=0o644,
+            )
+            for _original, temporary, _was_referenced in quarantined:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    # The retired file is outside the application directory and
+                    # therefore cannot be discovered or activated as a launcher.
+                    pass
+        except (OSError, TypeError, ValueError) as error:
+            self._rollback_proxy_transaction(
+                proxy_snapshot,
+                manifest_before,
+                manifest_mode,
+                referenced_paths,
+                quarantined,
+            )
+            for record in records:
+                record["ok"] = False
+                record["error"] = "无法写入启动器代理清单：%s" % error
+            return records, ""
+        return records, ""
+
     def _catalog_entry_status(self, path):
         """Read catalog visibility only; launch validity comes from COMMON."""
         try:
@@ -557,22 +1003,31 @@ class PackageInstaller:
         return path
 
     def _package_launchers(self, package):
-        """Validate package-owned direct children of the system app catalog."""
+        """Validate direct system entries and bounded /opt/apps proxy sources."""
         returncode, output, command_error = self._call(
             ("dpkg-query", "-L", package), timeout=20)
         if returncode != 0:
             detail = command_error.strip() or "dpkg-query -L 失败"
             return [], "无法枚举软件包图形启动器：%s" % detail
-        package_paths = {
+        catalog_paths = {
             str(path) for value in output.splitlines()
             for path in (self._catalog_desktop_path(value),)
             if path is not None
         }
-        return ([
+        opt_paths = {
+            str(path) for value in output.splitlines()
+            for path in (self._opt_apps_desktop_path(value),)
+            if path is not None
+        }
+        package_paths = catalog_paths | opt_paths
+        launchers = [
             self._launcher_record(
                 pathlib.Path(value), package_paths=package_paths, package=package)
-            for value in sorted(package_paths)
-        ], "")
+            for value in sorted(catalog_paths)
+        ]
+        proxies, proxy_error = self._sync_desktop_proxies(package, opt_paths)
+        launchers.extend(proxies)
+        return launchers, proxy_error
 
     def _launch_readiness(self, launchers, completed_state, enumeration_error=""):
         if enumeration_error:
@@ -708,6 +1163,7 @@ class PackageInstaller:
             })
         state, launch_ready, launch_error = self._launch_readiness(
             launchers, "installed", enumeration_error)
+        proxy_fields = self._proxy_result_fields(launchers)
         self._log("installed %s from %s" % (inspected["package"], inspected["file"]))
         self._log_launch_readiness(
             inspected["package"], launcher_warnings, enumeration_error)
@@ -726,6 +1182,7 @@ class PackageInstaller:
             error_code=E_LAUNCH_NOT_READY if not launch_ready else "",
             repair_argv=(self._repair_argv(inspected["package"])
                          if not launch_ready else []),
+            **proxy_fields,
             **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
         )
 
@@ -791,6 +1248,7 @@ class PackageInstaller:
             })
         state, launch_ready, launch_error = self._launch_readiness(
             launchers, "repaired", enumeration_error)
+        proxy_fields = self._proxy_result_fields(launchers)
         self._log("repaired %s" % package)
         self._log_launch_readiness(package, launcher_warnings, enumeration_error)
         return self._result(
@@ -807,6 +1265,7 @@ class PackageInstaller:
             error=launch_error,
             error_code=E_LAUNCH_NOT_READY if not launch_ready else "",
             repair_argv=self._repair_argv(package) if not launch_ready else [],
+            **proxy_fields,
         )
 
 
