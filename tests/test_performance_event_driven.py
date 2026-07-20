@@ -137,6 +137,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             state_dir = root / "state"
             state_dir.mkdir()
             timers = []
+            scheduled_delays = []
             monitored = []
 
             class FakeMonitor:
@@ -160,6 +161,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
                 @staticmethod
                 def timeout_add(delay, callback, *args):
                     timers.append((delay, callback, args))
+                    scheduled_delays.append(delay)
                     return len(timers)
 
             namespace = {
@@ -167,7 +169,7 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
                 "HOME": root,
                 "STATE_DIR": state_dir,
                 "Path": pathlib.Path,
-                "CATALOG_MONITOR_RETRY_DELAYS_MS": (250, 1000, 5000),
+                "CATALOG_MONITOR_RETRY_DELAYS_MS": (250, 1000, 30_000),
                 "Gio": types.SimpleNamespace(
                     File=types.SimpleNamespace(new_for_path=lambda path: FakeFile(path)),
                     FileMonitorFlags=types.SimpleNamespace(WATCH_MOVES=1),
@@ -192,6 +194,14 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             self.assertNotIn(str(missing), monitored)
             self.assertEqual(1, len(timers))
             self.assertLessEqual(timers[0][0], 30_000)
+
+            monitor.start_catalog_monitor()
+            self.assertEqual(1, len(timers), "only one retry source may be pending")
+            for _attempt in range(len(namespace["CATALOG_MONITOR_RETRY_DELAYS_MS"]) + 2):
+                self.assertEqual(1, len(timers), "missing paths must keep a bounded retry alive")
+                _delay, callback, args = timers.pop(0)
+                self.assertFalse(callback(*args))
+            self.assertEqual([30_000, 30_000, 30_000], scheduled_delays[-3:])
 
             missing.mkdir()
             _delay, callback, args = timers.pop(0)
@@ -223,7 +233,10 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             if isinstance(node, ast.Assign)
             and any(isinstance(target, ast.Name) and target.id in {
                 "APP_CATALOG_FINGERPRINT_VERSION",
+                "APP_CATALOG_MAX_ROOTS",
+                "APP_CATALOG_MAX_LAUNCHERS",
                 "APP_CATALOG_LAUNCHER_HASH_BYTES",
+                "APP_CATALOG_TOTAL_HASH_BYTES",
             } for target in node.targets)
         ]
         functions = {
@@ -308,6 +321,156 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             after = namespace["launcher_content_stamp"](launcher)
 
         self.assertNotEqual(before, after)
+
+    def test_catalog_fingerprint_enforces_global_file_and_byte_budgets(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        assignments = {
+            target.id: node
+            for node in tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        required = {
+            "APP_CATALOG_MAX_ROOTS",
+            "APP_CATALOG_MAX_LAUNCHERS",
+            "APP_CATALOG_TOTAL_HASH_BYTES",
+            "APP_CATALOG_LAUNCHER_HASH_BYTES",
+        }
+        self.assertTrue(required.issubset(assignments))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "app_catalog_fingerprint"
+        )
+        function_source = ast.unparse(function)
+        for name in required:
+            self.assertIn(name, function_source)
+
+        namespace = {"Path": pathlib.Path, "os": os}
+        exec(compile(
+            ast.Module(
+                body=[
+                    assignments["APP_CATALOG_FINGERPRINT_VERSION"],
+                    *(assignments[name] for name in required),
+                    function,
+                ],
+                type_ignores=[],
+            ),
+            str(PHONE),
+            "exec",
+        ), namespace)
+        namespace["APP_CATALOG_MAX_ROOTS"] = 8
+        namespace["APP_CATALOG_MAX_LAUNCHERS"] = 3
+        namespace["APP_CATALOG_TOTAL_HASH_BYTES"] = 10
+        namespace["APP_CATALOG_LAUNCHER_HASH_BYTES"] = 8
+        requested_bytes = []
+        namespace["launcher_content_stamp"] = (
+            lambda _path, max_bytes: requested_bytes.append(max_bytes) or "digest"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            roots = []
+            for root_index in range(3):
+                root = pathlib.Path(directory) / ("root-%d" % root_index)
+                root.mkdir()
+                roots.append(root)
+                for file_index in range(3):
+                    (root / ("app-%d.desktop" % file_index)).write_bytes(b"12345678")
+            fingerprint = namespace["app_catalog_fingerprint"](roots)
+
+        launcher_entries = [
+            entry for entry in fingerprint
+            if len(entry) > 1 and entry[1] == "launcher"
+        ]
+        self.assertLessEqual(len(launcher_entries), 3)
+        self.assertLessEqual(sum(requested_bytes), 10)
+
+    def test_catalog_gio_event_marks_dirty_before_debounced_refresh(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        methods = {
+            node.name: node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        event_method = methods["on_catalog_file_changed"]
+        refresh_method = methods["refresh_if_apps_changed"]
+        self.assertIn("_catalog_dirty", ast.unparse(event_method))
+        self.assertIn("_catalog_dirty", ast.unparse(refresh_method))
+        self.assertIn("STATE_DIR", ast.unparse(methods["_ensure_catalog_monitor"]))
+
+        timers = []
+
+        class FakeGLib:
+            @staticmethod
+            def timeout_add(delay, callback, *args):
+                timers.append((delay, callback, args))
+                return len(timers)
+
+            @staticmethod
+            def source_remove(_source):
+                return None
+
+        namespace = {"GLib": FakeGLib}
+        selected = [event_method, methods["_run_catalog_refresh"]]
+        exec(compile(ast.Module(body=selected, type_ignores=[]), str(PHONE), "exec"), namespace)
+        observed = []
+        desktop = types.SimpleNamespace(
+            _catalog_dirty=False,
+            _catalog_debounce_source=0,
+            refresh_if_apps_changed=lambda: observed.append(desktop._catalog_dirty),
+        )
+        desktop.on_catalog_file_changed = types.MethodType(
+            namespace["on_catalog_file_changed"], desktop)
+        desktop._run_catalog_refresh = types.MethodType(
+            namespace["_run_catalog_refresh"], desktop)
+
+        desktop.on_catalog_file_changed()
+        self.assertTrue(desktop._catalog_dirty)
+        self.assertEqual(1, len(timers))
+        _delay, callback, args = timers.pop()
+        self.assertFalse(callback(*args))
+        self.assertEqual([True], observed)
+
+        desktop._catalog_dirty = False
+        desktop.on_catalog_file_changed(None, None, None, None, False)
+        self.assertFalse(
+            desktop._catalog_dirty,
+            "layout/appearance state events must not force an application rescan",
+        )
+
+        sync_calls = []
+        stable_catalog = (("version", 4),)
+        refresh_namespace = {
+            "app_catalog_fingerprint": lambda: stable_catalog,
+            "sync_layout": lambda width: sync_calls.append(width) or {
+                "version": 4, "items": []},
+            "load_layout": lambda: {"version": 4, "items": []},
+            "layout_is_valid": lambda _layout, require_items=False: True,
+            "LAYOUT_VERSION": 4,
+        }
+        exec(compile(
+            ast.Module(body=[refresh_method], type_ignores=[]),
+            str(PHONE),
+            "exec",
+        ), refresh_namespace)
+        fake_screen = types.SimpleNamespace(get_width=lambda: 1366)
+        dirty_desktop = types.SimpleNamespace(
+            _catalog_dirty=True,
+            catalog_stamp=stable_catalog,
+            appearance_stamp=(0, 0),
+            layout_stamp=0,
+            layout={"version": 4, "items": []},
+            current_layout_stamp=lambda: 0,
+            current_appearance_stamp=lambda: (0, 0),
+            get_screen=lambda: fake_screen,
+            render=lambda: None,
+        )
+        refresh = types.MethodType(
+            refresh_namespace["refresh_if_apps_changed"], dirty_desktop)
+        self.assertFalse(refresh())
+        self.assertEqual([1366], sync_calls)
+        self.assertFalse(dirty_desktop._catalog_dirty)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")

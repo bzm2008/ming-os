@@ -130,8 +130,11 @@ APP_DIRS = [
     Path("/usr/local/share/applications"),
     HOME / ".local/share/applications",
 ]
-APP_CATALOG_FINGERPRINT_VERSION = 3
+APP_CATALOG_FINGERPRINT_VERSION = 4
+APP_CATALOG_MAX_ROOTS = 8
+APP_CATALOG_MAX_LAUNCHERS = 512
 APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
+APP_CATALOG_TOTAL_HASH_BYTES = 2 * 1024 * 1024
 CATALOG_MONITOR_RETRY_DELAYS_MS = (500, 2_000, 10_000, 30_000)
 CORE_NAMES = {
     "Install Ming OS.desktop",
@@ -533,10 +536,16 @@ def canonicalize_core_layout_item(item, canonical_by_basename, seen):
     return restored
 
 
-def launcher_content_stamp(path):
+def launcher_content_stamp(path, max_bytes=None):
     """Hash a bounded launcher prefix so metadata-preserving edits are visible."""
     digest = hashlib.blake2b(digest_size=16)
-    remaining = APP_CATALOG_LAUNCHER_HASH_BYTES
+    try:
+        requested = APP_CATALOG_LAUNCHER_HASH_BYTES if max_bytes is None else int(max_bytes)
+    except (TypeError, ValueError):
+        requested = 0
+    remaining = min(APP_CATALOG_LAUNCHER_HASH_BYTES, max(0, requested))
+    if remaining == 0:
+        return "budget-exhausted"
     try:
         with Path(path).open("rb") as handle:
             while remaining > 0:
@@ -545,7 +554,6 @@ def launcher_content_stamp(path):
                     break
                 digest.update(chunk)
                 remaining -= len(chunk)
-            digest.update(b"\x01" if handle.read(1) else b"\x00")
         return digest.hexdigest()
     except OSError:
         return "unreadable"
@@ -555,11 +563,14 @@ def app_catalog_fingerprint(paths=None):
     """Return a bounded, cheap stamp for application-directory changes.
 
     Directory metadata changes whenever dpkg or a store adds/removes a desktop
-    entry.  Deliberately do not recursively walk app directories from the GTK
-    timer; only the three trusted roots are inspected.
+    entry.  Deliberately do not recursively walk app directories; roots, files
+    and content hashing share one fixed budget across the complete snapshot.
     """
     entries = [("version", APP_CATALOG_FINGERPRINT_VERSION)]
-    for raw_path in tuple(paths or APP_DIRS)[:8]:
+    remaining_launchers = APP_CATALOG_MAX_LAUNCHERS
+    remaining_hash_bytes = APP_CATALOG_TOTAL_HASH_BYTES
+    launcher_limit_reached = False
+    for raw_path in tuple(paths or APP_DIRS)[:APP_CATALOG_MAX_ROOTS]:
         path = Path(raw_path)
         try:
             stat_result = path.stat()
@@ -580,11 +591,20 @@ def app_catalog_fingerprint(paths=None):
                 for candidate in directory:
                     if not candidate.name.endswith(".desktop"):
                         continue
-                    if len(launchers) >= 512:
-                        entries.append((str(path), "launcher-limit"))
+                    if remaining_launchers <= 0:
+                        entries.append(("budget", "launcher-limit"))
+                        launcher_limit_reached = True
                         break
+                    remaining_launchers -= 1
                     try:
                         launcher_stat = candidate.stat(follow_symlinks=False)
+                        file_size = max(0, int(launcher_stat.st_size))
+                        hash_bytes = min(
+                            APP_CATALOG_LAUNCHER_HASH_BYTES,
+                            remaining_hash_bytes,
+                            file_size,
+                        )
+                        remaining_hash_bytes -= hash_bytes
                         launchers.append((
                             candidate.name,
                             getattr(
@@ -597,15 +617,18 @@ def app_catalog_fingerprint(paths=None):
                                 "st_ctime_ns",
                                 int(launcher_stat.st_ctime * 1000000000),
                             ),
-                            launcher_stat.st_size,
+                            file_size,
                             launcher_stat.st_mode,
-                            launcher_content_stamp(candidate.path),
+                            hash_bytes,
+                            launcher_content_stamp(candidate.path, hash_bytes),
                         ))
                     except OSError:
                         launchers.append((candidate.name, "unreadable"))
         except OSError:
             continue
         entries.extend((str(path), "launcher", *metadata) for metadata in sorted(launchers))
+        if launcher_limit_reached:
+            break
     return tuple(entries)
 
 
@@ -2816,6 +2839,7 @@ class PhoneDesktop(Gtk.Window):
         self._catalog_debounce_source = 0
         self._catalog_retry_source = 0
         self._catalog_retry_attempt = 0
+        self._catalog_dirty = False
         self.start_catalog_monitor()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
@@ -2850,6 +2874,12 @@ class PhoneDesktop(Gtk.Window):
             self._schedule_catalog_monitor_retry()
         else:
             self._catalog_retry_attempt = 0
+            if self._catalog_retry_source:
+                try:
+                    GLib.source_remove(self._catalog_retry_source)
+                except (TypeError, ValueError):
+                    pass
+                self._catalog_retry_source = 0
 
     def _ensure_catalog_monitor(self, directory):
         path = str(Path(directory))
@@ -2859,7 +2889,11 @@ class PhoneDesktop(Gtk.Window):
             monitor = Gio.File.new_for_path(path).monitor_directory(
                 Gio.FileMonitorFlags.WATCH_MOVES,
                 None)
-            monitor.connect("changed", self.on_catalog_file_changed)
+            monitor.connect(
+                "changed",
+                self.on_catalog_file_changed,
+                path != str(STATE_DIR),
+            )
             self._catalog_monitors.append(monitor)
             self._catalog_monitor_paths.add(path)
             return True
@@ -2870,10 +2904,17 @@ class PhoneDesktop(Gtk.Window):
     def _schedule_catalog_monitor_retry(self):
         if self._catalog_retry_source:
             return
-        if self._catalog_retry_attempt >= len(CATALOG_MONITOR_RETRY_DELAYS_MS):
+        if not CATALOG_MONITOR_RETRY_DELAYS_MS:
             return
-        delay = CATALOG_MONITOR_RETRY_DELAYS_MS[self._catalog_retry_attempt]
-        self._catalog_retry_attempt += 1
+        index = min(
+            self._catalog_retry_attempt,
+            len(CATALOG_MONITOR_RETRY_DELAYS_MS) - 1,
+        )
+        delay = CATALOG_MONITOR_RETRY_DELAYS_MS[index]
+        self._catalog_retry_attempt = min(
+            index + 1,
+            len(CATALOG_MONITOR_RETRY_DELAYS_MS) - 1,
+        )
         try:
             self._catalog_retry_source = GLib.timeout_add(
                 delay, self._run_catalog_monitor_retry)
@@ -2887,6 +2928,9 @@ class PhoneDesktop(Gtk.Window):
 
     def on_catalog_file_changed(self, *_args):
         """Debounce package/appearance bursts and refresh on the GTK main loop."""
+        catalog_event = not _args or not isinstance(_args[-1], bool) or _args[-1]
+        if catalog_event:
+            self._catalog_dirty = True
         if self._catalog_debounce_source:
             try:
                 GLib.source_remove(self._catalog_debounce_source)
@@ -3347,7 +3391,7 @@ class PhoneDesktop(Gtk.Window):
         appearance_stamp = self.current_appearance_stamp()
         appearance_changed = appearance_stamp != self.appearance_stamp
         layout_changed = stamp != self.layout_stamp
-        catalog_changed = catalog_stamp != self.catalog_stamp
+        catalog_changed = self._catalog_dirty or catalog_stamp != self.catalog_stamp
         if not layout_changed and not catalog_changed and not appearance_changed:
             return False
         if appearance_changed:
@@ -3367,6 +3411,7 @@ class PhoneDesktop(Gtk.Window):
             self.render()
         if catalog_changed:
             updated = sync_layout(self.get_screen().get_width())
+            self._catalog_dirty = False
         else:
             updated = load_layout()
         self.layout_stamp = self.current_layout_stamp()
