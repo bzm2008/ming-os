@@ -87,15 +87,10 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertNotIn("systemd-udev-settle.service", service)
         self.assertNotIn("Wants=systemd-udev-settle.service", service)
 
-    def test_spark_readiness_is_delayed_by_timer_without_network_online(self):
-        service = APPS.split(
-            "cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'",
-            1,
-        )[1].split("SVCUNIT", 1)[0]
-        self.assertNotIn("network-online.target", service)
-        self.assertIn("ming-appstore-ready.timer", APPS)
-        self.assertIn("OnBootSec=90s", APPS)
-        self.assertIn("After=graphical.target", service)
+    def test_spark_readiness_does_not_create_a_login_timer_or_service(self):
+        self.assertNotIn("ming-appstore-ready.timer", APPS)
+        self.assertNotIn("ming-appstore-ready.service", APPS)
+        self.assertNotIn("OnBootSec=90s", APPS)
 
     def test_vendor_spark_notifier_is_masked_after_every_store_install(self):
         """The vendor notifier is not allowed into the graphical boot chain."""
@@ -103,16 +98,10 @@ class ServiceProfileContracts(unittest.TestCase):
             "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
             1,
         )[1].split("SPARKINSTALL", 1)[0]
-        self.assertIn("mask_spark_update_notifier", installer)
-        self.assertIn(
-            "rm -f /etc/systemd/system/multi-user.target.wants/spark-update-notifier.service",
-            installer,
-        )
-        self.assertIn(
-            "ln -sfn /dev/null /etc/systemd/system/spark-update-notifier.service",
-            installer,
-        )
-        self.assertLess(installer.index("mask_spark_update_notifier"), installer.index("target_user"))
+        self.assertIn("ming-spark-security-converge prepare --deb", installer)
+        self.assertIn("ming-spark-security-converge enforce", installer)
+        self.assertNotIn("mask_spark_update_notifier", installer)
+        self.assertLess(installer.index("ming-spark-security-converge enforce"), installer.index("target_user"))
         self.assertIn("spark-update-notifier.service", BUILD)
 
     def test_modem_manager_is_disabled_by_default_but_has_explicit_opt_in(self):

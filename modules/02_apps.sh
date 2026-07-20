@@ -1772,8 +1772,29 @@ MINGSPARKMODE
     chmod 0755 "${target}" || return 1
 }
 
+deploy_spark_security_boundary() {
+    local asset_dir="/tmp/ming-build/assets"
+    local asset
+    for asset in ming-package-installer.py ming-shell-common.py ming-spark-package-helper.py ming-spark-security-converge.py; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "[ERROR] missing Spark security asset: ${asset}" >&2
+            return 1
+        fi
+    done
+    install -d -m 0755 /usr/local/sbin /usr/local/lib/ming-os
+    install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/lib/ming-os/ming-shell-common.py
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
+    python3 -m py_compile \
+        /usr/local/sbin/ming-package-installer \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge || return 1
+}
+
 install_app_store() {
     local app_store_mode
+    deploy_spark_security_boundary || return 1
     deploy_spark_build_mode_resolver || return 1
     if ! app_store_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
         echo "[ERROR] Spark Store build identity is invalid" >&2
@@ -1783,6 +1804,7 @@ install_app_store() {
         curl \
         wget \
         apt-transport-https \
+        gnupg \
         xdg-utils \
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
@@ -1876,6 +1898,13 @@ if ! verify_spark_asset "${deb}"; then
     exit 1
 fi
 
+# Register diversions and install the fixed source/key before dpkg runs the
+# vendor maintainer scripts. This closes the postinst policy window.
+if ! /usr/local/sbin/ming-spark-security-converge prepare --deb "${deb}"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
 verify_installed_spark_package() {
     local installed
     installed="$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' spark-store 2>/dev/null)" \
@@ -1892,7 +1921,7 @@ touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/
 # not deployed it yet, so retain a strictly verified bootstrap fallback.
 if [[ -x /usr/local/sbin/ming-package-installer ]]; then
     result_file="$(mktemp /tmp/ming-spark-install-result.XXXXXX)"
-    if ! /usr/local/sbin/ming-package-installer install "${deb}" >"${result_file}"; then
+    if ! /usr/local/sbin/ming-package-installer install "${deb}" --resolver spark --json >"${result_file}"; then
         cat "${result_file}" | tee -a "${log}" >&2
         rm -f "${result_file}"
         exit 1
@@ -1913,7 +1942,9 @@ except (OSError, TypeError, ValueError):
 if not isinstance(result, dict):
     print("E_PACKAGE_FAILED", file=sys.stderr)
     raise SystemExit(1)
-if result.get("ok") is not True:
+if (result.get("ok") is not True
+        or result.get("installed") is not True
+        or result.get("resolver") != "spark"):
     print(str(result.get("error_code") or "E_PACKAGE_FAILED"), file=sys.stderr)
     raise SystemExit(1)
 if result.get("launch_ready") is True:
@@ -1984,6 +2015,11 @@ else
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
+if ! /usr/local/sbin/ming-spark-security-converge enforce; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
 if ! verify_installed_spark_package; then
     printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
     exit 1
@@ -1992,20 +2028,6 @@ if [[ ! -x /usr/local/bin/spark-store ]]; then
     printf '%s\n' E_LAUNCH_NOT_READY | tee -a "${log}" >&2
     exit 1
 fi
-
-# Spark Store currently ships an enabled notifier with invalid restart fields
-# and an unbounded network wait. Keep the vendor file intact, but prevent it
-# from entering the boot transaction; Ming's delayed readiness timer owns this.
-mask_spark_update_notifier() {
-    if [[ ! -f /usr/lib/systemd/system/spark-update-notifier.service \
-        && ! -f /lib/systemd/system/spark-update-notifier.service ]]; then
-        return 0
-    fi
-    mkdir -p /etc/systemd/system
-    rm -f /etc/systemd/system/multi-user.target.wants/spark-update-notifier.service
-    ln -sfn /dev/null /etc/systemd/system/spark-update-notifier.service
-}
-mask_spark_update_notifier
 
 # A graphical user may already be logged in while a package is installed.
 # Trigger a bounded catalog sync; the drawer also rescans when it opens.
@@ -2184,37 +2206,6 @@ X-GNOME-Autostart-Delay=15
 APPRECAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-app-recommend.desktop"
 
-    cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'
-[Unit]
-Description=Ming OS App Store Readiness (delayed, non-blocking)
-After=graphical.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'command -v spark-store >/dev/null 2>&1 || /usr/local/bin/ming-install-spark-store || true'
-TimeoutStartSec=90
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVCUNIT
-
-    cat > /etc/systemd/system/ming-appstore-ready.timer << 'SPARKTIMER'
-[Unit]
-Description=Ming OS delayed Spark Store readiness
-After=graphical.target
-
-[Timer]
-OnBootSec=90s
-AccuracySec=30s
-Unit=ming-appstore-ready.service
-
-[Install]
-WantedBy=timers.target
-SPARKTIMER
-
-    systemctl disable --now ming-appstore-ready.service 2>/dev/null || true
-    systemctl enable ming-appstore-ready.timer 2>/dev/null || true
 }
 
 # ======================== 附加实用工具 ========================

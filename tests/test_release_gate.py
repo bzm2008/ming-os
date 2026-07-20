@@ -340,6 +340,7 @@ class ReleaseGateContracts(unittest.TestCase):
         expected_order = (
             "prepare_chroot_scripts\n"
             "    seed_resume_package_installer\n"
+            "    seed_resume_spark_security\n"
             "    ensure_resume_runtime_packages"
         )
         self.assertIn(expected_order, main)

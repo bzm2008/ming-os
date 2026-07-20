@@ -222,7 +222,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-thunar-menu-sync.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -244,6 +244,8 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
     install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
@@ -296,7 +298,7 @@ if not isinstance(result, dict):
 ok = result.get("ok") is True and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
-log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
+log_path = str(result.get("log_path") or "/var/log/ming-os/package-installer.jsonl")
 if "launch_ready" in result:
     launch_ready = result.get("launch_ready") is True
 else:
@@ -440,6 +442,13 @@ NoDisplay=true
 MINGDRAWERDESKTOP
     cp /usr/share/applications/ming-app-library.desktop "/home/${MING_USER}/.local/share/applications/"
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications/ming-app-library.desktop"
+    python3 -m py_compile \
+        /usr/local/sbin/ming-package-installer \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge || return 1
+    if dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -qx 'ii '; then
+        /usr/local/sbin/ming-spark-security-converge enforce || return 1
+    fi
 }
 
 install_ming_files() {

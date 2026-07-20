@@ -399,7 +399,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("if not isinstance(repaired, dict):", gui)
         self.assertIn("软件已安装，但暂时无法启动", gui)
         self.assertIn('"/usr/local/sbin/ming-package-installer", "repair"', gui)
-        self.assertIn("/var/log/ming-package-installer.log", gui)
+        self.assertIn("/var/log/ming-os/package-installer.jsonl", gui)
         self.assertIn("timeout --foreground 8s ming-phone-desktop --sync", gui)
         embedded = gui.split("if python3 -", 1)[1].split("\n", 1)[1].split(
             "\nMINGPACKAGEUIPY", 1

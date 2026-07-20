@@ -239,6 +239,63 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
 
 class PackageInstallerTransactionTests(unittest.TestCase):
+    def test_spark_resolver_uses_the_pinned_source_and_shared_lock(self):
+        installer = load_installer()
+        command = installer.PackageInstaller._apt_install_command(
+            "/var/lib/ming-package-installer/incoming/sample.deb",
+            resolver="spark",
+        )
+
+        self.assertEqual("flock", command[0])
+        self.assertIn("/run/lock/ming-package-manager.lock", command)
+        self.assertIn("DPkg::Lock::Timeout=60", command)
+        self.assertIn(
+            "Dir::Etc::sourcelist=/etc/apt/sources.list.d/ming-spark-store.list",
+            command,
+        )
+        self.assertIn("Dir::Etc::sourceparts=-", command)
+        self.assertEqual("ming-package-installer-26.4.0-v3", installer.PACKAGE_INSTALLER_CONTRACT)
+
+    def test_cli_passes_spark_resolver_and_json_contract(self):
+        installer = load_installer()
+
+        class SpyInstaller:
+            def __init__(self):
+                self.calls = []
+
+            def install(self, package_file, resolver="apt"):
+                self.calls.append((package_file, resolver))
+                return {
+                    "ok": True,
+                    "installed": True,
+                    "launch_ready": True,
+                    "resolver": resolver,
+                }
+
+        spy = SpyInstaller()
+        stdout = io.StringIO()
+        returncode = installer.main(
+            [
+                "install", "/tmp/sample.deb", "--resolver", "spark", "--json",
+            ],
+            installer=spy,
+            stdout=stdout,
+        )
+
+        self.assertEqual(0, returncode)
+        self.assertEqual([("/tmp/sample.deb", "spark")], spy.calls)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("spark", payload["resolver"])
+        self.assertTrue(payload["installed"])
+
+    def test_default_log_path_is_structured_package_installer_jsonl(self):
+        installer = load_installer()
+        service = installer.PackageInstaller()
+        self.assertEqual(
+            "/var/log/ming-os/package-installer.jsonl",
+            service.log_path.as_posix(),
+        )
+
     def test_all_apt_commands_share_the_ming_package_manager_lock(self):
         installer = load_installer()
         commands = (

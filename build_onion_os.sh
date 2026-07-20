@@ -1406,6 +1406,155 @@ if errors:
     print("\n".join(errors), file=sys.stderr)
     raise SystemExit(1)
 # MING_DESKTOP_BACKEND_VALIDATOR_END
+
+# Spark Store security convergence is validated outside the legacy vendor
+# chain checker so a reinstalled package cannot restore a broad polkit action.
+from pathlib import Path as _SparkPath
+import re as _SparkRe
+import shutil as _SparkShutil
+import stat as _SparkStat
+import subprocess as _SparkSubprocess
+
+_spark_security_errors = []
+_spark_security_root = _SparkPath(sys.argv[1])
+_spark_security_files = {
+    "usr/local/sbin/ming-spark-package-helper": 0o755,
+    "usr/local/sbin/ming-spark-security-converge": 0o755,
+    "etc/apt/keyrings/ming-spark-store.gpg": 0o644,
+    "etc/apt/sources.list.d/ming-spark-store.list": 0o644,
+}
+for _relative, _mode in _spark_security_files.items():
+    _path = _spark_security_root / _relative
+    try:
+        _metadata = _path.lstat()
+    except OSError:
+        _spark_security_errors.append("missing Spark security file: " + _relative)
+        continue
+    if _path.is_symlink() or not _SparkStat.S_ISREG(_metadata.st_mode):
+        _spark_security_errors.append("unsafe Spark security file: " + _relative)
+    elif (_metadata.st_uid, _metadata.st_gid, _SparkStat.S_IMODE(_metadata.st_mode)) != (0, 0, _mode):
+        _spark_security_errors.append("unsafe Spark security metadata: " + _relative)
+
+_spark_source = _spark_security_root / "etc/apt/sources.list.d/ming-spark-store.list"
+if _spark_source.is_file() and _spark_source.read_text(encoding="utf-8", errors="replace") != (
+        "deb [signed-by=/etc/apt/keyrings/ming-spark-store.gpg] https://d.spark-app.store/store /\n"):
+    _spark_security_errors.append("Spark source is not the pinned signed source")
+
+_spark_keyring = _spark_security_root / "etc/apt/keyrings/ming-spark-store.gpg"
+if _spark_keyring.is_file() and not _spark_keyring.is_symlink():
+    _gpg = _SparkShutil.which("gpg") or "/usr/bin/gpg"
+    _probe = _SparkSubprocess.run(
+        [_gpg, "--batch", "--no-options", "--with-colons", "--show-keys", str(_spark_keyring)],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    _primary = ""
+    _saw_pub = False
+    for _line in _probe.stdout.splitlines():
+        _fields = _line.split(":")
+        if _fields[0] == "pub":
+            _saw_pub = True
+        elif _fields[0] == "fpr" and _saw_pub and not _primary:
+            _primary = next((value.upper() for value in _fields[1:] if _SparkRe.fullmatch(r"[0-9A-Fa-f]{40}", value)), "")
+    if _probe.returncode != 0 or _primary != "9D9AA859F75024B1A1ECE16E0E41D354A29A440C":
+        _spark_security_errors.append("Spark keyring primary fingerprint is not pinned")
+
+_spark_policy_paths = (
+    "opt/spark-store/extras/store.spark-app.spark-store.policy",
+    "opt/spark-store/bin/extras/store.spark-app.spark-store.policy",
+    "usr/share/polkit-1/actions/store.spark-app.spark-store.policy",
+)
+for _relative in _spark_policy_paths:
+    _path = _spark_security_root / _relative
+    try:
+        _metadata = _path.lstat()
+    except OSError:
+        _metadata = None
+    if (
+        _metadata is None
+        or _path.is_symlink()
+        or not _SparkStat.S_ISREG(_metadata.st_mode)
+        or (_metadata.st_uid, _metadata.st_gid, _SparkStat.S_IMODE(_metadata.st_mode)) != (0, 0, 0o644)
+    ):
+        _spark_security_errors.append("unsafe Spark policy metadata: " + _relative)
+    _text = _path.read_text(encoding="utf-8", errors="replace") if _path.is_file() else ""
+    if (
+        '<action id="store.spark-app.spark-store">' not in _text
+        or "<allow_any>no</allow_any>" not in _text
+        or "<allow_inactive>no</allow_inactive>" not in _text
+        or "<allow_active>auth_admin_keep</allow_active>" not in _text
+        or "/opt/spark-store/extras/shell-caller.sh" not in _text
+        or "allow_gui" in _text
+        or "<allow_any>yes</allow_any>" in _text
+    ):
+        _spark_security_errors.append("unsafe Spark policy: " + _relative)
+
+_actions_dir = _spark_security_root / "usr/share/polkit-1/actions"
+_spark_bindings = []
+if _actions_dir.is_dir():
+    for _policy_file in _actions_dir.glob("*.policy"):
+        if not _policy_file.is_file() or _policy_file.is_symlink():
+            continue
+        _policy_text = _policy_file.read_text(encoding="utf-8", errors="replace")
+        if "/opt/spark-store/extras/shell-caller.sh" in _policy_text:
+            _spark_bindings.append(_policy_file.name)
+        if "/usr/local/bin/ssinstall" in _policy_text:
+            _spark_security_errors.append("active Spark ssinstall policy remains: " + _policy_file.name)
+if _spark_bindings != ["store.spark-app.spark-store.policy"]:
+    _spark_security_errors.append("multiple active Spark polkit actions bind the Electron shim")
+
+for _relative in (
+    "opt/spark-store/extras/shell-caller.sh",
+    "opt/spark-store/bin/extras/shell-caller.sh",
+):
+    _path = _spark_security_root / _relative
+    try:
+        _metadata = _path.lstat()
+    except OSError:
+        _metadata = None
+    if (
+        _metadata is None
+        or _path.is_symlink()
+        or not _SparkStat.S_ISREG(_metadata.st_mode)
+        or (_metadata.st_uid, _metadata.st_gid, _SparkStat.S_IMODE(_metadata.st_mode)) != (0, 0, 0o755)
+    ):
+        _spark_security_errors.append("unsafe Spark shell shim metadata: " + _relative)
+    _text = _path.read_text(encoding="utf-8", errors="replace") if _path.is_file() else ""
+    if _path.is_symlink() or "exec /usr/local/sbin/ming-spark-package-helper" not in _text or "eval" in _text:
+        _spark_security_errors.append("unsafe Spark shell shim: " + _relative)
+
+for _relative in (
+    "usr/share/polkit-1/actions/store.spark-app.ssinstall.policy",
+    "usr/share/polkit-1/actions/store.spark-update-tool.policy",
+):
+    # Required diversion targets remain visible to source-level release gates:
+    # store.spark-app.ssinstall.policy.vendor and store.spark-update-tool.policy.vendor
+    if (_spark_security_root / _relative).exists() or (_spark_security_root / _relative).is_symlink():
+        _spark_security_errors.append("dangerous Spark policy remains active: " + _relative)
+    if not (_spark_security_root / (_relative + ".vendor")).exists():
+        _spark_security_errors.append("missing diverted Spark policy: " + _relative)
+
+for _relative in (
+    "opt/spark-store/extras/shell-caller.sh",
+    "opt/spark-store/bin/extras/shell-caller.sh",
+    "opt/spark-store/extras/store.spark-app.spark-store.policy",
+    "opt/spark-store/bin/extras/store.spark-app.spark-store.policy",
+):
+    if not (_spark_security_root / (_relative + ".vendor")).exists():
+        _spark_security_errors.append("missing diverted Spark vendor path: " + _relative)
+
+for _relative in (
+    "etc/apt/trusted.gpg.d/spark-store.gpg",
+    "etc/apt/trusted.gpg.d/spark-store.asc",
+    "etc/systemd/system/ming-appstore-ready.service",
+    "etc/systemd/system/ming-appstore-ready.timer",
+):
+    if (_spark_security_root / _relative).exists() or (_spark_security_root / _relative).is_symlink():
+        _spark_security_errors.append("retired Spark security path remains: " + _relative)
+
+if _spark_security_errors:
+    print("\n".join(_spark_security_errors), file=sys.stderr)
+    raise SystemExit(1)
+
 PY
     then
         log_error "core desktop launcher validation failed"
@@ -1712,6 +1861,8 @@ for path, marker in [
     ("usr/local/bin/ming-device-control", "DeviceController"),
     ("usr/local/bin/ming-audio-session", "audio-repair-playback"),
     ("usr/local/sbin/ming-package-installer", "PackageInstaller"),
+    ("usr/local/sbin/ming-spark-package-helper", "SparkPackageHelper"),
+    ("usr/local/sbin/ming-spark-security-converge", "SparkSecurityConverger"),
     ("usr/local/bin/ming-hardware-status", "HardwareStatus"),
     ("usr/local/bin/ming-storage-status", "parse_partitions"),
     ("usr/local/bin/ming-files", "ming-files.py"),
@@ -1832,6 +1983,8 @@ for helper in [
     "usr/local/bin/ming-spark-store",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
+    "usr/local/sbin/ming-spark-package-helper",
+    "usr/local/sbin/ming-spark-security-converge",
 ]:
     require_file(helper)
 
@@ -1873,7 +2026,6 @@ for relative_path in [
     "etc/systemd/system/ming-power-profile.service",
     "etc/systemd/system/ming-time-sync.service",
     "etc/systemd/system/ming-time-sync.timer",
-    "etc/systemd/system/ming-appstore-ready.timer",
 ]:
     validate_systemd_unit(relative_path)
 spark_notifier_mask = root / "etc/systemd/system/spark-update-notifier.service"
@@ -1993,6 +2145,8 @@ for relative_path in [
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
+    "usr/local/sbin/ming-spark-package-helper",
+    "usr/local/sbin/ming-spark-security-converge",
     "usr/local/bin/ming-thunar-menu-sync",
     "usr/local/lib/ming-os/ming-performance-policy.py",
     "usr/local/lib/ming-os/ming-prefetch.py",

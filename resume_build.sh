@@ -130,6 +130,24 @@ PY
     chroot_exec python3 -m py_compile /usr/local/sbin/ming-package-installer
 }
 
+seed_resume_spark_security() {
+    local asset_dir="/tmp/ming-build/assets"
+    local asset
+    for asset in ming-spark-package-helper.py ming-spark-security-converge.py; do
+        if ! chroot_exec test -s "${asset_dir}/${asset}"; then
+            log_error "resume 构建缺少 Spark security asset: ${asset}"
+            return 1
+        fi
+    done
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-package-helper.py" \
+        /usr/local/sbin/ming-spark-package-helper
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-security-converge.py" \
+        /usr/local/sbin/ming-spark-security-converge
+    chroot_exec python3 -m py_compile \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge
+}
+
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
     # Interrupted b43 installer postinst scripts download from GitHub and can
@@ -328,6 +346,7 @@ resume_main() {
     # 同步最新的 assets（含壁纸、图标、settings.py）
     prepare_chroot_scripts
     seed_resume_package_installer
+    seed_resume_spark_security
     ensure_resume_runtime_packages
 
     # 执行剩余模块（03 及之后）

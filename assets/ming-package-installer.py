@@ -18,17 +18,19 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 SUPPORTED_ARCHITECTURES = {"amd64", "all"}
-PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
+PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,127}$")
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z.+:~\-]+$")
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 SHELL_WRAPPER_REJECTION = "shell command wrappers are not allowed"
 PACKAGE_INSTALLER_PATH = "/usr/local/sbin/ming-package-installer"
-PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v2"
+PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v3"
 REQUIRED_COMMON_SHA256 = "cc2e34b62e6ab9cac74164dd51c2b5218d016f42500f80017931ce7d6f3b6ad1"
 PACKAGE_MANAGER_LOCK = "/run/lock/ming-package-manager.lock"
 PACKAGE_MANAGER_LOCK_TIMEOUT = 30
 DPKG_LOCK_TIMEOUT = 60
 PACKAGE_MANAGER_BUSY_EXIT = 75
+DEFAULT_LOG_PATH = "/var/log/ming-os/package-installer.jsonl"
+SPARK_SOURCE_LIST = "/etc/apt/sources.list.d/ming-spark-store.list"
 E_PACKAGE_BUSY = "E_PACKAGE_BUSY"
 E_RESOLVER_FAILED = "E_RESOLVER_FAILED"
 E_LAUNCH_NOT_READY = "E_LAUNCH_NOT_READY"
@@ -144,7 +146,7 @@ class PackageInstaller:
             self, runner=None, log_path=None, uid_getter=None, logger=None,
             desktop_candidate_verifier=None):
         self.runner = runner or _run
-        self.log_path = pathlib.Path(log_path or "/var/log/ming-package-installer.log")
+        self.log_path = pathlib.Path(log_path or DEFAULT_LOG_PATH)
         self.uid_getter = uid_getter or getattr(os, "geteuid", lambda: 1)
         self.logger = logger
         self.desktop_candidate_verifier = (
@@ -169,6 +171,8 @@ class PackageInstaller:
             "package": "",
             "version": "",
             "architecture": "",
+            "resolver": "apt",
+            "installed": False,
             "error": "",
             "error_code": "",
             "state": "",
@@ -182,8 +186,10 @@ class PackageInstaller:
         return _redact_json_value(result)
 
     def _log(self, message):
-        line = "[%s] %s" % (
-            datetime.now().strftime("%F %T"), _redact_sensitive(message))
+        line = json.dumps({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "message": _redact_sensitive(message),
+        }, ensure_ascii=False, sort_keys=True)
         try:
             if self.logger is not None:
                 self.logger(line)
@@ -285,23 +291,29 @@ class PackageInstaller:
         )
 
     @staticmethod
-    def _locked_apt_command(*arguments):
-        return (
+    def _locked_apt_command(*arguments, resolver="apt"):
+        command = (
             "flock", "--exclusive", "--timeout", str(PACKAGE_MANAGER_LOCK_TIMEOUT),
             "--conflict-exit-code", str(PACKAGE_MANAGER_BUSY_EXIT),
             PACKAGE_MANAGER_LOCK,
             "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
             "-o", "DPkg::Lock::Timeout=%s" % DPKG_LOCK_TIMEOUT,
-            *tuple(str(value) for value in arguments),
         )
+        if resolver == "spark":
+            command += (
+                "-o", "Dir::Etc::sourcelist=%s" % SPARK_SOURCE_LIST,
+                "-o", "Dir::Etc::sourceparts=-",
+            )
+        return command + tuple(str(value) for value in arguments)
 
     @staticmethod
-    def _apt_install_command(package_file):
-        return PackageInstaller._locked_apt_command("install", package_file)
+    def _apt_install_command(package_file, resolver="apt"):
+        return PackageInstaller._locked_apt_command(
+            "install", package_file, resolver=resolver)
 
     @staticmethod
-    def _apt_fix_command():
-        return PackageInstaller._locked_apt_command("-f", "install")
+    def _apt_fix_command(resolver="apt"):
+        return PackageInstaller._locked_apt_command("-f", "install", resolver=resolver)
 
     @staticmethod
     def _apt_reinstall_command(package):
@@ -624,10 +636,15 @@ class PackageInstaller:
                 warning.get("error") or "启动器不可用",
             ))
 
-    def install(self, package_file):
+    def install(self, package_file, resolver="apt"):
+        if resolver not in {"apt", "spark"}:
+            return self._result(
+                False, action="install", state="validation_failed",
+                resolver=str(resolver), error="软件包解析器无效。",
+            )
         inspected = self.inspect(package_file)
         if not inspected["ok"]:
-            inspected.update(action="install", state="validation_failed")
+            inspected.update(action="install", state="validation_failed", resolver=resolver)
             return inspected
         if self.uid_getter() != 0:
             return self._result(
@@ -638,16 +655,18 @@ class PackageInstaller:
                 package=inspected["package"],
                 version=inspected["version"],
                 architecture=inspected["architecture"],
+                resolver=resolver,
                 error="安装 DEB 软件包需要管理员权限。",
             )
 
-        command = self._apt_install_command(inspected["file"])
+        command = self._apt_install_command(inspected["file"], resolver=resolver)
         returncode, output, error = self._call(command, timeout=180)
         dependency_repair_attempted = False
         failure_code = self._apt_failure_code(returncode, output, error)
         if returncode != 0 and failure_code == E_RESOLVER_FAILED:
             dependency_repair_attempted = True
-            fix_code, fix_output, fix_error = self._call(self._apt_fix_command(), timeout=180)
+            fix_code, fix_output, fix_error = self._call(
+                self._apt_fix_command(resolver=resolver), timeout=180)
             if fix_code == 0:
                 returncode, output, error = self._call(command, timeout=180)
             else:
@@ -663,6 +682,7 @@ class PackageInstaller:
                 state="install_failed",
                 error_code=failure_code,
                 dependency_repair_attempted=dependency_repair_attempted,
+                resolver=resolver,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
                 error=self._apt_failure_message(failure_code),
             )
@@ -673,6 +693,8 @@ class PackageInstaller:
                 action="install",
                 state="verification_failed",
                 dependency_repair_attempted=dependency_repair_attempted,
+                resolver=resolver,
+                installed=False,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
                 error="软件包安装后未处于已安装状态。",
             )
@@ -694,6 +716,8 @@ class PackageInstaller:
             action="install",
             state=state,
             launch_ready=launch_ready,
+            installed=True,
+            resolver=resolver,
             dependency_repair_attempted=dependency_repair_attempted,
             refresh=refresh,
             launchers=launchers,
@@ -774,6 +798,7 @@ class PackageInstaller:
             action="repair",
             state=state,
             launch_ready=launch_ready,
+            installed=True,
             package=package,
             dependency_repair_attempted=dependency_repair_attempted,
             refresh=refresh,
@@ -793,6 +818,8 @@ def build_parser():
     inspect.add_argument("--json", action="store_true")
     install = actions.add_parser("install")
     install.add_argument("file")
+    install.add_argument("--resolver", choices=("apt", "spark"), default="apt")
+    install.add_argument("--json", action="store_true")
     repair = actions.add_parser("repair")
     repair.add_argument("package")
     return parser
@@ -815,7 +842,7 @@ def main(argv=None, installer=None, stdout=None):
     if args.action == "inspect":
         result = installer.inspect(args.file)
     elif args.action == "install":
-        result = installer.install(args.file)
+        result = installer.install(args.file, resolver=args.resolver)
     else:
         result = installer.repair(args.package)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
