@@ -222,7 +222,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -247,6 +247,7 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
     install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
     install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
+    install -m 0755 "${asset_dir}/ming-window-resource-monitor.py" /usr/local/bin/ming-window-resource-monitor
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
@@ -1192,7 +1193,8 @@ install_themes() {
         arc-theme \
         numix-gtk-theme \
         papirus-icon-theme \
-        numix-icon-theme-circle
+        numix-icon-theme-circle \
+        gir1.2-wnck-3.0
 
     # 生成 Ming 品牌化 GTK3 CSS 覆盖（26.3.0 深绿强调色）
     mkdir -p /usr/share/themes/Arc-Darker/gtk-3.0
@@ -3311,36 +3313,15 @@ window_manager_healthy() {
     grep -Fq '"healthy":true' <<<"${status}"
 }
 
-run_session() {
-    local lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-window-manager-watchdog.lock"
-    exec 9>"${lock_file}" || exit 1
-    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
-        exit 0
-    fi
-
-    local failure_count=0 last_repair=0 now
-    sleep 3
-    while true; do
-        if window_manager_healthy; then
-            failure_count=0
-        else
-            failure_count=$((failure_count + 1))
-            log "health failure ${failure_count}/3"
-            now="$(date +%s)"
-            if (( failure_count >= 3 )) && (( now - last_repair >= 60 )); then
-                log 'three consecutive failures; requesting conservative Xfwm/EWMH repair'
-                /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
-                    || log 'repair attempt did not report recovery'
-                last_repair="${now}"
-                failure_count=0
-            fi
-        fi
-        sleep 10
-    done
+repair_if_needed() {
+    window_manager_healthy && return 0
+    log 'window-manager-changed event reported an unhealthy Xfwm/EWMH state'
+    /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+        || { log 'event-triggered repair did not report recovery'; return 1; }
 }
 
 case "${1:-start}" in
-    --session) run_session ;;
+    --session|--repair-if-needed) repair_if_needed ;;
     --check) window_manager_healthy ;;
     *)
         /usr/local/bin/ming-window-control status --json
@@ -3825,21 +3806,10 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-session-healthcheck
 MINGDOCKAUTO
 
-    cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
-[Desktop Entry]
-Type=Application
-Name=Ming Window Manager Health
-Comment=检测并保守恢复 Xfwm 窗口控制
-Exec=/usr/local/bin/ming-window-manager-watchdog --session
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-MINGWINDOWMANAGERAUTO
+    rm -f "${autostart_dir}/ming-window-manager.desktop"
 
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
-        "${autostart_dir}/ming-dock.desktop" \
-        "${autostart_dir}/ming-window-manager.desktop"
+        "${autostart_dir}/ming-dock.desktop"
 }
 
 # ======================== 统一会话启动/健康协调器 ========================
@@ -3857,7 +3827,8 @@ readonly PLANK_STARTUP_DEADLINE=8
 readonly PICOM_STARTUP_DEADLINE=5
 # Startup watchdogs are bounded as timeout --foreground 8s / 8s / 5s.
 readonly PROBE_TIMEOUT=2
-readonly SUPERVISOR_INTERVAL=10
+readonly SUPERVISOR_INTERVAL=30
+readonly RESOURCE_MONITOR_RETRY_SECONDS=60
 readonly AUDIO_CHECK_INTERVAL=30
 
 log_dir="${HOME}/.cache/ming-os"
@@ -3865,6 +3836,7 @@ mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 mkdir -p "${log_dir}" 2>/dev/null || true
 health_log="${log_dir}/session-health.log"
 metrics_file="${log_dir}/session-startup.json"
+resource_monitor_attempt_file="${log_dir}/resource-monitor-attempt"
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
 touch "${health_log}" 2>/dev/null || true
@@ -3898,6 +3870,16 @@ now_ms() {
     local value
     value="$(date +%s%3N 2>/dev/null || true)"
     [[ "${value}" =~ ^[0-9]+$ ]] && printf '%s\n' "${value}" || printf '%s\n' "$(( $(date +%s) * 1000 ))"
+}
+
+monotonic_seconds() {
+    local uptime="0" ignored=""
+    if [[ -r /proc/uptime ]]; then
+        read -r uptime ignored </proc/uptime || uptime="0"
+    fi
+    uptime="${uptime%%.*}"
+    [[ "${uptime}" =~ ^[0-9]+$ ]] || uptime=0
+    printf '%s\n' "${uptime}"
 }
 
 process_count() {
@@ -3953,7 +3935,7 @@ ensure_audio_session() {
     # user-scoped session coordinator at a low cadence.  The helper is bounded
     # and preserves a valid user-selected HDMI, Bluetooth or USB output.
     local now
-    now="$(date +%s 2>/dev/null || printf '0')"
+    now="$(monotonic_seconds)"
     [[ "${now}" =~ ^[0-9]+$ ]] || now=0
     if (( last_audio_check > 0 && now > 0 && now - last_audio_check < AUDIO_CHECK_INTERVAL )); then
         return 0
@@ -3965,54 +3947,39 @@ ensure_audio_session() {
         >>"${health_log}" 2>&1 &) || true
 }
 
-# ming-resource-supervisor is intentionally owned by the unified session
-# coordinator.  It samples EWMH windows with a two-second ceiling and delegates
-# every PID change to the validated resource-policy daemon.
-ming-resource-supervisor() {
-    command -v xprop >/dev/null 2>&1 || return 0
-    command -v wmctrl >/dev/null 2>&1 || return 0
-    command -v ming-interaction-boost >/dev/null 2>&1 || return 0
-    local active active_id active_pid active_start line window_id desktop pid state hidden_file now hidden_since
-    local hidden_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-resource-hidden"
-    mkdir -p "${hidden_dir}" 2>/dev/null || true
-    active="$(x11_call xprop -root _NET_ACTIVE_WINDOW 2>/dev/null || true)"
-    active_id="$(grep -oE '0x[0-9a-fA-F]+' <<<"${active}" | head -n1 || true)"
-    active_pid=""
-    if [[ -n "${active_id}" ]]; then
-        active_pid="$(x11_call xprop -id "${active_id}" _NET_WM_PID 2>/dev/null | awk -F' = ' '{print $2}' | tr -dc '0-9' || true)"
+ensure_window_manager_once() {
+    command -v ming-window-manager-watchdog >/dev/null 2>&1 || return 0
+    (run_bounded 8 /usr/local/bin/ming-window-manager-watchdog --repair-if-needed \
+        >>"${health_log}" 2>&1 &) || true
+}
+
+resource_monitor_running() {
+    probe_timeout pgrep -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-window-resource-monitor([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-window-resource-monitor([[:space:]]|$)' \
+        >/dev/null 2>&1
+}
+
+start_resource_monitor() {
+    local now last_attempt=0
+    resource_monitor_running && return 0
+    [[ -x /usr/local/bin/ming-window-resource-monitor ]] || {
+        log 'event-driven resource monitor is unavailable'
+        return 0
+    }
+    now="$(monotonic_seconds)"
+    if [[ -s "${resource_monitor_attempt_file}" ]]; then
+        read -r last_attempt <"${resource_monitor_attempt_file}" || last_attempt=0
     fi
-    if [[ "${active_pid}" =~ ^[0-9]+$ && -r "/proc/${active_pid}/stat" ]]; then
-        active_start="$(awk -F') ' '{print $2}' "/proc/${active_pid}/stat" 2>/dev/null | awk '{print $20}' || true)"
-        if [[ "${active_start}" =~ ^[0-9]+$ ]]; then
-            (timeout --foreground 2s ming-interaction-boost begin --pid "${active_pid}" \
-                --starttime "${active_start}" --reason activate --json >/dev/null 2>&1 &) || true
-        fi
+    [[ "${now}" =~ ^[0-9]+$ ]] || now=0
+    [[ "${last_attempt}" =~ ^[0-9]+$ ]] || last_attempt=0
+    if (( now > 0 && last_attempt > 0 && now >= last_attempt
+          && now - last_attempt < RESOURCE_MONITOR_RETRY_SECONDS )); then
+        return 0
     fi
-    now="$(date +%s 2>/dev/null || echo 0)"
-    while read -r window_id desktop pid _rest; do
-        [[ "${pid}" =~ ^[0-9]+$ && "${pid}" != "${active_pid}" ]] || continue
-        [[ -r "/proc/${pid}/stat" ]] || continue
-        state="$(x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null || true)"
-        hidden_file="${hidden_dir}/${pid}"
-        if grep -q '_NET_WM_STATE_HIDDEN' <<<"${state}"; then
-            if [[ ! -s "${hidden_file}" ]]; then
-                printf '%s\n' "${now}" >"${hidden_file}" 2>/dev/null || true
-                continue
-            fi
-            hidden_since="$(cat "${hidden_file}" 2>/dev/null || echo "${now}")"
-            [[ "${hidden_since}" =~ ^[0-9]+$ && "${now}" =~ ^[0-9]+$ ]] || continue
-            (( now - hidden_since >= 10 )) || continue
-            visible=false
-        else
-            rm -f "${hidden_file}" 2>/dev/null || true
-            visible=true
-        fi
-        starttime="$(awk -F') ' '{print $2}' "/proc/${pid}/stat" 2>/dev/null | awk '{print $20}' || true)"
-        [[ "${starttime}" =~ ^[0-9]+$ ]] || continue
-        (timeout --foreground 2s ming-background-policy apply --pid "${pid}" \
-            --starttime "${starttime}" --desktop-file /usr/share/applications/ming-running-apps.desktop \
-            --visible "${visible}" --json >/dev/null 2>&1 &) || true
-    done < <(x11_call wmctrl -lp 2>/dev/null || true)
+    printf '%s\n' "${now}" >"${resource_monitor_attempt_file}" 2>/dev/null || true
+    log 'starting event-driven Wnck resource monitor'
+    (nohup /usr/local/bin/ming-window-resource-monitor >>"${health_log}" 2>&1 &) || true
+    return 0
 }
 
 phone_desktop_running() {
@@ -4329,7 +4296,7 @@ payload = {
     "deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
     "startup_deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
     "probe_timeout": 2,
-    "supervisor_interval": 10,
+    "supervisor_interval": 30,
     "health_log": os.environ.get("MING_HEALTH_LOG", ""),
     "duplicates": {
         "phone_desktop": integer("MING_PHONE_DUPLICATES"),
@@ -4354,12 +4321,13 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    start_resource_monitor
+    ensure_window_manager_once
     # Establish the effective renderer before Ming Shell draws its first frame.
     start_picom || log 'Picom is not healthy after startup deadline'
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
     ensure_audio_session
-    ming-resource-supervisor
     write_metrics startup "${phone_fallback}"
     log 'session startup check complete'
 }
@@ -4367,13 +4335,13 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    start_resource_monitor
     start_picom || log 'Picom repair did not recover a compositor'
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
     start_plank_dock || log 'Plank Dock repair did not recover a visible window'
     ensure_audio_session
-    ming-resource-supervisor
     write_metrics supervisor "${phone_fallback}"
     log 'session supervisor check complete'
 }
@@ -4403,7 +4371,7 @@ case "${1:---once}" in
         acquire_coordinator_lock || exit 0
         startup_once
         while true; do
-            sleep "${SUPERVISOR_INTERVAL}" # fixed supervisor cadence: sleep 10
+            sleep "${SUPERVISOR_INTERVAL}" # fixed low-overhead supervisor cadence
             supervise_once
         done
         ;;
@@ -4739,27 +4707,6 @@ for item in "${desktop}/Ming 设置.desktop"; do
     ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
 done
 
-if [[ "${1:-}" == "--watch" ]]; then
-    while true; do
-        if command -v inotifywait >/dev/null 2>&1; then
-            inotifywait -q -e close_write,create,move,delete /usr/share/applications "${HOME}/.local/share/applications" >/dev/null 2>&1 || sleep 5
-        else
-            sleep 20
-        fi
-        if command -v ming-phone-desktop >/dev/null 2>&1; then
-            ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
-        else
-            sync_apps
-        fi
-        # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
-        for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
-            if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
-                gtk-update-icon-cache -q -t -f "${icon_dir}" 2>/dev/null || true
-            fi
-        done
-        xdg-desktop-menu forceupdate 2>/dev/null || true
-    done
-fi
 DESKORG
     chmod +x /usr/local/bin/ming-desktop-organizer
 
@@ -5854,18 +5801,9 @@ CALAMARES
         "/etc/skel/Desktop/Install Debian.desktop" \
         "/etc/skel/Desktop/安装 Debian.desktop" 2>/dev/null || true
 
-    # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用。
-    cat > "${autostart_dir}/ming-desktop-organizer.desktop" << DESKORGAUTO
-[Desktop Entry]
-Type=Application
-Name=Ming Desktop Organizer
-Comment=同步新安装应用到 Ming 手机式桌面
-Exec=sh -c "sleep 5 && /usr/local/bin/ming-desktop-organizer --watch"
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5
-DESKORGAUTO
+    # Launcher/state changes are handled inside the phone desktop with
+    # Gio.FileMonitor. Remove the legacy long-running organizer during upgrade.
+    rm -f "${autostart_dir}/ming-desktop-organizer.desktop"
 
     # Compatibility filename retained for Settings/upgrade migrations.  The
     # old session watchdog is intentionally disabled; the unified coordinator

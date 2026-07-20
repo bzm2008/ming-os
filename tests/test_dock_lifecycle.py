@@ -207,16 +207,20 @@ class DockLifecycleContracts(unittest.TestCase):
             "PLANK_STARTUP_DEADLINE=8",
             "PICOM_STARTUP_DEADLINE=5",
             "PROBE_TIMEOUT=2",
-            "SUPERVISOR_INTERVAL=10",
+            "SUPERVISOR_INTERVAL=30",
             "flock -n",
             "ming-session-healthcheck.pid",
             "ming-phone-desktop-watchdog",
             "ming-plank-watchdog",
             "ming-picom",
             "while true; do",
-            "sleep 10",
+            'sleep "${SUPERVISOR_INTERVAL}"',
         ):
             self.assertIn(marker, self.session_healthcheck)
+
+        self.assertIn("monotonic_seconds()", self.session_healthcheck)
+        self.assertIn("/proc/uptime", self.session_healthcheck)
+        self.assertIn("now >= last_attempt", self.session_healthcheck)
 
         self.assertIn(
             "Exec=/usr/local/bin/ming-session-healthcheck --session",
@@ -226,6 +230,7 @@ class DockLifecycleContracts(unittest.TestCase):
             "Exec=/usr/local/bin/ming-phone-desktop-watchdog --session",
             "Exec=/usr/local/bin/ming-plank-watchdog --session",
             "Exec=/usr/local/bin/ming-picom",
+            "Exec=/usr/local/bin/ming-window-manager-watchdog --session",
         ):
             self.assertNotIn(direct, self.autostart)
 

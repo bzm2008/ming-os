@@ -179,6 +179,7 @@ ensure_resume_runtime_packages() {
         fonts-wqy-zenhei \
         xfce4-screensaver \
         python3-gi \
+        gir1.2-wnck-3.0 \
         gir1.2-gtk-4.0 \
         gir1.2-adw-1 \
         libadwaita-1-0 \
@@ -222,7 +223,7 @@ ensure_resume_runtime_packages() {
 
     local package
     for package in \
-        python3-gi gir1.2-nm-1.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        python3-gi gir1.2-nm-1.0 gir1.2-wnck-3.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \

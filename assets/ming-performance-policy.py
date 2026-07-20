@@ -11,7 +11,9 @@ or a background snapshot and is restored on expiry or visibility changes.
 # Public aliases installed by the image: ming-interaction-boost,
 # ming-background-policy and ming-performance-policy.  The cgroup v2 policy
 # uses SO_PEERCRED and process starttime checks before touching any PID.
-# cgroup v2 controls include CPUWeight/CPUQuota/IOWeight and timer_slack_ns.
+# cgroup v2 controls include CPUWeight/IOWeight and timer_slack_ns. Background
+# applications never share a hard CPU quota because one busy process must not
+# stall every other minimized application in the same slice.
 
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -52,6 +55,8 @@ if pwd is not None:
         pass
 LEASE_SECONDS = 1.5
 MAX_LEASE_SECONDS = 3.0
+COMPLETED_TOKEN_TTL_SECONDS = 30.0
+COMPLETED_TOKEN_LIMIT = 256
 PROTECTED_PROCESSES = {
     "ming-phone-desktop", "ming-dock", "ming-launch", "plank", "picom",
     "fcitx5", "fcitx5-qt", "pulseaudio", "pipewire", "wireplumber",
@@ -175,6 +180,12 @@ def _proc_name(pid: int) -> str:
     return _read(f"/proc/{int(pid)}/comm") or _read(f"/proc/{int(pid)}/cmdline").split("\x00", 1)[0]
 
 
+def process_is_protected(pid: int) -> bool:
+    names = [_read(f"/proc/{int(pid)}/comm")]
+    names.extend(_read(f"/proc/{int(pid)}/cmdline").split("\x00"))
+    return any(is_protected_process(name) for name in names if name)
+
+
 def _proc_uid(pid: int) -> int | None:
     text = _read(f"/proc/{int(pid)}/status")
     for line in text.splitlines():
@@ -236,7 +247,6 @@ def _slice_path(name: str, uid: int | None = None) -> pathlib.Path | None:
         path.mkdir(parents=True, exist_ok=True)
         if name == "ming-background.slice":
             (path / "cpu.weight").write_text("20\n", encoding="ascii")
-            (path / "cpu.max").write_text("40000 100000\n", encoding="ascii")
             (path / "io.weight").write_text("default 20\n", encoding="ascii")
         elif name == "ming-foreground.slice":
             (path / "cpu.weight").write_text("100\n", encoding="ascii")
@@ -315,11 +325,11 @@ def _apply_ionice(pid: int, idle: bool = False) -> bool:
     if not idle:
         command += ["-n", "0"]
     command += ["-p", str(int(pid))]
-    return _run(command, timeout=1.0)[0] == 0
+    return _run(command, timeout=0.2)[0] == 0
 
 
 def _ionice_snapshot(pid: int) -> dict[str, int] | None:
-    rc, output, _ = _run(["ionice", "-p", str(int(pid))], timeout=1.0)
+    rc, output, _ = _run(["ionice", "-p", str(int(pid))], timeout=0.2)
     if rc != 0:
         return None
     import re
@@ -338,7 +348,22 @@ def _restore_ionice(pid: int, snapshot: dict[str, int] | None) -> bool:
     if class_id in {1, 2}:
         command += ["-n", str(int(snapshot.get("priority", 0)))]
     command += ["-p", str(int(pid))]
-    return _run(command, timeout=1.0)[0] == 0
+    return _run(command, timeout=0.2)[0] == 0
+
+
+def _pulse_ota_yield() -> bool:
+    helper = pathlib.Path("/usr/local/bin/ming-ota-yield")
+    if not helper.exists():
+        return True
+    try:
+        subprocess.Popen(
+            [str(helper), "pulse", "--duration-ms", "1000", "--json"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+        )
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _timer_slack(pid: int, default: int = 50_000) -> int:
@@ -547,7 +572,7 @@ def _validate_pid(pid: int, starttime: str | None, expected_uid: int | None = No
         return False, "starttime-mismatch"
     if expected_uid is not None and _proc_uid(pid) != int(expected_uid):
         return False, "uid-mismatch"
-    if is_protected_process(_proc_name(pid)):
+    if process_is_protected(pid):
         return False, "protected-process"
     return True, ""
 
@@ -557,7 +582,63 @@ class ResourcePolicy:
         self.session_uid = int(session_uid) if session_uid is not None else CURRENT_UID
         self.leases = LeaseState()
         self.snapshots: dict[str, dict[str, Any]] = {}
-        self.background: dict[int, dict[str, Any]] = {}
+        self.background: dict[tuple[int, str], dict[str, Any]] = {}
+        self.lease_timers: dict[str, threading.Timer] = {}
+        self.state_lock = threading.RLock()
+        self.completed_tokens: dict[str, float] = {}
+        self.governor_tokens: set[str] = set()
+        self.governor_base_snapshot: Any = None
+
+    def _schedule_lease_timer(self, token: str) -> None:
+        with self.state_lock:
+            lease = self.leases.leases.get(str(token))
+            if not lease:
+                return
+            previous = self.lease_timers.pop(str(token), None)
+            if previous is not None:
+                previous.cancel()
+            delay = max(0.01, float(lease["expires"]) - time.monotonic())
+            timer = threading.Timer(delay, self._expire_lease, args=(str(token),))
+            timer.daemon = True
+            self.lease_timers[str(token)] = timer
+            timer.start()
+
+    def _expire_lease(self, token: str) -> dict[str, Any]:
+        with self.state_lock:
+            if self.leases.active(str(token)):
+                self._schedule_lease_timer(str(token))
+                return _json(
+                    True, token=str(token), restored=False, rescheduled=True)
+            return self.end(str(token))
+
+    def _prune_completed_tokens(self) -> None:
+        cutoff = time.monotonic() - COMPLETED_TOKEN_TTL_SECONDS
+        stale = [token for token, stamp in self.completed_tokens.items() if stamp < cutoff]
+        for token in stale:
+            self.completed_tokens.pop(token, None)
+        if len(self.completed_tokens) > COMPLETED_TOKEN_LIMIT:
+            ordered = sorted(self.completed_tokens.items(), key=lambda item: item[1])
+            for token, _stamp in ordered[:-COMPLETED_TOKEN_LIMIT]:
+                self.completed_tokens.pop(token, None)
+
+    def _acquire_governor(self, token: str) -> dict[str, Any]:
+        with self.state_lock:
+            if not self.governor_tokens:
+                self.governor_base_snapshot = _governor_snapshot()
+            self.governor_tokens.add(str(token))
+            return dict(LAST_GOVERNOR_GATE)
+
+    def _release_governor(self, token: str, snapshot: dict[str, Any]) -> tuple[bool, Any]:
+        if str(token) in self.governor_tokens:
+            self.governor_tokens.remove(str(token))
+            if self.governor_tokens:
+                return False, None
+            base = self.governor_base_snapshot
+            self.governor_base_snapshot = None
+            return True, base
+        if "governors" in snapshot:
+            return True, snapshot.get("governors")
+        return False, None
 
     def _log(self, event: str, **fields: Any) -> None:
         _policy_log(event, uid=self.session_uid, **fields)
@@ -583,86 +664,103 @@ class ResourcePolicy:
         if not ok:
             self._log("lease_rejected", reason=error)
             return _json(False, error=error)
-        existing = next(
-            (token for token, lease in self.leases.leases.items()
-             if int(lease.get("pid", -1)) == int(pid)
-             and str(lease.get("starttime", "")) == str(starttime)
-             and self.leases.active(token)),
-            None,
-        )
-        if existing and existing in self.snapshots:
-            lease = self.leases.leases[existing]
-            self._log("lease_reused", pid=int(pid))
-            return _json(
-                True,
-                token=existing,
-                pid=int(pid),
-                expires_in=max(0.0, float(lease["expires"]) - time.monotonic()),
-                duplicate=True,
-                actions={},
-                degraded=[],
+        with self.state_lock:
+            for token, lease in tuple(self.leases.leases.items()):
+                if (int(lease.get("pid", -1)) == int(pid)
+                        and str(lease.get("starttime", "")) == str(starttime)
+                        and not self.leases.active(token)):
+                    self.end(token)
+            existing = next(
+                (token for token, lease in self.leases.leases.items()
+                 if int(lease.get("pid", -1)) == int(pid)
+                 and str(lease.get("starttime", "")) == str(starttime)
+                 and self.leases.active(token)),
+                None,
             )
-        token = self.leases.begin(pid, starttime)
-        old_nice = None
-        try:
-            getpriority = getattr(os, "getpriority", None)
-            prio_process = getattr(os, "PRIO_PROCESS", None)
-            if callable(getpriority) and prio_process is not None:
-                old_nice = getpriority(prio_process, int(pid))
-        except (OSError, AttributeError):
-            pass
-        old_ionice = _ionice_snapshot(pid)
-        old_slack = _timer_slack(pid)
-        nice_ok, nice_detail = _apply_nice(pid, -10)
-        if not nice_ok:
-            nice_ok, nice_detail = _apply_nice(pid, -5)
-        io_ok = _apply_ionice(pid, idle=False)
-        old_cgroup = _cgroup_relative_path(pid)
-        cgroup_ok = _move_pid(pid, "ming-foreground.slice", self.session_uid)
-        ota_yield = True
-        if pathlib.Path("/usr/local/bin/ming-ota-yield").exists():
-            ota_yield = _run(
-                ["/usr/local/bin/ming-ota-yield", "pulse", "--duration-ms", "1000", "--json"],
-                timeout=1.5,
-            )[0] == 0
-        self.snapshots[token] = {
-            "pid": int(pid), "starttime": str(starttime), "nice": old_nice,
-            "ionice": old_ionice, "timer_slack": old_slack,
-            "cgroup_path": old_cgroup,
-            "governors": _governor_snapshot(), "governor_gate": dict(LAST_GOVERNOR_GATE),
-            "cgroup": cgroup_ok,
-        }
-        result = _json(
-            True, token=token, pid=int(pid), expires_in=LEASE_SECONDS,
-            actions={"nice": nice_detail, "ionice": io_ok, "cgroup": cgroup_ok, "ota_yield": ota_yield},
-            degraded=[name for name, value in (("nice", nice_ok), ("ionice", io_ok), ("cgroup", cgroup_ok), ("ota_yield", ota_yield)) if not value],
-        )
-        self._log("lease_started", pid=int(pid),
-                  degraded=result.get("degraded", []), governor=LAST_GOVERNOR_GATE.get("reason"))
-        return result
+            if existing and existing in self.snapshots:
+                self.leases.begin(pid, starttime, duration=LEASE_SECONDS)
+                lease = self.leases.leases[existing]
+                self._schedule_lease_timer(existing)
+                self._log("lease_reused", pid=int(pid))
+                return _json(
+                    True,
+                    token=existing,
+                    pid=int(pid),
+                    expires_in=max(0.0, float(lease["expires"]) - time.monotonic()),
+                    duplicate=True,
+                    actions={},
+                    degraded=[],
+                )
+            token = self.leases.begin(pid, starttime, duration=LEASE_SECONDS)
+            old_nice = None
+            try:
+                getpriority = getattr(os, "getpriority", None)
+                prio_process = getattr(os, "PRIO_PROCESS", None)
+                if callable(getpriority) and prio_process is not None:
+                    old_nice = getpriority(prio_process, int(pid))
+            except (OSError, AttributeError):
+                pass
+            old_ionice = _ionice_snapshot(pid)
+            old_slack = _timer_slack(pid)
+            nice_ok, nice_detail = _apply_nice(pid, -10)
+            if not nice_ok:
+                nice_ok, nice_detail = _apply_nice(pid, -5)
+            io_ok = _apply_ionice(pid, idle=False)
+            old_cgroup = _cgroup_relative_path(pid)
+            cgroup_ok = _move_pid(pid, "ming-foreground.slice", self.session_uid)
+            ota_yield = _pulse_ota_yield()
+            governor_gate = self._acquire_governor(token)
+            self.snapshots[token] = {
+                "pid": int(pid), "starttime": str(starttime), "nice": old_nice,
+                "ionice": old_ionice, "timer_slack": old_slack,
+                "cgroup_path": old_cgroup,
+                "governor_gate": governor_gate,
+                "cgroup": cgroup_ok,
+            }
+            self._schedule_lease_timer(token)
+            result = _json(
+                True, token=token, pid=int(pid), expires_in=LEASE_SECONDS,
+                actions={"nice": nice_detail, "ionice": io_ok, "cgroup": cgroup_ok, "ota_yield": ota_yield},
+                degraded=[name for name, value in (("nice", nice_ok), ("ionice", io_ok), ("cgroup", cgroup_ok), ("ota_yield", ota_yield)) if not value],
+            )
+            self._log("lease_started", pid=int(pid),
+                      degraded=result.get("degraded", []), governor=governor_gate.get("reason"))
+            return result
 
     def end(self, token: str) -> dict[str, Any]:
-        snapshot = self.snapshots.pop(str(token), None)
-        self.leases.leases.pop(str(token), None)
-        if not snapshot:
-            self._log("lease_rejected", reason="unknown-token")
-            return _json(False, error="unknown-token")
-        pid = int(snapshot["pid"])
-        if pathlib.Path(f"/proc/{pid}").is_dir() and process_starttime(pid) == snapshot["starttime"]:
-            if snapshot.get("nice") is not None:
-                try:
-                    setpriority = getattr(os, "setpriority", None)
-                    prio_process = getattr(os, "PRIO_PROCESS", None)
-                    if callable(setpriority) and prio_process is not None:
-                        setpriority(prio_process, pid, int(snapshot["nice"]))
-                except (OSError, AttributeError):
-                    pass
-            _restore_ionice(pid, snapshot.get("ionice"))
-            _set_timer_slack(pid, int(snapshot.get("timer_slack", 50_000)))
-            _restore_cgroup(pid, snapshot.get("cgroup_path"), self.session_uid)
-        _restore_governors(snapshot.get("governors"))
-        self._log("lease_restored", pid=pid)
-        return _json(True, token=str(token), restored=True)
+        with self.state_lock:
+            self._prune_completed_tokens()
+            snapshot = self.snapshots.pop(str(token), None)
+            self.leases.leases.pop(str(token), None)
+            timer = self.lease_timers.pop(str(token), None)
+            if timer is not None and timer is not threading.current_thread():
+                timer.cancel()
+            if not snapshot:
+                if str(token) in self.completed_tokens:
+                    return _json(
+                        True, token=str(token), restored=False, already_ended=True)
+                self._log("lease_rejected", reason="unknown-token")
+                return _json(False, error="unknown-token")
+            pid = int(snapshot["pid"])
+            if pathlib.Path(f"/proc/{pid}").is_dir() and process_starttime(pid) == snapshot["starttime"]:
+                if snapshot.get("nice") is not None:
+                    try:
+                        setpriority = getattr(os, "setpriority", None)
+                        prio_process = getattr(os, "PRIO_PROCESS", None)
+                        if callable(setpriority) and prio_process is not None:
+                            setpriority(prio_process, pid, int(snapshot["nice"]))
+                    except (OSError, AttributeError):
+                        pass
+                _restore_ionice(pid, snapshot.get("ionice"))
+                _set_timer_slack(pid, int(snapshot.get("timer_slack", 50_000)))
+                _restore_cgroup(pid, snapshot.get("cgroup_path"), self.session_uid)
+            restore_governor, governor_snapshot = self._release_governor(
+                str(token), snapshot)
+            if restore_governor:
+                _restore_governors(governor_snapshot)
+            self.completed_tokens[str(token)] = time.monotonic()
+            self._log("lease_restored", pid=pid)
+            return _json(True, token=str(token), restored=True)
 
     def apply_background(self, pid: int, starttime: str, desktop_file: str, visible: bool) -> dict[str, Any]:
         ok, error = _validate_pid(pid, starttime, self.session_uid)
@@ -672,7 +770,7 @@ class ResourcePolicy:
         if not desktop_file_is_trusted(desktop_file, uid=self.session_uid):
             self._log("background_rejected", reason="desktop-file-not-allowlisted")
             return _json(False, error="desktop-file-not-allowlisted")
-        if not visible and self._settings().get("background_throttle", True) is False:
+        if not visible and self._settings().get("background_throttle", False) is False:
             self._log("background_skipped", pid=int(pid), reason="policy-disabled")
             return _json(True, pid=int(pid), visible=False, skipped=True, reason="policy-disabled")
         if not visible:
@@ -682,47 +780,34 @@ class ResourcePolicy:
                 return _json(
                     True, pid=int(pid), visible=False, skipped=True, reason=exemption_reason
                 )
+        key = (int(pid), str(starttime))
+        stale_keys = [item for item in self.background if item[0] == int(pid) and item != key]
+        for stale_key in stale_keys:
+            self.background.pop(stale_key, None)
         if visible:
-            snapshot = self.background.pop(int(pid), None)
-            if snapshot and snapshot.get("nice") is not None:
-                try:
-                    setpriority = getattr(os, "setpriority", None)
-                    prio_process = getattr(os, "PRIO_PROCESS", None)
-                    if callable(setpriority) and prio_process is not None:
-                        setpriority(prio_process, int(pid), int(snapshot["nice"]))
-                except (OSError, AttributeError):
-                    pass
-            _restore_ionice(pid, snapshot.get("ionice") if snapshot else None)
+            snapshot = self.background.pop(key, None)
+            if not snapshot:
+                self._log("background_skipped", pid=int(pid), reason="not-backgrounded")
+                return _json(
+                    True, pid=int(pid), visible=True, skipped=True,
+                    restored=False, reason="not-backgrounded",
+                )
             restored_cgroup = _restore_cgroup(
                 pid, snapshot.get("cgroup_path") if snapshot else None, self.session_uid
             )
             if not restored_cgroup:
                 _move_pid(pid, "ming-foreground.slice", self.session_uid)
-            _set_timer_slack(pid, int(snapshot.get("timer_slack", 50_000)) if snapshot else 50_000)
             self._log("background_restored", pid=int(pid))
             return _json(True, pid=int(pid), visible=True, restored=True)
-        if int(pid) not in self.background:
-            try:
-                getpriority = getattr(os, "getpriority", None)
-                prio_process = getattr(os, "PRIO_PROCESS", None)
-                old_nice = (getpriority(prio_process, int(pid))
-                            if callable(getpriority) and prio_process is not None else None)
-            except (OSError, AttributeError):
-                old_nice = None
-            self.background[int(pid)] = {
-                "nice": old_nice,
-                "ionice": _ionice_snapshot(pid),
-                "timer_slack": _timer_slack(pid),
+        if key not in self.background:
+            self.background[key] = {
                 "cgroup_path": _cgroup_relative_path(pid),
                 "desktop_file": desktop_file,
             }
-        _apply_nice(pid, 10)
-        io_ok = _apply_ionice(pid, idle=True)
         cgroup_ok = _move_pid(pid, "ming-background.slice", self.session_uid)
-        slack_ok = _set_timer_slack(pid, 50_000_000)
         result = _json(True, pid=int(pid), visible=False,
-                       actions={"nice": True, "ionice": io_ok, "cgroup": cgroup_ok, "timer_slack": slack_ok},
-                       degraded=[name for name, value in (("ionice", io_ok), ("cgroup", cgroup_ok), ("timer_slack", slack_ok)) if not value])
+                       actions={"cgroup": cgroup_ok},
+                       degraded=["cgroup"] if not cgroup_ok else [])
         self._log("background_throttled", pid=int(pid), degraded=result.get("degraded", []))
         return result
 
@@ -792,14 +877,8 @@ def serve(uid: int, path: pathlib.Path = DEFAULT_SOCKET) -> int:
         except OSError:
             pass
         server.listen(8)
-        server.settimeout(0.5)
         while True:
-            for token in policy.leases.reap():
-                policy.end(token)
-            try:
-                connection, _ = server.accept()
-            except socket.timeout:
-                continue
+            connection, _ = server.accept()
             with connection:
                 connection.settimeout(2.0)
                 peer_uid = _peer_uid(connection)

@@ -1054,7 +1054,7 @@ validate_required_desktop_runtime() {
         return 1
     fi
     for package in \
-        python3-gi gir1.2-nm-1.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        python3-gi gir1.2-nm-1.0 gir1.2-wnck-3.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
@@ -1770,6 +1770,14 @@ for marker in [
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing bounded input marker {marker}")
+if "Gio.FileMonitorFlags.WATCH_MOVES" not in phone_desktop:
+    errors.append("ming-phone-desktop must use the supported Gio FileMonitor WATCH_MOVES flag")
+for invalid_flag in [
+    "Gio.FileMonitorFlags.WATCH_CHANGES",
+    "Gio.FileMonitorFlags.WATCH_DELETED",
+]:
+    if invalid_flag in phone_desktop:
+        errors.append(f"ming-phone-desktop uses invalid Gio FileMonitor flag {invalid_flag}")
 
 plank_watchdog = require_file("usr/local/bin/ming-plank-watchdog", "plank_window_visible")
 for marker in ["start_plank()", "stop_legacy_dock()", "while true; do", "ming-plank-watchdog.lock", "nohup plank"]:
@@ -1860,6 +1868,7 @@ for path, marker in [
     ("usr/local/bin/ming-notifications", "parse_notification_log"),
     ("usr/local/bin/ming-device-control", "DeviceController"),
     ("usr/local/bin/ming-audio-session", "audio-repair-playback"),
+    ("usr/local/bin/ming-window-resource-monitor", "WnckResourceMonitor"),
     ("usr/local/sbin/ming-package-installer", "PackageInstaller"),
     ("usr/local/sbin/ming-spark-package-helper", "SparkPackageHelper"),
     ("usr/local/sbin/ming-spark-security-converge", "SparkSecurityConverger"),
@@ -1982,6 +1991,7 @@ for helper in [
     "usr/local/bin/ming-edge",
     "usr/local/bin/ming-spark-store",
     "usr/local/bin/ming-audio-session",
+    "usr/local/bin/ming-window-resource-monitor",
     "usr/local/sbin/ming-package-installer",
     "usr/local/sbin/ming-spark-package-helper",
     "usr/local/sbin/ming-spark-security-converge",
@@ -2106,9 +2116,35 @@ for marker in [
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
 performance_policy = require_file("usr/local/lib/ming-os/ming-performance-policy.py", "SO_PEERCRED")
-for marker in ["ming-interaction-boost", "ming-background-policy", "CPUWeight", "CPUQuota", "timer_slack_ns", "cgroup v2"]:
+for marker in ["ming-interaction-boost", "ming-background-policy", "CPUWeight", "IOWeight", "timer_slack_ns", "cgroup v2"]:
     if marker not in performance_policy:
         errors.append(f"ming-performance-policy missing marker {marker}")
+for marker in [
+    "process_is_protected", "/cmdline", "lease_timers", "governor_tokens",
+    "dict[tuple[int, str]", "threading.Timer(delay, self._expire_lease",
+    "self.leases.active(str(token))",
+]:
+    if marker not in performance_policy:
+        errors.append(f"ming-performance-policy missing concurrency marker {marker}")
+if "cpu.max" in performance_policy or "CPUQuota" in performance_policy:
+    errors.append("background resource policy must not impose a shared hard CPU quota")
+if "for token in policy.leases.reap()" in performance_policy:
+    errors.append("ming-performance-policy must not race timer expiry with a socket reaper")
+window_resource_monitor = require_file(
+    "usr/local/bin/ming-window-resource-monitor", "active-window-changed")
+for marker in [
+    "window-opened", "window-closed", "state-changed", "HIDDEN_DELAY_MS = 10_000",
+    "window-manager-changed", "--repair-if-needed",
+    "ming-interaction-boost", "ming-background-policy", "threading.Thread",
+    "process.wait(timeout=", "subprocess.TimeoutExpired", "self.GLib.idle_add",
+    "WINDOW_MANAGER_RETRY_DELAY_MS", "WINDOW_MANAGER_RETRY_BACKOFF_SECONDS",
+    "time.monotonic()",
+]:
+    if marker not in window_resource_monitor:
+        errors.append(f"ming-window-resource-monitor missing event marker {marker}")
+for forbidden in ["xprop", "wmctrl"]:
+    if forbidden in window_resource_monitor:
+        errors.append(f"ming-window-resource-monitor must not poll windows with {forbidden}")
 prefetch = require_file("usr/local/lib/ming-os/ming-prefetch.py", "posix_fadvise")
 for marker in [
     "filter_prefetch_paths", "DEFAULT_MAX_FILES", "DEFAULT_MAX_BYTES", "runtime_should_prefetch",
@@ -2134,6 +2170,7 @@ for relative_path in [
     "usr/local/bin/ming-performance-policy",
 ]:
     validate_generated_executable(relative_path, "bash")
+validate_generated_executable("usr/local/bin/ming-session-healthcheck", "bash")
 validate_generated_executable("usr/local/bin/ming-ota-run", "bash")
 validate_generated_executable("usr/local/bin/ming-ota-yield", "bash")
 for relative_path in [
@@ -2152,6 +2189,7 @@ for relative_path in [
     "usr/local/lib/ming-os/ming-prefetch.py",
 ]:
     validate_generated_executable(relative_path, "python")
+validate_generated_executable("usr/local/bin/ming-window-resource-monitor", "python")
 menu_sync = require_file("usr/local/bin/ming-thunar-menu-sync", "sync_menu")
 for marker in ["ACTION_ID", "ET.parse", "os.replace", "never replaced"]:
     if marker not in menu_sync:
@@ -2202,11 +2240,20 @@ plank_watchdog = require_file("usr/local/bin/ming-plank-watchdog", "plank_window
 for marker in ["x11_call()", "valid_window_id()", "timeout --foreground 2s"]:
     if marker not in plank_watchdog:
         errors.append(f"ming-plank-watchdog missing bounded X11 marker {marker}")
-window_watchdog = require_file("usr/local/bin/ming-window-manager-watchdog", "failure_count >= 3")
-for marker in ["sleep 10", "ming-window-control repair", "window-manager.log"]:
+window_watchdog = require_file("usr/local/bin/ming-window-manager-watchdog", "repair_if_needed()")
+for marker in ["--repair-if-needed", "ming-window-control repair", "window-manager.log"]:
     if marker not in window_watchdog:
         errors.append(f"ming-window-manager-watchdog missing health marker {marker}")
-require_file("home/user/.config/autostart/ming-window-manager.desktop", "ming-window-manager-watchdog --session")
+session_healthcheck = require_file("usr/local/bin/ming-session-healthcheck", "readonly SUPERVISOR_INTERVAL=30")
+for marker in [
+    "readonly SUPERVISOR_INTERVAL=30", "RESOURCE_MONITOR_RETRY_SECONDS=60",
+    "monotonic_seconds", "/proc/uptime", "now >= last_attempt",
+    'sleep "${SUPERVISOR_INTERVAL}"',
+]:
+    if marker not in session_healthcheck:
+        errors.append(f"ming-session-healthcheck missing recovery marker {marker}")
+if (root / "home/user/.config/autostart/ming-window-manager.desktop").exists():
+    errors.append("polling window-manager watchdog autostart must be absent")
 
 picom_wrapper = require_file("usr/local/bin/ming-picom", "/tmp/ming-picom.log")
 for marker in ["low-memory", "safe-graphics-cmdline", "software-renderer", "virtual-machine-gpu", "no-dri", "old-intel-gpu"]:

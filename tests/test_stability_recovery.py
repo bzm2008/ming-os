@@ -513,16 +513,19 @@ fi
         ):
             self.assertIn(marker, helper)
 
-    def test_window_watchdog_requires_three_failures_and_deploys_session_autostart(self):
+    def test_window_watchdog_is_event_triggered_without_a_polling_autostart(self):
         for marker in (
             "ming-window-manager-watchdog",
-            "failure_count >= 3",
-            "sleep 10",
+            "--repair-if-needed",
             "window-manager.log",
-            "ming-window-manager.desktop",
             "ming-window-control repair",
         ):
             self.assertIn(marker, DESKTOP)
+        self.assertNotIn(
+            "Exec=/usr/local/bin/ming-window-manager-watchdog --session",
+            DESKTOP,
+        )
+        self.assertIn("window-manager-changed", (ROOT / "assets" / "ming-window-resource-monitor.py").read_text(encoding="utf-8"))
 
     def test_main_and_lowmem_picom_profiles_keep_windows_redirected(self):
         main = DESKTOP.split("cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'", 1)[1].split("PICOMCFG", 1)[0]
