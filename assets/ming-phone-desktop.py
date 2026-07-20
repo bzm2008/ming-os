@@ -900,9 +900,8 @@ def add_core_app(apps_by_basename, basename):
 
 def load_apps(default_only=False):
     apps_by_basename = {}
-    if default_only:
-        for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
-            add_core_app(apps_by_basename, basename)
+    for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
+        add_core_app(apps_by_basename, basename)
 
     roots = []
     root_limit_reached = False

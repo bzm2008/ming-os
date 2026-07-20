@@ -622,6 +622,7 @@ class TrustedDesktopActivationTests(unittest.TestCase):
             self.assertEqual(str(system_wrapper.resolve()), namespace["read_app"](copied)["path"])
 
             namespace["APP_DIRS"] = [desktop_dir, applications]
+            namespace["add_core_app"] = lambda _apps, _basename: False
             apps = namespace["load_apps"]()
             self.assertEqual([str(system_wrapper.resolve())], [app["path"] for app in apps])
             self.assertEqual([""], [app["diagnostic"] for app in apps])

@@ -647,6 +647,73 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "directory-entry-limit=6, launcher-limit=6",
         ], logs)
 
+    def test_nondefault_catalog_discovers_core_before_budgeted_roots(self):
+        namespace = load_phone_subset({"load_apps"})
+        core_calls = []
+        parsed = []
+        logs = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            desktop = root / "Desktop"
+            system = root / "applications"
+            desktop.mkdir()
+            system.mkdir()
+            user_duplicate = desktop / "ming-settings.desktop"
+            user_duplicate.write_text("user duplicate\n", encoding="utf-8")
+            (system / "later.desktop").write_text("later app\n", encoding="utf-8")
+
+            def add_core_app(apps_by_basename, basename):
+                core_calls.append(basename)
+                apps_by_basename[basename] = {
+                    "basename": basename,
+                    "name": basename,
+                    "path": "/protected/%s" % basename,
+                }
+                return True
+
+            def add_app_from_path(apps_by_basename, path, default_only=False):
+                path = pathlib.Path(path)
+                parsed.append((path, default_only))
+                if path.name in apps_by_basename:
+                    return False
+                apps_by_basename[path.name] = {
+                    "basename": path.name,
+                    "name": path.stem,
+                    "path": str(path),
+                }
+                return True
+
+            namespace.update({
+                "APP_DIRS": [desktop, system],
+                "APP_CATALOG_MAX_ROOTS": 2,
+                "APP_CATALOG_MAX_DIRECTORY_ENTRIES": 1,
+                "APP_CATALOG_MAX_LAUNCHERS": 1,
+                "CORE_NAMES": {"ming-settings.desktop", "ming-files.desktop"},
+                "DESKTOP_ORDER": {"ming-settings.desktop": 0, "ming-files.desktop": 1},
+                "add_core_app": add_core_app,
+                "add_app_from_path": add_app_from_path,
+                "log": logs.append,
+            })
+            apps = namespace["load_apps"](default_only=False)
+
+        apps_by_basename = {app["basename"]: app for app in apps}
+        self.assertEqual(["ming-settings.desktop", "ming-files.desktop"], core_calls)
+        self.assertEqual([(user_duplicate, False)], parsed)
+        self.assertEqual(
+            "/protected/ming-settings.desktop",
+            apps_by_basename["ming-settings.desktop"]["path"],
+        )
+        self.assertEqual(
+            "/protected/ming-files.desktop",
+            apps_by_basename["ming-files.desktop"]["path"],
+        )
+        self.assertNotIn("later.desktop", apps_by_basename)
+        self.assertEqual([
+            "application catalog enumeration truncated: "
+            "directory-entry-limit=1, launcher-limit=1",
+        ], logs)
+
     def test_catalog_gio_event_marks_dirty_before_debounced_refresh(self):
         tree = ast.parse(PHONE.read_text(encoding="utf-8"))
         phone_class = next(
