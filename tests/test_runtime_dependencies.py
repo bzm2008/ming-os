@@ -422,6 +422,11 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn(
             "cat > /usr/local/bin/ming-package-install-gui", function)
 
+    def test_desktop_main_propagates_package_installer_runtime_validation_failure(self):
+        main = DESKTOP.split("main() {", 1)[1].split("\n}", 1)[0]
+
+        self.assertIn("install_ming_shell_components || return 1", main)
+
     def test_full_build_uses_the_same_immutable_installer_runtime_as_resume(self):
         marker = "deploy_package_installer_runtime() {"
         self.assertIn(marker, APPS)

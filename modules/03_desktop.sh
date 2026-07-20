@@ -7600,7 +7600,7 @@ main() {
     configure_ming_shell
     install_ming_settings
     cleanup_retired_ming_entries
-    install_ming_shell_components
+    install_ming_shell_components || return 1
     install_ota_target_guard
     install_ming_files
     ensure_wps_office

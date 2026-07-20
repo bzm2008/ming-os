@@ -37,6 +37,8 @@ def async_timeout_backend(device_module):
     class Cancellable:
         def cancel(self):
             state.cancel_calls += 1
+            if state.callback is not None:
+                state.callback(None, object(), None)
 
     cancellable = Cancellable()
 
@@ -157,6 +159,7 @@ class NetworkReliabilityContracts(unittest.TestCase):
         self.assertFalse(result[0])
         self.assertIn("超时", result[1])
         self.assertEqual(1, state.cancel_calls)
+        self.assertEqual(0, state.finisher_calls)
         self.assertEqual([], state.removed)
         self.assertIsNotNone(state.cancellable)
 
