@@ -87,6 +87,81 @@ class SparkPackageHelperAssetTests(unittest.TestCase):
     def test_helper_asset_exists(self):
         self.assertTrue(HELPER.is_file(), "Spark package helper asset is missing")
 
+    def test_runtime_loader_rejects_configured_symlink_before_resolution(self):
+        helper = load_helper()
+        parameters = inspect.signature(helper._load_package_installer).parameters
+        self.assertIn("lstat_func", parameters)
+        self.assertIn("resolve_func", parameters)
+        configured = pathlib.Path("/usr/local/sbin/ming-package-installer")
+        resolve_calls = []
+
+        def resolve(candidate):
+            resolve_calls.append(pathlib.Path(candidate))
+            return pathlib.Path(candidate)
+
+        result = helper._load_package_installer(
+            configured,
+            lstat_func=lambda _path: types.SimpleNamespace(
+                st_mode=stat.S_IFLNK | 0o777, st_uid=0),
+            resolve_func=resolve,
+            platform_name="posix",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual([], resolve_calls)
+
+    def test_runtime_loader_rejects_a_writable_protected_parent(self):
+        helper = load_helper()
+        parameters = inspect.signature(helper._load_package_installer).parameters
+        self.assertIn("lstat_func", parameters)
+        self.assertIn("resolve_func", parameters)
+        configured = pathlib.Path(
+            "/usr/local/lib/ming-os/package-installer-runtimes/"
+            "ming-package-installer-26.4.0-v4/ming-package-installer")
+        unsafe_parent = configured.parent
+        resolve_calls = []
+
+        def lstat(candidate):
+            candidate = pathlib.Path(candidate)
+            if candidate == configured:
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+            mode = 0o777 if candidate == unsafe_parent else 0o755
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=0)
+
+        def resolve(candidate):
+            resolve_calls.append(pathlib.Path(candidate))
+            return pathlib.Path(candidate)
+
+        result = helper._load_package_installer(
+            configured,
+            lstat_func=lstat,
+            resolve_func=resolve,
+            platform_name="posix",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual([], resolve_calls)
+
+    def test_default_runtime_candidates_prefer_immutable_v4_then_regular_fallback(self):
+        helper = load_helper()
+
+        service = helper.SparkPackageHelper(runner=ProtocolRunner())
+
+        self.assertEqual(
+            pathlib.Path(
+                "/usr/local/lib/ming-os/package-installer-runtimes/"
+                "ming-package-installer-26.4.0-v4/ming-package-installer"),
+            service.package_installer_paths[0],
+        )
+        self.assertEqual(
+            pathlib.Path("/usr/local/sbin/ming-package-installer"),
+            service.package_installer_paths[1],
+        )
+        self.assertNotIn(
+            "package-installer-current",
+            "\n".join(str(path) for path in service.package_installer_paths),
+        )
+
 
 class SparkPackageRequestTests(unittest.TestCase):
     @classmethod
@@ -585,6 +660,40 @@ class SparkPackageRepositoryTests(unittest.TestCase):
         self.assertFalse(failed["launch_ready"])
         self.assertEqual("E_LAUNCH_NOT_READY", failed["error_code"])
         self.assertEqual(not_ready.installer_result["launchers"], failed["launchers"])
+
+    def test_package_name_postflight_propagates_installer_log_and_error(self):
+        payload = {
+            "ok": True,
+            "package": "sample-app",
+            "installed": True,
+            "launch_ready": False,
+            "launchers": [],
+            "error_code": "E_LAUNCH_NOT_READY",
+            "error": "软件已安装，但没有可用启动器。",
+            "log_path": "/var/log/ming-os/package-installer.jsonl",
+        }
+
+        class FakeInstaller:
+            def __init__(self, runner=None):
+                self.runner = runner
+
+            def verify_installed(self, _package):
+                return dict(payload)
+
+        runtime = types.SimpleNamespace(
+            PACKAGE_INSTALLER_CONTRACT="ming-package-installer-26.4.0-v4",
+            PackageInstaller=FakeInstaller,
+        )
+        request = self.helper.parse_request([
+            "ssinstall", "sample-app", "--no-create-desktop-entry", "--native"])
+
+        result = self.helper.SparkPackageHelper(
+            runner=ProtocolRunner(), package_installer_module=runtime,
+        ).execute(request, 1000)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(payload["error"], result["error"])
+        self.assertEqual(payload["log_path"], result["log_path"])
 
     def test_package_name_install_loads_matching_installer_contract_without_reinstall(self):
         helper = self.helper

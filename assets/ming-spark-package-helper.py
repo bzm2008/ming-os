@@ -53,8 +53,12 @@ E_REQUEST_INVALID = "E_REQUEST_INVALID"
 E_AUTHORIZATION_FAILED = "E_AUTHORIZATION_FAILED"
 E_FILE_UNSAFE = "E_FILE_UNSAFE"
 E_PACKAGE_UNVERIFIED = "E_PACKAGE_UNVERIFIED"
-PACKAGE_INSTALLER_PATH = pathlib.Path("/usr/local/sbin/ming-package-installer")
 REQUIRED_PACKAGE_INSTALLER_CONTRACT = "ming-package-installer-26.4.0-v4"
+PACKAGE_INSTALLER_PATH = pathlib.Path(
+    "/usr/local/lib/ming-os/package-installer-runtimes/%s/ming-package-installer"
+    % REQUIRED_PACKAGE_INSTALLER_CONTRACT)
+PACKAGE_INSTALLER_FALLBACK_PATH = pathlib.Path(
+    "/usr/local/sbin/ming-package-installer")
 
 
 class HelperError(Exception):
@@ -241,17 +245,41 @@ def _deb822_stanzas(output):
     return stanzas
 
 
-def _load_package_installer(path=PACKAGE_INSTALLER_PATH):
+def _load_package_installer(
+        path=PACKAGE_INSTALLER_PATH, lstat_func=None, resolve_func=None,
+        platform_name=None):
     """Load only the root-controlled installer runtime with the pinned contract."""
-    try:
-        runtime = pathlib.Path(path).resolve(strict=True)
-        metadata = os.lstat(runtime)
+    lstat_func = lstat_func or os.lstat
+    resolve_func = resolve_func or (lambda candidate: candidate.resolve(strict=True))
+    require_root = (platform_name or os.name) != "nt"
+
+    def protected(candidate, expect_file):
+        candidate = pathlib.Path(candidate)
+        if not candidate.is_absolute():
+            return False
+        try:
+            metadata = lstat_func(candidate)
+        except OSError:
+            return False
+        expected = stat.S_ISREG if expect_file else stat.S_ISDIR
         if (
-            not stat.S_ISREG(metadata.st_mode)
-            or (os.name != "nt" and (
+            stat.S_ISLNK(metadata.st_mode)
+            or not expected(metadata.st_mode)
+            or (require_root and (
                 int(metadata.st_uid) != 0 or bool(metadata.st_mode & 0o022)
             ))
         ):
+            return False
+        if expect_file:
+            return all(protected(parent, False) for parent in candidate.parents)
+        return True
+
+    try:
+        configured = pathlib.Path(path)
+        if not protected(configured, True):
+            return None
+        runtime = pathlib.Path(resolve_func(configured))
+        if not protected(runtime, True):
             return None
         spec = importlib.util.spec_from_file_location(
             "ming_package_installer_for_spark", runtime)
@@ -267,7 +295,8 @@ def _load_package_installer(path=PACKAGE_INSTALLER_PATH):
         ):
             return None
         return module
-    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+    except (AttributeError, ImportError, NameError, OSError, RuntimeError,
+            SyntaxError, TypeError, ValueError):
         return None
 
 
@@ -288,8 +317,12 @@ class SparkPackageHelper:
         self.keyring_path = str(keyring_path or SPARK_KEYRING)
         self.verify_source = (runner is None) if verify_source is None else bool(verify_source)
         self.package_installer_module = package_installer_module
-        self.package_installer_path = pathlib.Path(
-            package_installer_path or PACKAGE_INSTALLER_PATH)
+        if package_installer_path is None:
+            self.package_installer_paths = (
+                PACKAGE_INSTALLER_PATH, PACKAGE_INSTALLER_FALLBACK_PATH)
+        else:
+            self.package_installer_paths = (pathlib.Path(package_installer_path),)
+        self.package_installer_path = self.package_installer_paths[0]
         self.lstat_func = lstat_func or os.lstat
         self.euid_getter = euid_getter or getattr(os, "geteuid", lambda: 1)
         self.environ = dict(os.environ if environ is None else environ)
@@ -668,6 +701,7 @@ class SparkPackageHelper:
             "launch_ready": False,
             "launchers": [],
             "resolver": "spark",
+            "log_path": str(self.log_path),
             "error_code": "",
             "error": "",
         }
@@ -677,7 +711,10 @@ class SparkPackageHelper:
     def _verify_package_install(self, request):
         runtime = self.package_installer_module
         if runtime is None:
-            runtime = _load_package_installer(self.package_installer_path)
+            for candidate in self.package_installer_paths:
+                runtime = _load_package_installer(candidate)
+                if runtime is not None:
+                    break
         if (
             runtime is None
             or getattr(runtime, "PACKAGE_INSTALLER_CONTRACT", None)
@@ -704,21 +741,31 @@ class SparkPackageHelper:
         launchers = payload.get("launchers")
         if not isinstance(launchers, list):
             return self._result(False, request, error_code=E_PACKAGE_FAILED)
+        payload_log_path = payload.get("log_path")
+        if not isinstance(payload_log_path, str) or not payload_log_path.strip():
+            payload_log_path = str(self.log_path)
+        payload_error = payload.get("error")
+        if not isinstance(payload_error, str):
+            payload_error = ""
         if payload.get("installed") is not True:
             return self._result(
                 False, request, installed=False, launchers=launchers,
+                log_path=payload_log_path, error=payload_error,
                 error_code=E_PACKAGE_FAILED)
         if payload.get("launch_ready") is not True:
             return self._result(
                 False, request, installed=True, launch_ready=False,
-                launchers=launchers, error_code=E_LAUNCH_NOT_READY)
+                launchers=launchers, log_path=payload_log_path,
+                error=payload_error, error_code=E_LAUNCH_NOT_READY)
         if payload.get("ok") is not True:
             return self._result(
                 False, request, installed=True, launch_ready=True,
-                launchers=launchers, error_code=E_PACKAGE_FAILED)
+                launchers=launchers, log_path=payload_log_path,
+                error=payload_error, error_code=E_PACKAGE_FAILED)
         return self._result(
             True, request, installed=True, launch_ready=True,
-            launchers=launchers)
+            launchers=launchers, log_path=payload_log_path,
+            error=payload_error)
 
     def _run_typed_apt(self, request, operation, package=""):
         try:
