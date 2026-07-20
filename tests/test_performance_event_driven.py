@@ -1086,6 +1086,67 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             self.assertEqual([(proxy, False)], confirmations)
             self.assertNotIn(str(proxy.absolute()), pending)
 
+    def test_durable_replace_prunes_missing_pending_targets_at_capacity(self):
+        namespace = load_phone_subset({"_confirm_file_durable", "_durable_replace"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            staged = root / "staged.desktop"
+            target = root / "target.desktop"
+            staged.write_bytes(b"durable")
+            pending = namespace["_DESKTOP_DURABILITY_PENDING"]
+            namespace["DESKTOP_DURABILITY_PENDING_MAX"] = 2
+            pending.update({
+                str((root / "missing-a.desktop").absolute()),
+                str((root / "missing-b.desktop").absolute()),
+            })
+
+            try:
+                namespace["_durable_replace"](staged, target)
+            except OSError as exc:
+                self.fail("missing pending targets must be pruned: %s" % exc)
+
+            self.assertEqual(b"durable", target.read_bytes())
+            self.assertEqual(set(), pending)
+
+    def test_unsupported_directory_fsync_clears_pending_but_eio_retries(self):
+        errno = __import__("errno")
+        namespace = load_phone_subset({"_confirm_file_durable"})
+        target = pathlib.Path("/catalog/app.desktop")
+        key = str(target.absolute())
+        pending = namespace["_DESKTOP_DURABILITY_PENDING"]
+        failure = OSError(errno.EINVAL, "directory fsync unsupported")
+        logs = []
+
+        def fsync(_descriptor):
+            raise failure
+
+        namespace.update({
+            "os": types.SimpleNamespace(
+                O_RDONLY=os.O_RDONLY,
+                O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
+                name="posix",
+                open=lambda _path, _flags: 42,
+                fsync=fsync,
+                close=lambda _descriptor: None,
+            ),
+            "log": logs.append,
+        })
+        pending.add(key)
+        try:
+            unsupported_result = namespace["_confirm_file_durable"](
+                target, data_synced=True)
+        except OSError:
+            unsupported_result = False
+        self.assertTrue(unsupported_result)
+        self.assertNotIn(key, pending)
+        self.assertTrue(logs)
+
+        failure = OSError(errno.EIO, "real storage error")
+        pending.add(key)
+        with self.assertRaises(OSError):
+            namespace["_confirm_file_durable"](target, data_synced=True)
+        self.assertIn(key, pending)
+
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")
         commands = []

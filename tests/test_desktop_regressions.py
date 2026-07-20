@@ -737,10 +737,14 @@ class DesktopSourceTests(unittest.TestCase):
             }), encoding="utf-8")
             namespace["DESKTOP_DIR"] = desktop
             namespace["DESKTOP_MANIFEST_PATH"] = manifest
+            pending = namespace["_DESKTOP_DURABILITY_PENDING"]
+            stale_key = str(stale.absolute())
+            pending.add(stale_key)
             layout = {"items": [{"id": "alpha", "type": "app", "path": str(app), "name": "Alpha", "pinned": True}]}
             namespace["sync_files"](layout)
             self.assertTrue(user.exists())
             self.assertFalse(stale.exists())
+            self.assertNotIn(stale_key, pending)
             self.assertTrue(reclaimed.exists())
             self.assertEqual(reclaimed_text, reclaimed.read_text(encoding="utf-8"))
             generated = desktop / "Alpha.desktop"

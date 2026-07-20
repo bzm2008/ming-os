@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import configparser
 import datetime
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1292,16 +1293,38 @@ def _confirm_file_durable(target, data_synced=False):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+    unsupported_errnos = {
+        errno.EINVAL,
+        errno.ENOSYS,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         directory_fd = os.open(str(target.parent), flags)
-    except OSError:
-        if os.name == "nt":
+    except OSError as exc:
+        unsupported_open = (
+            exc.errno in unsupported_errnos
+            or (os.name == "nt" and exc.errno in {errno.EACCES, errno.EPERM})
+        )
+        if unsupported_open:
+            logger = globals().get("log")
+            if callable(logger):
+                logger(f"directory fsync is unsupported for {target.parent}: {exc}")
             _DESKTOP_DURABILITY_PENDING.discard(key)
             return True
         raise
     try:
-        os.fsync(directory_fd)
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            if exc.errno not in unsupported_errnos:
+                raise
+            logger = globals().get("log")
+            if callable(logger):
+                logger(f"directory fsync is unsupported for {target.parent}: {exc}")
+            _DESKTOP_DURABILITY_PENDING.discard(key)
+            return True
     finally:
         os.close(directory_fd)
     _DESKTOP_DURABILITY_PENDING.discard(key)
@@ -1313,6 +1336,12 @@ def _durable_replace(staged, target):
     staged = Path(staged)
     target = Path(target)
     key = str(target.absolute())
+    if (
+            key not in _DESKTOP_DURABILITY_PENDING
+            and len(_DESKTOP_DURABILITY_PENDING) >= DESKTOP_DURABILITY_PENDING_MAX):
+        for pending_key in tuple(_DESKTOP_DURABILITY_PENDING):
+            if not Path(pending_key).exists():
+                _DESKTOP_DURABILITY_PENDING.discard(pending_key)
     if (
             key not in _DESKTOP_DURABILITY_PENDING
             and len(_DESKTOP_DURABILITY_PENDING) >= DESKTOP_DURABILITY_PENDING_MAX):
@@ -1588,6 +1617,7 @@ def sync_files(layout):
             continue
         try:
             old.unlink()
+            _DESKTOP_DURABILITY_PENDING.discard(str(old.absolute()))
         except OSError as exc:
             log(f"could not remove managed desktop launcher {old}: {exc}")
             succeeded = False
