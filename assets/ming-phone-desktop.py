@@ -3400,7 +3400,10 @@ class PhoneDesktop(Gtk.Window):
         appearance_stamp = self.current_appearance_stamp()
         appearance_changed = appearance_stamp != self.appearance_stamp
         layout_changed = stamp != self.layout_stamp
-        catalog_changed = self._catalog_dirty or catalog_stamp != self.catalog_stamp
+        # Desktop launcher reconciliation writes into a monitored catalog root.
+        # Consume that wake-up without treating its stable fingerprint as a new change.
+        catalog_changed = catalog_stamp != self.catalog_stamp
+        self._catalog_dirty = False
         if not layout_changed and not catalog_changed and not appearance_changed:
             return False
         if appearance_changed:
@@ -3420,7 +3423,6 @@ class PhoneDesktop(Gtk.Window):
             self.render()
         if catalog_changed:
             updated = sync_layout(self.get_screen().get_width())
-            self._catalog_dirty = False
         else:
             updated = load_layout()
         self.layout_stamp = self.current_layout_stamp()

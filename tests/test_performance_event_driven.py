@@ -530,38 +530,84 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "layout/appearance state events must not force an application rescan",
         )
 
+    def test_catalog_refresh_converges_after_sync_induced_monitor_event(self):
+        tree = ast.parse(PHONE.read_text(encoding="utf-8"))
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        methods = {
+            node.name: node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        selected = [
+            methods["on_catalog_file_changed"],
+            methods["_run_catalog_refresh"],
+            methods["refresh_if_apps_changed"],
+        ]
+        timers = []
+
+        class FakeGLib:
+            @staticmethod
+            def timeout_add(delay, callback, *args):
+                timers.append((delay, callback, args))
+                return len(timers)
+
+            @staticmethod
+            def source_remove(_source):
+                return None
+
+        catalog_before = (("version", 4), ("external", "before"))
+        catalog_after = (("version", 4), ("external", "after"))
         sync_calls = []
-        stable_catalog = (("version", 4),)
-        refresh_namespace = {
-            "app_catalog_fingerprint": lambda: stable_catalog,
-            "sync_layout": lambda width: sync_calls.append(width) or {
-                "version": 4, "items": []},
-            "load_layout": lambda: {"version": 4, "items": []},
+        layout = {"version": 4, "items": []}
+        namespace = {
+            "GLib": FakeGLib,
+            "app_catalog_fingerprint": lambda: catalog_after,
+            "sync_layout": lambda width: sync_calls.append(width) or dict(layout),
+            "load_layout": lambda: dict(layout),
             "layout_is_valid": lambda _layout, require_items=False: True,
             "LAYOUT_VERSION": 4,
         }
         exec(compile(
-            ast.Module(body=[refresh_method], type_ignores=[]),
+            ast.Module(body=selected, type_ignores=[]),
             str(PHONE),
             "exec",
-        ), refresh_namespace)
+        ), namespace)
         fake_screen = types.SimpleNamespace(get_width=lambda: 1366)
-        dirty_desktop = types.SimpleNamespace(
-            _catalog_dirty=True,
-            catalog_stamp=stable_catalog,
+        desktop = types.SimpleNamespace(
+            _catalog_dirty=False,
+            _catalog_debounce_source=0,
+            catalog_stamp=catalog_before,
             appearance_stamp=(0, 0),
             layout_stamp=0,
-            layout={"version": 4, "items": []},
+            layout=dict(layout),
             current_layout_stamp=lambda: 0,
             current_appearance_stamp=lambda: (0, 0),
             get_screen=lambda: fake_screen,
             render=lambda: None,
         )
-        refresh = types.MethodType(
-            refresh_namespace["refresh_if_apps_changed"], dirty_desktop)
-        self.assertFalse(refresh())
-        self.assertEqual([1366], sync_calls)
-        self.assertFalse(dirty_desktop._catalog_dirty)
+        for name in ("on_catalog_file_changed", "_run_catalog_refresh", "refresh_if_apps_changed"):
+            setattr(desktop, name, types.MethodType(namespace[name], desktop))
+
+        desktop.on_catalog_file_changed(None, None, None, None, True)
+        _delay, callback, args = timers.pop(0)
+        self.assertFalse(callback(*args))
+        self.assertEqual([1366], sync_calls, "the external catalog change must be reconciled")
+        self.assertEqual(catalog_after, desktop.catalog_stamp)
+
+        # Gio delivers the Desktop launcher write after sync_layout returns.
+        desktop.on_catalog_file_changed(None, None, None, None, True)
+        _delay, callback, args = timers.pop(0)
+        self.assertFalse(callback(*args))
+
+        self.assertEqual(
+            [1366],
+            sync_calls,
+            "a sync-induced event with a stable fingerprint must not start another sync",
+        )
+        self.assertFalse(desktop._catalog_dirty)
+        self.assertEqual([], timers)
 
     def test_metric_sampling_reads_default_route_without_subprocesses(self):
         module = load_module(PERFORMANCE, "ming_performance_status_proc_metrics_test")
