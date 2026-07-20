@@ -128,15 +128,16 @@ def write_symlink(root, relative_path, target):
     return path
 
 
-def write_spark_dpkg_metadata(root, version="5.2.1.0", owned_paths=SPARK_VENDOR_PATHS):
+def write_spark_dpkg_metadata(
+        root, version="5.2.1.0", architecture="amd64", owned_paths=SPARK_VENDOR_PATHS):
     dpkg = root / "var/lib/dpkg"
     info = dpkg / "info"
     info.mkdir(parents=True, exist_ok=True)
     (dpkg / "status").write_text(
         "Package: spark-store\n"
         "Status: install ok installed\n"
-        "Architecture: amd64\n"
-        "Version: %s\n\n" % version,
+        "Architecture: %s\n"
+        "Version: %s\n\n" % (architecture, version),
         encoding="utf-8",
     )
     (info / "spark-store.list").write_text(
@@ -154,6 +155,7 @@ def write_vendor_spark_package(
         final_exists=True,
         final_executable=True,
         version="5.2.1.0",
+        architecture="amd64",
         owned_paths=SPARK_VENDOR_PATHS):
     if first_is_regular:
         write_executable(root, "usr/local/bin/spark-store")
@@ -170,7 +172,12 @@ def write_vendor_spark_package(
         "1" if final_executable else "0",
         encoding="ascii",
     )
-    write_spark_dpkg_metadata(root, version=version, owned_paths=owned_paths)
+    write_spark_dpkg_metadata(
+        root,
+        version=version,
+        architecture=architecture,
+        owned_paths=owned_paths,
+    )
 
 
 def write_core_desktops(root):
@@ -576,6 +583,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "regular wrapper spoof": {"first_is_regular": True},
             "non executable final target": {"final_executable": False},
             "wrong package version": {"version": "5.2.1.1"},
+            "wrong package architecture": {"architecture": "arm64"},
             "wrong dpkg owner": {"owned_paths": (SPARK_VENDOR_TARGET,)},
         }
         for label, options in cases.items():

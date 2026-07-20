@@ -1721,7 +1721,62 @@ MINGINPUTCONTROL
 
 # ======================== 应用商店 (星火应用商店) ========================
 
+spark_release_field() {
+    local key="$1"
+    awk -F= -v key="${key}" \
+        '$1 == key {value=substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", value); print value; exit}' \
+        /etc/os-release 2>/dev/null
+}
+
+resolve_spark_build_mode() {
+    local requested="${MING_RELEASE_MODE:-}"
+    local release_stage version_id identity_mode
+    release_stage="$(spark_release_field MING_RELEASE_STAGE)" || return 1
+    version_id="$(spark_release_field VERSION_ID)" || return 1
+    case "${release_stage}:${version_id}" in
+        stable:26.4.0.1)
+            identity_mode="release"
+            ;;
+        development:26.4.0.1-development)
+            identity_mode="development"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [[ -z "${requested}" ]]; then
+        [[ "${identity_mode}" == "release" ]] || return 1
+        printf '%s\n' release
+        return 0
+    fi
+    case "${requested}" in
+        release|development)
+            [[ "${requested}" == "${identity_mode}" ]] || return 1
+            printf '%s\n' "${requested}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+deploy_spark_build_mode_resolver() {
+    local target="/usr/local/libexec/ming-spark-build-mode"
+    install -d -m 0755 "$(dirname "${target}")" || return 1
+    {
+        printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail' ''
+        declare -f spark_release_field resolve_spark_build_mode
+        printf '\n%s\n' resolve_spark_build_mode
+    } >"${target}" || return 1
+    chmod 0755 "${target}" || return 1
+}
+
 install_app_store() {
+    local app_store_mode
+    if ! app_store_mode="$(resolve_spark_build_mode)"; then
+        echo "[ERROR] Spark Store build identity is invalid" >&2
+        return 1
+    fi
     /usr/local/sbin/apt-build install --no-install-recommends \
         curl \
         wget \
@@ -1730,6 +1785,8 @@ install_app_store() {
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
         libnotify-bin || return 1
+
+    deploy_spark_build_mode_resolver || return 1
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash
@@ -1761,46 +1818,7 @@ verify_spark_asset() {
     [[ "${actual_sha256}" == "${expected_sha256}" ]]
 }
 
-release_field() {
-    local key="$1"
-    awk -F= -v key="${key}" \
-        '$1 == key {value=substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", value); print value; exit}' \
-        /etc/os-release 2>/dev/null
-}
-
-resolve_build_mode() {
-    local requested="${MING_RELEASE_MODE:-}"
-    local release_stage version_id identity_mode
-    release_stage="$(release_field MING_RELEASE_STAGE)" || return 1
-    version_id="$(release_field VERSION_ID)" || return 1
-    case "${release_stage}:${version_id}" in
-        stable:26.4.0.1)
-            identity_mode="release"
-            ;;
-        development:26.4.0.1-development)
-            identity_mode="development"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-    if [[ -z "${requested}" ]]; then
-        [[ "${identity_mode}" == "release" ]] || return 1
-        printf '%s\n' release
-        return 0
-    fi
-    case "${requested}" in
-        release|development)
-            [[ "${requested}" == "${identity_mode}" ]] || return 1
-            printf '%s\n' "${requested}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-if ! build_mode="$(resolve_build_mode)"; then
+if ! build_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
     printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
     exit 1
 fi
@@ -2005,7 +2023,7 @@ SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
 
     if ! /usr/local/bin/ming-install-spark-store; then
-        if [[ "${MING_RELEASE_MODE:-}" == "release" ]]; then
+        if [[ "${app_store_mode}" == "release" ]]; then
             echo "[ERROR] 星火应用商店安装失败，正式构建已中止。" >&2
             return 1
         fi
@@ -2308,6 +2326,12 @@ EOF
 main() {
     echo "=====> [02_apps] 开始安装应用软件 <====="
 
+    local app_store_mode
+    if ! app_store_mode="$(resolve_spark_build_mode)"; then
+        echo "[ERROR] [02_apps] Spark Store build identity is invalid" >&2
+        return 1
+    fi
+
     run_required_step install_xfce_desktop || return 1
     run_required_step install_fonts || return 1
     run_required_step install_required_desktop_runtime || return 1
@@ -2319,7 +2343,7 @@ main() {
     run_optional_step install_edge
     run_optional_step install_wps_office
     run_optional_step install_wechat
-    if [[ "${MING_RELEASE_MODE:-}" == "release" ]]; then
+    if [[ "${app_store_mode}" == "release" ]]; then
         run_required_step install_app_store || return 1
     else
         run_optional_step install_app_store

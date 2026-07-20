@@ -29,6 +29,24 @@ def spark_installer_source():
     )[1].split("\nSPARKINSTALL", 1)[0]
 
 
+def module_shell_function_source(name):
+    module_prefix = APPS.split("install_app_store() {", 1)[0]
+    marker = "%s() {" % name
+    if marker not in module_prefix:
+        return ""
+    start = module_prefix.index(marker)
+    end = module_prefix.index("\n}", start) + 2
+    return module_prefix[start:end]
+
+
+def module_spark_mode_source():
+    functions = (
+        module_shell_function_source("spark_release_field"),
+        module_shell_function_source("resolve_spark_build_mode"),
+    )
+    return "\n\n".join(function for function in functions if function)
+
+
 def bash_path(path):
     value = str(path.resolve()).replace("\\", "/")
     if os.name == "nt":
@@ -43,6 +61,12 @@ def write_shell_executable(path, content):
 
 def spark_asset_gate_source(root):
     source = spark_installer_source().split("mkdir -p /root/.config", 1)[0]
+    mode_source = module_spark_mode_source()
+    if mode_source:
+        source = mode_source + "\n\n" + source.replace(
+            "/usr/local/libexec/ming-spark-build-mode",
+            "resolve_spark_build_mode",
+        )
     root_guard = """if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     echo "Administrator privileges are required to install Spark Store." >&2
     exit 1
@@ -127,6 +151,48 @@ def apps_main_source():
     return APPS[start:end]
 
 
+def run_apps_main(mode, os_release):
+    harness = """
+run_required_step() { "$@"; }
+run_optional_step() { "$@" || true; }
+install_xfce_desktop() { return 0; }
+install_fonts() { return 0; }
+install_required_desktop_runtime() { return 0; }
+generate_edge_video_samples() { return 0; }
+enable_bluetooth_after_runtime() { return 0; }
+install_fcitx5() { return 0; }
+deploy_eyecare() { return 0; }
+install_edge() { return 0; }
+install_wps_office() { return 0; }
+install_wechat() { return 0; }
+install_app_store() { return 42; }
+install_utilities() { return 0; }
+"""
+    with tempfile.TemporaryDirectory(prefix="ming-apps-main-") as directory:
+        root = pathlib.Path(directory)
+        os_release_path = root / "os-release"
+        os_release_path.write_text(os_release, encoding="utf-8")
+        source = (
+            harness
+            + module_spark_mode_source()
+            + "\n\n"
+            + apps_main_source()
+            + "\nmain\n"
+        ).replace("/etc/os-release", bash_path(os_release_path))
+        environment = dict(os.environ)
+        environment.pop("MING_RELEASE_MODE", None)
+        if mode is not None:
+            environment["MING_RELEASE_MODE"] = mode
+        return subprocess.run(
+            [BASH],
+            input=source,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+
+
 class MultimediaRuntimeContracts(unittest.TestCase):
     def test_audio_session_helper_is_deployed_with_login_recovery(self):
         install = DESKTOP.split("install_ming_shell_components() {", 1)[1].split(
@@ -183,7 +249,7 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             "/releases/download/5.2.1.0/",
             "MING_SPARK_STORE_ASSET",
             "/tmp/ming-build/assets/",
-            "MING_RELEASE_MODE",
+            "/usr/local/libexec/ming-spark-build-mode",
             "sha256sum",
             "timeout --foreground 300s",
             "--connect-timeout=10",
@@ -262,37 +328,42 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertEqual("wget\n", wget_calls)
         self.assertIn("E_PACKAGE_FAILED", completed.stderr)
 
-    def test_release_app_store_install_failure_propagates_from_main(self):
-        harness = """
-run_required_step() { "$@"; }
-run_optional_step() { "$@" || true; }
-install_xfce_desktop() { return 0; }
-install_fonts() { return 0; }
-install_required_desktop_runtime() { return 0; }
-generate_edge_video_samples() { return 0; }
-enable_bluetooth_after_runtime() { return 0; }
-install_fcitx5() { return 0; }
-deploy_eyecare() { return 0; }
-install_edge() { return 0; }
-install_wps_office() { return 0; }
-install_wechat() { return 0; }
-install_app_store() { return 42; }
-install_utilities() { return 0; }
-"""
-        source = harness + apps_main_source() + "\nmain\n"
-        for mode, expected_success in (("release", False), ("development", True)):
-            with self.subTest(mode=mode):
-                environment = dict(os.environ)
-                environment["MING_RELEASE_MODE"] = mode
-                completed = subprocess.run(
-                    [BASH],
-                    input=source,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=environment,
-                )
+    def test_module_app_store_identity_controls_failure_propagation(self):
+        stable = "MING_RELEASE_STAGE=stable\nVERSION_ID=26.4.0.1\n"
+        development = (
+            "MING_RELEASE_STAGE=development\n"
+            "VERSION_ID=26.4.0.1-development\n"
+        )
+        cases = (
+            ("explicit release", "release", stable, False),
+            ("release identity fallback", None, stable, False),
+            ("explicit development", "development", development, True),
+            ("development missing mode", None, development, False),
+            ("conflicting development mode", "development", stable, False),
+            ("unknown identity", None, "MING_RELEASE_STAGE=preview\nVERSION_ID=26.4.0.1\n", False),
+        )
+        for label, mode, os_release, expected_success in cases:
+            with self.subTest(label=label):
+                completed = run_apps_main(mode, os_release)
                 self.assertEqual(expected_success, completed.returncode == 0)
+
+    def test_installer_reuses_the_module_spark_mode_resolver(self):
+        module_prefix = APPS.split("install_app_store() {", 1)[0]
+        app_store = APPS.split("install_app_store() {", 1)[1].split(
+            "\n# ========================", 1
+        )[0]
+        installer = spark_installer_source()
+        main = apps_main_source()
+
+        self.assertNotIn('[[ "${MING_RELEASE_MODE:-}" == "release" ]]', app_store)
+        self.assertNotIn("MING_RELEASE_MODE", main)
+        self.assertIn("resolve_spark_build_mode() {", module_prefix)
+        self.assertIn(
+            "declare -f spark_release_field resolve_spark_build_mode",
+            APPS,
+        )
+        self.assertIn("/usr/local/libexec/ming-spark-build-mode", installer)
+        self.assertNotIn("resolve_build_mode() {", installer)
 
     def test_installer_requires_the_exact_installed_package_version(self):
         installer = spark_installer_source()

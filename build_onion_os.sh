@@ -1324,8 +1324,9 @@ spark_package = dpkg_package_fields(root / "var/lib/dpkg/status", "spark-store")
 if not (
         spark_package
         and spark_package.get("Status") == "install ok installed"
-        and spark_package.get("Version") == "5.2.1.0"):
-    errors.append("Spark Store package is not installed at exact version 5.2.1.0")
+        and spark_package.get("Version") == "5.2.1.0"
+        and spark_package.get("Architecture") == "amd64"):
+    errors.append("Spark Store package is not installed as exact 5.2.1.0 amd64 build")
 
 spark_owned_paths = set()
 for owner_name in ("spark-store.list", "spark-store:amd64.list"):
