@@ -27,6 +27,25 @@ def load_module(path, name):
     return module
 
 
+def load_rootfs_ast_contract_helpers():
+    build = BUILD.read_text(encoding="utf-8")
+    gate = build[
+        build.index("validate_r4_compatibility() {"):
+        build.index("write_grub_config() {")
+    ]
+    source = gate.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    tree = ast.parse(source, filename=str(BUILD))
+    helper_names = {"require_ast_class", "require_ast_method"}
+    helpers = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in helper_names
+    ]
+    namespace = {"ast": ast, "errors": []}
+    module = ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[]))
+    exec(compile(module, str(BUILD), "exec"), namespace)
+    return namespace
+
+
 def load_phone_subset(function_names=(), method_names=()):
     tree = ast.parse(PHONE.read_text(encoding="utf-8"))
     wanted_functions = set(function_names)
@@ -1373,6 +1392,64 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             "WINDOW_MANAGER_HELPER_TIMEOUT_SECONDS",
         ):
             self.assertIn(marker, source)
+
+    def test_rootfs_ast_contract_requires_positional_parameters(self):
+        helpers = load_rootfs_ast_contract_helpers()
+        require_method = helpers["require_ast_method"]
+        required = ("pid", "starttime", "reason")
+        positional = ast.parse(
+            "class ResourcePolicy:\n"
+            "    def begin(self, pid, starttime, reason):\n"
+            "        pass\n"
+        )
+        self.assertIsNotNone(
+            require_method(positional, "ResourcePolicy", "begin", required))
+        self.assertEqual([], helpers["errors"])
+
+        keyword_only = ast.parse(
+            "class ResourcePolicy:\n"
+            "    def begin(self, *, pid, starttime, reason):\n"
+            "        pass\n"
+        )
+        require_method(keyword_only, "ResourcePolicy", "begin", required)
+        self.assertEqual(
+            ["Python AST ResourcePolicy.begin missing parameters: "
+             "pid, starttime, reason"],
+            helpers["errors"],
+        )
+
+    def test_rootfs_ast_contract_uses_final_class_and_method_definitions(self):
+        fixtures = {
+            "class": (
+                "class ResourcePolicy:\n"
+                "    def begin(self, pid, starttime, reason):\n"
+                "        pass\n"
+                "class ResourcePolicy:\n"
+                "    def begin(self, pid):\n"
+                "        pass\n"
+            ),
+            "method": (
+                "class ResourcePolicy:\n"
+                "    def begin(self, pid, starttime, reason):\n"
+                "        pass\n"
+                "    def begin(self, pid):\n"
+                "        pass\n"
+            ),
+        }
+        for binding, source in fixtures.items():
+            with self.subTest(binding=binding):
+                helpers = load_rootfs_ast_contract_helpers()
+                helpers["require_ast_method"](
+                    ast.parse(source),
+                    "ResourcePolicy",
+                    "begin",
+                    ("pid", "starttime", "reason"),
+                )
+                self.assertEqual(
+                    ["Python AST ResourcePolicy.begin missing parameters: "
+                     "starttime, reason"],
+                    helpers["errors"],
+                )
 
     def test_rootfs_performance_contract_gate_is_ast_only(self):
         build = BUILD.read_text(encoding="utf-8")

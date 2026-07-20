@@ -1668,7 +1668,7 @@ def require_ast_class(tree, class_name):
     if tree is None:
         return None
     owner = next(
-        (node for node in tree.body
+        (node for node in reversed(tree.body)
          if isinstance(node, ast.ClassDef) and node.name == class_name),
         None,
     )
@@ -1682,7 +1682,7 @@ def require_ast_method(tree, class_name, method_name, required_parameters=()):
     if owner is None:
         return None
     method = next(
-        (node for node in owner.body
+        (node for node in reversed(owner.body)
          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
          and node.name == method_name),
         None,
@@ -1695,7 +1695,6 @@ def require_ast_method(tree, class_name, method_name, required_parameters=()):
         for argument in (
             method.args.posonlyargs
             + method.args.args
-            + method.args.kwonlyargs
         )
     }
     missing = [name for name in required_parameters if name not in parameters]
