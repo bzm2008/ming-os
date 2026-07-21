@@ -90,6 +90,29 @@ class SoftwareBrightnessDisplayTests(unittest.TestCase):
             ["xrandr", "--output", "HDMI-1", "--brightness", "0.5"], runner.commands[2])
         self.assertEqual(50, saved["value"])
 
+    def test_status_keeps_a_numeric_value_when_active_outputs_are_mixed(self):
+        runner = SequenceRunner([XRANDR_VERBOSE])
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = self.display.DisplayController(runner=runner)
+            with mock.patch.dict(os.environ, {
+                "DISPLAY": ":99", "HOME": temporary,
+                "XDG_CONFIG_HOME": str(pathlib.Path(temporary) / ".config"),
+            }, clear=False):
+                result = controller.software_status()
+        self.assertTrue(result["ok"])
+        self.assertEqual(80, result["value"])
+        self.assertTrue(result["mixed"])
+        self.assertEqual({"DP-1": 100, "HDMI-1": 80}, result["output_values"])
+
+    def test_status_keeps_a_slider_safe_value_when_outputs_are_initially_mixed(self):
+        controller = self.display.DisplayController(runner=SequenceRunner([XRANDR_VERBOSE]))
+        with mock.patch.dict(os.environ, {"DISPLAY": ":99"}, clear=False):
+            result = controller.software_status()
+        self.assertTrue(result["ok"])
+        self.assertEqual(80, result["value"])
+        self.assertTrue(result["mixed"])
+        self.assertEqual({"DP-1": 100, "HDMI-1": 80}, result["output_values"])
+
     def test_partial_output_failure_rolls_back_outputs_already_changed(self):
         runner = SequenceRunner([XRANDR_VERBOSE], failed_output="HDMI-1")
         with tempfile.TemporaryDirectory() as temporary:

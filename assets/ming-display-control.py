@@ -383,7 +383,8 @@ class DisplayController:
             result["preference"] = self._read_software_preference()
             return result
         values = [self._software_percent(item["brightness"]) for item in result["outputs"]]
-        result["value"] = values[0] if values and all(value == values[0] for value in values) else None
+        result["value"] = min(values) if values else None
+        result["mixed"] = bool(values) and any(value != values[0] for value in values)
         result["preference"] = self._read_software_preference()
         result["output_values"] = {
             item["name"]: self._software_percent(item["brightness"])
