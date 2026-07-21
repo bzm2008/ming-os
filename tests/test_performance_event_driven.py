@@ -2193,18 +2193,52 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             for index in range(5):
                 client.state.allow_boost(index, str(index), 10.0)
                 client.state.mark_hidden(str(index), index, str(index), float(index))
-                client.state.mark_backgrounded(index, str(index))
-                client.state.next_background_generation(index, str(index))
+                if client.state.mark_backgrounded(index, str(index)):
+                    client.state.next_background_generation(index, str(index))
                 client.state.remember_window_identity(str(index), index, str(index))
 
-        process_identities = (
-            set(client.state.backgrounded)
-            | set(client.state.background_generations)
-            | set(client.state.boosted)
-        )
         self.assertLessEqual(len(client.state.hidden), 2)
-        self.assertLessEqual(len(process_identities), 2)
+        self.assertLessEqual(len(client.state.backgrounded), 2)
+        self.assertLessEqual(len(client.state.background_generations), 2)
+        self.assertLessEqual(len(client.state.boosted), 2)
         self.assertLessEqual(len(client.state.window_identities), 2)
+
+    def test_window_identity_capacity_fails_open_without_evicting_live_windows(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_window_capacity_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        hidden = make_window(1, 4242, True)
+        visible = make_window(2, 4242, False)
+        with mock.patch.object(module, "MAX_TRACKED_WINDOWS", 1), \
+                mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.attach(hidden)
+            monitor.attach(visible)
+            hidden_key = monitor.window_id(hidden)
+            self.assertIn(hidden_key, client.state.hidden)
+            generation = client.state.hidden[hidden_key]["generation"]
+            client.state.hidden[hidden_key]["since"] -= 11.0
+            monitor.on_hidden_timeout(hidden_key, generation)
+        self.assertEqual([], client.calls)
+        self.assertEqual((4242, "100"), client.state.window_identity(hidden_key))
+        self.assertTrue(client.state.window_tracking_saturated)
+
+    def test_process_identity_capacity_preserves_active_restore_marker(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_process_capacity_test",
+        )
+        state = module.EventState()
+        with mock.patch.object(module, "MAX_TRACKED_PROCESS_IDENTITIES", 1):
+            self.assertTrue(state.mark_backgrounded(42, "100"))
+            state.next_background_generation(42, "100")
+            self.assertFalse(state.mark_backgrounded(43, "200"))
+        self.assertTrue(state.is_backgrounded(42, "100"))
+        self.assertIn((42, "100"), state.background_generations)
+        self.assertTrue(state.consume_backgrounded(42, "100"))
 
     def test_detach_without_confirmed_identity_never_restores_current_pid(self):
         module = load_module(

@@ -40,35 +40,49 @@ class EventState:
         self.boosted: dict[tuple[int, str], float] = {}
         self.hidden: dict[str, dict[str, Any]] = {}
         self.window_identities: dict[str, tuple[int, str]] = {}
+        self.window_tracking_saturated = False
         self.backgrounded: set[tuple[int, str]] = set()
         self.background_generations: dict[tuple[int, str], int] = {}
+        self.process_policy_saturated = False
 
     def _prune_window_state(self) -> None:
         """Keep event bookkeeping bounded during long-running sessions."""
-        while len(self.window_identities) > MAX_TRACKED_WINDOWS:
-            window_id, _identity = next(iter(self.window_identities.items()))
-            self.window_identities.pop(window_id, None)
-            self.hidden.pop(window_id, None)
         while len(self.hidden) > MAX_TRACKED_WINDOWS:
-            window_id = next(iter(self.hidden))
-            self.hidden.pop(window_id, None)
+            removable = next(
+                (window_id for window_id in self.hidden
+                 if window_id not in self.window_identities),
+                None,
+            )
+            if removable is None:
+                break
+            self.hidden.pop(removable, None)
 
     def _prune_process_state(self) -> None:
         while len(self.background_generations) > MAX_TRACKED_PROCESS_IDENTITIES:
-            identity = next(iter(self.background_generations))
-            self.background_generations.pop(identity, None)
-            self.backgrounded.discard(identity)
-        while len(self.backgrounded) > MAX_TRACKED_PROCESS_IDENTITIES:
-            self.backgrounded.pop()
+            removable = next(
+                (identity for identity in self.background_generations
+                 if identity not in self.backgrounded),
+                None,
+            )
+            if removable is None:
+                self.process_policy_saturated = True
+                break
+            self.background_generations.pop(removable, None)
         while len(self.boosted) > MAX_TRACKED_PROCESS_IDENTITIES:
             self.boosted.pop(next(iter(self.boosted)))
 
-    def remember_window_identity(self, window_id: str, pid: int, starttime: str) -> None:
+    def remember_window_identity(self, window_id: str, pid: int, starttime: str) -> bool:
         key = str(window_id)
+        if key not in self.window_identities and len(self.window_identities) >= MAX_TRACKED_WINDOWS:
+            # Never evict a live identity. An untracked window makes the
+            # monitor conservative until capacity is available again.
+            self.window_tracking_saturated = True
+            return False
         # Re-inserting makes the most recently observed window the newest entry.
         self.window_identities.pop(key, None)
         self.window_identities[key] = (int(pid), str(starttime))
         self._prune_window_state()
+        return True
 
     def window_identity(self, window_id: str) -> tuple[int, str] | None:
         return self.window_identities.get(str(window_id))
@@ -131,6 +145,9 @@ class EventState:
     def mark_backgrounded(self, pid: int, starttime: str) -> bool:
         key = (int(pid), str(starttime))
         if key in self.backgrounded:
+            return False
+        if len(self.backgrounded) >= MAX_TRACKED_PROCESS_IDENTITIES:
+            self.process_policy_saturated = True
             return False
         self.backgrounded.add(key)
         self._prune_process_state()
@@ -337,6 +354,8 @@ class WnckResourceMonitor:
         return True
 
     def process_has_visible_window(self, pid: int, starttime: str | None = None) -> bool:
+        if self.client.state.window_tracking_saturated:
+            return True
         if starttime is None:
             starttime = process_starttime(pid)
         requested = (int(pid), str(starttime)) if starttime else None
@@ -413,7 +432,10 @@ class WnckResourceMonitor:
         if not starttime:
             return
         key = self.window_id(window)
-        self.client.state.remember_window_identity(key, pid, starttime)
+        if not self.client.state.remember_window_identity(key, pid, starttime):
+            self.client.state.mark_visible(key)
+            self.cancel_timer(key)
+            return
         if self.is_visible(window):
             self.client.state.mark_visible(key)
             self.cancel_timer(key)
