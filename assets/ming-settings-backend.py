@@ -83,7 +83,7 @@ SETTING_SPECS = {
         "channel": "xfce4-notifyd", "property": "/log-max-size",
     },
     "dock_icon_size": {
-        "kind": "int", "min": 32, "max": 96, "backend": "plank", "key": "IconSize",
+        "kind": "int", "min": 32, "max": 96, "backend": "appearance",
     },
     "dock_zoom_percent": {
         "kind": "int", "min": 100, "max": 180, "backend": "plank", "key": "ZoomPercent",
@@ -554,7 +554,9 @@ class SettingsBackend:
                     value = bool(local.get("reduced_motion", False))
                 return self._result(True, key, value)
             return self._result(True, key, self._read_local().get(key, spec.get("default")))
-        if backend == "plank":
+        if backend == "appearance":
+            raw = self._read_appearance().get("dock_icon_size", 48)
+        elif backend == "plank":
             parser = self._plank_config()
             raw = parser.get("PlankDockPreferences", spec["key"], fallback="0")
         elif backend == "xfconf":
@@ -607,6 +609,20 @@ class SettingsBackend:
             if key == "reduced_motion":
                 self._write_appearance_values(
                     motion="reduced" if validated else "normal")
+        elif backend == "appearance":
+            rc, output, error = self.runner([
+                "/usr/local/bin/ming-appearance-control", "apply",
+                "--dock-icon-size", str(validated), "--json",
+            ])
+            if rc != 0:
+                return self._result(False, key, error=error or output or "Dock 外观设置未生效")
+            try:
+                applied = json.loads(output)
+            except (TypeError, ValueError):
+                return self._result(False, key, error="Dock 外观控制返回了无效结果")
+            if not isinstance(applied, dict) or applied.get("dock_icon_size") != validated:
+                return self._result(False, key, error="Dock 图标大小没有通过外观控制读回")
+            self._write_appearance_values(dock_icon_size=validated)
         elif backend == "plank":
             parser = self._plank_config()
             parser.set("PlankDockPreferences", spec["key"], str(encoded))

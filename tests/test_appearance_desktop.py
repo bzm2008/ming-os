@@ -164,9 +164,9 @@ class AppearanceControlTests(unittest.TestCase):
         self.assertIn("def fsync_directory", source)
         self.assertIn('getattr(os, "O_DIRECTORY"', source)
         self.assertGreaterEqual(source.count("fsync_directory("), 3)
-        plank = source[source.index('plank = home_path()'):source.index("def parser")]
-        self.assertIn("finally:", plank)
-        self.assertIn("os.unlink(temporary)", plank)
+        atomic_text = source[source.index("def atomic_write_text"):source.index("def _replace_setting_line")]
+        self.assertIn("finally:", atomic_text)
+        self.assertIn("os.unlink(temporary)", atomic_text)
 
     def test_wallpaper_rejects_animation_and_oversized_png_metadata(self):
         spec = importlib.util.spec_from_file_location("appearance_wallpaper", CONTROL)
@@ -194,6 +194,52 @@ class AppearanceControlTests(unittest.TestCase):
                        phone.index("    def on_draw", phone.index("    def load_wallpaper"))]
         self.assertIn("new_from_file_at_scale", loader)
         self.assertNotIn("new_from_file(", loader)
+
+    def test_runtime_font_updates_system_chrome_without_content_scaling(self):
+        source = CONTROL.read_text(encoding="utf-8")
+        runtime = source[source.index("def apply_runtime("):source.index("def parser():")]
+        for marker in (
+            "sync_gtk_font_settings",
+            "org.gnome.desktop.interface",
+            '"font-name"',
+            "/general/title_font",
+        ):
+            self.assertIn(marker, runtime)
+        for marker in (
+            "gtk-font-name",
+            ".config/gtk-3.0/settings.ini",
+            ".config/gtk-4.0/settings.ini",
+            ".gtkrc-2.0",
+        ):
+            self.assertIn(marker, source)
+        for forbidden in ("text-scaling-factor", "document-font-name"):
+            self.assertNotIn(forbidden, runtime)
+
+    def test_ming_shell_font_metric_is_shared_and_bounded(self):
+        common = load_common()
+        self.assertEqual(9, common.appearance_font_size({"font_size": 3}))
+        self.assertEqual(14, common.appearance_font_size({"font_size": 14}))
+        self.assertEqual(18, common.appearance_font_size({"font_size": 99}))
+        for path in ("assets/ming-phone-desktop.py", "assets/ming-app-drawer.py"):
+            self.assertIn("COMMON.appearance_font_size", (ROOT / path).read_text(encoding="utf-8"))
+
+    def test_dock_runtime_syncs_dconf_and_requests_bounded_single_instance_reload(self):
+        control = CONTROL.read_text(encoding="utf-8")
+        desktop = (ROOT / "modules/03_desktop.sh").read_text(encoding="utf-8")
+        runtime = control[control.index("def sync_dock_runtime(config"):
+                          control.index("def parser():")]
+        for marker in (
+            "dconf",
+            "/net/launchpad/plank/docks/dock1/icon-size",
+            "dconf read",
+            "--reload-dock",
+            "ming-session-healthcheck",
+        ):
+            self.assertIn(marker, runtime)
+        health_start = desktop.index("cat > /usr/local/bin/ming-session-healthcheck")
+        health = desktop[health_start:desktop.index("\nMINGSESSIONHEALTH\n", health_start)]
+        for marker in ("--reload-dock", "reload_dock()", "start_plank_dock", "PLANK_STARTUP_DEADLINE=8"):
+            self.assertIn(marker, health)
 
 
 class DeploymentContractTests(unittest.TestCase):
@@ -300,6 +346,27 @@ class DeploymentContractTests(unittest.TestCase):
         for forbidden in ("xfce4-panel --preferences", "xfdesktop-settings", "xfce4-display-settings"):
             self.assertNotIn(forbidden, settings)
         self.assertIn("ming-appearance-control.py", desktop)
+
+    def test_display_page_has_no_legacy_competing_interface_scale_writer(self):
+        settings = (ROOT / "assets/ming-settings.py").read_text(encoding="utf-8")
+        for forbidden in (
+            "def apply_interface_scale",
+            "def on_interface_scale_changed",
+            "text-scaling-factor",
+            "pkill plank",
+            "save_scale_preference(percent)",
+        ):
+            self.assertNotIn(forbidden, settings)
+
+    def test_rootfs_gate_requires_dock_reload_and_importable_performance_status(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        for marker in (
+            "usr/local/lib/ming-os/ming-performance-status.py",
+            "usr/local/sbin/ming-performance-status",
+            "--reload-dock",
+            "reload_dock()",
+        ):
+            self.assertIn(marker, build)
 
     def test_session_and_package_contract_has_one_ming_shell(self):
         apps = (ROOT / "modules/02_apps.sh").read_text(encoding="utf-8")

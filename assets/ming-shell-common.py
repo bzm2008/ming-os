@@ -35,6 +35,15 @@ BROKER_RECOVERY_TIMEOUT = 3.0
 BROKER_RECOVERY_INTERVAL = 0.05
 
 
+def appearance_font_size(appearance, fallback=11):
+    """Return a bounded UI font size shared by Ming-rendered surfaces."""
+    try:
+        value = int((appearance or {}).get("font_size", fallback))
+    except (AttributeError, TypeError, ValueError):
+        value = int(fallback)
+    return max(9, min(18, value))
+
+
 class Rect:
     __slots__ = ("x", "y", "width", "height")
 

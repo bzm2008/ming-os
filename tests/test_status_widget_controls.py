@@ -140,6 +140,23 @@ class ControlRequestStateTests(unittest.TestCase):
         self.assertIn("self.volume_scale = StatusSlider(0, 100)", status)
         self.assertIn("self.brightness_scale = StatusSlider(1, 100)", status)
 
+    def test_metric_loader_uses_importable_runtime_and_primes_cpu_and_network(self):
+        source = self.source
+        paths = source[source.index("PERFORMANCE_STATUS_PATHS = ["):
+                       source.index("]\n", source.index("PERFORMANCE_STATUS_PATHS = ["))]
+        self.assertIn('Path("/usr/local/lib/ming-os/ming-performance-status.py")', paths)
+        self.assertNotIn('Path("/usr/local/sbin/ming-performance-status")', paths)
+        status = source[source.index("class StatusWidget"):
+                        source.index("class WallpaperCanvas")]
+        self.assertIn("METRIC_PRIME_INTERVAL_MS = 250", source)
+        for marker in (
+            "metric_generation",
+            "prime_metric_sample",
+            "等待下一次",
+            "采样中",
+        ):
+            self.assertIn(marker, status)
+
 
 if __name__ == "__main__":
     unittest.main()

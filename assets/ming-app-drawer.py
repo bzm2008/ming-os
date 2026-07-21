@@ -163,6 +163,9 @@ def drawer_css(appearance):
         raised = profile["surface_raised"]
     shadow = "0 -10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
     font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    font_size = COMMON.appearance_font_size(appearance)
+    label_size = max(9, min(16, font_size))
+    diagnostic_size = max(8, min(14, font_size - 2))
     return ("""
 window#ming-app-drawer { background: %(base)s; font-family: "%(font)s"; }
 .drawer-root { background: %(raised)s; border-top: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 20px; }
@@ -172,12 +175,13 @@ window#ming-app-drawer { background: %(base)s; font-family: "%(font)s"; }
 .drawer-category:checked { background: %(accent)s; color: #ffffff; }
 .drawer-tile { border-radius: 8px; padding: 10px 8px; background: transparent; border: 1px solid transparent; }
 .drawer-tile:hover { background: %(sunken)s; border-color: %(accent)s; }
-.drawer-label { color: %(text)s; font-weight: 700; font-size: 11px; }
-.drawer-diagnostic { color: #B63E3E; font-size: 9px; font-weight: 700; }
+.drawer-label { color: %(text)s; font-weight: 700; font-size: %(label_size)dpx; }
+.drawer-diagnostic { color: #B63E3E; font-size: %(diagnostic_size)dpx; font-weight: 700; }
 """ % {
         "base": profile["surface_base"], "raised": raised, "sunken": profile["surface_sunken"],
         "border": profile["border_soft"], "accent": profile["accent"],
         "text": profile["text_primary"], "shadow": shadow, "font": font,
+        "label_size": label_size, "diagnostic_size": diagnostic_size,
     }).encode("utf-8")
 
 

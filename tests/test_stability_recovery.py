@@ -644,8 +644,10 @@ fi
         for marker in ("status", "apply", "confirm", "rollback", "15"):
             self.assertIn(marker, source)
         self.assertIn("ming-display-control", SETTINGS)
-        self.assertIn("100% 标准", SETTINGS)
         self.assertIn("1920 × 1080", SETTINGS)
+        for marker in ("字体大小", "桌面图标", "Dock 图标"):
+            self.assertIn(marker, SETTINGS)
+        self.assertNotIn("apply_interface_scale", SETTINGS)
 
     def test_status_widget_compact_state_is_persistent_and_uses_a_revealer(self):
         for marker in (

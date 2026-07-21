@@ -2234,7 +2234,11 @@ time_timer = require_file("etc/systemd/system/ming-time-sync.timer", "OnBootSec=
 for marker in ["OnUnitActiveSec=6h", "RandomizedDelaySec=5m", "Persistent=true"]:
     if marker not in time_timer:
         errors.append(f"ming-time-sync.timer missing marker {marker}")
-performance_status = require_file("usr/local/sbin/ming-performance-status", "status --json")
+performance_status = require_file(
+    "usr/local/lib/ming-os/ming-performance-status.py", "status --json")
+performance_status_cli = require_file(
+    "usr/local/sbin/ming-performance-status",
+    "exec /usr/bin/python3 /usr/local/lib/ming-os/ming-performance-status.py")
 for marker in [
     "systemd-analyze", "/proc/meminfo", "scaling_governor",
     "discard_max_bytes", "fstrim.timer", "sensors", "ModemManager",
@@ -2307,6 +2311,7 @@ for relative_path in [
     "usr/local/bin/ming-interaction-boost",
     "usr/local/bin/ming-background-policy",
     "usr/local/bin/ming-performance-policy",
+    "usr/local/sbin/ming-performance-status",
 ]:
     validate_generated_executable(relative_path, "bash")
 validate_generated_executable("usr/local/bin/ming-session-healthcheck", "bash")
@@ -2316,7 +2321,6 @@ for relative_path in [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
     "usr/local/bin/ming-storage-status",
-    "usr/local/sbin/ming-performance-status",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
@@ -2326,6 +2330,7 @@ for relative_path in [
     "usr/local/bin/ming-thunar-menu-sync",
     "usr/local/lib/ming-os/ming-performance-policy.py",
     "usr/local/lib/ming-os/ming-prefetch.py",
+    "usr/local/lib/ming-os/ming-performance-status.py",
 ]:
     validate_generated_executable(relative_path, "python")
 validate_generated_executable("usr/local/bin/ming-window-resource-monitor", "python")
@@ -2387,7 +2392,7 @@ session_healthcheck = require_file("usr/local/bin/ming-session-healthcheck", "re
 for marker in [
     "readonly SUPERVISOR_INTERVAL=30", "RESOURCE_MONITOR_RETRY_SECONDS=60",
     "monotonic_seconds", "/proc/uptime", "now >= last_attempt",
-    'sleep "${SUPERVISOR_INTERVAL}"',
+    'sleep "${SUPERVISOR_INTERVAL}"', "--reload-dock", "reload_dock()",
 ]:
     if marker not in session_healthcheck:
         errors.append(f"ming-session-healthcheck missing recovery marker {marker}")

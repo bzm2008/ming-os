@@ -1363,13 +1363,20 @@ deploy_performance_status() {
     # is used by the rootfs gate and by an installed system.  It is read-only and
     # all external probes are bounded, so missing hardware never blocks boot.
     local asset="/tmp/ming-build/assets/ming-performance-status.py"
+    local library="/usr/local/lib/ming-os/ming-performance-status.py"
     local target="/usr/local/sbin/ming-performance-status"
     if [[ ! -s "${asset}" ]]; then
         echo "[ERROR] missing performance status asset: ${asset}" >&2
         return 1
     fi
-    install -m 0755 "${asset}" "${target}" || return 1
-    if ! python3 - "${target}" <<'PY'
+    install -d -m 0755 /usr/local/lib/ming-os /usr/local/sbin || return 1
+    install -m 0644 "${asset}" "${library}" || return 1
+    cat > "${target}" <<'PERFORMANCESTATUSWRAPPER'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/ming-os/ming-performance-status.py "$@"
+PERFORMANCESTATUSWRAPPER
+    chmod 0755 "${target}" || return 1
+    if ! python3 - "${library}" <<'PY'
 import ast
 import pathlib
 import sys

@@ -1271,7 +1271,7 @@ headerbar {
 }
 MINGGTKCSS
 
-    mkdir -p "/home/${MING_USER}/.config/gtk-3.0"
+    mkdir -p "/home/${MING_USER}/.config/gtk-3.0" "/home/${MING_USER}/.config/gtk-4.0"
     cat > "/home/${MING_USER}/.config/gtk-3.0/settings.ini" << 'GTKSETTINGS'
 [Settings]
 gtk-theme-name=Ming-Glass
@@ -1289,6 +1289,9 @@ gtk-application-prefer-dark-theme=0
 gtk-decoration-layout=close,minimize,maximize:
 GTKSETTINGS
 
+    cp "/home/${MING_USER}/.config/gtk-3.0/settings.ini" \
+        "/home/${MING_USER}/.config/gtk-4.0/settings.ini"
+
     cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
 gtk-theme-name="Ming-Glass"
 gtk-icon-theme-name="Papirus"
@@ -1301,7 +1304,10 @@ gtk-menu-images=0
 gtk-enable-event-sounds=0
 gtk-enable-input-feedback-sounds=0
 GTK2SETTINGS
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/gtk-3.0/settings.ini" "/home/${MING_USER}/.gtkrc-2.0"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/gtk-3.0/settings.ini" \
+        "/home/${MING_USER}/.config/gtk-4.0/settings.ini" \
+        "/home/${MING_USER}/.gtkrc-2.0"
 
     # Ming-Glass GTK3 轻量纸感主题：参考 Lingmo/deepin/macOS 的统一浅色层级，
     # 但避免高成本模糊和重发光，优先照顾老电脑。
@@ -4404,6 +4410,33 @@ acquire_coordinator_lock() {
     return 0
 }
 
+reload_dock() {
+    # dconf updates a healthy Plank live.  Only recover when the instance is
+    # missing/unhealthy or duplicated, so a size change cannot create a second
+    # Dock while the session coordinator owns its long-running lifecycle.
+    local reload_lock="${XDG_RUNTIME_DIR:-/tmp}/ming-dock-reload.lock"
+    local count
+    exec 8>"${reload_lock}" || return 1
+    if command -v flock >/dev/null 2>&1 && ! flock -n 8; then
+        log 'Dock reload already in progress'
+        return 0
+    fi
+    count="$(process_count plank)"
+    if [[ "${count}" =~ ^[0-9]+$ ]] && (( count > 1 )); then
+        log "Dock reload found ${count} Plank processes; recovering one instance"
+        stop_plank
+        sleep 0.2
+    fi
+    if ! plank_window_visible; then
+        start_plank_dock || {
+            write_metrics reload-dock false
+            return 1
+        }
+    fi
+    write_metrics reload-dock false
+    return 0
+}
+
 case "${1:---once}" in
     --session)
         acquire_coordinator_lock || exit 0
@@ -4420,8 +4453,11 @@ case "${1:---once}" in
     --check)
         [[ -s "${metrics_file}" ]] && cat "${metrics_file}" || write_metrics check
         ;;
+    --reload-dock)
+        reload_dock
+        ;;
     *)
-        printf 'Usage: %s --session|--once|--check\n' "$0" >&2
+        printf 'Usage: %s --session|--once|--check|--reload-dock\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -7411,6 +7447,15 @@ if command -v ming-appearance-control >/dev/null 2>&1; then
         timeout --foreground 8s ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
     else
         ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
+    fi
+fi
+if command -v ming-device-control >/dev/null 2>&1; then
+    # Hardware backlight remains authoritative.  This only reapplies the
+    # user's X11 software dimming state on machines without one.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground 4s ming-device-control reapply-brightness --json >>"${log_file}" 2>&1 || true
+    else
+        ming-device-control reapply-brightness --json >>"${log_file}" 2>&1 || true
     fi
 fi
 exit 0

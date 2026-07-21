@@ -35,6 +35,9 @@ class FakeRunner:
 
     def __call__(self, argv, timeout=8):
         self.calls.append(list(argv))
+        if argv[:2] == ["/usr/local/bin/ming-appearance-control", "apply"]:
+            size = int(argv[argv.index("--dock-icon-size") + 1])
+            return 0, json.dumps({"dock_icon_size": size}), ""
         if argv[0] == "xfconf-query":
             channel = argv[argv.index("-c") + 1]
             prop = argv[argv.index("-p") + 1]
@@ -125,14 +128,18 @@ class SettingsBackendTests(unittest.TestCase):
         self.assertEqual("bool", write[write.index("-t") + 1])
         self.assertEqual("true", write[write.index("-s") + 1])
 
-    def test_plank_setting_uses_structured_keyfile_update(self):
-        settings = pathlib.Path(self.tempdir.name) / ".config/plank/dock1/settings"
-        settings.parent.mkdir(parents=True)
-        settings.write_text("[PlankDockPreferences]\nIconSize=48\nZoomPercent=126\n", encoding="utf-8")
+    def test_dock_icon_size_uses_the_authoritative_appearance_control(self):
         result = self.backend.set_value("dock_icon_size", 64)
         self.assertTrue(result["ok"])
         self.assertEqual(64, result["value"])
-        self.assertIn("IconSize=64", settings.read_text(encoding="utf-8"))
+        appearance_path = pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json"
+        self.assertTrue(appearance_path.is_file())
+        appearance = json.loads(appearance_path.read_text(encoding="utf-8"))
+        self.assertEqual(64, appearance["dock_icon_size"])
+        self.assertIn(
+            ["/usr/local/bin/ming-appearance-control", "apply", "--dock-icon-size", "64", "--json"],
+            self.runner.calls,
+        )
 
     def test_protected_autostart_entry_cannot_be_disabled(self):
         result = self.backend.set_autostart("ming-phone-desktop.desktop", False)

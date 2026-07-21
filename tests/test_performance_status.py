@@ -160,6 +160,14 @@ class PerformanceStatusDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(marker, BASE)
 
+    def test_base_deploys_importable_performance_library_and_thin_cli_wrapper(self):
+        for marker in (
+            "/usr/local/lib/ming-os/ming-performance-status.py",
+            "exec /usr/bin/python3 /usr/local/lib/ming-os/ming-performance-status.py",
+        ):
+            self.assertIn(marker, BASE)
+        self.assertIn("usr/local/lib/ming-os/ming-performance-status.py", BUILD)
+
     def test_rootfs_gate_validates_and_executes_performance_status_json(self):
         for marker in (
             "usr/local/sbin/ming-performance-status",

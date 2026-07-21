@@ -22,7 +22,6 @@ SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
 STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
-SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
     "/usr/local/lib/ming-os/ming-device-control.py",
     "/usr/local/bin/ming-device-control",
@@ -789,26 +788,6 @@ def display_mode_label(mode, rate):
     if not match:
         return "%s · %s Hz" % (mode, hz)
     return "%s × %s · %s Hz" % (match.group(1), match.group(2), hz)
-
-
-def load_scale_preference():
-    try:
-        with open(SCALE_PREFERENCE_PATH, encoding="utf-8") as handle:
-            value = json.load(handle).get("percent")
-        return value if value in {100, 125, 150, 175, 200} else None
-    except (OSError, ValueError, AttributeError):
-        return None
-
-
-def save_scale_preference(percent):
-    directory = os.path.dirname(SCALE_PREFERENCE_PATH)
-    os.makedirs(directory, exist_ok=True)
-    temporary = SCALE_PREFERENCE_PATH + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump({"percent": percent}, handle, ensure_ascii=False)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, SCALE_PREFERENCE_PATH)
 
 
 class GenerationState:
@@ -2490,22 +2469,6 @@ class MingSettings(Adw.ApplicationWindow):
             "确认保护", "变更后会出现倒计时确认；没有确认将自动恢复原设置。",
             self.display_apply_button))
 
-        scale_grp = Adw.PreferencesGroup(
-            title="界面大小",
-            description="只改变文字、图标与 Dock 大小；不会改变屏幕分辨率。")
-        box.append(scale_grp)
-        self.scale_options = [
-            (100, "100% 标准"), (125, "125% 较大"), (150, "150% 很大"),
-            (175, "175% 超大"), (200, "200% 特大"),
-        ]
-        self.scale_choice_row = Adw.ComboRow(title="界面大小", subtitle="此选择会保留，不会被桌面修复覆盖。")
-        self.scale_choice_row.set_model(Gtk.StringList.new([label for _percent, label in self.scale_options]))
-        current_percent = load_scale_preference() or 100
-        self.scale_choice_row.set_selected(next(
-            index for index, (percent, _label) in enumerate(self.scale_options)
-            if percent == current_percent))
-        self.scale_choice_row.connect("notify::selected", self.on_interface_scale_changed)
-        scale_grp.add(self.scale_choice_row)
         self.display_page = sc
         self.display_output_items = []
         self.display_mode_items = []
@@ -2632,42 +2595,6 @@ class MingSettings(Adw.ApplicationWindow):
         dialog.connect("response", respond)
         dialog.present()
 
-    def on_interface_scale_changed(self, row, _param):
-        selected = min(row.get_selected(), len(self.scale_options) - 1)
-        self.apply_interface_scale(self.scale_options[selected][0])
-
-    def on_scale_changed(self, slider):
-        # Compatibility for older callers that still pass a Gtk.Scale.
-        self.apply_interface_scale(int(round(slider.get_value() * 100 / 11.0)))
-
-    def apply_interface_scale(self, percent):
-        percent = min((100, 125, 150, 175, 200), key=lambda value: abs(value - int(percent)))
-        size = int(round(11 * percent / 100.0))
-        # 1) 系统字体
-        run(["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "Sans %d" % size])
-        run(["xfconf-query", "-c", "xfwm4", "-p", "/general/title_font", "-s", "Sans Bold %d" % size])
-        # 2) 桌面图标随字体等比（xfdesktop icon-size），基准 11→48px
-        icon_px = int(round(48 * size / 11.0))
-        run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/desktop-icons/icon-size",
-             "-n", "-t", "int", "-s", str(icon_px)])
-        # 3) Dock (Plank) 图标大小：写入 settings 并重启 plank
-        plank = os.path.join(HOME, ".config/plank/dock1/settings")
-        dock_px = max(32, min(96, int(round(48 * size / 11.0))))
-        if os.path.exists(plank):
-            try:
-                run(["sed", "-i", "s/^IconSize=.*/IconSize=%d/" % dock_px, plank])
-                run(["bash", "-c", "pkill plank 2>/dev/null || true; sleep 1; /usr/local/bin/ming-plank-watchdog"])
-            except Exception:
-                pass
-        # 4) GSettings 文本缩放（GTK4 应用自身也放大）
-        factor = size / 11.0
-        run(["gsettings", "set", "org.gnome.desktop.interface", "text-scaling-factor",
-             "%.2f" % factor])
-        try:
-            save_scale_preference(percent)
-        except OSError as exc:
-            self.toast("界面大小已应用，但无法保存偏好：%s" % exc, "warning")
-
     def build_appearance(self):
         sc, box = self.page_scroller()
         self.appearance_loading = True
@@ -2743,8 +2670,14 @@ class MingSettings(Adw.ApplicationWindow):
 
     def apply_appearance(self, arguments):
         self.appearance_loading = True
+        def done(rc, output, error):
+            if rc != 0:
+                message = error or output or "外观设置未能应用。"
+                self.toast(message, "warning")
+            self.refresh_appearance_status()
+            return False
         run_capture_async(self.appearance_command("apply", *arguments, "--json"), timeout=15,
-                          on_done=lambda _rc, _output, _error: self.refresh_appearance_status())
+                          on_done=done)
 
     def on_choose_wallpaper(self, _button):
         dialog = Gtk.FileDialog(title="选择壁纸")

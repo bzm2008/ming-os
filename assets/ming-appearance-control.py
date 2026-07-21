@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -179,15 +180,16 @@ def apply_and_commit(config, previous=None):
     """Persist one requested change, verify it, and retain a recoverable copy."""
     previous = normalize_config(previous if isinstance(previous, dict) else load_config())
     config = save_config(config)
+    dock_changed = config["dock_icon_size"] != previous["dock_icon_size"]
     try:
-        apply_runtime(config)
+        apply_runtime(config, reload_dock=dock_changed)
     except OSError:
         # Keep a desktop that was known to work rather than a half-applied
         # appearance choice.  Runtime rollback is best effort because a broken
         # Xfconf daemon cannot be repaired by this command alone.
         save_config(previous, save_last_good=True)
         try:
-            apply_runtime(previous)
+            apply_runtime(previous, reload_dock=dock_changed)
         except OSError:
             pass
         raise
@@ -311,22 +313,122 @@ def safe_wallpaper_dimensions(path):
     return width, height
 
 
-def apply_runtime(config):
+def atomic_write_text(path, value):
+    """Atomically replace a small per-user text configuration file."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".%s-" % path.name, suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def _replace_setting_line(text, key, value):
+    lines = text.splitlines()
+    replacement = "%s=%s" % (key, value)
+    pattern = re.compile(r"^\s*%s\s*=.*$" % re.escape(key))
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = replacement
+            break
+    else:
+        lines.append(replacement)
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def sync_gtk_font_settings(font_name):
+    """Update toolkit chrome defaults without touching document/web content fonts."""
+    gtk3_path = home_path() / ".config/gtk-3.0/settings.ini"
+    try:
+        gtk3_text = gtk3_path.read_text(encoding="utf-8")
+    except OSError:
+        gtk3_text = "[Settings]\n"
+    if "[Settings]" not in gtk3_text:
+        gtk3_text = "[Settings]\n" + gtk3_text
+    atomic_write_text(gtk3_path, _replace_setting_line(gtk3_text, "gtk-font-name", font_name))
+
+    gtk4_path = home_path() / ".config/gtk-4.0/settings.ini"
+    try:
+        gtk4_text = gtk4_path.read_text(encoding="utf-8")
+    except OSError:
+        gtk4_text = "[Settings]\n"
+    if "[Settings]" not in gtk4_text:
+        gtk4_text = "[Settings]\n" + gtk4_text
+    atomic_write_text(gtk4_path, _replace_setting_line(gtk4_text, "gtk-font-name", font_name))
+
+    gtk2_path = home_path() / ".gtkrc-2.0"
+    try:
+        gtk2_text = gtk2_path.read_text(encoding="utf-8")
+    except OSError:
+        gtk2_text = ""
+    atomic_write_text(gtk2_path, _replace_setting_line(
+        gtk2_text, "gtk-font-name", '"%s"' % font_name))
+
+
+def sync_dock_runtime(config, reload_dock=False):
+    """Keep Plank's dconf and keyfile in sync, then request one bounded reload."""
+    dock_size = int(config["dock_icon_size"])
+    dconf_key = "/net/launchpad/plank/docks/dock1/icon-size"
+    if shutil.which("dconf"):
+        checked = lambda command, label: _run_checked(command, label)
+        checked(["dconf", "write", dconf_key, str(dock_size)], "Dock dconf")
+        actual = checked(["dconf", "read", dconf_key], "Dock dconf readback")
+        match = re.search(r"\b(\d+)\b", actual)
+        if not match or int(match.group(1)) != dock_size:
+            raise OSError("Dock dconf readback did not match the requested value")
+
+    plank = home_path() / ".config/plank/dock1/settings"
+    try:
+        lines = plank.read_text(encoding="utf-8").splitlines() if plank.is_file() else []
+        lines = [line for line in lines if not line.startswith("IconSize=")]
+        lines.append("IconSize=%s" % dock_size)
+        atomic_write_text(plank, "\n".join(lines) + "\n")
+        actual_lines = plank.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise OSError("Dock icon size could not be applied") from exc
+    if "IconSize=%s" % dock_size not in actual_lines:
+        raise OSError("Dock icon size readback did not match the requested value")
+
+    if reload_dock and shutil.which("ming-session-healthcheck"):
+        try:
+            subprocess.run(
+                ["ming-session-healthcheck", "--reload-dock"],
+                timeout=9, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _run_checked(command, label, timeout=4):
+    try:
+        completed = subprocess.run(
+            command, timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError("%s could not be applied" % label) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise OSError("%s could not be applied%s" % (
+            label, ": " + detail[:160] if detail else ""))
+    return completed.stdout.strip()
+
+
+def apply_runtime(config, reload_dock=False):
     if os.environ.get("MING_APPEARANCE_NO_APPLY") == "1":
         return
 
-    def checked(command, label):
-        try:
-            completed = subprocess.run(
-                command, timeout=4, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise OSError("%s could not be applied" % label) from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise OSError("%s could not be applied%s" % (
-                label, ": " + detail[:160] if detail else ""))
-        return completed.stdout.strip()
+    checked = _run_checked
 
     def xfconf_set(channel, property_name, value, label):
         command = ["xfconf-query", "-c", channel, "-p", property_name, "-s", value]
@@ -349,6 +451,10 @@ def apply_runtime(config):
     xfconf_set(
         "xsettings", "/Gtk/FontName", "%s %s" % (config["font_family"], config["font_size"]),
         "GTK font")
+    xfconf_set(
+        "xfwm4", "/general/title_font",
+        "%s Bold %s" % (config["font_family"], config["font_size"]),
+        "window title font")
     color_scheme = "prefer-dark" if theme == "dark" else "default"
     checked(
         ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", color_scheme],
@@ -358,41 +464,23 @@ def apply_runtime(config):
         "GTK4 color scheme readback")
     if color_scheme not in gsettings_actual:
         raise OSError("GTK4 color scheme readback did not match the requested value")
+    font_name = "%s %s" % (config["font_family"], config["font_size"])
+    checked(
+        ["gsettings", "set", "org.gnome.desktop.interface", "font-name", font_name],
+        "GTK4 font")
+    gsettings_font_actual = checked(
+        ["gsettings", "get", "org.gnome.desktop.interface", "font-name"],
+        "GTK4 font readback")
+    if font_name not in gsettings_font_actual:
+        raise OSError("GTK4 font readback did not match the requested value")
+    sync_gtk_font_settings(font_name)
 
     wallpaper = BUILTIN_WALLPAPERS.get(config["wallpaper"], pathlib.Path(config["wallpaper"]))
     if wallpaper.is_file():
         xfconf_set(
             "xfce4-desktop", "/backdrop/screen0/monitor0/workspace0/last-image", str(wallpaper),
             "desktop wallpaper")
-    plank = home_path() / ".config/plank/dock1/settings"
-    temporary = None
-    try:
-        lines = plank.read_text(encoding="utf-8").splitlines() if plank.is_file() else []
-        lines = [line for line in lines if not line.startswith("IconSize=")]
-        lines.append("IconSize=%s" % config["dock_icon_size"])
-        atomic_write_text = "\n".join(lines) + "\n"
-        plank.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=".plank-", suffix=".tmp", dir=str(plank.parent))
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(atomic_write_text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, plank)
-        fsync_directory(plank.parent)
-    except OSError as exc:
-        raise OSError("Dock icon size could not be applied") from exc
-    finally:
-        if temporary:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-    try:
-        actual_lines = plank.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise OSError("Dock icon size could not be read back") from exc
-    if "IconSize=%s" % config["dock_icon_size"] not in actual_lines:
-        raise OSError("Dock icon size readback did not match the requested value")
+    sync_dock_runtime(config, reload_dock=reload_dock)
 
 
 def parser():

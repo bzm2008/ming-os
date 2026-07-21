@@ -200,7 +200,6 @@ DEVICE_CONTROL_PATHS = [
 ]
 PERFORMANCE_STATUS_PATHS = [
     Path("/usr/local/lib/ming-os/ming-performance-status.py"),
-    Path("/usr/local/sbin/ming-performance-status"),
     Path(__file__).resolve().with_name("ming-performance-status.py"),
 ]
 NOTIFICATION_LOG_PATHS = [
@@ -226,6 +225,7 @@ CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
 STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_EXPANDED_HEIGHT = 248
+METRIC_PRIME_INTERVAL_MS = 250
 WALLPAPER_PATHS = [
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
     Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"),
@@ -372,13 +372,17 @@ def css_for_appearance(appearance):
     feedback_sunken = profile["surface_sunken"]
     shadow = "0 10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
     font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    font_metric = getattr(COMMON, "appearance_font_size", lambda _appearance: 11)
+    font_size = font_metric(appearance)
+    label_size = max(9, min(16, font_size))
+    title_size = max(14, min(24, font_size + 7))
     return ("""
 window.ming-desktop { background-color: %(base)s; font-family: "%(font)s"; }
 .tile { border-radius: 8px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 7px 6px 6px; color: %(text)s; }
 .tile:hover, .tile.dragging { background: %(sunken)s; border-color: %(accent)s; }
 .folder { background: %(sunken)s; border-color: %(accent)s; }
-.label { color: %(text)s; font-size: 10.5px; font-weight: 700; }
-.folder-title { color: %(text)s; font-size: 18px; font-weight: 700; }
+.label { color: %(text)s; font-size: %(label_size)dpx; font-weight: 700; }
+.folder-title { color: %(text)s; font-size: %(title_size)dpx; font-weight: 700; }
 .folder-panel { background: %(raised)s; border: 1px solid %(border)s; border-radius: 8px; padding: 18px; }
 .folder-action { border-radius: 6px; padding: 7px 10px; }
 .clock-widget, .status-widget, .launch-feedback { border-radius: 8px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; }
@@ -406,7 +410,7 @@ window.ming-launch-error-dialog label { color: %(text)s; opacity: 1; }
         "feedback_raised": feedback_raised, "feedback_sunken": feedback_sunken,
         "border": profile["border_soft"], "text": profile["text_primary"],
         "secondary": profile["text_secondary"], "accent": profile["accent"], "shadow": shadow,
-        "font": font,
+        "font": font, "label_size": label_size, "title_size": title_size,
     }).encode("utf-8")
 
 
@@ -2229,6 +2233,8 @@ class StatusWidget(Gtk.Box):
         self.metric_previous = None
         self.metric_result = None
         self.metric_worker_active = False
+        self.metric_generation = 0
+        self.metric_prime_source = 0
         self.metric_timer = None
         self.volume_timer = None
         self.volume_sink_id = ""
@@ -2365,6 +2371,11 @@ class StatusWidget(Gtk.Box):
 
     def set_collapsed(self, collapsed):
         self.collapsed = bool(collapsed)
+        if self.collapsed:
+            self.metric_generation += 1
+            if self.metric_prime_source:
+                GLib.source_remove(self.metric_prime_source)
+                self.metric_prime_source = 0
         try:
             save_widget_state(self.collapsed, metric_mode=self.metric_mode)
         except OSError as exc:
@@ -2479,6 +2490,11 @@ class StatusWidget(Gtk.Box):
     @staticmethod
     def format_metric_value(result):
         if not isinstance(result, dict) or not result.get("available"):
+            reason = str((result or {}).get("reason") or "")
+            if "等待下一次" in reason:
+                return "采样中"
+            if reason:
+                return reason[:18]
             return "不可用"
         value = result.get("value")
         mode = result.get("mode")
@@ -2504,29 +2520,53 @@ class StatusWidget(Gtk.Box):
         battery = getattr(self, "battery_summary", "")
         self.metric_label.set_text("%s · %s" % (text, battery) if battery else text)
 
-    def refresh_metrics(self):
+    def refresh_metrics(self, interval_seconds=None):
         if self.collapsed or self.metric_worker_active or not self.performance_module:
             return True
         self.metric_worker_active = True
+        self.metric_generation += 1
+        generation = self.metric_generation
         previous = self.metric_result
+        interval = 5.0 if interval_seconds is None else max(0.1, float(interval_seconds))
 
         def worker():
             try:
                 service = self.performance_module.PerformanceStatus()
-                result = service.metrics_snapshot(previous=previous, interval_seconds=5.0)
+                result = service.metrics_snapshot(previous=previous, interval_seconds=interval)
             except Exception as exc:
                 result = {"memory": {}, "cpu": {}, "network": {}, "error": str(exc)}
-            GLib.idle_add(self.apply_metric_result, result)
+            GLib.idle_add(self.apply_metric_result, generation, result)
 
         threading.Thread(target=worker, daemon=True).start()
         return True
 
-    def apply_metric_result(self, result):
+    def prime_metric_sample(self):
+        self.metric_prime_source = 0
+        if self.collapsed:
+            return False
+        self.refresh_metrics(interval_seconds=METRIC_PRIME_INTERVAL_MS / 1000.0)
+        return False
+
+    @staticmethod
+    def metric_needs_prime(result):
+        for mode in ("cpu", "network"):
+            entry = result.get(mode, {}) if isinstance(result, dict) else {}
+            if not entry.get("available") and "等待下一次" in str(entry.get("reason") or ""):
+                return True
+        return False
+
+    def apply_metric_result(self, generation, result):
+        if generation != self.metric_generation or self.collapsed:
+            self.metric_worker_active = False
+            return False
         self.metric_worker_active = False
         if isinstance(result, dict):
             self.metric_result = result
             self.metric_previous = result.get("sample")
         self.update_metric_label()
+        if self.metric_needs_prime(result) and not self.metric_prime_source:
+            self.metric_prime_source = GLib.timeout_add(
+                METRIC_PRIME_INTERVAL_MS, self.prime_metric_sample)
         return False
 
     def open_command(self, command):
@@ -3365,7 +3405,8 @@ class PhoneDesktop(Gtk.Window):
             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
             layout.set_ellipsize(Pango.EllipsizeMode.END)
             font_name = str(self.appearance.get("font_family", "Noto Sans CJK SC")).replace('"', "")
-            layout.set_font_description(Pango.FontDescription("%s Bold 10" % font_name))
+            font_size = max(9, min(16, COMMON.appearance_font_size(self.appearance) - 1))
+            layout.set_font_description(Pango.FontDescription("%s Bold %d" % (font_name, font_size)))
             if profile["theme"] == "dark":
                 cr.set_source_rgba(0.95, 0.97, 0.96, 1.0)
             else:

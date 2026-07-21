@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import inspect
 import io
 import json
@@ -1266,6 +1267,13 @@ class PackageInstallerRepairTests(unittest.TestCase):
 
 
 class PackageInstallerLauncherTests(unittest.TestCase):
+    def test_common_integrity_pin_matches_the_deployed_shared_library(self):
+        installer = load_installer()
+        expected = hashlib.sha256(
+            (ROOT / "assets" / "ming-shell-common.py").read_bytes()).hexdigest()
+
+        self.assertEqual(expected, installer.REQUIRED_COMMON_SHA256)
+
     def test_common_loader_finds_library_copy_for_the_installed_sbin_layout(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
