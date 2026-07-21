@@ -199,6 +199,87 @@ class ResourcePolicyTests(unittest.TestCase):
         self.assertEqual("not-backgrounded", visible.get("reason"))
         restore_cgroup.assert_not_called()
 
+    def test_background_identity_change_before_move_rejects_without_state(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        validations = iter(((True, ""), (False, "starttime-mismatch")))
+        key = (123, "100")
+        with mock.patch.object(
+                self.module, "_validate_pid",
+                side_effect=lambda *_args: next(validations)), \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                mock.patch.object(self.module, "_cgroup_relative_path", return_value="/user.slice/user-1000.slice/app.slice"), \
+                mock.patch.object(self.module, "_move_pid") as move_pid:
+            result = policy.apply_background(
+                123, "100", "/usr/share/applications/app.desktop", False,
+                generation=1,
+            )
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual("starttime-mismatch", result.get("error"))
+        move_pid.assert_not_called()
+        self.assertNotIn(key, policy.background)
+        self.assertNotIn(key, policy.background_generations)
+
+    def test_background_identity_change_after_move_rolls_back_cgroup_and_state(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        validations = iter(((True, ""), (True, ""), (False, "starttime-mismatch")))
+        key = (123, "100")
+        captured_path = "/user.slice/user-1000.slice/app.slice"
+        with mock.patch.object(
+                self.module, "_validate_pid",
+                side_effect=lambda *_args: next(validations)), \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                mock.patch.object(self.module, "_cgroup_relative_path", return_value=captured_path), \
+                mock.patch.object(self.module, "_move_pid", return_value=True) as move_pid, \
+                mock.patch.object(self.module, "_restore_cgroup", return_value=True) as restore_cgroup:
+            result = policy.apply_background(
+                123, "100", "/usr/share/applications/app.desktop", False,
+                generation=1,
+            )
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual("starttime-mismatch", result.get("error"))
+        move_pid.assert_called_once_with(123, "ming-background.slice", 1000)
+        restore_cgroup.assert_called_once_with(123, captured_path, 1000)
+        self.assertNotIn(key, policy.background)
+        self.assertNotIn(key, policy.background_generations)
+
+    def test_reused_pid_visible_and_hidden_requests_never_touch_new_identity(self):
+        for visible in (True, False):
+            with self.subTest(visible=visible):
+                policy = self.module.ResourcePolicy(session_uid=1000)
+                key = (123, "100")
+                policy.background[key] = {
+                    "cgroup_path": "/user.slice/user-1000.slice/app.slice",
+                    "desktop_file": "/usr/share/applications/app.desktop",
+                }
+                policy.background_generations[key] = 4
+                validations = iter(((True, ""), (False, "starttime-mismatch")))
+                with mock.patch.object(
+                        self.module, "_validate_pid",
+                        side_effect=lambda *_args: next(validations)), \
+                        mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                        mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                        mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                        mock.patch.object(self.module, "_cgroup_relative_path", return_value="/user.slice/user-1000.slice/app.slice"), \
+                        mock.patch.object(self.module, "_move_pid") as move_pid, \
+                        mock.patch.object(self.module, "_restore_cgroup") as restore_cgroup:
+                    result = policy.apply_background(
+                        123, "100", "/usr/share/applications/app.desktop", visible,
+                        generation=5,
+                    )
+
+                self.assertFalse(result.get("ok"))
+                self.assertEqual("starttime-mismatch", result.get("error"))
+                move_pid.assert_not_called()
+                restore_cgroup.assert_not_called()
+                self.assertNotIn(key, policy.background)
+                self.assertNotIn(key, policy.background_generations)
+
     def test_lease_timer_restores_without_waiting_for_socket_reaper(self):
         policy = self.module.ResourcePolicy(session_uid=1000)
         with mock.patch.object(self.module, "LEASE_SECONDS", 0.05), \

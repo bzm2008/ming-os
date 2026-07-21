@@ -666,6 +666,36 @@ class ResourcePolicy:
         except (KeyError, OSError, ValueError):
             return {}
 
+    def _reject_background_identity(
+            self, key: tuple[int, str], error: str,
+            rollback_path: str | None = None, moved: bool = False) -> dict[str, Any]:
+        rollback_ok = False
+        if moved:
+            # This is only an undo of the move made by this request.  It is
+            # never a business restore for an unverified/reused identity.
+            rollback_ok = _restore_cgroup(
+                key[0], rollback_path, self.session_uid)
+        with self.state_lock:
+            self.background.pop(key, None)
+            self.background_generations.pop(key, None)
+        self._log(
+            "background_rejected", pid=int(key[0]), reason=str(error),
+            rollback=bool(moved and rollback_ok),
+        )
+        return _json(
+            False, pid=int(key[0]), error=str(error),
+            rolled_back=bool(moved and rollback_ok),
+        )
+
+    def _revalidate_background_identity(
+            self, key: tuple[int, str], rollback_path: str | None = None,
+            moved: bool = False) -> dict[str, Any] | None:
+        ok, error = _validate_pid(key[0], key[1], self.session_uid)
+        if ok:
+            return None
+        return self._reject_background_identity(
+            key, error, rollback_path=rollback_path, moved=moved)
+
     def _prune_background_state(self, preserve: tuple[int, str] | None = None) -> None:
         keys = set(self.background) | set(self.background_generations)
         for key in keys:
@@ -820,12 +850,19 @@ class ResourcePolicy:
                     latest_generation=latest,
                 )
             self.background_generations[key] = requested_generation
-        if not visible and self._settings().get("background_throttle", False) is False:
+        settings = self._settings()
+        if not visible and settings.get("background_throttle", False) is False:
+            rejected = self._revalidate_background_identity(key)
+            if rejected:
+                return rejected
             self._log("background_skipped", pid=int(pid), reason="policy-disabled")
             return _json(True, pid=int(pid), visible=False, skipped=True, reason="policy-disabled")
         if not visible:
             exempt, exemption_reason = background_throttle_exemption(pid)
             if exempt:
+                rejected = self._revalidate_background_identity(key)
+                if rejected:
+                    return rejected
                 self._log("background_skipped", pid=int(pid), reason=exemption_reason)
                 return _json(
                     True, pid=int(pid), visible=False, skipped=True, reason=exemption_reason
@@ -833,27 +870,41 @@ class ResourcePolicy:
         stale_keys = [item for item in self.background if item[0] == int(pid) and item != key]
         for stale_key in stale_keys:
             self.background.pop(stale_key, None)
+        rollback_path = _cgroup_relative_path(pid)
+        rejected = self._revalidate_background_identity(key, rollback_path=rollback_path)
+        if rejected:
+            return rejected
         if visible:
-            snapshot = self.background.pop(key, None)
+            snapshot = self.background.get(key)
             if not snapshot:
                 self._log("background_skipped", pid=int(pid), reason="not-backgrounded")
                 return _json(
                     True, pid=int(pid), visible=True, skipped=True,
                     restored=False, reason="not-backgrounded",
                 )
+            self.background.pop(key, None)
             restored_cgroup = _restore_cgroup(
                 pid, snapshot.get("cgroup_path") if snapshot else None, self.session_uid
             )
+            moved = bool(restored_cgroup)
             if not restored_cgroup:
-                _move_pid(pid, "ming-foreground.slice", self.session_uid)
+                moved = bool(_move_pid(pid, "ming-foreground.slice", self.session_uid))
+            rejected = self._revalidate_background_identity(
+                key, rollback_path=rollback_path, moved=moved)
+            if rejected:
+                return rejected
             self._log("background_restored", pid=int(pid))
             return _json(True, pid=int(pid), visible=True, restored=True)
         if key not in self.background:
             self.background[key] = {
-                "cgroup_path": _cgroup_relative_path(pid),
+                "cgroup_path": rollback_path,
                 "desktop_file": desktop_file,
             }
         cgroup_ok = _move_pid(pid, "ming-background.slice", self.session_uid)
+        rejected = self._revalidate_background_identity(
+            key, rollback_path=rollback_path, moved=bool(cgroup_ok))
+        if rejected:
+            return rejected
         result = _json(True, pid=int(pid), visible=False,
                        actions={"cgroup": cgroup_ok},
                        degraded=["cgroup"] if not cgroup_ok else [])
