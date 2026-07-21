@@ -3,20 +3,33 @@
 
 import argparse
 import configparser
+import errno
 import hashlib
 import importlib.util
 import json
 import pathlib
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import os
 import sys
 import tempfile
+import time
 import types
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows-only test path
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Linux production path
+    msvcrt = None
 
 
 SUPPORTED_ARCHITECTURES = {"amd64", "all"}
@@ -39,6 +52,10 @@ DESKTOP_PROXY_MANIFEST = pathlib.Path(
     "/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 DESKTOP_PROXY_SCHEMA_VERSION = 1
 DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+DESKTOP_PROXY_LOCK = pathlib.Path("/run/lock/ming-desktop-proxies.lock")
+DESKTOP_PROXY_LOCK_TIMEOUT = 10
+DESKTOP_PROXY_STAGING_DIR = pathlib.Path(
+    "/usr/local/share/.ming-desktop-proxy-transactions")
 MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 OPT_APP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$")
 E_PACKAGE_BUSY = "E_PACKAGE_BUSY"
@@ -60,6 +77,100 @@ _AUTHORIZATION = re.compile(
     r"\b(authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+",
     re.IGNORECASE,
 )
+
+
+class DesktopProxyLockTimeout(TimeoutError):
+    """Raised when the desktop proxy transaction lock cannot be acquired."""
+
+
+class _DesktopProxyTransactionLock:
+    """Small cross-process lock; Debian uses flock and tests can inject a fake."""
+
+    def __init__(self, path, timeout):
+        self.path = pathlib.Path(path)
+        self.timeout = max(0.0, float(timeout))
+        self.handle = None
+
+    @staticmethod
+    def _metadata_is_protected(metadata):
+        return (
+            stat.S_ISREG(metadata.st_mode)
+            and not stat.S_ISLNK(metadata.st_mode)
+            and (os.name == "nt" or (
+                int(getattr(metadata, "st_uid", -1)) == 0
+                and not bool(metadata.st_mode & 0o077)
+            ))
+        )
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            before = os.lstat(self.path)
+        except FileNotFoundError:
+            before = None
+        if before is not None and not self._metadata_is_protected(before):
+            raise OSError("desktop proxy lock is unsafe")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            if os.name != "nt" and hasattr(os, "fchown"):
+                os.fchown(descriptor, 0, 0)
+            metadata = os.fstat(descriptor)
+            if not self._metadata_is_protected(metadata):
+                raise OSError("desktop proxy lock is not root protected")
+            self.handle = os.fdopen(descriptor, "r+b", buffering=0)
+            descriptor = -1
+            self._acquire()
+            return self
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def _acquire(self):
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:
+                    self.handle.seek(0, os.SEEK_END)
+                    if self.handle.tell() == 0:
+                        self.handle.write(b"\0")
+                        self.handle.flush()
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover - supported targets provide one backend
+                    raise OSError("desktop proxy locking backend is unavailable")
+                return
+            except (BlockingIOError, OSError) as error:
+                busy = isinstance(error, BlockingIOError) or getattr(error, "errno", None) in {
+                    errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+                }
+                if not busy:
+                    self.handle.close()
+                    self.handle = None
+                    raise
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    self.handle = None
+                    raise DesktopProxyLockTimeout("desktop proxy lock timeout") from error
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def __exit__(self, exception_type, _exception, _traceback):
+        if self.handle is None:
+            return False
+        try:
+            if fcntl is not None:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self.handle.close()
+            self.handle = None
+        return False
 
 
 def _redacted_url(match):
@@ -155,7 +266,8 @@ class PackageInstaller:
     def __init__(
             self, runner=None, log_path=None, uid_getter=None, logger=None,
             desktop_candidate_verifier=None, opt_apps_root=None, proxy_dir=None,
-            proxy_manifest=None):
+            proxy_manifest=None, proxy_lock_factory=None, proxy_lock_path=None,
+            proxy_staging_dir=None):
         self.runner = runner or _run
         self.log_path = pathlib.Path(log_path or DEFAULT_LOG_PATH)
         self.uid_getter = uid_getter or getattr(os, "geteuid", lambda: 1)
@@ -169,6 +281,12 @@ class PackageInstaller:
         self.opt_apps_root = pathlib.Path(opt_apps_root or OPT_APPS_ROOT)
         self.proxy_dir = pathlib.Path(proxy_dir or DESKTOP_PROXY_DIR)
         self.proxy_manifest = pathlib.Path(proxy_manifest or DESKTOP_PROXY_MANIFEST)
+        self.proxy_lock_factory = proxy_lock_factory or _DesktopProxyTransactionLock
+        self.proxy_lock_path = (
+            pathlib.Path(proxy_lock_path) if proxy_lock_path is not None else None)
+        self.proxy_lock_timeout = DESKTOP_PROXY_LOCK_TIMEOUT
+        self.proxy_staging_dir = (
+            pathlib.Path(proxy_staging_dir) if proxy_staging_dir is not None else None)
         desktop_ids = getattr(COMMON, "current_desktop_ids", None)
         try:
             self.current_desktops = set(desktop_ids()) if callable(desktop_ids) else {"xfce"}
@@ -460,6 +578,22 @@ class PackageInstaller:
             return None
         return metadata
 
+    @staticmethod
+    def _opt_directory_chain(path, anchor):
+        current = pathlib.Path(path)
+        anchor = pathlib.Path(anchor)
+        if not current.is_absolute() or not anchor.is_absolute():
+            return ()
+        chain = []
+        while True:
+            chain.append(current)
+            if current == anchor:
+                return tuple(chain)
+            parent = current.parent
+            if parent == current:
+                return ()
+            current = parent
+
     def _opt_apps_desktop_path(self, value):
         """Accept only /opt/apps/<app>/entries/applications/<name>.desktop."""
         try:
@@ -491,15 +625,10 @@ class PackageInstaller:
             relative = path.relative_to(self.opt_apps_root)
         except ValueError:
             return False
-        package = relative.parts[0]
-        directories = (
-            self.opt_apps_root,
-            self.opt_apps_root / package,
-            self.opt_apps_root / package / "entries",
-            self.opt_apps_root / package / "entries" / "applications",
-        )
-        if any(self._protected_metadata(directory, directory=True) is None
-               for directory in directories):
+        directories = self._opt_directory_chain(path.parent, self.opt_apps_root.parent)
+        if not directories or any(
+                self._protected_metadata(directory, directory=True) is None
+                for directory in directories):
             return False
         return self._protected_metadata(path) is not None
 
@@ -546,8 +675,14 @@ class PackageInstaller:
 
     def _ensure_proxy_dir(self):
         try:
-            self.proxy_dir.mkdir(parents=True, exist_ok=True)
+            if self.proxy_dir.exists() or self.proxy_dir.is_symlink():
+                if self._protected_metadata(self.proxy_dir, directory=True) is None:
+                    raise OSError("desktop proxy directory is unsafe")
+                return
+            self.proxy_dir.mkdir(parents=True, exist_ok=False)
             os.chmod(self.proxy_dir, 0o755)
+            if os.name != "nt" and hasattr(os, "chown"):
+                os.chown(self.proxy_dir, 0, 0)
         except OSError as error:
             raise OSError("desktop proxy directory is unavailable") from error
         if self._protected_metadata(self.proxy_dir, directory=True) is None:
@@ -698,89 +833,313 @@ class PackageInstaller:
     def _snapshot_proxy_state(self):
         snapshot = {}
         for path in self._reserved_proxy_files():
-            metadata = os.lstat(path)
-            if stat.S_ISLNK(metadata.st_mode):
-                snapshot[str(path)] = ("symlink", os.readlink(path), 0o777)
-            elif stat.S_ISREG(metadata.st_mode):
-                snapshot[str(path)] = (
-                    "file", path.read_bytes(), stat.S_IMODE(metadata.st_mode))
-            else:
+            metadata = self._protected_metadata(path)
+            if metadata is None:
                 raise OSError("reserved desktop proxy has an unsafe type")
+            snapshot[str(path)] = (
+                path.read_bytes(), stat.S_IMODE(metadata.st_mode) or 0o644)
         return snapshot
 
-    def _quarantine_proxy(self, path):
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".retired-proxy-", dir=str(self.proxy_manifest.parent))
-        os.close(fd)
-        temporary = pathlib.Path(temporary_name)
+    def _effective_proxy_lock_path(self):
+        if self.proxy_lock_path is not None:
+            path = pathlib.Path(self.proxy_lock_path)
+        elif (
+                self.proxy_manifest == DESKTOP_PROXY_MANIFEST
+                and self.proxy_dir == DESKTOP_PROXY_DIR):
+            path = DESKTOP_PROXY_LOCK
+        else:
+            path = self.proxy_manifest.parent / ".desktop-proxies.lock"
+        if str(path) == str(PACKAGE_MANAGER_LOCK):
+            raise OSError("desktop proxy lock must be separate from package manager lock")
+        return path
+
+    def _effective_proxy_staging_dir(self):
+        if self.proxy_staging_dir is not None:
+            return pathlib.Path(self.proxy_staging_dir)
+        if self.proxy_dir == DESKTOP_PROXY_DIR:
+            return DESKTOP_PROXY_STAGING_DIR
+        return self.proxy_dir.parent / ".ming-desktop-proxy-transactions"
+
+    def _proxy_transaction_lock(self):
+        return self.proxy_lock_factory(
+            self._effective_proxy_lock_path(), self.proxy_lock_timeout)
+
+    def _ensure_manifest_dir(self):
+        directory = self.proxy_manifest.parent
+        if directory.exists() or directory.is_symlink():
+            if self._protected_metadata(directory, directory=True) is None:
+                raise OSError("desktop proxy manifest directory is unsafe")
+            return
+        directory.mkdir(parents=True, exist_ok=False)
+        os.chmod(directory, 0o755)
+        if os.name != "nt" and hasattr(os, "chown"):
+            os.chown(directory, 0, 0)
+        if self._protected_metadata(directory, directory=True) is None:
+            raise OSError("desktop proxy manifest directory is unsafe")
+
+    def _ensure_proxy_staging_root(self):
+        directory = self._effective_proxy_staging_dir()
+        if not directory.is_absolute():
+            raise OSError("desktop proxy staging directory is not absolute")
         try:
-            temporary.unlink()
+            directory.relative_to(self.proxy_dir)
+        except ValueError:
+            pass
+        else:
+            raise OSError("desktop proxy staging directory is inside application catalog")
+        parent = directory.parent
+        if self._protected_metadata(parent, directory=True) is None:
+            raise OSError("desktop proxy staging parent is unsafe")
+        if directory.exists() or directory.is_symlink():
+            if self._protected_metadata(directory, directory=True) is None:
+                raise OSError("desktop proxy staging directory is unsafe")
+            return directory
+        directory.mkdir(mode=0o700, exist_ok=False)
+        os.chmod(directory, 0o700)
+        if os.name != "nt" and hasattr(os, "chown"):
+            os.chown(directory, 0, 0)
+        if self._protected_metadata(directory, directory=True) is None:
+            raise OSError("desktop proxy staging directory is unsafe")
+        return directory
+
+    def _new_proxy_transaction_dir(self, staging_root):
+        directory = pathlib.Path(tempfile.mkdtemp(
+            prefix="transaction-", dir=str(staging_root)))
+        os.chmod(directory, 0o700)
+        if os.name != "nt" and hasattr(os, "chown"):
+            os.chown(directory, 0, 0)
+        if self._protected_metadata(directory, directory=True) is None:
+            raise OSError("desktop proxy transaction directory is unsafe")
+        return directory
+
+    def _stage_proxy(self, transaction_dir, record, content, manifest_entry):
+        destination = pathlib.Path(record["proxy_path"])
+        staged = pathlib.Path(transaction_dir) / (destination.name + ".staged")
+        self._atomic_write(staged, content, mode=0o644)
+        if (
+                self._protected_metadata(staged) is None
+                or self._sha256_file(staged) != manifest_entry["proxy_sha256"]):
+            raise OSError("staged desktop proxy verification failed")
+        return staged
+
+    def _publish_staged_proxy(self, staged, destination):
+        staged = pathlib.Path(staged)
+        destination = pathlib.Path(destination)
+        if (
+                destination.parent != self.proxy_dir
+                or not re.fullmatch(
+                    r"ming-opt-[0-9a-f]{64}\.desktop", destination.name)
+                or self._protected_metadata(staged) is None
+                or self._protected_metadata(self.proxy_dir, directory=True) is None):
+            raise OSError("desktop proxy publication path is unsafe")
+        os.replace(staged, destination)
+        os.chmod(destination, 0o644)
+        if os.name != "nt" and hasattr(os, "chown"):
+            os.chown(destination, 0, 0)
+        if self._protected_metadata(destination) is None:
+            raise OSError("published desktop proxy is not protected")
+        self._fsync_directory(self.proxy_dir)
+
+    @staticmethod
+    def _fsync_directory(directory):
+        try:
+            descriptor = os.open(
+                directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         except OSError:
             pass
+
+    def _quarantine_proxy(self, path):
+        transaction_dir = pathlib.Path(self._active_proxy_transaction_dir)
+        path = pathlib.Path(path)
+        if self._protected_metadata(path) is None:
+            raise OSError("obsolete desktop proxy is unsafe")
+        temporary = transaction_dir / ("retired-" + path.name)
+        if temporary.exists() or temporary.is_symlink():
+            raise OSError("desktop proxy quarantine collision")
         os.replace(path, temporary)
+        if path.exists() or path.is_symlink():
+            raise OSError("obsolete desktop proxy remains visible")
         return temporary
+
+    def _cleanup_proxy_transaction_dir(self, transaction_dir):
+        if transaction_dir is None:
+            return []
+        directory = pathlib.Path(transaction_dir)
+        errors = []
+        staging_root = self._effective_proxy_staging_dir()
+        if directory.parent != staging_root or not directory.name.startswith("transaction-"):
+            return ["cleanup refused an unexpected transaction path"]
+        if not (directory.exists() or directory.is_symlink()):
+            return []
+        if self._protected_metadata(directory, directory=True) is None:
+            return ["cleanup found an unsafe transaction directory"]
+        try:
+            children = sorted(directory.iterdir(), key=str)
+        except OSError as error:
+            return ["cleanup could not enumerate transaction directory: %s" % error]
+        for child in children:
+            try:
+                metadata = os.lstat(child)
+                if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                    raise OSError("unsafe transaction artifact")
+                os.unlink(child)
+                if child.exists() or child.is_symlink():
+                    raise OSError("transaction artifact remains")
+            except OSError as error:
+                errors.append("cleanup failed for %s: %s" % (child.name, error))
+        if not errors:
+            try:
+                os.rmdir(directory)
+                if directory.exists() or directory.is_symlink():
+                    raise OSError("transaction directory remains")
+            except OSError as error:
+                errors.append("cleanup failed for transaction directory: %s" % error)
+        return errors
+
+    def _cleanup_abandoned_proxy_transactions(self, staging_root):
+        errors = []
+        try:
+            candidates = sorted(pathlib.Path(staging_root).glob("transaction-*"), key=str)
+        except OSError as error:
+            return ["cleanup could not enumerate abandoned transactions: %s" % error]
+        for candidate in candidates:
+            errors.extend(self._cleanup_proxy_transaction_dir(candidate))
+        return errors
+
+    def _retained_proxy_contract_valid(self, entry):
+        try:
+            source = pathlib.Path(entry["source_path"])
+            proxy = pathlib.Path(entry["proxy_path"])
+            package = entry["package"]
+            if (
+                    entry.get("generated_by") != DESKTOP_PROXY_GENERATION
+                    or proxy != self._opt_proxy_path(source)
+                    or self._protected_metadata(self.proxy_dir, directory=True) is None
+                    or self._protected_metadata(proxy) is None
+                    or not self._safe_opt_apps_source(source)
+                    or not self._package_owns_launcher(
+                        source, {str(source)}, package)
+                    or self._sha256_file(source) != entry["source_sha256"]
+                    or self._sha256_file(proxy) != entry["proxy_sha256"]):
+                return False
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.optionxform = str
+            with proxy.open("r", encoding="utf-8", errors="replace") as handle:
+                parser.read_file(handle)
+            section = parser["Desktop Entry"]
+            expected_exec = "%s --desktop-file %s --source desktop" % (
+                MING_LAUNCH_PATH, shlex.quote(str(proxy)))
+            return (
+                section.get("X-Ming-Desktop-Proxy", "").strip().casefold() == "true"
+                and section.get("X-Ming-Proxy-Source", "").strip() == str(source)
+                and section.get("X-Ming-Proxy-Package", "").strip() == package
+                and section.get("Exec", "").strip() == expected_exec
+            )
+        except (
+                KeyError, OSError, TypeError, ValueError,
+                configparser.Error, subprocess.TimeoutExpired):
+            return False
 
     def _rollback_proxy_transaction(
             self, snapshot, manifest_before, manifest_mode, referenced_paths,
             quarantined):
+        del referenced_paths, quarantined
+        errors = []
         try:
-            for path in self._reserved_proxy_files():
-                if str(path) not in snapshot:
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
-            for path, state in snapshot.items():
-                if path not in referenced_paths:
-                    continue
-                target = pathlib.Path(path)
-                try:
-                    if state[0] == "file":
-                        type(self)._atomic_write(target, state[1], state[2] or 0o644)
-                    elif state[0] == "symlink":
-                        try:
-                            os.unlink(target)
-                        except OSError:
-                            pass
-                        os.symlink(state[1], target)
-                except OSError:
-                    pass
-            for original, temporary, was_referenced in quarantined:
-                if not was_referenced:
-                    try:
-                        os.unlink(temporary)
-                    except OSError:
-                        pass
-                    continue
-                try:
-                    if pathlib.Path(original).exists() or pathlib.Path(original).is_symlink():
-                        os.unlink(original)
-                    os.replace(temporary, original)
-                except OSError:
-                    pass
             if manifest_before is None:
-                try:
-                    if self.proxy_manifest.exists() or self.proxy_manifest.is_symlink():
-                        os.unlink(self.proxy_manifest)
-                except OSError:
-                    pass
+                if self.proxy_manifest.exists() or self.proxy_manifest.is_symlink():
+                    os.unlink(self.proxy_manifest)
             else:
                 type(self)._atomic_write(
                     self.proxy_manifest, manifest_before, manifest_mode or 0o644)
-        except OSError:
-            pass
+        except OSError as error:
+            errors.append("manifest rollback failed: %s" % error)
+        try:
+            current = self._reserved_proxy_files()
+        except OSError as error:
+            current = []
+            errors.append("proxy rollback enumeration failed: %s" % error)
+        for candidate in current:
+            if str(candidate) in snapshot:
+                continue
+            try:
+                os.unlink(candidate)
+                if candidate.exists() or candidate.is_symlink():
+                    raise OSError("new proxy remains")
+            except OSError as error:
+                errors.append("proxy rollback removal failed for %s: %s" % (
+                    candidate, error))
+        for path, state in snapshot.items():
+            try:
+                content, mode = state
+                type(self)._atomic_write(
+                    pathlib.Path(path), content, mode or 0o644)
+            except OSError as error:
+                errors.append("proxy rollback restore failed for %s: %s" % (path, error))
+        try:
+            if manifest_before is None:
+                if self.proxy_manifest.exists() or self.proxy_manifest.is_symlink():
+                    errors.append("manifest rollback verification failed: manifest remains")
+            elif (
+                    self._protected_metadata(self.proxy_manifest) is None
+                    or self.proxy_manifest.read_bytes() != manifest_before):
+                errors.append("manifest rollback verification failed: content mismatch")
+        except OSError as error:
+            errors.append("manifest rollback verification failed: %s" % error)
+        try:
+            restored = self._snapshot_proxy_state()
+            if set(restored) != set(snapshot):
+                errors.append("proxy rollback verification failed: path set mismatch")
+            else:
+                for path, state in snapshot.items():
+                    if restored.get(path) != state:
+                        errors.append(
+                            "proxy rollback verification failed for %s" % path)
+        except OSError as error:
+            errors.append("proxy rollback verification failed: %s" % error)
+        return errors
+
+    def _proxy_transaction_failure(
+            self, package, records, error, rollback_errors=(), cleanup_errors=()):
+        parts = [str(error) or "unknown desktop proxy transaction failure"]
+        parts.extend("rollback: %s" % item for item in rollback_errors if item)
+        parts.extend("cleanup: %s" % item for item in cleanup_errors if item)
+        message = "desktop proxy transaction failed: %s" % "; ".join(parts)
+        for record in records:
+            record["ok"] = False
+            record["error"] = message
+        self._log("desktop proxy convergence failed for %s: %s" % (package, message))
+        return records, message
 
     def _sync_desktop_proxies(self, package, source_paths):
+        try:
+            lock = self._proxy_transaction_lock()
+            with lock:
+                return self._sync_desktop_proxies_locked(package, source_paths)
+        except (DesktopProxyLockTimeout, TimeoutError) as error:
+            message = "desktop proxy lock timeout: %s" % error
+            self._log("desktop proxy lock timeout for %s: %s" % (package, error))
+            return [], message
+        except OSError as error:
+            message = "desktop proxy lock unavailable: %s" % error
+            self._log("desktop proxy lock unavailable for %s: %s" % (package, error))
+            return [], message
+
+    def _sync_desktop_proxies_locked(self, package, source_paths):
         manifest_exists = self.proxy_manifest.exists() or self.proxy_manifest.is_symlink()
-        if not source_paths and not manifest_exists:
+        proxy_dir_exists = self.proxy_dir.exists() or self.proxy_dir.is_symlink()
+        if not source_paths and not manifest_exists and not proxy_dir_exists:
             return [], ""
+        records = []
+        transaction_dir = None
         try:
             existing = self._read_proxy_manifest()
             self._ensure_proxy_dir()
-            self.proxy_manifest.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self.proxy_manifest.parent, 0o755)
-            if self._protected_metadata(self.proxy_manifest.parent, directory=True) is None:
-                raise OSError("desktop proxy manifest directory is unsafe")
+            self._ensure_manifest_dir()
             manifest_before = None
             manifest_mode = 0o644
             if manifest_exists:
@@ -790,7 +1149,6 @@ class PackageInstaller:
             proxy_snapshot = self._snapshot_proxy_state()
         except (OSError, ValueError) as error:
             return [], "无法读取图形启动器代理清单：%s" % error
-        records = []
         prepared = []
         package_paths = {str(path) for path in source_paths}
         for source in sorted({pathlib.Path(path) for path in source_paths}, key=str):
@@ -800,10 +1158,17 @@ class PackageInstaller:
             if record.get("ok"):
                 prepared.append((record, content, manifest_entry))
         invalid_source = any(not record.get("ok") for record in records)
-        old_entries = [
-            entry for entry in existing.get("entries", [])
-            if entry.get("package") != package
-        ]
+        old_entries = []
+        for entry in existing.get("entries", []):
+            if entry.get("package") == package:
+                continue
+            if self._retained_proxy_contract_valid(entry):
+                old_entries.append(entry)
+            else:
+                self._log("dropping invalid retained desktop proxy for %s: %s" % (
+                    entry.get("package") or "<unknown>",
+                    entry.get("proxy_path") or "<unknown>",
+                ))
         current_entries = [] if invalid_source else [item[2] for item in prepared]
         desired_entries = sorted(
             old_entries + current_entries, key=lambda item: item["proxy_path"])
@@ -812,15 +1177,21 @@ class PackageInstaller:
             entry["proxy_path"] for entry in existing.get("entries", [])}
         quarantined = []
         try:
+            staging_root = self._ensure_proxy_staging_root()
+            abandoned_errors = self._cleanup_abandoned_proxy_transactions(staging_root)
+            if abandoned_errors:
+                return self._proxy_transaction_failure(
+                    package, records, "abandoned transaction cleanup failed",
+                    cleanup_errors=abandoned_errors)
+            transaction_dir = self._new_proxy_transaction_dir(staging_root)
+            self._active_proxy_transaction_dir = transaction_dir
+            staged = []
             if not invalid_source:
-                for _record, content, _entry in prepared:
-                    self._atomic_write(_record["proxy_path"], content, mode=0o644)
-            for candidate in self._reserved_proxy_files():
-                if str(candidate) not in desired_paths:
-                    quarantined.append((
-                        str(candidate),
-                        self._quarantine_proxy(candidate),
-                        str(candidate) in referenced_paths,
+                for record, content, entry in prepared:
+                    staged.append((
+                        self._stage_proxy(transaction_dir, record, content, entry),
+                        pathlib.Path(record["proxy_path"]),
+                        entry,
                     ))
             payload = {
                 "schema_version": DESKTOP_PROXY_SCHEMA_VERSION,
@@ -833,25 +1204,43 @@ class PackageInstaller:
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                 mode=0o644,
             )
-            for _original, temporary, _was_referenced in quarantined:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    # The retired file is outside the application directory and
-                    # therefore cannot be discovered or activated as a launcher.
-                    pass
+            for staged_path, destination, entry in staged:
+                self._publish_staged_proxy(staged_path, destination)
+                if (
+                        self._protected_metadata(destination) is None
+                        or self._sha256_file(destination) != entry["proxy_sha256"]):
+                    raise OSError("published desktop proxy verification failed")
+            for candidate in self._reserved_proxy_files():
+                if str(candidate) not in desired_paths:
+                    quarantined.append((
+                        str(candidate),
+                        self._quarantine_proxy(candidate),
+                        str(candidate) in referenced_paths,
+                    ))
+            cleanup_errors = self._cleanup_proxy_transaction_dir(transaction_dir)
+            transaction_dir = None
+            if cleanup_errors:
+                raise OSError("cleanup: %s" % "; ".join(cleanup_errors))
         except (OSError, TypeError, ValueError) as error:
-            self._rollback_proxy_transaction(
+            rollback_errors = self._rollback_proxy_transaction(
                 proxy_snapshot,
                 manifest_before,
                 manifest_mode,
                 referenced_paths,
                 quarantined,
             )
-            for record in records:
-                record["ok"] = False
-                record["error"] = "无法写入启动器代理清单：%s" % error
-            return records, ""
+            cleanup_errors = self._cleanup_proxy_transaction_dir(transaction_dir)
+            transaction_dir = None
+            return self._proxy_transaction_failure(
+                package, records, error,
+                rollback_errors=rollback_errors,
+                cleanup_errors=cleanup_errors,
+            )
+        finally:
+            try:
+                del self._active_proxy_transaction_dir
+            except AttributeError:
+                pass
         return records, ""
 
     def _catalog_entry_status(self, path):

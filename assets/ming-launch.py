@@ -281,6 +281,22 @@ def _protected_path_metadata(path, directory=False):
     return metadata
 
 
+def _opt_directory_chain(path, anchor):
+    current = pathlib.Path(path)
+    anchor = pathlib.Path(anchor)
+    if not current.is_absolute() or not anchor.is_absolute():
+        return ()
+    chain = []
+    while True:
+        chain.append(current)
+        if current == anchor:
+            return tuple(chain)
+        parent = current.parent
+        if parent == current:
+            return ()
+        current = parent
+
+
 def _proxy_path_shape(path, proxy_dir=DESKTOP_PROXY_DIR):
     try:
         proxy = pathlib.Path(os.fspath(path))
@@ -325,14 +341,10 @@ def _canonical_opt_apps_source(path, opt_apps_root=OPT_APPS_ROOT):
             or any(ord(character) < 32 for character in parts[3])
             or any(part in {".", ".."} for part in source.parts + root.parts)):
         raise ValueError("desktop proxy source layout is invalid")
-    directories = (
-        root,
-        root / parts[0],
-        root / parts[0] / "entries",
-        root / parts[0] / "entries" / "applications",
-    )
-    if any(_protected_path_metadata(directory, directory=True) is None
-           for directory in directories):
+    directories = _opt_directory_chain(source.parent, root.parent)
+    if not directories or any(
+            _protected_path_metadata(directory, directory=True) is None
+            for directory in directories):
         raise ValueError("desktop proxy source directory is unsafe")
     if _protected_path_metadata(source) is None:
         raise ValueError("desktop proxy source is unsafe")
