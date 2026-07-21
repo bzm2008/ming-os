@@ -87,6 +87,13 @@ class EventState:
     def window_identity(self, window_id: str) -> tuple[int, str] | None:
         return self.window_identities.get(str(window_id))
 
+    def refresh_window_tracking_capacity(self, live_window_ids) -> None:
+        if not self.window_tracking_saturated:
+            return
+        live = {str(window_id) for window_id in live_window_ids}
+        if live.issubset(self.window_identities):
+            self.window_tracking_saturated = False
+
     def discard_process_identity(self, pid: int, starttime: str) -> None:
         identity = (int(pid), str(starttime))
         self.backgrounded.discard(identity)
@@ -397,6 +404,7 @@ class WnckResourceMonitor:
         self.cancel_timer(key)
         closed_identity = self.client.state.close(key) or stored_identity
         self.windows.pop(key, None)
+        self.client.state.refresh_window_tracking_capacity(self.windows)
         if closed_identity:
             old_pid, old_starttime = closed_identity
             if current_starttime is None:
@@ -436,6 +444,7 @@ class WnckResourceMonitor:
             self.client.state.mark_visible(key)
             self.cancel_timer(key)
             return
+        self.client.state.refresh_window_tracking_capacity(self.windows)
         if self.is_visible(window):
             self.client.state.mark_visible(key)
             self.cancel_timer(key)

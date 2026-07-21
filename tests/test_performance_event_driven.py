@@ -2240,6 +2240,24 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         self.assertIn((42, "100"), state.background_generations)
         self.assertTrue(state.consume_backgrounded(42, "100"))
 
+    def test_window_identity_capacity_recovers_after_untracked_window_closes(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_capacity_recovery_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        tracked = make_window(1, 4242, True)
+        untracked = make_window(2, 4242, False)
+        with mock.patch.object(module, "MAX_TRACKED_WINDOWS", 1), \
+                mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.attach(tracked)
+            monitor.attach(untracked)
+            self.assertTrue(client.state.window_tracking_saturated)
+            monitor.detach(untracked)
+        self.assertFalse(client.state.window_tracking_saturated)
+
     def test_detach_without_confirmed_identity_never_restores_current_pid(self):
         module = load_module(
             ROOT / "assets" / "ming-window-resource-monitor.py",
