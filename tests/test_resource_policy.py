@@ -201,7 +201,11 @@ class ResourcePolicyTests(unittest.TestCase):
 
     def test_background_identity_change_before_move_rejects_without_state(self):
         policy = self.module.ResourcePolicy(session_uid=1000)
-        validations = iter(((True, ""), (False, "starttime-mismatch")))
+        validations = iter((
+            (True, ""),
+            (True, ""),
+            (False, "starttime-mismatch"),
+        ))
         key = (123, "100")
         with mock.patch.object(
                 self.module, "_validate_pid",
@@ -224,7 +228,12 @@ class ResourcePolicyTests(unittest.TestCase):
 
     def test_background_identity_change_after_move_rolls_back_cgroup_and_state(self):
         policy = self.module.ResourcePolicy(session_uid=1000)
-        validations = iter(((True, ""), (True, ""), (False, "starttime-mismatch")))
+        validations = iter((
+            (True, ""),
+            (True, ""),
+            (True, ""),
+            (False, "starttime-mismatch"),
+        ))
         key = (123, "100")
         captured_path = "/user.slice/user-1000.slice/app.slice"
         with mock.patch.object(
@@ -279,6 +288,172 @@ class ResourcePolicyTests(unittest.TestCase):
                 restore_cgroup.assert_not_called()
                 self.assertNotIn(key, policy.background)
                 self.assertNotIn(key, policy.background_generations)
+
+    def test_reused_pid_before_generation_update_preserves_new_identity_state(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        old_key = (123, "100")
+        new_key = (123, "200")
+        new_snapshot = {
+            "cgroup_path": "/user.slice/user-1000.slice/app.slice",
+            "desktop_file": "/usr/share/applications/new.desktop",
+        }
+        policy.background[new_key] = new_snapshot
+        policy.background_generations[new_key] = 9
+        validations = iter(((True, ""), (False, "starttime-mismatch")))
+        with mock.patch.object(
+                self.module, "_validate_pid",
+                side_effect=lambda *_args: next(validations)), \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(self.module, "process_starttime", return_value="200"), \
+                mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                mock.patch.object(self.module, "_cgroup_relative_path", return_value="/user.slice/user-1000.slice/app.slice"), \
+                mock.patch.object(self.module, "_move_pid") as move_pid:
+            result = policy.apply_background(
+                123, "100", "/usr/share/applications/old.desktop", False,
+                generation=1,
+            )
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual("starttime-mismatch", result.get("error"))
+        move_pid.assert_not_called()
+        self.assertNotIn(old_key, policy.background)
+        self.assertNotIn(old_key, policy.background_generations)
+        self.assertEqual({new_key: new_snapshot}, policy.background)
+        self.assertEqual({new_key: 9}, policy.background_generations)
+
+    def test_reused_pid_during_state_lock_wait_preserves_new_identity_state(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        old_key = (123, "100")
+        new_key = (123, "200")
+        new_snapshot = {
+            "cgroup_path": "/user.slice/user-1000.slice/app.slice",
+            "desktop_file": "/usr/share/applications/new.desktop",
+        }
+        identity = {"starttime": "100"}
+
+        def validate(_pid, starttime, _uid):
+            if identity["starttime"] != str(starttime):
+                return False, "starttime-mismatch"
+            return True, ""
+
+        class GateLock:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self._owner = None
+                self._depth = 0
+                self.waiting = threading.Event()
+                self.release = threading.Event()
+
+            def __enter__(self):
+                owner = threading.get_ident()
+                if self._owner != owner:
+                    self.waiting.set()
+                    if not self.release.wait(timeout=2):
+                        raise AssertionError("timed out waiting for state-lock release")
+                    self._lock.acquire()
+                    self._owner = owner
+                else:
+                    self._lock.acquire()
+                self._depth += 1
+                return self
+
+            def __exit__(self, *_args):
+                self._depth -= 1
+                if self._depth == 0:
+                    self._owner = None
+                self._lock.release()
+
+        gate = GateLock()
+        policy.state_lock = gate
+        result_holder = []
+        error_holder = []
+
+        def apply_request():
+            try:
+                result_holder.append(policy.apply_background(
+                    123, "100", "/usr/share/applications/old.desktop", False,
+                    generation=1,
+                ))
+            except BaseException as error:  # surface worker failures in this test
+                error_holder.append(error)
+
+        with mock.patch.object(
+                self.module, "_validate_pid",
+                side_effect=validate) as validate_pid, \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(
+                    self.module, "process_starttime",
+                    side_effect=lambda _pid: identity["starttime"]), \
+                mock.patch.object(policy, "_settings", return_value={"background_throttle": True}), \
+                mock.patch.object(self.module, "background_throttle_exemption", return_value=(False, "")), \
+                mock.patch.object(self.module, "_cgroup_relative_path", return_value="/user.slice/user-1000.slice/app.slice"), \
+                mock.patch.object(self.module, "_move_pid") as move_pid:
+            worker = threading.Thread(target=apply_request)
+            worker.start()
+            self.assertTrue(gate.waiting.wait(timeout=2))
+            identity["starttime"] = "200"
+            policy.background[new_key] = new_snapshot
+            policy.background_generations[new_key] = 9
+            gate.release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], error_holder)
+        self.assertEqual(1, len(result_holder))
+        result = result_holder[0]
+        self.assertFalse(result.get("ok"))
+        self.assertEqual("starttime-mismatch", result.get("error"))
+        move_pid.assert_not_called()
+        self.assertNotIn(old_key, policy.background)
+        self.assertNotIn(old_key, policy.background_generations)
+        self.assertEqual({new_key: new_snapshot}, policy.background)
+        self.assertEqual({new_key: 9}, policy.background_generations)
+        self.assertEqual(2, validate_pid.call_count)
+
+    def test_stale_background_generation_revalidates_before_success(self):
+        policy = self.module.ResourcePolicy(session_uid=1000)
+        old_key = (123, "100")
+        other_key = (456, "300")
+        old_snapshot = {
+            "cgroup_path": "/user.slice/user-1000.slice/old.slice",
+            "desktop_file": "/usr/share/applications/old.desktop",
+        }
+        other_snapshot = {
+            "cgroup_path": "/user.slice/user-1000.slice/other.slice",
+            "desktop_file": "/usr/share/applications/other.desktop",
+        }
+        policy.background = {old_key: old_snapshot, other_key: other_snapshot}
+        policy.background_generations = {old_key: 5, other_key: 8}
+        validations = iter((
+            (True, ""),
+            (True, ""),
+            (False, "starttime-mismatch"),
+        ))
+
+        def starttime(pid):
+            return {123: "100", 456: "300"}[int(pid)]
+
+        with mock.patch.object(
+                self.module, "_validate_pid",
+                side_effect=lambda *_args: next(validations)) as validate_pid, \
+                mock.patch.object(self.module, "desktop_file_is_trusted", return_value=True), \
+                mock.patch.object(self.module, "process_starttime", side_effect=starttime), \
+                mock.patch.object(self.module, "_move_pid") as move_pid:
+            result = policy.apply_background(
+                123, "100", "/usr/share/applications/old.desktop", False,
+                generation=4,
+            )
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual("starttime-mismatch", result.get("error"))
+        self.assertFalse(result.get("stale", False))
+        self.assertEqual(3, validate_pid.call_count)
+        move_pid.assert_not_called()
+        self.assertNotIn(old_key, policy.background)
+        self.assertNotIn(old_key, policy.background_generations)
+        self.assertEqual({other_key: other_snapshot}, policy.background)
+        self.assertEqual({other_key: 8}, policy.background_generations)
 
     def test_lease_timer_restores_without_waiting_for_socket_reaper(self):
         policy = self.module.ResourcePolicy(session_uid=1000)

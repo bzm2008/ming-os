@@ -827,6 +827,9 @@ class ResourcePolicy:
             return _json(False, error="desktop-file-not-allowlisted")
         key = (int(pid), str(starttime))
         with self.state_lock:
+            rejected = self._revalidate_background_identity(key)
+            if rejected:
+                return rejected
             self._prune_background_state(preserve=key)
             for stale_key in tuple(self.background_generations):
                 if stale_key[0] == key[0] and stale_key != key:
@@ -840,6 +843,9 @@ class ResourcePolicy:
             if requested_generation <= 0:
                 requested_generation = latest + 1
             if requested_generation <= latest:
+                rejected = self._revalidate_background_identity(key)
+                if rejected:
+                    return rejected
                 self._log(
                     "background_stale", pid=int(pid), generation=requested_generation,
                     latest_generation=latest,
