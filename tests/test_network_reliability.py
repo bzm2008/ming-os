@@ -240,7 +240,7 @@ class NetworkReliabilityContracts(unittest.TestCase):
         self.assertEqual(
             [("ming-net-" + "a" * 32, "wlan0", "secret")], backend.calls)
 
-    def test_libnm_wifi_connect_sets_bssid_as_a_string_mac_address(self):
+    def test_libnm_wifi_connect_sets_bssid_as_a_six_byte_mac_address(self):
         class FakeSetting:
             def __init__(self):
                 self.properties = {}
@@ -264,7 +264,11 @@ class NetworkReliabilityContracts(unittest.TestCase):
                 self.settings.append(setting)
 
         class FakeWireless(FakeSetting):
-            pass
+            def set_property(self, name, value):
+                if name == "bssid":
+                    if not isinstance(value, bytes) or len(value) != 6:
+                        raise TypeError("bssid expects a six-byte MAC address")
+                super().set_property(name, value)
 
         class FakeClient:
             def __init__(self):
@@ -327,8 +331,8 @@ class NetworkReliabilityContracts(unittest.TestCase):
         wireless = next(
             setting for setting in client.connection.settings
             if isinstance(setting, FakeWireless))
-        self.assertIsInstance(wireless.properties["bssid"], str)
-        self.assertEqual(bssid, wireless.properties["bssid"])
+        self.assertIsInstance(wireless.properties["bssid"], bytes)
+        self.assertEqual(bytes.fromhex("AABBCCDDEEFF"), wireless.properties["bssid"])
 
     def test_ethernet_repair_targets_one_interface_without_networkmanager_restart(self):
         class Backend:

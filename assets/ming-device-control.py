@@ -734,7 +734,8 @@ class NetworkManagerBackend:
             except Exception:
                 ssid = raw
             wireless.set_property("ssid", ssid)
-            wireless.set_property("bssid", str(target["bssid"]))
+            wireless.set_property(
+                "bssid", bytes.fromhex(str(target["bssid"]).replace(":", "")))
             connection.add_setting(wireless)
             key_mgmt = target.get("_key_mgmt", "unknown")
             if key_mgmt in {"enterprise", "wep"}:
