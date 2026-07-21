@@ -227,9 +227,15 @@ install_ming_shell_components() {
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin \
         /usr/local/share/applications "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-spark-package-helper.py ming-spark-security-converge.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
+            return 1
+        fi
+    done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if [[ ! -s "${asset_dir}/polkit/${asset}" ]]; then
+            echo "ERROR: missing Spark security policy: ${asset}" >&2
             return 1
         fi
     done
@@ -269,8 +275,14 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
-    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
-    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper || return 1
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge || return 1
+    install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    install -d -m 0755 /usr/share/polkit-1/actions || return 1
+    install -m 0644 "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    install -m 0644 "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
     install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
     install -m 0755 "${asset_dir}/ming-window-resource-monitor.py" /usr/local/bin/ming-window-resource-monitor
 
@@ -471,7 +483,8 @@ MINGDRAWERDESKTOP
     python3 -m py_compile \
         /usr/local/sbin/ming-package-installer \
         /usr/local/sbin/ming-spark-package-helper \
-        /usr/local/sbin/ming-spark-security-converge || return 1
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
     if dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -qx 'ii '; then
         /usr/local/sbin/ming-spark-security-converge enforce || return 1
     fi
@@ -4821,7 +4834,7 @@ case "${1:-}" in
         ;;
     repair-store)
         if confirm "将修复或重新安装星火应用商店。这个过程需要联网。" "修复商店"; then
-            if pkexec /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1 || sudo /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1; then
+            if pkexec /usr/local/sbin/ming-spark-store-repair-helper >/tmp/ming-spark.log 2>&1; then
                 info "星火应用商店已就绪。"
             else
                 warn "商店修复没有完成。请先连接网络，再点一次“修复应用商店”。"

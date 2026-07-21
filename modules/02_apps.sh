@@ -1888,19 +1888,32 @@ PY
 deploy_spark_security_boundary() {
     local asset_dir="/tmp/ming-build/assets"
     local asset
-    for asset in ming-package-installer.py ming-shell-common.py ming-package-runtime-root-guard.sh ming-spark-package-helper.py ming-spark-security-converge.py; do
+    for asset in ming-package-installer.py ming-shell-common.py ming-package-runtime-root-guard.sh ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "[ERROR] missing Spark security asset: ${asset}" >&2
             return 1
         fi
     done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if [[ ! -s "${asset_dir}/polkit/${asset}" ]]; then
+            echo "[ERROR] missing Spark security policy: ${asset}" >&2
+            return 1
+        fi
+    done
     deploy_package_installer_runtime || return 1
-    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper
-    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge
+    install -d -m 0755 /usr/share/polkit-1/actions || return 1
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper || return 1
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge || return 1
+    install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    install -m 0644 "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    install -m 0644 "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
     python3 -m py_compile \
         /usr/local/sbin/ming-package-installer \
         /usr/local/sbin/ming-spark-package-helper \
-        /usr/local/sbin/ming-spark-security-converge || return 1
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
 }
 
 install_app_store() {
@@ -2175,8 +2188,8 @@ spark_bin="/usr/local/bin/spark-store"
 if [[ ! -x "${spark_bin}" ]]; then
     notify-send -i dialog-error "星火应用商店" "应用商店尚未安装，请从应用库运行“修复星火应用商店”。" 2>/dev/null || true
     printf '[%s] Spark Store binary is missing\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
-    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/bin/ming-install-spark-store ]]; then
-        exec pkexec /usr/local/bin/ming-install-spark-store "$@"
+    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/sbin/ming-spark-store-repair-helper ]]; then
+        exec pkexec /usr/local/sbin/ming-spark-store-repair-helper
     fi
     exit 127
 fi
@@ -2294,7 +2307,7 @@ SPARKSYSDESKTOP
 Name=修复星火应用商店
 Name[zh_CN]=修复星火应用商店
 Comment=Download and install Spark Store if it was not bundled during image build
-Exec=pkexec /usr/local/bin/ming-install-spark-store
+Exec=pkexec /usr/local/sbin/ming-spark-store-repair-helper
 Icon=ming-app-store
 Terminal=true
 Type=Application

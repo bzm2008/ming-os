@@ -139,19 +139,35 @@ PY
 seed_resume_spark_security() {
     local asset_dir="/tmp/ming-build/assets"
     local asset
-    for asset in ming-spark-package-helper.py ming-spark-security-converge.py; do
+    for asset in ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py; do
         if ! chroot_exec test -s "${asset_dir}/${asset}"; then
             log_error "resume 构建缺少 Spark security asset: ${asset}"
             return 1
         fi
     done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if ! chroot_exec test -s "${asset_dir}/polkit/${asset}"; then
+            log_error "resume 构建缺少 Spark security policy: ${asset}"
+            return 1
+        fi
+    done
+    chroot_exec install -d -m 0755 /usr/share/polkit-1/actions || return 1
     chroot_exec install -m 0755 "${asset_dir}/ming-spark-package-helper.py" \
-        /usr/local/sbin/ming-spark-package-helper
+        /usr/local/sbin/ming-spark-package-helper || return 1
     chroot_exec install -m 0755 "${asset_dir}/ming-spark-security-converge.py" \
-        /usr/local/sbin/ming-spark-security-converge
+        /usr/local/sbin/ming-spark-security-converge || return 1
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    chroot_exec install -m 0644 \
+        "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    chroot_exec install -m 0644 \
+        "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
     chroot_exec python3 -m py_compile \
         /usr/local/sbin/ming-spark-package-helper \
-        /usr/local/sbin/ming-spark-security-converge
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper
 }
 
 ensure_resume_runtime_packages() {

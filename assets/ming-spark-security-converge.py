@@ -61,6 +61,16 @@ SAFE_POLICY = """<?xml version="1.0" encoding="UTF-8"?>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/extras/shell-caller.sh</annotate>
   </action>
+  <action id="store.spark-app.spark-store.bin-extras">
+    <description>Install or remove a Spark Store package</description>
+    <message>Administrator authentication is required to change installed software</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/bin/extras/shell-caller.sh</annotate>
+  </action>
 </policyconfig>
 """
 SAFE_SHIM = """#!/bin/sh
@@ -91,11 +101,33 @@ def _run(command, timeout=20):
 class SparkSecurityConverger:
     def __init__(
             self, root="/", runner=None, euid_getter=None,
-            symlink_creator=None):
+            symlink_creator=None, live_systemd_getter=None):
         self.root = pathlib.Path(root)
         self.runner = runner or _run
         self.euid_getter = euid_getter or getattr(os, "geteuid", lambda: 1)
         self.symlink_creator = symlink_creator or os.symlink
+        self.live_systemd_getter = live_systemd_getter or self._is_live_systemd
+
+    def _is_live_systemd(self):
+        if self.root != pathlib.Path("/"):
+            return False
+        try:
+            if not pathlib.Path("/run/systemd/system").is_dir():
+                return False
+            if pathlib.Path("/proc/1/comm").read_text(
+                    encoding="utf-8", errors="replace").strip() != "systemd":
+                return False
+            current_root = os.stat("/")
+            pid1_root = os.stat("/proc/1/root/.")
+            return (
+                current_root.st_dev,
+                current_root.st_ino,
+            ) == (
+                pid1_root.st_dev,
+                pid1_root.st_ino,
+            )
+        except OSError:
+            return False
 
     def _path(self, absolute_path):
         return self.root / str(absolute_path).lstrip("/")
@@ -258,26 +290,58 @@ class SparkSecurityConverger:
         self._atomic_write(ACTIVE_POLICY_PATH, SAFE_POLICY, 0o644)
 
     def _mask_notifier(self):
-        self._call((
-            "/usr/bin/systemctl", "disable", "--now",
-            "spark-update-notifier.service",
-        ), timeout=30)
+        live_systemd = bool(self.live_systemd_getter())
+        if live_systemd:
+            code, _output, error = self._call((
+                "/usr/bin/systemctl", "disable", "--now",
+                "spark-update-notifier.service",
+            ), timeout=30)
+            if code != 0:
+                raise ConvergenceError(
+                    "E_CONVERGENCE_FAILED",
+                    "unable to disable Spark notifier: %s" % error.strip(),
+                )
         self._remove_path(NOTIFIER_WANTS)
+        wants = self._path(NOTIFIER_WANTS)
+        if wants.exists() or wants.is_symlink():
+            raise ConvergenceError(
+                "E_CONVERGENCE_FAILED", "Spark notifier wants removal failed")
         mask = self._path(NOTIFIER_MASK)
-        if mask.is_symlink():
-            try:
-                if os.readlink(mask) == "/dev/null":
-                    return
-            except OSError:
-                pass
-        self._remove_path(NOTIFIER_MASK)
-        mask.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.symlink_creator("/dev/null", mask)
-        except FileExistsError:
-            pass
-        except OSError as error:
-            raise ConvergenceError("E_CONVERGENCE_FAILED", "unable to mask notifier") from error
+            mask_valid = mask.is_symlink() and os.readlink(mask) == "/dev/null"
+        except OSError:
+            mask_valid = False
+        if not mask_valid:
+            self._remove_path(NOTIFIER_MASK)
+            mask.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self.symlink_creator("/dev/null", mask)
+            except FileExistsError:
+                pass
+            except OSError as error:
+                raise ConvergenceError(
+                    "E_CONVERGENCE_FAILED", "unable to mask notifier") from error
+        try:
+            mask_valid = mask.is_symlink() and os.readlink(mask) == "/dev/null"
+        except OSError:
+            mask_valid = False
+        if not mask_valid:
+            raise ConvergenceError(
+                "E_CONVERGENCE_FAILED", "Spark notifier mask readback failed")
+        if live_systemd:
+            code, output, error = self._call((
+                "/usr/bin/systemctl", "is-active",
+                "spark-update-notifier.service",
+            ), timeout=5)
+            state = output.strip().casefold()
+            if code == 0 or state in {"active", "activating", "reloading"}:
+                raise ConvergenceError(
+                    "E_CONVERGENCE_FAILED", "Spark notifier remains active")
+            if state not in {"inactive", "failed", "unknown", "deactivating"}:
+                raise ConvergenceError(
+                    "E_CONVERGENCE_FAILED",
+                    "unable to verify Spark notifier state: %s" % error.strip(),
+                )
 
     def _converge(self, key_source=None, armored=None):
         self._require_root()

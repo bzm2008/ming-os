@@ -684,11 +684,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("Spark Store repair fallback", result.stderr)
 
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
             result = run_backend_validator(root)
@@ -701,11 +702,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             write_executable(root, "usr/bin/microsoft-edge-stable")
             write_executable(root, "usr/bin/spark-store")
             write_executable(root, "opt/spark-store/bin/spark-store")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
 
             result = run_backend_validator(root)
@@ -721,11 +723,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
 
@@ -749,11 +752,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 root = pathlib.Path(directory)
                 write_core_desktops(root)
                 write_executable(root, "usr/bin/microsoft-edge-stable")
+                write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
                 write_executable(root, "usr/local/bin/ming-install-spark-store")
                 write_executable(
                     root,
                     "usr/local/bin/ming-spark-store",
-                    "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                    "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
                 )
                 write_vendor_spark_package(root, **options)
 
@@ -765,11 +769,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
 
@@ -781,11 +786,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
 
@@ -801,11 +807,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
 
@@ -821,11 +828,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
             write_executable(root, "usr/local/bin/ming-install-spark-store")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
             )
             write_vendor_spark_package(root)
 
@@ -847,11 +855,12 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                 root = pathlib.Path(directory)
                 write_core_desktops(root)
                 write_executable(root, "usr/bin/microsoft-edge-stable")
+                write_executable(root, "usr/local/sbin/ming-spark-store-repair-helper")
                 write_executable(root, "usr/local/bin/ming-install-spark-store")
                 write_executable(
                     root,
                     "usr/local/bin/ming-spark-store",
-                    "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                    "#!/bin/sh\nexec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n",
                 )
                 write_vendor_spark_package(root)
                 helper = root / "usr/local/libexec/ming-spark-build-mode"

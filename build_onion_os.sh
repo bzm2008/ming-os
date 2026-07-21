@@ -1392,12 +1392,16 @@ if not spark_vendor_paths.issubset(spark_owned_paths):
 
 spark_wrapper = root / "usr/local/bin/ming-spark-store"
 spark_installer = root / "usr/local/bin/ming-install-spark-store"
+spark_repair_helper = root / "usr/local/sbin/ming-spark-store-repair-helper"
 wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
 has_repair_fallback = (
     desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
     and spark_installer.is_file()
     and os.access(spark_installer, os.X_OK)
-    and 'exec pkexec /usr/local/bin/ming-install-spark-store "$@"' in wrapper_text
+    and spark_repair_helper.is_file()
+    and os.access(spark_repair_helper, os.X_OK)
+    and "exec pkexec /usr/local/sbin/ming-spark-store-repair-helper\n" in wrapper_text
+    and 'ming-spark-store-repair-helper "$@"' not in wrapper_text
 )
 if not has_repair_fallback:
     errors.append("Spark Store repair fallback is missing or not executable")
@@ -1414,12 +1418,16 @@ import re as _SparkRe
 import shutil as _SparkShutil
 import stat as _SparkStat
 import subprocess as _SparkSubprocess
+import xml.etree.ElementTree as _SparkET
 
 _spark_security_errors = []
 _spark_security_root = _SparkPath(sys.argv[1])
 _spark_security_files = {
     "usr/local/sbin/ming-spark-package-helper": 0o755,
     "usr/local/sbin/ming-spark-security-converge": 0o755,
+    "usr/local/sbin/ming-spark-store-repair-helper": 0o755,
+    "usr/share/polkit-1/actions/store.spark-app.spark-store.policy": 0o644,
+    "usr/share/polkit-1/actions/org.ming.spark-store.repair.policy": 0o644,
     "etc/apt/keyrings/ming-spark-store.gpg": 0o644,
     "etc/apt/sources.list.d/ming-spark-store.list": 0o644,
 }
@@ -1463,6 +1471,46 @@ _spark_policy_paths = (
     "opt/spark-store/bin/extras/store.spark-app.spark-store.policy",
     "usr/share/polkit-1/actions/store.spark-app.spark-store.policy",
 )
+_spark_vendor_actions = {
+    "store.spark-app.spark-store": "/opt/spark-store/extras/shell-caller.sh",
+    "store.spark-app.spark-store.bin-extras": "/opt/spark-store/bin/extras/shell-caller.sh",
+}
+_spark_repair_action = {
+    "org.ming.spark-store.repair": "/usr/local/sbin/ming-spark-store-repair-helper",
+}
+
+def _spark_policy_actions(_path, _relative):
+    try:
+        _tree = _SparkET.parse(_path)
+    except (OSError, _SparkET.ParseError):
+        _spark_security_errors.append("unsafe Spark policy XML: " + _relative)
+        return {}
+    _actions = {}
+    for _action in _tree.findall(".//action"):
+        _action_id = str(_action.attrib.get("id", ""))
+        _annotations = _action.findall("annotate")
+        _paths = [
+            str(_node.text or "")
+            for _node in _annotations
+            if _node.attrib.get("key") == "org.freedesktop.policykit.exec.path"
+        ]
+        if (
+            not _action_id
+            or _action_id in _actions
+            or len(_annotations) != 1
+            or len(_paths) != 1
+        ):
+            _spark_security_errors.append("unsafe broad Spark policy action: " + _relative)
+            continue
+        if (
+            _action.findtext("./defaults/allow_any") != "no"
+            or _action.findtext("./defaults/allow_inactive") != "no"
+            or _action.findtext("./defaults/allow_active") != "auth_admin_keep"
+        ):
+            _spark_security_errors.append("unsafe broad Spark policy defaults: " + _relative)
+        _actions[_action_id] = _paths[0]
+    return _actions
+
 for _relative in _spark_policy_paths:
     _path = _spark_security_root / _relative
     try:
@@ -1478,29 +1526,42 @@ for _relative in _spark_policy_paths:
         _spark_security_errors.append("unsafe Spark policy metadata: " + _relative)
     _text = _path.read_text(encoding="utf-8", errors="replace") if _path.is_file() else ""
     if (
-        '<action id="store.spark-app.spark-store">' not in _text
-        or "<allow_any>no</allow_any>" not in _text
-        or "<allow_inactive>no</allow_inactive>" not in _text
-        or "<allow_active>auth_admin_keep</allow_active>" not in _text
-        or "/opt/spark-store/extras/shell-caller.sh" not in _text
+        _spark_policy_actions(_path, _relative) != _spark_vendor_actions
         or "allow_gui" in _text
+        or "ssinstall" in _text.casefold()
         or "<allow_any>yes</allow_any>" in _text
+        or "<allow_inactive>yes</allow_inactive>" in _text
     ):
         _spark_security_errors.append("unsafe Spark policy: " + _relative)
 
 _actions_dir = _spark_security_root / "usr/share/polkit-1/actions"
-_spark_bindings = []
+_spark_expected_bindings = dict(_spark_vendor_actions)
+_spark_expected_bindings.update(_spark_repair_action)
+_spark_binding_counts = {path: 0 for path in _spark_expected_bindings.values()}
 if _actions_dir.is_dir():
     for _policy_file in _actions_dir.glob("*.policy"):
         if not _policy_file.is_file() or _policy_file.is_symlink():
             continue
         _policy_text = _policy_file.read_text(encoding="utf-8", errors="replace")
-        if "/opt/spark-store/extras/shell-caller.sh" in _policy_text:
-            _spark_bindings.append(_policy_file.name)
-        if "/usr/local/bin/ssinstall" in _policy_text:
+        if "ssinstall" in _policy_text.casefold():
             _spark_security_errors.append("active Spark ssinstall policy remains: " + _policy_file.name)
-if _spark_bindings != ["store.spark-app.spark-store.policy"]:
-    _spark_security_errors.append("multiple active Spark polkit actions bind the Electron shim")
+        if "spark" not in _policy_text.casefold() and "spark" not in _policy_file.name.casefold():
+            continue
+        _actions = _spark_policy_actions(_policy_file, _policy_file.name)
+        for _action_id, _exec_path in _actions.items():
+            if _exec_path in _spark_binding_counts:
+                _spark_binding_counts[_exec_path] += 1
+            if _spark_expected_bindings.get(_action_id) != _exec_path:
+                _spark_security_errors.append(
+                    "unsafe broad Spark policy action: " + _policy_file.name)
+if any(_count != 1 for _count in _spark_binding_counts.values()):
+    _spark_security_errors.append(
+        "multiple active Spark polkit actions or missing exact Spark binding")
+
+_repair_policy = _spark_security_root / "usr/share/polkit-1/actions/org.ming.spark-store.repair.policy"
+if _repair_policy.is_file() and _spark_policy_actions(
+        _repair_policy, "org.ming.spark-store.repair.policy") != _spark_repair_action:
+    _spark_security_errors.append("unsafe Spark repair policy")
 
 for _relative in (
     "opt/spark-store/extras/shell-caller.sh",
@@ -2060,6 +2121,7 @@ for helper in [
     "usr/local/sbin/ming-package-installer",
     "usr/local/sbin/ming-spark-package-helper",
     "usr/local/sbin/ming-spark-security-converge",
+    "usr/local/sbin/ming-spark-store-repair-helper",
 ]:
     require_file(helper)
 

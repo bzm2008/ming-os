@@ -14,4 +14,14 @@
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/extras/shell-caller.sh</annotate>
   </action>
+  <action id="store.spark-app.spark-store.bin-extras">
+    <description>Install or remove a Spark Store package</description>
+    <message>Administrator authentication is required to change installed software</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/bin/extras/shell-caller.sh</annotate>
+  </action>
 </policyconfig>
