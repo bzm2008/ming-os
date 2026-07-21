@@ -29,6 +29,8 @@ WINDOW_MANAGER_RETRY_DELAY_MS = 2_000
 WINDOW_MANAGER_RETRY_BACKOFF_SECONDS = 60.0
 TRUSTED_DESKTOP = "/usr/share/applications/ming-running-apps.desktop"
 LOCK_PATH = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ming-window-resource-monitor.lock"
+MAX_TRACKED_WINDOWS = 512
+MAX_TRACKED_PROCESS_IDENTITIES = 512
 
 
 class EventState:
@@ -37,8 +39,50 @@ class EventState:
     def __init__(self):
         self.boosted: dict[tuple[int, str], float] = {}
         self.hidden: dict[str, dict[str, Any]] = {}
+        self.window_identities: dict[str, tuple[int, str]] = {}
         self.backgrounded: set[tuple[int, str]] = set()
         self.background_generations: dict[tuple[int, str], int] = {}
+
+    def _prune_window_state(self) -> None:
+        """Keep event bookkeeping bounded during long-running sessions."""
+        while len(self.window_identities) > MAX_TRACKED_WINDOWS:
+            window_id, _identity = next(iter(self.window_identities.items()))
+            self.window_identities.pop(window_id, None)
+            self.hidden.pop(window_id, None)
+        while len(self.hidden) > MAX_TRACKED_WINDOWS:
+            window_id = next(iter(self.hidden))
+            self.hidden.pop(window_id, None)
+
+    def _prune_process_state(self) -> None:
+        while len(self.background_generations) > MAX_TRACKED_PROCESS_IDENTITIES:
+            identity = next(iter(self.background_generations))
+            self.background_generations.pop(identity, None)
+            self.backgrounded.discard(identity)
+        while len(self.backgrounded) > MAX_TRACKED_PROCESS_IDENTITIES:
+            self.backgrounded.pop()
+        while len(self.boosted) > MAX_TRACKED_PROCESS_IDENTITIES:
+            self.boosted.pop(next(iter(self.boosted)))
+
+    def remember_window_identity(self, window_id: str, pid: int, starttime: str) -> None:
+        key = str(window_id)
+        # Re-inserting makes the most recently observed window the newest entry.
+        self.window_identities.pop(key, None)
+        self.window_identities[key] = (int(pid), str(starttime))
+        self._prune_window_state()
+
+    def window_identity(self, window_id: str) -> tuple[int, str] | None:
+        return self.window_identities.get(str(window_id))
+
+    def discard_process_identity(self, pid: int, starttime: str) -> None:
+        identity = (int(pid), str(starttime))
+        self.backgrounded.discard(identity)
+        self.background_generations.pop(identity, None)
+        self.boosted.pop(identity, None)
+        for window_id, window_identity in tuple(self.window_identities.items()):
+            if window_identity == identity:
+                self.window_identities.pop(window_id, None)
+                self.hidden.pop(window_id, None)
+        self._prune_process_state()
 
     def allow_boost(self, pid: int, starttime: str, now: float) -> bool:
         key = (int(pid), str(starttime))
@@ -49,6 +93,7 @@ class EventState:
         # Keep the table bounded when a long-running session opens many apps.
         cutoff = float(now) - 5.0
         self.boosted = {item: stamp for item, stamp in self.boosted.items() if stamp >= cutoff}
+        self._prune_process_state()
         return True
 
     def mark_hidden(self, window_id: str, pid: int, starttime: str, now: float) -> int:
@@ -64,6 +109,7 @@ class EventState:
             "since": float(current["since"]) if same_process else float(now),
             "generation": generation,
         }
+        self._prune_window_state()
         return generation
 
     def hidden_ready(self, window_id: str, generation: int, now: float) -> bool:
@@ -87,6 +133,7 @@ class EventState:
         if key in self.backgrounded:
             return False
         self.backgrounded.add(key)
+        self._prune_process_state()
         return True
 
     def consume_backgrounded(self, pid: int, starttime: str) -> bool:
@@ -110,10 +157,13 @@ class EventState:
             self.background_generations.get(key, 0) + 1,
         )
         self.background_generations[key] = generation
+        self._prune_process_state()
         return generation
 
-    def close(self, window_id: str) -> None:
+    def close(self, window_id: str) -> tuple[int, str] | None:
+        identity = self.window_identities.pop(str(window_id), None)
         self.hidden.pop(str(window_id), None)
+        return identity
 
 
 def process_starttime(pid: int) -> str | None:
@@ -286,11 +336,24 @@ class WnckResourceMonitor:
             pass
         return True
 
-    def process_has_visible_window(self, pid: int) -> bool:
+    def process_has_visible_window(self, pid: int, starttime: str | None = None) -> bool:
+        if starttime is None:
+            starttime = process_starttime(pid)
+        requested = (int(pid), str(starttime)) if starttime else None
         return any(
-            self.pid(window) == int(pid) and self.is_visible(window)
+            self._window_matches_identity(window, requested) and self.is_visible(window)
             for window in self.windows.values()
         )
+
+    def _window_matches_identity(self, window, requested: tuple[int, str] | None) -> bool:
+        pid = self.pid(window)
+        if pid is None or requested is None or pid != requested[0]:
+            return False
+        identity = self.client.state.window_identity(self.window_id(window))
+        # Windows injected by older Wnck versions may not have an identity yet.
+        # Every attached window is recorded by reconcile, so this fallback is
+        # only for the short compatibility interval before that first event.
+        return identity is None or identity == requested
 
     def attach(self, window, launch=False):
         key = self.window_id(window)
@@ -311,17 +374,33 @@ class WnckResourceMonitor:
     def detach(self, window):
         key = self.window_id(window)
         pid = self.pid(window)
-        starttime = process_starttime(pid) if pid is not None else None
+        stored_identity = self.client.state.window_identity(key)
+        probe_pid = pid if pid is not None else (
+            stored_identity[0] if stored_identity is not None else None)
+        current_starttime = process_starttime(probe_pid) if probe_pid is not None else None
         self.cancel_timer(key)
-        self.client.state.close(key)
+        closed_identity = self.client.state.close(key) or stored_identity
+        if closed_identity is None and pid is not None and current_starttime:
+            closed_identity = (pid, str(current_starttime))
         self.windows.pop(key, None)
-        if pid is not None and starttime:
-            if self.client.state.is_backgrounded(pid, starttime):
-                if self.client.state.consume_backgrounded(pid, starttime):
-                    self.client.background(pid, starttime, True)
-            for item in tuple(self.windows.values()):
-                if self.pid(item) == pid and not self.is_visible(item):
-                    self.reconcile(item)
+        if closed_identity:
+            old_pid, old_starttime = closed_identity
+            if current_starttime is None:
+                # The process has exited; there is no safe target to restore.
+                self.client.state.discard_process_identity(old_pid, old_starttime)
+            elif str(current_starttime) != str(old_starttime):
+                # The numeric PID was reused.  Drop only the old identity and
+                # never apply its restore request to the new process.
+                self.client.state.discard_process_identity(old_pid, old_starttime)
+            else:
+                if self.client.state.is_backgrounded(old_pid, old_starttime):
+                    if self.client.state.consume_backgrounded(old_pid, old_starttime):
+                        self.client.background(old_pid, old_starttime, True)
+                for item in tuple(self.windows.values()):
+                    if (self._window_matches_identity(
+                            item, (old_pid, str(old_starttime)))
+                            and not self.is_visible(item)):
+                        self.reconcile(item)
 
     def cancel_timer(self, key: str):
         source = self.timers.pop(key, 0)
@@ -339,6 +418,7 @@ class WnckResourceMonitor:
         if not starttime:
             return
         key = self.window_id(window)
+        self.client.state.remember_window_identity(key, pid, starttime)
         if self.is_visible(window):
             self.client.state.mark_visible(key)
             self.cancel_timer(key)
@@ -365,7 +445,9 @@ class WnckResourceMonitor:
         pid = self.pid(window)
         value = self.client.state.hidden.get(key)
         self.timers.pop(key, None)
-        if (pid is not None and value and not self.process_has_visible_window(pid)
+        if (pid is not None and value
+                and process_starttime(pid) == str(value["starttime"])
+                and not self.process_has_visible_window(pid, str(value["starttime"]))
                 and self.client.state.mark_backgrounded(pid, str(value["starttime"]))):
             self.client.background(pid, str(value["starttime"]), False)
         return False

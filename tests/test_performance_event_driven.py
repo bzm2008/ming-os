@@ -2021,6 +2021,182 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
 
         self.assertEqual([(os.getpid(), "100", True)], client.calls)
 
+    @staticmethod
+    def _window_identity_fixture(module):
+        scheduled = []
+        removed = []
+        source_id = [0]
+
+        class FakeGLib:
+            @staticmethod
+            def timeout_add(delay, callback, *args):
+                source_id[0] += 1
+                scheduled.append((source_id[0], delay, callback, args))
+                return source_id[0]
+
+            @staticmethod
+            def source_remove(source):
+                removed.append(source)
+
+        class FakeClient:
+            def __init__(self):
+                self.state = module.EventState()
+                self.calls = []
+
+            def background(self, pid, starttime, visible):
+                self.calls.append((pid, starttime, visible))
+
+            @staticmethod
+            def boost(_pid, _reason):
+                return None
+
+        screen = types.SimpleNamespace(get_active_workspace=lambda: None)
+        client = FakeClient()
+        monitor = module.WnckResourceMonitor(FakeGLib, screen, client)
+
+        def make_window(xid, pid, minimized):
+            pid_value = [pid]
+            minimized_value = [minimized]
+            return types.SimpleNamespace(
+                pid_value=pid_value,
+                minimized_value=minimized_value,
+                get_xid=lambda: xid,
+                get_pid=lambda: pid_value[0],
+                is_minimized=lambda: minimized_value[0],
+                connect=lambda *_args: 1,
+            )
+
+        return monitor, client, scheduled, removed, make_window
+
+    def test_detach_after_process_exit_reclaims_old_background_identity_without_restore(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_exit_identity_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        pid = 4242
+        identity = (pid, "100")
+        window = make_window(1, pid, True)
+
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.attach(window)
+        client.state.mark_backgrounded(*identity)
+        client.state.next_background_generation(*identity)
+
+        with mock.patch.object(module, "process_starttime", return_value=None):
+            monitor.detach(window)
+
+        self.assertEqual([], client.calls)
+        self.assertFalse(client.state.is_backgrounded(*identity))
+        self.assertNotIn(identity, client.state.background_generations)
+
+    def test_detach_after_pid_reuse_never_restores_new_identity(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_reused_pid_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        pid = 4242
+        old_identity = (pid, "100")
+        new_identity = (pid, "200")
+        window = make_window(1, pid, True)
+
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.attach(window)
+        client.state.backgrounded.update((old_identity, new_identity))
+        client.state.background_generations.update({old_identity: 10, new_identity: 20})
+
+        with mock.patch.object(module, "process_starttime", return_value="200"):
+            monitor.detach(window)
+
+        self.assertEqual([], client.calls)
+        self.assertNotIn(old_identity, client.state.backgrounded)
+        self.assertNotIn(old_identity, client.state.background_generations)
+        self.assertIn(new_identity, client.state.backgrounded)
+        self.assertIn(new_identity, client.state.background_generations)
+
+    def test_same_identity_window_close_restores_and_rearms_remaining_window(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_multiwindow_identity_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        pid = 4242
+        identity = (pid, "100")
+        closing = make_window(1, pid, True)
+        remaining = make_window(2, pid, True)
+
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.attach(closing)
+            monitor.attach(remaining)
+        remaining_key = monitor.window_id(remaining)
+        monitor.cancel_timer(remaining_key)
+        client.state.mark_backgrounded(*identity)
+        client.state.next_background_generation(*identity)
+        closing.pid_value[0] = 0
+
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.detach(closing)
+
+        self.assertEqual([(pid, "100", True)], client.calls)
+        self.assertIn(remaining_key, monitor.windows)
+        self.assertIn(remaining_key, monitor.timers)
+        self.assertEqual(pid, client.state.hidden[remaining_key]["pid"])
+        self.assertEqual("100", client.state.hidden[remaining_key]["starttime"])
+
+    def test_visible_window_matching_requires_same_process_starttime(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_visible_identity_test",
+        )
+        monitor, _client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        pid = 4242
+        visible = make_window(2, pid, False)
+
+        with mock.patch.object(module, "process_starttime", return_value="200"):
+            monitor.attach(visible)
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            self.assertFalse(monitor.process_has_visible_window(pid))
+        with mock.patch.object(module, "process_starttime", return_value="200"):
+            self.assertTrue(monitor.process_has_visible_window(pid))
+
+    def test_window_identity_state_tables_have_explicit_bounds(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_identity_bounds_test",
+        )
+        self.assertTrue(hasattr(module, "MAX_TRACKED_WINDOWS"))
+        self.assertTrue(hasattr(module, "MAX_TRACKED_PROCESS_IDENTITIES"))
+        monitor, client, _scheduled, _removed, _make_window = (
+            self._window_identity_fixture(module)
+        )
+
+        with mock.patch.object(module, "MAX_TRACKED_WINDOWS", 2), \
+                mock.patch.object(module, "MAX_TRACKED_PROCESS_IDENTITIES", 2):
+            for index in range(5):
+                client.state.allow_boost(index, str(index), 10.0)
+                client.state.mark_hidden(str(index), index, str(index), float(index))
+                client.state.mark_backgrounded(index, str(index))
+                client.state.next_background_generation(index, str(index))
+                client.state.remember_window_identity(str(index), index, str(index))
+
+        process_identities = (
+            set(client.state.backgrounded)
+            | set(client.state.background_generations)
+            | set(client.state.boosted)
+        )
+        self.assertLessEqual(len(client.state.hidden), 2)
+        self.assertLessEqual(len(process_identities), 2)
+        self.assertLessEqual(len(client.state.window_identities), 2)
+
     def test_window_close_restores_or_rearms_process_policy(self):
         module = load_module(
             ROOT / "assets" / "ming-window-resource-monitor.py",
