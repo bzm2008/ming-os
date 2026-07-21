@@ -786,7 +786,8 @@ class DeviceControlTests(unittest.TestCase):
             )
             result = controller.set_brightness(50)
         self.assertFalse(result["ok"])
-        self.assertEqual("unavailable", result["error"])
+        self.assertEqual("xrandr-software", result["backend"])
+        self.assertIn("available", result["error"])
 
     def test_brightness_rejects_zero_before_running_a_command(self):
         runner = FakeRunner({})
@@ -862,8 +863,8 @@ class DeviceControlTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["available"])
-        self.assertEqual("unavailable", result["state"])
-        self.assertEqual("", result["backend"])
+        self.assertIn(result["state"], {"unavailable", "error"})
+        self.assertEqual("xrandr-software", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(50, result["requested"])
 

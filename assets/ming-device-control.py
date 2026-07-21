@@ -19,6 +19,7 @@ from pathlib import Path
 
 RFKILL = "/usr/sbin/rfkill"
 BACKLIGHT_ROOT = Path("/sys/class/backlight")
+MING_DISPLAY_CONTROL = "/usr/local/bin/ming-display-control"
 BLUETOOTH_MODULES = {"btusb", "btintel", "btrtl", "btbcm", "ath3k"}
 BLUETOOTH_USB_VENDOR_IDS = {
     "8087",  # Intel
@@ -943,7 +944,8 @@ class NetworkManagerBackend:
 class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
                  backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
-                 settings_path=None, network_backend=None, sysfs_root="/sys"):
+                 settings_path=None, network_backend=None, sysfs_root="/sys",
+                 display_control=MING_DISPLAY_CONTROL):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
@@ -952,6 +954,7 @@ class DeviceController:
         self.settings_path = Path(settings_path) if settings_path else (
             Path.home() / ".config" / "ming-os" / "settings.json")
         self.network_backend = network_backend
+        self.display_control = str(display_control)
         self._network_backend_checked = network_backend is not None
         self._carrier_snapshots = {}
 
@@ -975,6 +978,36 @@ class DeviceController:
 
     def _can_run(self, command):
         return bool(self.executable(command))
+
+    def _software_brightness(self, action, value=None):
+        """Delegate software dimming to the bounded user-session X11 helper."""
+        command_name = Path(self.display_control).name
+        if not self._can_run(command_name):
+            return self._control_result(
+                False, requested=value, error="ming-display-control 不可用",
+                backend="xrandr-software", state="unavailable")
+        command = [self.display_control, action, "--json"]
+        if value is not None and action == "software-set":
+            command.insert(2, str(int(value)))
+        rc, output, error = self._run(command, timeout=8)
+        try:
+            payload = json.loads(output or "")
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            return self._control_result(
+                False, requested=value,
+                error=error or output or "软件亮度助手返回无效结果",
+                backend="xrandr-software", state="unavailable")
+        payload.setdefault("ok", rc == 0)
+        payload.setdefault("available", bool(payload.get("ok")))
+        payload.setdefault("state", "ready" if payload.get("ok") else "error")
+        payload.setdefault("backend", "xrandr-software")
+        payload.setdefault("requested", value)
+        payload.setdefault("value", None)
+        payload.setdefault("error", error if rc != 0 else "")
+        payload["backend"] = "xrandr-software"
+        return payload
 
     def _get_network_backend(self):
         if not self._network_backend_checked:
@@ -1762,12 +1795,14 @@ class DeviceController:
             return False
 
     def brightness_status(self):
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+        if not self._has_backlight():
+            return self._software_brightness("software-status")
+        if not self._can_run("brightnessctl"):
             return {
                 "available": False,
                 "value": None,
-                "error": "unavailable",
-                "backend": "",
+                "error": "brightnessctl 不可用，无法读取物理背光。",
+                "backend": "brightnessctl",
                 "state": "unavailable",
             }
         rc, output, error = self._run(["brightnessctl", "-m"])
@@ -1798,9 +1833,13 @@ class DeviceController:
                 requested = None
             return self._control_result(
                 False, requested=requested, error=str(exc), state="invalid")
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+        if not self._has_backlight():
+            return self._software_brightness("software-set", value=value)
+        if not self._can_run("brightnessctl"):
             return self._control_result(
-                False, requested=value, error="unavailable", state="unavailable")
+                False, requested=value,
+                error="brightnessctl 不可用，无法设置物理背光。",
+                backend="brightnessctl", state="unavailable")
         rc, output, error = self._run(["brightnessctl", "set", "%d%%" % value])
         if rc != 0:
             return self._control_result(
@@ -1818,6 +1857,12 @@ class DeviceController:
             state=("ready" if status["available"] and status["value"] is not None
                    else "error"),
         )
+
+    def reapply_brightness(self):
+        """Restore only saved software brightness after an X11 session starts."""
+        if self._has_backlight():
+            return self.brightness_status()
+        return self._software_brightness("software-reapply")
 
     @staticmethod
     def _wireless_pci(output):
@@ -2713,6 +2758,8 @@ def build_parser():
     volume.add_argument("--sink", dest="sink_id")
     brightness = subparsers.add_parser("set-brightness")
     brightness.add_argument("value", type=int)
+    reapply_brightness = subparsers.add_parser("reapply-brightness")
+    reapply_brightness.add_argument("--json", action="store_true")
     return parser
 
 
@@ -2769,6 +2816,8 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
     elif args.action == "set-volume":
         result = (controller.set_volume(args.value, sink_id=args.sink_id)
                   if args.sink_id else controller.set_volume(args.value))
+    elif args.action == "reapply-brightness":
+        result = controller.reapply_brightness()
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
