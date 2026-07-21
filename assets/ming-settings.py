@@ -2019,6 +2019,8 @@ class MingSettings(Adw.ApplicationWindow):
         dlg = Adw.MessageDialog(
             transient_for=self, heading="连接到 %s" % ssid,
             body="将绑定到 BSSID %s（接口 %s）。如需密码，会仅通过标准输入安全传给 NetworkManager，绝不会写入命令参数、日志或诊断数据。" % (bssid, ifname))
+        dlg.add_css_class("ming-feedback-dialog")
+        dlg.add_css_class("feedback-info")
         entry = Gtk.PasswordEntry(show_peek_icon=True)
         entry.set_placeholder_text("开放网络可留空")
         dlg.set_extra_child(entry)

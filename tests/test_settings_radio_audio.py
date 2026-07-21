@@ -180,6 +180,62 @@ class SettingsRadioAudioContracts(unittest.TestCase):
 
 
 class SettingsAsyncBehaviorTests(unittest.TestCase):
+    def test_wifi_connect_dialog_uses_opaque_feedback_style(self):
+        class FakeDialog:
+            instance = None
+
+            def __init__(self, **_kwargs):
+                type(self).instance = self
+                self.css_classes = []
+                self.responses = []
+                self.presented = False
+
+            def set_extra_child(self, _child):
+                pass
+
+            def add_response(self, response_id, label):
+                self.responses.append((response_id, label))
+
+            def set_response_appearance(self, _response_id, _appearance):
+                pass
+
+            def add_css_class(self, css_class):
+                self.css_classes.append(css_class)
+
+            def connect(self, _signal, _callback):
+                pass
+
+            def present(self):
+                self.presented = True
+
+        class FakePasswordEntry:
+            def __init__(self, **_kwargs):
+                pass
+
+            def set_placeholder_text(self, _text):
+                pass
+
+        connect = executable_function("on_wifi_connect", {
+            "Adw": types.SimpleNamespace(
+                MessageDialog=FakeDialog,
+                ResponseAppearance=types.SimpleNamespace(SUGGESTED="suggested"),
+            ),
+            "Gtk": types.SimpleNamespace(PasswordEntry=FakePasswordEntry),
+        }, "MingSettings")
+
+        connect(types.SimpleNamespace(), Recorder(), {
+            "display": "Ming Wi-Fi",
+            "bssid": "AA:BB:CC:DD:EE:FF",
+            "network_id": "ming-net-" + "a" * 32,
+            "ifname": "wlan0",
+        })
+
+        self.assertTrue(FakeDialog.instance.presented)
+        self.assertEqual(
+            ["ming-feedback-dialog", "feedback-info"],
+            FakeDialog.instance.css_classes,
+        )
+
     def test_concurrent_device_control_load_waits_for_one_completed_module(self):
         entered = threading.Event()
         release = threading.Event()
