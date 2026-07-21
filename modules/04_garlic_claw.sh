@@ -253,8 +253,16 @@ def repair_ethernet(run=subprocess.run):
             not isinstance(status.get("ok"), bool) or
             not isinstance(status.get("devices"), list)):
         return repair_error("invalid_status", "有线网络状态结构无效。")
+    if status["ok"] is not True:
+        reason_text = status.get("reason_text")
+        error = status.get("error")
+        return repair_error(
+            "status_not_ok",
+            reason_text if isinstance(reason_text, str) and reason_text else "有线网络状态不可用。",
+            error if isinstance(error, str) else "")
 
     targets = []
+    blocked = []
     for device in status["devices"]:
         if not isinstance(device, dict):
             return repair_error("invalid_status", "有线网络设备记录结构无效。")
@@ -263,10 +271,18 @@ def repair_ethernet(run=subprocess.run):
             return repair_error("invalid_interface", "有线网络接口名称无效。")
         if not isinstance(device.get("state"), str):
             return repair_error("invalid_status", "有线网络设备状态无效。")
-        if device["state"] != "connected":
+        if device["state"] == "disconnected":
             targets.append(ifname)
+        elif device["state"] != "connected":
+            blocked.append("%s=%s" % (ifname, device["state"]))
 
+    if blocked:
+        return repair_error(
+            "interface_not_repairable", "有线网络接口状态不可安全修复。",
+            ", ".join(blocked))
     if not targets:
+        if status["devices"]:
+            return repair_error("already_connected", "有线网络已经连接，无需修复。")
         return repair_error("interface_missing", "没有明确的待修复有线网络接口。")
     if len(targets) != 1:
         return repair_error("ambiguous_interface", "检测到多个待修复接口，已拒绝自动选择。")
@@ -288,7 +304,7 @@ def repair_ethernet(run=subprocess.run):
     if not isinstance(repair_result, dict) or not isinstance(repair_result.get("ok"), bool):
         return repair_error("invalid_repair_result", "有线网络修复结果结构无效。")
     print(json.dumps(repair_result, ensure_ascii=False, sort_keys=True))
-    return result.returncode
+    return 0 if result.returncode == 0 and repair_result["ok"] is True else (result.returncode or 2)
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--repair-ethernet"]:
