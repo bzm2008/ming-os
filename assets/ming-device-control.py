@@ -2696,6 +2696,7 @@ def build_parser():
     ethernet_status.add_argument("--json", action="store_true")
     ethernet_repair = subparsers.add_parser("ethernet-repair")
     ethernet_repair.add_argument("--ifname", required=True)
+    ethernet_repair.add_argument("--json", action="store_true")
     migrate_profiles = subparsers.add_parser("migrate-network-profiles")
     migrate_profiles.add_argument("--directory", default="/etc/NetworkManager/system-connections")
     migrate_profiles.add_argument("--json", action="store_true")
