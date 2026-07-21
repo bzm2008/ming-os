@@ -34,6 +34,9 @@ DESKTOP_PROXY_MANIFEST = pathlib.Path(
     "/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 DESKTOP_PROXY_SCHEMA_VERSION = 1
 DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+DESKTOP_PROXY_RECEIPT = pathlib.Path(
+    "/var/lib/ming-os/desktop-proxies/manifest-v1.receipt.json")
+DESKTOP_PROXY_RECEIPT_SCHEMA_VERSION = 1
 MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,127}$")
 OPT_APP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$")
@@ -408,6 +411,51 @@ def _read_proxy_manifest(path):
     return payload
 
 
+def _effective_proxy_receipt_path(
+        manifest_path, proxy_dir=DESKTOP_PROXY_DIR, receipt_path=None):
+    manifest = pathlib.Path(manifest_path)
+    if receipt_path is not None:
+        receipt = pathlib.Path(receipt_path)
+    elif manifest == DESKTOP_PROXY_MANIFEST and pathlib.Path(proxy_dir) == DESKTOP_PROXY_DIR:
+        receipt = DESKTOP_PROXY_RECEIPT
+    else:
+        receipt = manifest.with_name(manifest.name + ".receipt.json")
+    if (
+            not receipt.is_absolute()
+            or receipt.parent != manifest.parent
+            or any(part in {".", ".."} for part in receipt.parts)):
+        raise ValueError("desktop proxy completion receipt path is unsafe")
+    return receipt
+
+
+def _verify_proxy_receipt(
+        manifest_path, proxy_dir=DESKTOP_PROXY_DIR, receipt_path=None):
+    manifest = pathlib.Path(manifest_path)
+    receipt = _effective_proxy_receipt_path(manifest, proxy_dir, receipt_path)
+    if (
+            _protected_path_metadata(receipt) is None
+            or _protected_path_metadata(receipt.parent, directory=True) is None):
+        raise ValueError("desktop proxy completion receipt is unsafe")
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ValueError("desktop proxy completion receipt is invalid") from error
+    if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != DESKTOP_PROXY_RECEIPT_SCHEMA_VERSION
+            or payload.get("generation") != DESKTOP_PROXY_GENERATION
+            or not isinstance(payload.get("manifest_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", payload["manifest_sha256"])):
+        raise ValueError("desktop proxy completion receipt schema is invalid")
+    try:
+        manifest_sha256 = _sha256_path(manifest)
+    except OSError as error:
+        raise ValueError("desktop proxy manifest cannot be hashed") from error
+    if payload["manifest_sha256"] != manifest_sha256:
+        raise ValueError("desktop proxy batch is incomplete")
+    return payload
+
+
 def _proxy_marker_matches(proxy, expected_argv):
     try:
         parser = configparser.ConfigParser(interpolation=None, strict=False)
@@ -433,7 +481,7 @@ def _proxy_marker_matches(proxy, expected_argv):
 
 def verify_desktop_proxy(
         path, manifest_path=DESKTOP_PROXY_MANIFEST, opt_apps_root=OPT_APPS_ROOT,
-        proxy_dir=DESKTOP_PROXY_DIR, command_runner=None):
+        proxy_dir=DESKTOP_PROXY_DIR, command_runner=None, receipt_path=None):
     """Return a freshly parsed source only for an intact manifest-backed proxy."""
     proxy, directory = _canonical_proxy_path(path, proxy_dir)
     if (
@@ -441,6 +489,7 @@ def verify_desktop_proxy(
             or _protected_path_metadata(proxy) is None):
         raise ValueError("desktop proxy is not protected")
     payload = _read_proxy_manifest(manifest_path)
+    _verify_proxy_receipt(manifest_path, proxy_dir, receipt_path)
     matches = [
         entry for entry in payload["entries"]
         if isinstance(entry, dict) and entry.get("proxy_path") == str(proxy)

@@ -52,6 +52,9 @@ DESKTOP_PROXY_MANIFEST = pathlib.Path(
     "/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 DESKTOP_PROXY_SCHEMA_VERSION = 1
 DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+DESKTOP_PROXY_RECEIPT = pathlib.Path(
+    "/var/lib/ming-os/desktop-proxies/manifest-v1.receipt.json")
+DESKTOP_PROXY_RECEIPT_SCHEMA_VERSION = 1
 DESKTOP_PROXY_LOCK = pathlib.Path("/run/lock/ming-desktop-proxies.lock")
 DESKTOP_PROXY_LOCK_TIMEOUT = 10
 DESKTOP_PROXY_STAGING_DIR = pathlib.Path(
@@ -267,7 +270,7 @@ class PackageInstaller:
             self, runner=None, log_path=None, uid_getter=None, logger=None,
             desktop_candidate_verifier=None, opt_apps_root=None, proxy_dir=None,
             proxy_manifest=None, proxy_lock_factory=None, proxy_lock_path=None,
-            proxy_staging_dir=None):
+            proxy_staging_dir=None, proxy_receipt=None):
         self.runner = runner or _run
         self.log_path = pathlib.Path(log_path or DEFAULT_LOG_PATH)
         self.uid_getter = uid_getter or getattr(os, "geteuid", lambda: 1)
@@ -287,6 +290,8 @@ class PackageInstaller:
         self.proxy_lock_timeout = DESKTOP_PROXY_LOCK_TIMEOUT
         self.proxy_staging_dir = (
             pathlib.Path(proxy_staging_dir) if proxy_staging_dir is not None else None)
+        self.proxy_receipt = (
+            pathlib.Path(proxy_receipt) if proxy_receipt is not None else None)
         desktop_ids = getattr(COMMON, "current_desktop_ids", None)
         try:
             self.current_desktops = set(desktop_ids()) if callable(desktop_ids) else {"xfce"}
@@ -764,6 +769,91 @@ class PackageInstaller:
                 raise ValueError("desktop proxy manifest entry is unsafe")
         return payload
 
+    def _effective_proxy_receipt_path(self):
+        if self.proxy_receipt is not None:
+            path = pathlib.Path(self.proxy_receipt)
+        elif (
+                self.proxy_manifest == DESKTOP_PROXY_MANIFEST
+                and self.proxy_dir == DESKTOP_PROXY_DIR):
+            path = DESKTOP_PROXY_RECEIPT
+        else:
+            path = self.proxy_manifest.with_name(
+                self.proxy_manifest.name + ".receipt.json")
+        if (
+                not path.is_absolute()
+                or path.parent != self.proxy_manifest.parent
+                or any(part in {".", ".."} for part in path.parts)):
+            raise OSError("desktop proxy completion receipt path is unsafe")
+        return path
+
+    def _snapshot_proxy_receipt(self):
+        path = self._effective_proxy_receipt_path()
+        if not (path.exists() or path.is_symlink()):
+            return None, 0o644
+        metadata = self._protected_metadata(path)
+        if metadata is None:
+            raise OSError("desktop proxy completion receipt is unsafe")
+        return path.read_bytes(), stat.S_IMODE(metadata.st_mode) or 0o644
+
+    def _invalidate_proxy_receipt(self):
+        path = self._effective_proxy_receipt_path()
+        if not (path.exists() or path.is_symlink()):
+            return []
+        if self._protected_metadata(path) is None:
+            return ["completion receipt is unsafe and cannot be removed"]
+        try:
+            os.unlink(path)
+            if path.exists() or path.is_symlink():
+                raise OSError("completion receipt remains")
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            return ["completion receipt invalidation failed: %s" % error]
+        return []
+
+    def _receipt_matches_manifest(self):
+        receipt = self._effective_proxy_receipt_path()
+        if (
+                self._protected_metadata(receipt) is None
+                or self._protected_metadata(receipt.parent, directory=True) is None
+                or self._protected_metadata(self.proxy_manifest) is None):
+            return False
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            return (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == DESKTOP_PROXY_RECEIPT_SCHEMA_VERSION
+                and payload.get("generation") == DESKTOP_PROXY_GENERATION
+                and re.fullmatch(r"[0-9a-f]{64}", payload.get("manifest_sha256", ""))
+                and payload["manifest_sha256"] == self._sha256_file(self.proxy_manifest)
+            )
+        except (OSError, UnicodeError, TypeError, ValueError):
+            return False
+
+    def _write_proxy_receipt(self):
+        manifest_sha256 = self._sha256_file(self.proxy_manifest)
+        payload = {
+            "schema_version": DESKTOP_PROXY_RECEIPT_SCHEMA_VERSION,
+            "generation": DESKTOP_PROXY_GENERATION,
+            "manifest_sha256": manifest_sha256,
+        }
+        content = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        path = self._effective_proxy_receipt_path()
+        self._atomic_write(path, content, mode=0o644)
+        if not self._receipt_matches_manifest():
+            raise OSError("desktop proxy completion receipt verification failed")
+
+    def _restore_proxy_receipt(self, receipt_before, receipt_mode):
+        if receipt_before is None:
+            return self._invalidate_proxy_receipt()
+        path = self._effective_proxy_receipt_path()
+        try:
+            type(self)._atomic_write(path, receipt_before, receipt_mode or 0o644)
+            if not self._receipt_matches_manifest():
+                return ["completion receipt rollback verification failed"]
+        except OSError as error:
+            return ["completion receipt rollback failed: %s" % error]
+        return []
+
     def _opt_launcher_record(self, path, package_paths, package):
         source = pathlib.Path(path)
         record = {
@@ -830,6 +920,22 @@ class PackageInstaller:
         except OSError as error:
             raise OSError("desktop proxy directory cannot be enumerated") from error
 
+    def _remove_orphan_proxy_symlinks(self):
+        errors = []
+        for path in self._reserved_proxy_files():
+            try:
+                metadata = os.lstat(path)
+                if not stat.S_ISLNK(metadata.st_mode):
+                    continue
+                os.unlink(path)
+                if path.exists() or path.is_symlink():
+                    raise OSError("orphan proxy symlink remains")
+                self._fsync_directory(self.proxy_dir)
+            except OSError as error:
+                errors.append("orphan proxy symlink cleanup failed for %s: %s" % (
+                    path, error))
+        return errors
+
     def _snapshot_proxy_state(self):
         snapshot = {}
         for path in self._reserved_proxy_files():
@@ -849,7 +955,28 @@ class PackageInstaller:
             path = DESKTOP_PROXY_LOCK
         else:
             path = self.proxy_manifest.parent / ".desktop-proxies.lock"
-        if str(path) == str(PACKAGE_MANAGER_LOCK):
+        package_lock = pathlib.Path(PACKAGE_MANAGER_LOCK)
+        try:
+            canonical_path = pathlib.Path(path).resolve(strict=False)
+            canonical_package_lock = package_lock.resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            canonical_path = pathlib.Path(os.path.abspath(os.path.normpath(str(path))))
+            canonical_package_lock = pathlib.Path(
+                os.path.abspath(os.path.normpath(str(package_lock))))
+        if os.path.normcase(str(canonical_path)) == os.path.normcase(
+                str(canonical_package_lock)):
+            raise OSError("desktop proxy lock must be separate from package manager lock")
+        try:
+            same_inode = (
+                os.path.exists(path)
+                and os.path.exists(package_lock)
+                and os.path.samefile(path, package_lock))
+        except (OSError, ValueError):
+            # A failed samefile probe is safe when canonical paths were already
+            # compared; inaccessible aliases are rejected by the lock's own
+            # protected-path checks when opened.
+            same_inode = False
+        if same_inode:
             raise OSError("desktop proxy lock must be separate from package manager lock")
         return path
 
@@ -1046,9 +1173,10 @@ class PackageInstaller:
 
     def _rollback_proxy_transaction(
             self, snapshot, manifest_before, manifest_mode, referenced_paths,
-            quarantined):
+            quarantined, receipt_before=None, receipt_mode=0o644):
         del referenced_paths, quarantined
         errors = []
+        errors.extend(self._invalidate_proxy_receipt())
         try:
             if manifest_before is None:
                 if self.proxy_manifest.exists() or self.proxy_manifest.is_symlink():
@@ -1101,6 +1229,13 @@ class PackageInstaller:
                             "proxy rollback verification failed for %s" % path)
         except OSError as error:
             errors.append("proxy rollback verification failed: %s" % error)
+        if errors:
+            errors.extend(self._invalidate_proxy_receipt())
+            return errors
+        receipt_errors = self._restore_proxy_receipt(receipt_before, receipt_mode)
+        errors.extend(receipt_errors)
+        if receipt_errors:
+            errors.extend(self._invalidate_proxy_receipt())
         return errors
 
     def _proxy_transaction_failure(
@@ -1136,9 +1271,19 @@ class PackageInstaller:
             return [], ""
         records = []
         transaction_dir = None
+        receipt_before = None
+        receipt_mode = 0o644
         try:
             existing = self._read_proxy_manifest()
             self._ensure_proxy_dir()
+            if not source_paths and not manifest_exists:
+                orphan_errors = self._remove_orphan_proxy_symlinks()
+                if orphan_errors:
+                    message = "orphan proxy symlink cleanup failed: %s" % (
+                        "; ".join(orphan_errors))
+                    self._log("desktop proxy convergence failed for %s: %s" % (
+                        package, message))
+                    return [], message
             self._ensure_manifest_dir()
             manifest_before = None
             manifest_mode = 0o644
@@ -1146,6 +1291,7 @@ class PackageInstaller:
                 manifest_metadata = os.lstat(self.proxy_manifest)
                 manifest_before = self.proxy_manifest.read_bytes()
                 manifest_mode = stat.S_IMODE(manifest_metadata.st_mode) or 0o644
+            receipt_before, receipt_mode = self._snapshot_proxy_receipt()
             proxy_snapshot = self._snapshot_proxy_state()
         except (OSError, ValueError) as error:
             return [], "无法读取图形启动器代理清单：%s" % error
@@ -1193,6 +1339,10 @@ class PackageInstaller:
                         pathlib.Path(record["proxy_path"]),
                         entry,
                     ))
+            receipt_invalidation_errors = self._invalidate_proxy_receipt()
+            if receipt_invalidation_errors:
+                raise OSError("completion receipt invalidation failed: %s" % (
+                    "; ".join(receipt_invalidation_errors)))
             payload = {
                 "schema_version": DESKTOP_PROXY_SCHEMA_VERSION,
                 "generation": DESKTOP_PROXY_GENERATION,
@@ -1218,9 +1368,10 @@ class PackageInstaller:
                         str(candidate) in referenced_paths,
                     ))
             cleanup_errors = self._cleanup_proxy_transaction_dir(transaction_dir)
-            transaction_dir = None
             if cleanup_errors:
                 raise OSError("cleanup: %s" % "; ".join(cleanup_errors))
+            transaction_dir = None
+            self._write_proxy_receipt()
         except (OSError, TypeError, ValueError) as error:
             rollback_errors = self._rollback_proxy_transaction(
                 proxy_snapshot,
@@ -1228,7 +1379,11 @@ class PackageInstaller:
                 manifest_mode,
                 referenced_paths,
                 quarantined,
+                receipt_before,
+                receipt_mode,
             )
+            if rollback_errors:
+                rollback_errors.extend(self._invalidate_proxy_receipt())
             cleanup_errors = self._cleanup_proxy_transaction_dir(transaction_dir)
             transaction_dir = None
             return self._proxy_transaction_failure(

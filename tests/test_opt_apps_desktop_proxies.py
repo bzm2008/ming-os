@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import multiprocessing
 import os
 import pathlib
 import shlex
@@ -112,6 +113,36 @@ class MultiPackageRunner:
         return 1, "", "unexpected command: %r" % (command,)
 
 
+class MultiLauncherRunner(Runner):
+    def __init__(self, package, sources):
+        sources = tuple(str(source) for source in sources)
+        super().__init__(package, sources[0])
+        self.sources = sources
+
+    def __call__(self, command, timeout=20):
+        command = tuple(command)
+        if not command or command[0] != "dpkg-query":
+            command = ("dpkg-query",) + command
+        if command == ("dpkg-query", "-L", self.package):
+            return 0, "\n".join(self.sources) + "\n", ""
+        if len(command) == 4 and command[:3] == ("dpkg-query", "-S", "--"):
+            source = command[3]
+            if source in self.sources:
+                return 0, "%s: %s\n" % (self.package, source), ""
+        return super().__call__(command, timeout=timeout)
+
+
+def _lock_child(installer_path, lock_path, result_queue):
+    module = load_module(installer_path, "ming_package_installer_lock_child")
+    try:
+        with module._DesktopProxyTransactionLock(lock_path, 0.25):
+            result_queue.put("acquired")
+    except module.DesktopProxyLockTimeout:
+        result_queue.put("timeout")
+    except Exception as error:  # pragma: no cover - diagnostic for CI failures
+        result_queue.put("error:%s" % error)
+
+
 def make_opt_app(root, package="com.example.app", name="example.desktop"):
     opt_root = pathlib.Path(root) / "opt" / "apps"
     source_dir = opt_root / package / "entries" / "applications"
@@ -177,6 +208,49 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             self.assertEqual(manifest_before, manifest.read_bytes())
             self.assertEqual(proxy_before, proxy.read_bytes())
 
+    def test_proxy_lock_rejects_normalized_and_same_inode_package_lock_aliases(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_lock_alias")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            locks = root / "locks"
+            locks.mkdir()
+            package_lock = locks / "ming-package-manager.lock"
+            package_lock.write_bytes(b"lock")
+            service = installer.PackageInstaller(uid_getter=lambda: 0)
+            with mock.patch.object(installer, "PACKAGE_MANAGER_LOCK", str(package_lock)):
+                service.proxy_lock_path = locks / "nested" / ".." / package_lock.name
+                with self.assertRaises(OSError):
+                    service._effective_proxy_lock_path()
+
+                hardlink = locks / "same-inode.lock"
+                try:
+                    hardlink.hardlink_to(package_lock)
+                except (OSError, NotImplementedError):
+                    self.skipTest("host cannot create hard links")
+                service.proxy_lock_path = hardlink
+                with self.assertRaises(OSError):
+                    service._effective_proxy_lock_path()
+
+    @unittest.skipIf(os.name == "nt", "POSIX flock required")
+    def test_real_proxy_lock_excludes_a_second_process(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_lock_process")
+        if installer.fcntl is None:
+            self.skipTest("fcntl is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = pathlib.Path(directory) / "desktop-proxies.lock"
+            context = multiprocessing.get_context("spawn")
+            result_queue = context.Queue()
+            first = installer._DesktopProxyTransactionLock(lock_path, 1)
+            with first:
+                worker = context.Process(
+                    target=_lock_child,
+                    args=(str(INSTALLER_PATH), str(lock_path), result_queue),
+                )
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual("timeout", result_queue.get(timeout=2))
+
     def test_proxy_publication_uses_external_staging_after_manifest_commit(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_order")
         with tempfile.TemporaryDirectory() as directory:
@@ -210,6 +284,38 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             self.assertEqual(1, len(observed))
             self.assertTrue(pathlib.Path(launchers[0]["proxy_path"]).is_file())
             self.assertEqual([], list(proxy_dir.glob(".*.desktop.*")))
+
+    def test_proxy_publication_hides_the_previous_completion_receipt(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_receipt_order")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            opt_root, source, _executable = make_opt_app(root)
+            service = installer.PackageInstaller(
+                runner=Runner("com.example.app", source), uid_getter=lambda: 0)
+            service.opt_apps_root = opt_root
+            service.proxy_dir = root / "proxies"
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+            first, first_error = service._package_launchers("com.example.app")
+            self.assertEqual("", first_error)
+            self.assertTrue(first[0]["ok"])
+            receipt = service.proxy_manifest.with_name(
+                service.proxy_manifest.name + ".receipt.json")
+            self.assertTrue(receipt.exists())
+            native_publish = service._publish_staged_proxy
+            observed = []
+
+            def publish(staged, destination):
+                observed.append(receipt.exists() or receipt.is_symlink())
+                return native_publish(staged, destination)
+
+            service._publish_staged_proxy = publish
+            second, second_error = service._package_launchers("com.example.app")
+
+            self.assertEqual("", second_error)
+            self.assertTrue(second[0]["ok"])
+            self.assertEqual([False], observed)
+            self.assertTrue(receipt.exists())
 
     def test_crash_before_manifest_commit_never_publishes_a_visible_proxy(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_precommit_crash")
@@ -380,6 +486,97 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             self.assertTrue(recovered[0]["ok"])
             self.assertTrue(proxy.is_file())
 
+    def test_partial_multi_launcher_publication_is_not_launchable(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_batch_crash")
+        launch = load_module(LAUNCH_PATH, "ming_launch_proxy_batch_crash")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            opt_root, source_a, _executable = make_opt_app(root)
+            source_b = source_a.with_name("second.desktop")
+            source_b.write_text(
+                source_a.read_text(encoding="utf-8").replace("Example App", "Second App"),
+                encoding="utf-8",
+            )
+            source_b.chmod(0o644)
+            runner = MultiLauncherRunner("com.example.app", (source_a, source_b))
+            service = installer.PackageInstaller(runner=runner, uid_getter=lambda: 0)
+            service.opt_apps_root = opt_root
+            service.proxy_dir = root / "proxies"
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+            native_publish = service._publish_staged_proxy
+            calls = []
+
+            def crash_on_second_publish(staged, destination):
+                calls.append(pathlib.Path(destination))
+                if len(calls) == 2:
+                    raise SystemExit("simulated power loss during batch publication")
+                return native_publish(staged, destination)
+
+            service._publish_staged_proxy = crash_on_second_publish
+            with self.assertRaises(SystemExit):
+                service._package_launchers("com.example.app")
+
+            self.assertEqual(2, len(calls))
+            first_proxy = service._opt_proxy_path(source_a)
+            second_proxy = service._opt_proxy_path(source_b)
+            self.assertTrue(first_proxy.exists())
+            self.assertFalse(second_proxy.exists())
+            receipt = service.proxy_manifest.with_name(
+                service.proxy_manifest.name + ".receipt.json")
+            self.assertFalse(receipt.exists())
+            for proxy in (first_proxy, second_proxy):
+                with self.assertRaises(ValueError):
+                    launch.verify_desktop_proxy(
+                        proxy,
+                        manifest_path=service.proxy_manifest,
+                        opt_apps_root=opt_root,
+                        proxy_dir=service.proxy_dir,
+                        command_runner=runner,
+                    )
+
+    def test_failed_rollback_after_publication_leaves_disk_state_unlaunchable(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_failed_rollback")
+        launch = load_module(LAUNCH_PATH, "ming_launch_proxy_failed_rollback")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            opt_root, source, _executable = make_opt_app(root)
+            runner = Runner("com.example.app", source)
+            service = installer.PackageInstaller(runner=runner, uid_getter=lambda: 0)
+            service.opt_apps_root = opt_root
+            service.proxy_dir = root / "proxies"
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+            initial, initial_error = service._package_launchers("com.example.app")
+            self.assertEqual("", initial_error)
+            proxy = pathlib.Path(initial[0]["proxy_path"])
+            source.write_text(source.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+            cleanup_calls = []
+
+            def fail_cleanup(transaction_dir):
+                cleanup_calls.append(transaction_dir)
+                return ["simulated cleanup failure"]
+
+            service._cleanup_proxy_transaction_dir = fail_cleanup
+            service._rollback_proxy_transaction = lambda *_args, **_kwargs: [
+                "simulated rollback failure"]
+            launchers, error = service._package_launchers("com.example.app")
+
+            self.assertTrue(error)
+            self.assertFalse(launchers[0]["ok"])
+            self.assertGreaterEqual(len(cleanup_calls), 2)
+            receipt = service.proxy_manifest.with_name(
+                service.proxy_manifest.name + ".receipt.json")
+            self.assertFalse(receipt.exists())
+            with self.assertRaises(ValueError):
+                launch.verify_desktop_proxy(
+                    proxy,
+                    manifest_path=service.proxy_manifest,
+                    opt_apps_root=opt_root,
+                    proxy_dir=service.proxy_dir,
+                    command_runner=runner,
+                )
+
     def test_rollback_failure_is_reported_and_logged(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_rollback_error")
         with tempfile.TemporaryDirectory() as directory:
@@ -433,7 +630,7 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             self.assertFalse(launchers[0]["ok"])
             self.assertTrue(orphan.exists())
 
-    def test_orphan_symlink_without_manifest_fails_closed(self):
+    def test_orphan_symlink_without_manifest_is_unlinked_without_following(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_orphan_symlink")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -455,8 +652,43 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             records, error = service._sync_desktop_proxies("com.example.app", set())
 
             self.assertEqual([], records)
+            self.assertFalse(orphan.exists() or orphan.is_symlink())
+            self.assertTrue(target.exists())
+            self.assertEqual("", error)
+
+    def test_orphan_symlink_unlink_failure_is_reported(self):
+        installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_orphan_link_error")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            proxy_dir = root / "proxies"
+            proxy_dir.mkdir(parents=True)
+            target = root / "target.desktop"
+            target.write_text("[Desktop Entry]\nType=Application\nName=Target\n", encoding="utf-8")
+            orphan = proxy_dir / ("ming-opt-%s.desktop" % ("a" * 64))
+            try:
+                orphan.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("host cannot create symlinks")
+            service = installer.PackageInstaller(uid_getter=lambda: 0)
+            service.opt_apps_root = root / "opt" / "apps"
+            service.proxy_dir = proxy_dir
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+            native_unlink = os.unlink
+
+            def fail_orphan_unlink(path, *args, **kwargs):
+                if pathlib.Path(path) == orphan:
+                    raise OSError("simulated orphan unlink failure")
+                return native_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(os, "unlink", side_effect=fail_orphan_unlink):
+                records, error = service._sync_desktop_proxies("com.example.app", set())
+
+            self.assertEqual([], records)
             self.assertTrue(error)
+            self.assertIn("symlink", error.casefold())
             self.assertTrue(orphan.is_symlink())
+            self.assertTrue(target.exists())
 
     def test_installer_and_launcher_reject_a_symlinked_opt_ancestor(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_opt_ancestor_link")
