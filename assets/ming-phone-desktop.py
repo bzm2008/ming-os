@@ -2254,6 +2254,7 @@ class StatusWidget(Gtk.Box):
         self.widget_box = box
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.header = header
         self.time_label = Gtk.Label()
         self.time_label.get_style_context().add_class("clock-time")
         self.time_label.set_halign(Gtk.Align.START)
@@ -2375,6 +2376,14 @@ class StatusWidget(Gtk.Box):
 
     def apply_collapsed_state(self, animate=False):
         timing = COMMON.shell_animation_timing(load_appearance())
+        widget_style = self.get_style_context()
+        header_style = self.header.get_style_context()
+        if self.collapsed:
+            widget_style.add_class("status-widget-compact")
+            header_style.add_class("status-compact-pill")
+        else:
+            widget_style.remove_class("status-widget-compact")
+            header_style.remove_class("status-compact-pill")
         self.status_toggle_label.set_text("展开 ▾" if self.collapsed else "收起 ▴")
         self.status_toggle_button.set_tooltip_text(
             "展开快捷组件" if self.collapsed else "收起快捷组件")

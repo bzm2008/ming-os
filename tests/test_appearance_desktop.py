@@ -400,6 +400,18 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("box.pack_start(header, False, False, 0)", status)
         self.assertNotIn("self.compact_button = Gtk.Button()", status)
 
+    def test_compact_status_widget_switches_card_and_header_styles_with_state(self):
+        """The shared header must remain visible inside the compact height."""
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        status = phone[phone.index("class StatusWidget"):
+                       phone.index("class WallpaperCanvas", phone.index("class StatusWidget"))]
+        apply_state = status[status.index("    def apply_collapsed_state"):]
+        self.assertIn("self.header = header", status)
+        self.assertIn('add_class("status-widget-compact")', apply_state)
+        self.assertIn('remove_class("status-widget-compact")', apply_state)
+        self.assertIn('add_class("status-compact-pill")', apply_state)
+        self.assertIn('remove_class("status-compact-pill")', apply_state)
+
     def test_build_gate_rejects_duplicate_shell_runtimes(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         for process in ("xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop", "xfce4-power-manager"):
