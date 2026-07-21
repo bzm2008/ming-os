@@ -412,6 +412,18 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('add_class("status-compact-pill")', apply_state)
         self.assertIn('remove_class("status-compact-pill")', apply_state)
 
+    def test_compact_status_header_request_fits_inside_compact_widget_height(self):
+        """A compact header must not request more height than its fixed card."""
+        phone = (ROOT / "assets/ming-phone-desktop.py").read_text(encoding="utf-8")
+        compact_height = int(re.search(
+            r"STATUS_WIDGET_COMPACT_HEIGHT = (\d+)", phone).group(1))
+        compact_rule = re.search(
+            r"\.status-compact-pill \{([^}]*)\}", phone, re.DOTALL).group(1)
+        min_height = int(re.search(r"min-height: (\d+)px", compact_rule).group(1))
+        vertical_padding = int(re.search(
+            r"padding: (\d+)px \d+px", compact_rule).group(1))
+        self.assertLessEqual(min_height + vertical_padding * 2 + 2, compact_height)
+
     def test_build_gate_rejects_duplicate_shell_runtimes(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         for process in ("xfce4-panel", "xfce4-appfinder", "whiskermenu", "volumeicon", "nm-applet", "xfdesktop", "xfce4-power-manager"):

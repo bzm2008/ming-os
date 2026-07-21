@@ -385,7 +385,7 @@ window.ming-desktop { background-color: %(base)s; font-family: "%(font)s"; }
 .clock-widget { padding: 9px 13px; }
 .status-widget { padding: 12px 14px; }
 .status-widget-compact { padding: 0; background: transparent; border: 0; box-shadow: none; }
-.status-compact-pill { min-height: 54px; border-radius: 8px; padding: 8px 14px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
+.status-compact-pill { min-height: 38px; border-radius: 8px; padding: 7px 12px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
 .status-compact-pill:hover, .status-button:hover { background-color: %(feedback_sunken)s; }
 .clock-time, .status-compact-time, .notification-title, .launch-title { color: %(text)s; font-weight: 800; }
 .clock-time { font-size: 26px; }
