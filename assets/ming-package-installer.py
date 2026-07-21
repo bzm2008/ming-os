@@ -693,8 +693,8 @@ class PackageInstaller:
         if self._protected_metadata(self.proxy_dir, directory=True) is None:
             raise OSError("desktop proxy directory is unsafe")
 
-    @staticmethod
-    def _atomic_write(path, content, mode=0o644):
+    @classmethod
+    def _atomic_write(cls, path, content, mode=0o644):
         path = pathlib.Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
@@ -711,14 +711,7 @@ class PackageInstaller:
             os.chmod(path, mode)
             if os.name != "nt" and hasattr(os, "chown"):
                 os.chown(path, 0, 0)
-            try:
-                directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            except OSError:
-                pass
+            cls._fsync_directory(path.parent)
         finally:
             try:
                 temporary.unlink()
@@ -920,20 +913,22 @@ class PackageInstaller:
         except OSError as error:
             raise OSError("desktop proxy directory cannot be enumerated") from error
 
-    def _remove_orphan_proxy_symlinks(self):
+    def _remove_unmanifested_proxy_artifacts(self):
         errors = []
         for path in self._reserved_proxy_files():
             try:
                 metadata = os.lstat(path)
-                if not stat.S_ISLNK(metadata.st_mode):
-                    continue
-                os.unlink(path)
+                if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
                 if path.exists() or path.is_symlink():
-                    raise OSError("orphan proxy symlink remains")
-                self._fsync_directory(self.proxy_dir)
+                    raise OSError("orphan proxy artifact remains")
             except OSError as error:
-                errors.append("orphan proxy symlink cleanup failed for %s: %s" % (
+                errors.append("orphan proxy artifact cleanup failed for %s: %s" % (
                     path, error))
+        if not errors:
+            self._fsync_directory(self.proxy_dir)
         return errors
 
     def _snapshot_proxy_state(self):
@@ -1069,6 +1064,8 @@ class PackageInstaller:
 
     @staticmethod
     def _fsync_directory(directory):
+        if os.name == "nt":
+            return False
         try:
             descriptor = os.open(
                 directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -1076,8 +1073,17 @@ class PackageInstaller:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        except OSError:
-            pass
+        except OSError as error:
+            unsupported = {
+                errno.EINVAL,
+                getattr(errno, "ENOSYS", errno.EINVAL),
+                getattr(errno, "ENOTSUP", errno.EINVAL),
+                getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+            }
+            if error.errno in unsupported:
+                return False
+            raise
+        return True
 
     def _quarantine_proxy(self, path):
         transaction_dir = pathlib.Path(self._active_proxy_transaction_dir)
@@ -1277,9 +1283,9 @@ class PackageInstaller:
             existing = self._read_proxy_manifest()
             self._ensure_proxy_dir()
             if not source_paths and not manifest_exists:
-                orphan_errors = self._remove_orphan_proxy_symlinks()
+                orphan_errors = self._remove_unmanifested_proxy_artifacts()
                 if orphan_errors:
-                    message = "orphan proxy symlink cleanup failed: %s" % (
+                    message = "orphan proxy artifact cleanup failed: %s" % (
                         "; ".join(orphan_errors))
                     self._log("desktop proxy convergence failed for %s: %s" % (
                         package, message))

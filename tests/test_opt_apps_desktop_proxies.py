@@ -1,3 +1,4 @@
+import errno
 import importlib.util
 import json
 import multiprocessing
@@ -169,6 +170,35 @@ def make_opt_app(root, package="com.example.app", name="example.desktop"):
 
 
 class OptAppsProxyInstallerTests(unittest.TestCase):
+    def test_atomic_proxy_write_propagates_real_directory_fsync_errors(self):
+        installer = load_module(
+            INSTALLER_PATH, "ming_package_installer_proxy_directory_fsync")
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "manifest.json"
+            with mock.patch.object(
+                    installer.PackageInstaller,
+                    "_fsync_directory",
+                    side_effect=OSError(errno.EIO, "simulated directory I/O failure")):
+                with self.assertRaises(OSError) as raised:
+                    installer.PackageInstaller._atomic_write(target, "{}\n")
+
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_directory_fsync_degrades_only_for_known_unsupported_errors(self):
+        installer = load_module(
+            INSTALLER_PATH, "ming_package_installer_proxy_unsupported_fsync")
+        with tempfile.TemporaryDirectory() as directory:
+            native_open = os.open
+
+            def unsupported_directory_open(path, flags, *args, **kwargs):
+                if pathlib.Path(path) == pathlib.Path(directory):
+                    raise OSError(errno.EINVAL, "directory fsync unsupported")
+                return native_open(path, flags, *args, **kwargs)
+
+            with mock.patch.object(os, "open", side_effect=unsupported_directory_open):
+                self.assertIs(
+                    installer.PackageInstaller._fsync_directory(directory), False)
+
     def test_proxy_lock_timeout_preserves_manifest_and_visible_proxies(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_lock_timeout")
         with tempfile.TemporaryDirectory() as directory:
@@ -656,6 +686,55 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertEqual("", error)
 
+    def test_orphan_empty_directory_without_manifest_is_removed(self):
+        installer = load_module(
+            INSTALLER_PATH, "ming_package_installer_proxy_orphan_directory")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            proxy_dir = root / "proxies"
+            proxy_dir.mkdir(parents=True)
+            orphan = proxy_dir / ("ming-opt-%s.desktop" % ("a" * 64))
+            orphan.mkdir()
+            service = installer.PackageInstaller(uid_getter=lambda: 0)
+            service.opt_apps_root = root / "opt" / "apps"
+            service.proxy_dir = proxy_dir
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+
+            records, error = service._sync_desktop_proxies(
+                "com.example.app", set())
+
+            self.assertEqual([], records)
+            self.assertEqual("", error)
+            self.assertFalse(orphan.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX special files and modes required")
+    def test_orphan_fifo_and_writable_file_without_manifest_are_removed(self):
+        installer = load_module(
+            INSTALLER_PATH, "ming_package_installer_proxy_orphan_posix_types")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            proxy_dir = root / "proxies"
+            proxy_dir.mkdir(parents=True)
+            fifo = proxy_dir / ("ming-opt-%s.desktop" % ("b" * 64))
+            writable = proxy_dir / ("ming-opt-%s.desktop" % ("c" * 64))
+            os.mkfifo(fifo)
+            writable.write_text("unsafe\n", encoding="utf-8")
+            writable.chmod(0o666)
+            service = installer.PackageInstaller(uid_getter=lambda: 0)
+            service.opt_apps_root = root / "opt" / "apps"
+            service.proxy_dir = proxy_dir
+            service.proxy_manifest = root / "manifest.json"
+            service.proxy_staging_dir = root / "staging"
+
+            records, error = service._sync_desktop_proxies(
+                "com.example.app", set())
+
+            self.assertEqual([], records)
+            self.assertEqual("", error)
+            self.assertFalse(fifo.exists())
+            self.assertFalse(writable.exists())
+
     def test_orphan_symlink_unlink_failure_is_reported(self):
         installer = load_module(INSTALLER_PATH, "ming_package_installer_proxy_orphan_link_error")
         with tempfile.TemporaryDirectory() as directory:
@@ -686,7 +765,7 @@ class OptAppsProxyInstallerTests(unittest.TestCase):
 
             self.assertEqual([], records)
             self.assertTrue(error)
-            self.assertIn("symlink", error.casefold())
+            self.assertIn("orphan proxy artifact", error.casefold())
             self.assertTrue(orphan.is_symlink())
             self.assertTrue(target.exists())
 
