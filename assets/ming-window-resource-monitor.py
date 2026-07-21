@@ -350,10 +350,7 @@ class WnckResourceMonitor:
         if pid is None or requested is None or pid != requested[0]:
             return False
         identity = self.client.state.window_identity(self.window_id(window))
-        # Windows injected by older Wnck versions may not have an identity yet.
-        # Every attached window is recorded by reconcile, so this fallback is
-        # only for the short compatibility interval before that first event.
-        return identity is None or identity == requested
+        return identity == requested
 
     def attach(self, window, launch=False):
         key = self.window_id(window)
@@ -380,8 +377,6 @@ class WnckResourceMonitor:
         current_starttime = process_starttime(probe_pid) if probe_pid is not None else None
         self.cancel_timer(key)
         closed_identity = self.client.state.close(key) or stored_identity
-        if closed_identity is None and pid is not None and current_starttime:
-            closed_identity = (pid, str(current_starttime))
         self.windows.pop(key, None)
         if closed_identity:
             old_pid, old_starttime = closed_identity

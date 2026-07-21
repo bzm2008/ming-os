@@ -1955,11 +1955,16 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             monitor.window_id(hidden): hidden,
             monitor.window_id(visible): visible,
         }
+        client.state.remember_window_identity(
+            monitor.window_id(hidden), os.getpid(), "100")
+        client.state.remember_window_identity(
+            monitor.window_id(visible), os.getpid(), "100")
         key = monitor.window_id(hidden)
         generation = client.state.mark_hidden(
             key, os.getpid(), "100", module.time.monotonic() - 11.0)
 
-        monitor.on_hidden_timeout(key, generation)
+        with mock.patch.object(module, "process_starttime", return_value="100"):
+            monitor.on_hidden_timeout(key, generation)
 
         self.assertEqual([], client.calls)
 
@@ -2014,6 +2019,10 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             monitor.window_id(hidden): hidden,
             monitor.window_id(visible): visible,
         }
+        client.state.remember_window_identity(
+            monitor.window_id(hidden), os.getpid(), "100")
+        client.state.remember_window_identity(
+            monitor.window_id(visible), os.getpid(), "100")
         client.state.mark_backgrounded(os.getpid(), "100")
 
         with mock.patch.object(module, "process_starttime", return_value="100"):
@@ -2197,6 +2206,35 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
         self.assertLessEqual(len(process_identities), 2)
         self.assertLessEqual(len(client.state.window_identities), 2)
 
+    def test_detach_without_confirmed_identity_never_restores_current_pid(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_missing_identity_test",
+        )
+        monitor, client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        pid = 4242
+        window = make_window(1, pid, True)
+        monitor.windows[monitor.window_id(window)] = window
+        client.state.mark_backgrounded(pid, "200")
+        with mock.patch.object(module, "process_starttime", return_value="200"):
+            monitor.detach(window)
+        self.assertEqual([], client.calls)
+        self.assertTrue(client.state.is_backgrounded(pid, "200"))
+
+    def test_unconfirmed_window_identity_is_not_counted_as_visible(self):
+        module = load_module(
+            ROOT / "assets" / "ming-window-resource-monitor.py",
+            "ming_window_resource_monitor_unconfirmed_visibility_test",
+        )
+        monitor, _client, _scheduled, _removed, make_window = (
+            self._window_identity_fixture(module)
+        )
+        window = make_window(1, 4242, False)
+        monitor.windows[monitor.window_id(window)] = window
+        self.assertFalse(monitor.process_has_visible_window(4242, "200"))
+
     def test_window_close_restores_or_rearms_process_policy(self):
         module = load_module(
             ROOT / "assets" / "ming-window-resource-monitor.py",
@@ -2248,6 +2286,10 @@ class PerformanceEventDrivenContracts(unittest.TestCase):
             monitor.window_id(hidden): hidden,
             monitor.window_id(visible): visible,
         }
+        client.state.remember_window_identity(
+            monitor.window_id(hidden), os.getpid(), "100")
+        client.state.remember_window_identity(
+            monitor.window_id(visible), os.getpid(), "100")
         client.state.mark_backgrounded(os.getpid(), "100")
 
         with mock.patch.object(module, "process_starttime", return_value="100"):
