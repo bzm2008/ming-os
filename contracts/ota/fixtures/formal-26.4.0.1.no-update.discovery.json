@@ -1,0 +1,8 @@
+{
+  "schema": "ming.update.discovery.v1",
+  "available": false,
+  "current_version": "26.4.0.1",
+  "architecture": "amd64",
+  "capability": "transactional-slot-v1",
+  "delivery": "none"
+}

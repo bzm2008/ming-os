@@ -103,13 +103,15 @@ def stage_release(
 
 
 def _read_version():
-    for path in (pathlib.Path("/etc/ming-os-version"), pathlib.Path("/etc/os-release")):
+    for path in (pathlib.Path("/etc/ming-version"), pathlib.Path("/etc/ming-os-version"), pathlib.Path("/etc/os-release")):
         try:
             content = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if path.name == "ming-os-version":
-            return content.strip()
+        if path.name != "os-release":
+            value = content.strip()
+            if value:
+                return value
         for line in content.splitlines():
             if line.startswith("VERSION_ID="):
                 return line.partition("=")[2].strip().strip('"')

@@ -5680,8 +5680,8 @@ metadata remain pending the final installation and hardware regression pass.
 
 Install the official signed bootstrap once, verify its SHA256, detached
 signature and public-key fingerprint, then use Ming Settings to check and
-apply the signed 26.4.0 manifest. The manifest must declare
-`from_versions: ["26.3.2"]` and `version: "26.4.0"`. The transaction engine
+apply the signed 26.4.0.1 manifest. The manifest must declare
+`from_versions: ["26.3.2", "26.3.3", "26.4.0"]` and `version: "26.4.0.1"`. The transaction engine
 preserves `/home`, uses a one-time `grub-reboot` entry, and automatically
 confirms or rolls back after health checks. It does not call Calamares,
 partition tools, mkfs or resize operations.

@@ -133,7 +133,7 @@ def _architecture():
 
 
 def _version():
-    for path in (pathlib.Path("/etc/ming-os-version"), pathlib.Path("/etc/ming-version"), pathlib.Path("/etc/os-release")):
+    for path in (pathlib.Path("/etc/ming-version"), pathlib.Path("/etc/ming-os-version"), pathlib.Path("/etc/os-release")):
         try:
             content = path.read_text(encoding="utf-8")
         except OSError:
