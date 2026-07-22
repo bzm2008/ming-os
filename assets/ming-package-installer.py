@@ -45,7 +45,7 @@ PACKAGE_MANAGER_LOCK_TIMEOUT = 30
 DPKG_LOCK_TIMEOUT = 60
 PACKAGE_MANAGER_BUSY_EXIT = 75
 DEFAULT_LOG_PATH = "/var/log/ming-os/package-installer.jsonl"
-SPARK_SOURCE_LIST = "/etc/apt/sources.list.d/ming-spark-store.list"
+SPARK_DEPENDENCY_SOURCE_LIST = "/etc/apt/sources.list"
 OPT_APPS_ROOT = pathlib.Path("/opt/apps")
 DESKTOP_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
 DESKTOP_PROXY_MANIFEST = pathlib.Path(
@@ -456,8 +456,14 @@ class PackageInstaller:
             "-o", "DPkg::Lock::Timeout=%s" % DPKG_LOCK_TIMEOUT,
         )
         if resolver == "spark":
+            # The caller verifies the local vendor DEB against the pinned
+            # Spark source first, either through its repository SHA512 or the
+            # controlled build asset SHA256. Its runtime dependencies resolve
+            # from the signed Debian base source, not the app repository that
+            # lacks packages such as aria2 or zenity. Excluding sourceparts
+            # keeps third-party repositories out of this transaction.
             command += (
-                "-o", "Dir::Etc::sourcelist=%s" % SPARK_SOURCE_LIST,
+                "-o", "Dir::Etc::sourcelist=%s" % SPARK_DEPENDENCY_SOURCE_LIST,
                 "-o", "Dir::Etc::sourceparts=-",
             )
         return command + tuple(str(value) for value in arguments)

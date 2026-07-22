@@ -304,21 +304,29 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
 
 class PackageInstallerTransactionTests(unittest.TestCase):
-    def test_spark_resolver_uses_the_pinned_source_and_shared_lock(self):
+    def test_spark_resolver_uses_the_debian_base_source_for_verified_local_deb_dependencies(self):
         installer = load_installer()
-        command = installer.PackageInstaller._apt_install_command(
-            "/var/lib/ming-package-installer/incoming/sample.deb",
-            resolver="spark",
+        commands = (
+            installer.PackageInstaller._apt_install_command(
+                "/var/lib/ming-package-installer/incoming/sample.deb",
+                resolver="spark",
+            ),
+            installer.PackageInstaller._apt_fix_command(resolver="spark"),
         )
 
-        self.assertEqual("flock", command[0])
-        self.assertIn("/run/lock/ming-package-manager.lock", command)
-        self.assertIn("DPkg::Lock::Timeout=60", command)
-        self.assertIn(
-            "Dir::Etc::sourcelist=/etc/apt/sources.list.d/ming-spark-store.list",
-            command,
-        )
-        self.assertIn("Dir::Etc::sourceparts=-", command)
+        for command in commands:
+            self.assertEqual("flock", command[0])
+            self.assertIn("/run/lock/ming-package-manager.lock", command)
+            self.assertIn("DPkg::Lock::Timeout=60", command)
+            self.assertIn(
+                "Dir::Etc::sourcelist=/etc/apt/sources.list",
+                command,
+            )
+            self.assertIn("Dir::Etc::sourceparts=-", command)
+            self.assertNotIn(
+                "Dir::Etc::sourcelist=/etc/apt/sources.list.d/ming-spark-store.list",
+                command,
+            )
         self.assertEqual("ming-package-installer-26.4.0-v4", installer.PACKAGE_INSTALLER_CONTRACT)
 
     def test_cli_passes_spark_resolver_and_json_contract(self):
