@@ -1062,6 +1062,33 @@ class WifiCliTests(unittest.TestCase):
         self.assertEqual([command], runner.commands)
         self.assertNotIn("password", output.getvalue().lower())
 
+    def test_network_id_connection_uses_raw_chinese_ssid_not_bssid_as_ssid(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        ssid = "办公室网络"
+        bssid = "AA:BB:CC:DD:EE:FF"
+        connect_command = (
+            "env", "LC_ALL=C.UTF-8", "nmcli", "--wait", "30", "device", "wifi",
+            "connect", ssid, "bssid", bssid, "ifname", "wlan0",
+        )
+        runner = FakeRunner({
+            scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:FF:%s:6:2437 MHz:75:WPA2:wlan0" % ssid, ""),
+            connect_command: (0, "Device activated", ""),
+        })
+        controller = self.device.DeviceController(runner=runner, executable=lambda _name: True)
+        # Exercise the documented nmcli fallback rather than the host's libnm.
+        controller._network_backend_checked = True
+
+        scan = controller.wifi_scan()
+        result = controller.wifi_connect(
+            network_id=scan["networks"][0]["network_id"], ifname="wlan0")
+
+        self.assertTrue(result["ok"])
+        self.assertIn(connect_command, runner.commands)
+
     def test_password_option_is_rejected_without_echoing_the_secret(self):
         password = "correct horse battery staple"
         runner = FakeRunner({})

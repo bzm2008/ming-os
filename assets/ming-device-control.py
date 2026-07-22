@@ -2191,8 +2191,17 @@ class DeviceController:
                 return network_result(
                     False, "unavailable", "network_gone", "扫描结果中未找到该无线网络。", True,
                     network_id=network_id, ifname=ifname, error="扫描结果中未找到该无线网络。")
+            try:
+                raw_ssid = base64.b64decode(target["ssid_bytes_b64"], validate=True)
+                ssid_for_nmcli = raw_ssid.decode("utf-8")
+            except (KeyError, TypeError, ValueError, UnicodeDecodeError):
+                return network_result(
+                    False, "unavailable", "libnm_required",
+                    "该无线网络名称需要 NetworkManager D-Bus 支持，无法安全使用兼容连接路径。", True,
+                    network_id=network_id, ifname=ifname,
+                    error="无线网络名称不是 UTF-8，兼容连接路径不可用。")
             command = [
-                "nmcli", "--wait", "30", "device", "wifi", "connect", target["bssid"],
+                "nmcli", "--wait", "30", "device", "wifi", "connect", ssid_for_nmcli,
                 "bssid", target["bssid"], "ifname", ifname,
             ]
             if password is not None:
