@@ -186,6 +186,8 @@ class WifiClassificationTests(unittest.TestCase):
             missing = controller.wifi_status()
             self.assertEqual("pci:14e4:432b", missing["firmware"]["device_id"])
             self.assertEqual("b43", missing["firmware"]["driver"])
+            self.assertEqual("not-bundled-no-redistribution-license",
+                             missing["firmware"]["source"])
             self.assertEqual("E_FIRMWARE_MISSING", missing["firmware"]["error_code"])
             self.assertEqual(["b43/ucode30_mimo.fw"],
                              missing["firmware"]["required_files"])
@@ -1350,6 +1352,8 @@ class BluetoothStatusTests(unittest.TestCase):
             missing = controller.bluetooth_status()
             self.assertEqual("usb:413c:8197", missing["firmware"]["device_id"])
             self.assertEqual("btbcm", missing["firmware"]["driver"])
+            self.assertEqual("not-bundled-no-redistribution-license",
+                             missing["firmware"]["source"])
             self.assertEqual([
                 "brcm/BCM-413c-8197.hcd",
                 "brcm/BCM20702A1-413c-8197.hcd",
