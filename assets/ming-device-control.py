@@ -1962,6 +1962,26 @@ class DeviceController:
                 "not-bundled-no-redistribution-license")
         return self._firmware_snapshot()
 
+    def compatibility_help(self):
+        _pci_rc, pci_output, _pci_error = self._run_c(["lspci", "-nnk"])
+        _usb_rc, usb_output, _usb_error = self._run_c(["lsusb"])
+        device_ids = []
+        if re.search(r"\[14e4:[0-9a-f]{4}\]", pci_output or "", re.I) and re.search(r"\bb43\b|\bbcma\b", pci_output or "", re.I):
+            identity = re.search(r"\[(14e4:[0-9a-f]{4})\]", pci_output, re.I)
+            if identity:
+                device_ids.append("pci:" + identity.group(1).lower())
+        if re.search(r"\b413c:8197\b", usb_output or "", re.I):
+            device_ids.append("usb:413c:8197")
+        return {
+            "read_only": True,
+            "device_ids": device_ids,
+            "official_sources": [
+                "firmware-b43-installer",
+                "https://www.dell.com/support",
+            ],
+            "risk_notice": "该帮助不自动下载、不安装 firmware，也不会绕过许可证或签名检查。",
+        }
+
     def wifi_radio_status(self):
         backend = self._get_network_backend()
         if backend is not None:
@@ -2832,6 +2852,7 @@ def build_parser():
     wifi_connect.add_argument("--ifname", required=True)
     wifi_connect.add_argument("--password-stdin", action="store_true")
     bluetooth_status = subparsers.add_parser("bluetooth-status")
+    subparsers.add_parser("compatibility-help")
     bluetooth_status.add_argument("--json", action="store_true")
     ethernet_status = subparsers.add_parser("ethernet-status")
     ethernet_status.add_argument("--json", action="store_true")
@@ -2892,6 +2913,8 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
                 args.ssid, args.bssid, args.ifname, password=password)
     elif args.action == "bluetooth-status":
         result = controller.bluetooth_status()
+    elif args.action == "compatibility-help":
+        result = controller.compatibility_help()
     elif args.action == "ethernet-status":
         result = controller.ethernet_status()
     elif args.action == "ethernet-repair":
@@ -2917,7 +2940,7 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
     return 0 if args.action in {
-        "status", "wifi-radio-status", "bluetooth-status", "ethernet-status", "audio-status"
+        "status", "wifi-radio-status", "bluetooth-status", "compatibility-help", "ethernet-status", "audio-status"
     } or result.get("ok") else 2
 
 

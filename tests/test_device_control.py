@@ -200,6 +200,19 @@ class WifiClassificationTests(unittest.TestCase):
             self.assertTrue(present["firmware"]["complete"])
             self.assertEqual("", present["firmware"]["error_code"])
 
+    def test_compatibility_help_is_read_only_and_names_official_sources(self):
+        controller = self.device.DeviceController(
+            runner=FakeRunner({
+                c_command("lspci", "-nnk"): (0, "02:00.0 Network controller [0280]: Broadcom BCM4322 [14e4:432b]\\n\\tKernel driver in use: b43", ""),
+                c_command("lsusb"): (0, "Bus 001 Device 003: ID 413c:8197 Dell Computer Corp. Bluetooth", ""),
+            }), executable=lambda _name: True)
+        help_data = controller.compatibility_help()
+        self.assertTrue(help_data["read_only"])
+        self.assertIn("pci:14e4:432b", help_data["device_ids"])
+        self.assertIn("usb:413c:8197", help_data["device_ids"])
+        self.assertIn("firmware-b43-installer", help_data["official_sources"])
+        self.assertIn("不自动下载", help_data["risk_notice"])
+
     def test_suspicious_unknown_usb_network_adapter_needs_diagnosis(self):
         runner = FakeRunner({
             c_command("lspci", "-nnk"): (0, "", ""),
