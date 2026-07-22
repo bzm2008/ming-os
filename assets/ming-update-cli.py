@@ -25,10 +25,10 @@ DEFAULT_STATE_ROOT = pathlib.Path("/var/lib/ming-update")
 DEFAULT_CACHE_ROOT = pathlib.Path("/var/cache/ming-update")
 DEFAULT_KEYRING = pathlib.Path("/usr/share/ming-update/trust/release-keyring.gpg")
 DEFAULT_KEY_POLICY = pathlib.Path("/usr/share/ming-update/trust/key-policy.json")
-DEFAULT_DISCOVERY_URL = "https://ming.scallion.uno/api/onion-update/check"
+DEFAULT_DISCOVERY_URL = "https://ming.sca-hub.cn/api/onion-update/check"
 # The replacement endpoint is a transport fallback only. Every object it
 # advertises remains subject to the same offline key policy and signatures.
-FALLBACK_DISCOVERY_URL = "https://ming.sca-hub.cn/api/onion-update/check"
+FALLBACK_DISCOVERY_URL = "https://sca-hub.cn/api/onion-update/check"
 DISCOVERY_FALLBACK_ENV = "MING_UPDATE_ENABLE_FALLBACK_DOMAIN"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._-]{3,128}$")

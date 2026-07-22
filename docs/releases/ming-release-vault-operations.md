@@ -13,10 +13,10 @@ No private key, passphrase, NAS credential, SSH private
 key, or host-local path may enter the repository, ISO build context, or a
 production server.
 
-The public discovery domain is `ming.scallion.uno`. The reserved fallback is
-`ming.sca-hub.cn`; it remains disabled until HTTPS,备案, API parity, and signed
-discovery responses have been verified. A DNS or HTTP fallback never relaxes
-manifest, version, architecture, content-index, or signature checks.
+The public discovery domain is `ming.sca-hub.cn`. The transport fallback is
+`sca-hub.cn`. A DNS or HTTP fallback is used only for a primary transport
+failure and never relaxes manifest, version, architecture, content-index, or
+signature checks.
 
 The local release vault is selected explicitly with `MING_RELEASE_VAULT` and
 contains the encrypted bundle, its SHA256 sidecar, and a public receipt. The

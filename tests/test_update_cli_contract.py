@@ -389,7 +389,7 @@ class UpdateCliContractTests(unittest.TestCase):
 
         def urlopen(url, timeout):
             calls.append(url)
-            if urllib.parse.urlsplit(url).netloc == "ming.scallion.uno":
+            if urllib.parse.urlsplit(url).netloc == "ming.sca-hub.cn":
                 raise self.cli.urllib.error.URLError("primary unavailable")
             return Response()
 
@@ -411,8 +411,8 @@ class UpdateCliContractTests(unittest.TestCase):
 
         self.assertEqual({"schema": "ming.update.discovery.v1"}, value)
         self.assertEqual(2, len(calls))
-        self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
-        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
+        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[0]).netloc)
+        self.assertEqual("sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
 
     def test_development_build_can_discover_same_numeric_stable_release(self):
         manifest_hash = hashlib.sha256(b"stable manifest").hexdigest()
@@ -487,7 +487,7 @@ class UpdateCliContractTests(unittest.TestCase):
 
         def urlopen(url, timeout):
             calls.append(url)
-            if urllib.parse.urlsplit(url).netloc == "ming.scallion.uno":
+            if urllib.parse.urlsplit(url).netloc == "ming.sca-hub.cn":
                 raise self.cli.urllib.error.URLError("primary unavailable")
             return Response()
 
@@ -510,8 +510,8 @@ class UpdateCliContractTests(unittest.TestCase):
 
         self.assertEqual({"schema": "ming.update.discovery.v1"}, value)
         self.assertEqual(2, len(calls))
-        self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
-        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
+        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[0]).netloc)
+        self.assertEqual("sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
         self.assertTrue(all(urllib.parse.urlsplit(url).scheme == "https" for url in calls))
 
     def test_discovery_fallback_is_not_used_for_primary_protocol_failure(self):

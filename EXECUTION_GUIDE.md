@@ -72,7 +72,7 @@ For each machine, record:
 Current OTA endpoint:
 
 ```text
-https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable
+https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable
 ```
 
 Expected public response:
@@ -91,10 +91,9 @@ Expected public response:
 
 ### OTA discovery 备用域名
 
-`ming.scallion.uno` 仍是当前主地址。为域名失效后的迁移预留
-`https://ming.sca-hub.cn/api/onion-update/check`，但新域名尚未备案，当前版本
-默认不发送请求。完成备案、证书、API parity 和签名响应核验后，才可由发布负责人
-在受控配置中开启 fallback；它不会放宽任何 manifest、payload 或签名门禁。
+`ming.sca-hub.cn` 是当前主地址，网络或端点传输失败时自动回退到
+`https://sca-hub.cn/api/onion-update/check`。格式、协议或签名错误不会触发
+回退；两个端点均不放宽 manifest、payload 或签名门禁。
 
 ## GitHub Release Assets
 

@@ -5582,8 +5582,8 @@ This is the version to use when producing:
 - ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
-- Reserved OTA discovery fallback: `https://ming.sca-hub.cn/api/onion-update/check` (disabled until备案 and release-owner verification)
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA discovery fallback after transport failure: `https://sca-hub.cn/api/onion-update/check`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 
@@ -5658,8 +5658,8 @@ Required links:
 - ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
-- Reserved OTA discovery fallback: `https://ming.sca-hub.cn/api/onion-update/check` (disabled until备案 and release-owner verification)
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA discovery fallback after transport failure: `https://sca-hub.cn/api/onion-update/check`
 
 Page goals:
 
