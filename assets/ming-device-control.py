@@ -1958,8 +1958,7 @@ class DeviceController:
         if identity and driver_name in {"b43", "bcma"}:
             return self._firmware_snapshot(
                 "pci:" + identity.group(1).lower(), driver_name,
-                ["b43/ucode30_mimo.fw"],
-                "not-bundled-no-redistribution-license")
+                ["b43/ucode30_mimo.fw"], "ming-audited-offline-bundle")
         return self._firmware_snapshot()
 
     def wifi_radio_status(self):
@@ -2366,7 +2365,7 @@ class DeviceController:
                 "usb:413c:8197", "btbcm", [
                     "brcm/BCM-413c-8197.hcd",
                     "brcm/BCM20702A1-413c-8197.hcd",
-                ], "not-bundled-no-redistribution-license", aliases_must_match=True)
+                ], "ming-audited-offline-bundle", aliases_must_match=True)
         else:
             firmware = self._firmware_snapshot()
         rfkill = {

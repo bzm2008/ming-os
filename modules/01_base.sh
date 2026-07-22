@@ -183,6 +183,7 @@ install_base_packages() {
     # mandatory: a missing regulatory database or Bluetooth/Wi-Fi firmware is
     # a build error, not an optional hardware enhancement.
     install_required_radio_firmware || return 1
+    install_audited_radio_firmware || return 1
 
     # Firmware and microcode packaging shifts across Debian snapshots. Install
     # what exists without letting renamed packages break the whole base system.
@@ -192,6 +193,7 @@ install_base_packages() {
         firmware-linux-nonfree \
         firmware-misc-nonfree \
         firmware-ath9k-htc \
+        b43-fwcutter \
         firmware-sof-signed \
         firmware-intel-graphics \
         firmware-nvidia-graphics \
@@ -325,6 +327,86 @@ install_required_wifi_firmware() {
     install_required_radio_firmware
 }
 
+install_audited_radio_firmware() {
+    local bundle=/tmp/ming-build/assets/radio-firmware
+    local manifest=${bundle}/manifest.json
+    local audit=/usr/share/ming-os/radio-firmware
+    local list=/usr/share/ming-os/radio-firmware-initramfs.list
+    local tmp_list required
+    [[ -s "${manifest}" && ! -L "${manifest}" ]] || {
+        echo '[ERROR] audited radio firmware manifest missing or unsafe' >&2
+        return 1
+    }
+    install -m 0755 /tmp/ming-build/assets/ming-radio-firmware.py \
+        /usr/local/sbin/ming-radio-firmware || return 1
+    /usr/local/sbin/ming-radio-firmware deploy \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    /usr/local/sbin/ming-radio-firmware verify \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    rm -rf "${audit}"
+    install -d -m 0755 "$(dirname "${audit}")"
+    cp -a "${bundle}" "${audit}" || return 1
+    tmp_list=$(mktemp "${list}.XXXXXX") || return 1
+    if ! /usr/local/sbin/ming-radio-firmware initramfs-files \
+        --manifest "${audit}/manifest.json" > "${tmp_list}"; then
+        rm -f "${tmp_list}"
+        return 1
+    fi
+    for required in \
+        /usr/lib/firmware/b43/ucode30_mimo.fw \
+        /usr/lib/firmware/brcm/BCM-413c-8197.hcd \
+        /usr/lib/firmware/brcm/BCM20702A1-413c-8197.hcd; do
+        if ! grep -Fxq "${required}" "${tmp_list}"; then
+            echo "[ERROR] audited firmware missing initramfs target: ${required}" >&2
+            rm -f "${tmp_list}"
+            return 1
+        fi
+    done
+    chmod 0644 "${tmp_list}" && mv -f "${tmp_list}" "${list}" || return 1
+    cat > /etc/initramfs-tools/hooks/ming-radio-firmware <<'RADIOHOOK'
+#!/bin/sh
+set -e
+PREREQ=''
+prereqs() { echo "${PREREQ}"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+while IFS= read -r firmware; do
+    case "${firmware}" in /usr/lib/firmware/*) ;; *) exit 1 ;; esac
+    [ -f "${firmware}" ] || exit 1
+    copy_file firmware "${firmware}" "${firmware}"
+done < /usr/share/ming-os/radio-firmware-initramfs.list
+RADIOHOOK
+    chmod 0755 /etc/initramfs-tools/hooks/ming-radio-firmware || return 1
+}
+
+verify_audited_radio_initramfs() {
+    local manifest=/usr/share/ming-os/radio-firmware/manifest.json
+    local list=/usr/share/ming-os/radio-firmware-initramfs.list
+    local initrd listing firmware relative found=false
+    /usr/local/sbin/ming-radio-firmware verify \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    [[ -s "${list}" && ! -L "${list}" ]] || return 1
+    for initrd in /boot/initrd.img-*; do
+        [[ -s "${initrd}" ]] || continue
+        found=true
+        listing=$(mktemp) || return 1
+        if ! lsinitramfs "${initrd}" > "${listing}"; then
+            rm -f "${listing}"
+            return 1
+        fi
+        while IFS= read -r firmware; do
+            relative=${firmware#/}
+            if ! grep -Fxq "${relative}" "${listing}"; then
+                echo "[ERROR] ${firmware} missing from ${initrd}" >&2
+                rm -f "${listing}"
+                return 1
+            fi
+        done < "${list}"
+        rm -f "${listing}"
+    done
+    [[ "${found}" == true ]]
+}
+
 cache_broadcom_sta_driver() {
     local cache_dir="/usr/share/ming-os/driver-cache/broadcom"
     local extract_dir
@@ -396,6 +478,7 @@ configure_macbook_input_modules() {
     done
 
     update-initramfs -u -k all || return 1
+    verify_audited_radio_initramfs || return 1
     initrd=$(find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print 2>/dev/null \
         | sort -V | tail -1)
     if [[ -z "${initrd}" || ! -s "${initrd}" ]]; then

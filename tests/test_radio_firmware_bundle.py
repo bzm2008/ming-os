@@ -139,14 +139,20 @@ class RadioFirmwareBundleTests(unittest.TestCase):
                                         "E_FIRMWARE_DEPLOYED_HASH"):
                 self.helper.verify_deployed(manifest, firmware)
 
-    def test_base_build_keeps_official_firmware_but_does_not_require_unredistributable_payloads(self):
+    def test_base_build_fails_closed_and_verifies_final_initramfs(self):
         base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
-        self.assertIn("install_required_radio_firmware || return 1", base)
-        self.assertIn("firmware-brcm80211", base)
-        self.assertNotIn("install_audited_radio_firmware || return 1", base)
-        self.assertNotIn("verify_audited_radio_initramfs || return 1", base)
-        self.assertNotIn("audited radio firmware contract is missing", build)
+        self.assertIn("install_audited_radio_firmware || return 1", base)
+        self.assertIn("verify_audited_radio_initramfs || return 1", base)
+        self.assertIn("ming-radio-firmware initramfs-files", base)
+        self.assertIn("lsinitramfs \"${initrd}\" > \"${listing}\"", base)
+        for target in (
+            "b43/ucode30_mimo.fw",
+            "brcm/BCM-413c-8197.hcd",
+            "brcm/BCM20702A1-413c-8197.hcd",
+        ):
+            self.assertIn(target, base)
+            self.assertIn(target, build)
 
 
 if __name__ == "__main__":
