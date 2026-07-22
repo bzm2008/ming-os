@@ -1979,6 +1979,10 @@ class DeviceController:
                 "firmware-b43-installer",
                 "https://www.dell.com/support",
             ],
+            "recovery_suggestions": [
+                "优先使用有线网络完成官方 Debian 或厂商支持页面的后续操作。",
+                "也可先使用受支持的 USB 网卡或蓝牙适配器恢复连接。",
+            ],
             "risk_notice": "该帮助不自动下载、不安装 firmware，也不会绕过许可证或签名检查。",
         }
 

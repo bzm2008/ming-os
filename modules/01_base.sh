@@ -65,7 +65,6 @@ install_base_packages() {
     apt install -y --no-install-recommends \
         linux-image-amd64 \
         linux-headers-amd64 \
-        dkms \
         systemd \
         systemd-sysv \
         systemd-timesyncd \
@@ -200,13 +199,19 @@ install_base_packages() {
         apt install -y --no-install-recommends "${pkg}" || true
     done
 
-    # Older resume builds may already contain wl. Keep the default image on
-    # in-tree drivers and retain STA only as a verified offline fallback.
-    if dpkg-query -W -f='${Status}' broadcom-sta-dkms 2>/dev/null | grep -Fq 'install ok installed'; then
-        apt purge -y broadcom-sta-dkms || return 1
-    fi
-    cache_broadcom_sta_driver || return 1
-    deploy_broadcom_driver_manager || return 1
+    # Resumed chroots can retain the previous forbidden third-party fallback.
+    # Remove its packages and artifacts before the image is validated.
+    dpkg --purge --force-all broadcom-sta-dkms dkms >/dev/null 2>&1 || true
+    rm -rf /usr/share/ming-os/driver-cache/broadcom
+    rm -rf /var/lib/dkms/broadcom-sta*
+    rm -rf /usr/src/broadcom-sta*
+    rm -f /var/cache/apt/archives/broadcom-sta-dkms_*.deb \
+        /var/cache/apt/archives/dkms_*.deb
+    rm -f /lib/modules/*/updates/dkms/wl.*
+    rm -f /usr/local/sbin/ming-broadcom-driver \
+        /var/log/ming-broadcom-driver.log \
+        /etc/modprobe.d/broadcom-sta-dkms.conf \
+        /etc/modprobe.d/broadcom-sta.conf
 
     cat > /etc/modules-load.d/ming-hardware.conf << 'HWLOAD'
 # Keep systemd-modules-load conservative. Broad hardware probing is handled by
@@ -325,51 +330,6 @@ install_required_wifi_firmware() {
     install_required_radio_firmware
 }
 
-cache_broadcom_sta_driver() {
-    local cache_dir="/usr/share/ming-os/driver-cache/broadcom"
-    local extract_dir
-    local debs=()
-
-    install -d -m 0755 "${cache_dir}"
-    rm -f "${cache_dir}"/broadcom-sta-dkms_*.deb \
-        "${cache_dir}/broadcom-sta.ids" \
-        "${cache_dir}/SHA256SUMS"
-
-    if ! (cd "${cache_dir}" && apt-get download broadcom-sta-dkms); then
-        echo "[ERROR] 无法从当前 Debian 仓库缓存 broadcom-sta-dkms" >&2
-        return 1
-    fi
-
-    shopt -s nullglob
-    debs=("${cache_dir}"/broadcom-sta-dkms_*.deb)
-    shopt -u nullglob
-    if [[ "${#debs[@]}" -ne 1 || ! -s "${debs[0]:-}" ]]; then
-        echo "[ERROR] Broadcom STA 缓存必须且只能包含一个有效 deb" >&2
-        return 1
-    fi
-
-    extract_dir=$(mktemp -d)
-    if ! dpkg-deb -x "${debs[0]}" "${extract_dir}"; then
-        rm -rf "${extract_dir}"
-        return 1
-    fi
-    if [[ ! -s "${extract_dir}/usr/share/broadcom-sta/broadcom-sta.ids" ]]; then
-        echo "[ERROR] broadcom-sta-dkms 包内缺少设备 ID 清单" >&2
-        rm -rf "${extract_dir}"
-        return 1
-    fi
-    install -m 0644 \
-        "${extract_dir}/usr/share/broadcom-sta/broadcom-sta.ids" \
-        "${cache_dir}/broadcom-sta.ids"
-    rm -rf "${extract_dir}"
-
-    (
-        cd "${cache_dir}"
-        sha256sum "$(basename "${debs[0]}")" broadcom-sta.ids > SHA256SUMS
-        sha256sum -c SHA256SUMS
-    ) || return 1
-}
-
 configure_macbook_input_modules() {
     local module
     local initrd
@@ -415,214 +375,6 @@ configure_macbook_input_modules() {
             echo "[WARN] ${module_file} 未出现在 ${initrd}，目标内核不提供该模块" >&2
         fi
     done
-}
-
-deploy_broadcom_driver_manager() {
-    cat > /usr/local/sbin/ming-broadcom-driver << 'BROADCOMDRIVER'
-#!/usr/bin/env bash
-set -uo pipefail
-
-CACHE_DIR=/usr/share/ming-os/driver-cache/broadcom
-IDS_FILE="${CACHE_DIR}/broadcom-sta.ids"
-SUMS_FILE="${CACHE_DIR}/SHA256SUMS"
-LOG=/var/log/ming-broadcom-driver.log
-
-usage() {
-    echo "Usage: ming-broadcom-driver status --json | install | restore" >&2
-}
-
-bool_json() {
-    [[ "$1" == "true" ]] && printf true || printf false
-}
-
-secure_boot_state() {
-    if [[ ! -d /sys/firmware/efi ]]; then
-        printf disabled
-    elif ! command -v mokutil >/dev/null 2>&1; then
-        printf unknown
-    elif mokutil --sb-state 2>/dev/null | grep -qi enabled; then
-        printf enabled
-    elif mokutil --sb-state 2>/dev/null | grep -qi disabled; then
-        printf disabled
-    else
-        printf unknown
-    fi
-}
-
-load_state() {
-    broadcom_line=$(lspci -Dnn -d 14e4: 2>/dev/null \
-        | grep -Ei 'network controller|ethernet controller|wireless' \
-        | head -1 || true)
-    detected=false
-    supported=false
-    wifi_present=false
-    pci_id=""
-    pci_slot=""
-    model=""
-    active_module="none"
-    sta_installed=false
-    secure_boot=$(secure_boot_state)
-
-    if [[ -n "${broadcom_line}" ]]; then
-        detected=true
-        pci_slot=$(awk '{print $1}' <<< "${broadcom_line}")
-        pci_id=$(grep -oE '\[14e4:[[:xdigit:]]{4}\]' <<< "${broadcom_line}" \
-            | tail -1 | tr -d '[]:' | tr '[:upper:]' '[:lower:]')
-        model=$(sed -E 's/^[^ ]+[[:space:]]+//' <<< "${broadcom_line}")
-        active_module=$(lspci -Dnnk -s "${pci_slot}" 2>/dev/null \
-            | awk -F': ' '/Kernel driver in use:/ {print $2; exit}')
-        active_module=${active_module:-none}
-        if [[ -n "${pci_id}" && -s "${IDS_FILE}" ]] \
-            && grep -Ev '^[[:space:]]*(#|$)' "${IDS_FILE}" \
-                | tr '[:upper:]' '[:lower:]' | grep -Fxq "${pci_id}"; then
-            supported=true
-        fi
-    fi
-
-    for wireless_path in /sys/class/net/*/wireless; do
-        if [[ -d "${wireless_path}" ]]; then
-            wifi_present=true
-            break
-        fi
-    done
-
-    if dpkg-query -W -f='${Status}' broadcom-sta-dkms 2>/dev/null \
-        | grep -Fq 'install ok installed'; then
-        sta_installed=true
-    fi
-
-    action=none
-    if [[ "${sta_installed}" == true ]]; then
-        action=restore
-    elif [[ "${supported}" != true ]]; then
-        action=unsupported
-    elif [[ "${wifi_present}" == true ]]; then
-        action=none
-    elif [[ "${secure_boot}" != disabled ]]; then
-        action=blocked_secure_boot
-    else
-        action=install
-    fi
-}
-
-print_status() {
-    local json=${1:-false}
-    load_state
-    if [[ "${json}" == true ]]; then
-        jq -n \
-            --argjson detected "$(bool_json "${detected}")" \
-            --argjson supported "$(bool_json "${supported}")" \
-            --argjson wifi_present "$(bool_json "${wifi_present}")" \
-            --arg active_module "${active_module}" \
-            --arg secure_boot "${secure_boot}" \
-            --argjson sta_installed "$(bool_json "${sta_installed}")" \
-            --arg action "${action}" \
-            --arg pci_id "${pci_id}" \
-            --arg model "${model}" \
-            '{detected:$detected,supported:$supported,wifi_present:$wifi_present,
-              active_module:$active_module,secure_boot:$secure_boot,
-              sta_installed:$sta_installed,action:$action,pci_id:$pci_id,model:$model}'
-    else
-        printf 'detected=%s\nsupported=%s\nwifi_present=%s\nactive_module=%s\nsecure_boot=%s\nsta_installed=%s\naction=%s\npci_id=%s\nmodel=%s\n' \
-            "${detected}" "${supported}" "${wifi_present}" "${active_module}" \
-            "${secure_boot}" "${sta_installed}" "${action}" "${pci_id}" "${model}"
-    fi
-}
-
-require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        echo "此操作需要通过系统授权运行。" >&2
-        exit 1
-    fi
-    touch "${LOG}" && chmod 0600 "${LOG}"
-    exec > >(tee -a "${LOG}") 2>&1
-    printf '\n[%s] ming-broadcom-driver %s\n' "$(date '+%F %T')" "$*"
-}
-
-verify_cache() {
-    [[ -s "${IDS_FILE}" && -s "${SUMS_FILE}" ]] || return 1
-    (cd "${CACHE_DIR}" && sha256sum -c SHA256SUMS)
-}
-
-rollback_sta() {
-    dpkg --purge broadcom-sta-dkms >/dev/null 2>&1 || true
-    rm -f /etc/modprobe.d/broadcom-sta-dkms.conf \
-        /etc/modprobe.d/broadcom-sta.conf 2>/dev/null || true
-    depmod -a 2>/dev/null || true
-}
-
-install_sta() {
-    local debs=()
-    require_root install
-    load_state
-    if [[ "${supported}" != true || "${wifi_present}" == true ]]; then
-        echo "当前硬件不适用 Broadcom STA，或开源驱动已经提供无线接口。" >&2
-        exit 2
-    fi
-    if [[ "${secure_boot}" != disabled ]]; then
-        echo "Secure Boot 已开启或状态未知，不能加载未注册 MOK 的 DKMS 模块。" >&2
-        exit 3
-    fi
-    if ! verify_cache; then
-        echo "Broadcom 离线驱动缓存校验失败。" >&2
-        exit 4
-    fi
-
-    shopt -s nullglob
-    debs=("${CACHE_DIR}"/broadcom-sta-dkms_*.deb)
-    shopt -u nullglob
-    if [[ "${#debs[@]}" -ne 1 ]]; then
-        echo "Broadcom 离线驱动包数量异常。" >&2
-        exit 4
-    fi
-
-    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "${debs[0]}"; then
-        rollback_sta
-        echo "Broadcom STA 安装失败，已恢复开源驱动配置。" >&2
-        exit 5
-    fi
-    if ! dkms status 2>/dev/null | grep -Fq 'broadcom-sta/' \
-        || ! modinfo wl >/dev/null 2>&1; then
-        rollback_sta
-        echo "Broadcom STA DKMS 未能为当前内核生成 wl 模块，已回滚。" >&2
-        exit 5
-    fi
-    if ! update-initramfs -u -k all; then
-        rollback_sta
-        update-initramfs -u -k all >/dev/null 2>&1 || true
-        echo "更新 initramfs 失败，Broadcom STA 已回滚。" >&2
-        exit 5
-    fi
-    echo "Broadcom 兼容驱动已安装。请重启电脑后检查 Wi-Fi。"
-}
-
-restore_open_drivers() {
-    require_root restore
-    rollback_sta
-    if ! update-initramfs -u -k all; then
-        echo "恢复开源驱动后更新 initramfs 失败，请查看 ${LOG}。" >&2
-        exit 5
-    fi
-    echo "已恢复内核开源 Broadcom 驱动配置。请重启电脑。"
-}
-
-case "${1:-status}" in
-    status)
-        [[ "${2:-}" == "--json" ]] && print_status true || print_status false
-        ;;
-    install)
-        install_sta
-        ;;
-    restore)
-        restore_open_drivers
-        ;;
-    *)
-        usage
-        exit 64
-        ;;
-esac
-BROADCOMDRIVER
-    chmod 0755 /usr/local/sbin/ming-broadcom-driver
 }
 
 configure_macbook_fan_and_disk_health() {
@@ -1713,23 +1465,26 @@ echo "== USB devices =="
 lsusb 2>/dev/null || true
 echo
 echo "== Loaded display/network/audio modules =="
-lsmod 2>/dev/null | grep -Ei 'i915|nouveau|amdgpu|radeon|snd|iwl|ath|brcm|b43|rtl|rt2|mt76|wl|btusb' || true
+lsmod 2>/dev/null | grep -Ei 'i915|nouveau|amdgpu|radeon|snd|iwl|ath|brcm|b43|rtl|rt2|mt76|btusb' || true
 echo
 echo "== Missing firmware / driver errors =="
 dmesg 2>/dev/null | grep -Ei 'firmware|microcode|drm|i915|nouveau|amdgpu|radeon|iwlwifi|ath|brcm|b43|rtl|rt2|mt76|snd|failed|error' | tail -140 || true
 
 echo
-echo "== Broadcom driver recommendation =="
-if [[ -x /usr/local/sbin/ming-broadcom-driver ]]; then
-    /usr/local/sbin/ming-broadcom-driver status 2>&1 || true
+echo "== Broadcom compatibility help =="
+if command -v ming-device-control >/dev/null 2>&1; then
+    ming-device-control compatibility-help 2>&1 || true
 else
-    echo "Broadcom driver manager is unavailable"
+    echo "ming-device-control compatibility help is unavailable"
 fi
 
 echo
-echo "== Secure Boot and DKMS =="
-mokutil --sb-state 2>/dev/null || echo "Secure Boot state unavailable"
-dkms status 2>/dev/null || true
+echo "== Secure Boot status =="
+if command -v mokutil >/dev/null 2>&1; then
+    mokutil --sb-state 2>&1 || true
+else
+    echo "Secure Boot state unavailable"
+fi
 
 echo
 echo "== VA-API =="

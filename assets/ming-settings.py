@@ -692,26 +692,29 @@ def hardware_status_snapshot():
     """Read only the structured card contract, never scrape raw PCI logs in the UI."""
     rc, output, error = run(
         ["ming-hardware-status", "status", "--json"], timeout=30)
-    broadcom = read_broadcom_status_snapshot()
+    compatibility_help = read_compatibility_help_snapshot()
     if rc != 0:
         return {
             "ok": False, "error": error or output or "硬件状态工具未返回结果。",
-            "devices": {}, "broadcom": broadcom,
+            "devices": {}, "compatibility_help": compatibility_help,
         }
     try:
         result = json.loads(output)
     except (TypeError, ValueError):
         return {
             "ok": False, "error": "硬件状态工具返回了无效数据。",
-            "devices": {}, "broadcom": broadcom,
+            "devices": {}, "compatibility_help": compatibility_help,
         }
     devices = result.get("devices") if isinstance(result, dict) else None
     if not isinstance(devices, dict):
         return {
             "ok": False, "error": "硬件状态中缺少设备卡片。",
-            "devices": {}, "broadcom": broadcom,
+            "devices": {}, "compatibility_help": compatibility_help,
         }
-    return {"ok": True, "error": "", "devices": devices, "broadcom": broadcom}
+    return {
+        "ok": True, "error": "", "devices": devices,
+        "compatibility_help": compatibility_help,
+    }
 
 
 def storage_partition_snapshot():
@@ -832,15 +835,46 @@ class PointerMutationSerial:
             return operation()
 
 
-def read_broadcom_status_snapshot():
-    manager = "/usr/local/sbin/ming-broadcom-driver"
-    rc, output, error = run([manager, "status", "--json"], timeout=8)
+def read_compatibility_help_snapshot():
+    """Read the non-mutating radio compatibility contract off the GTK thread."""
+    rc, output, error = run(
+        ["ming-device-control", "compatibility-help"], timeout=8)
     if rc != 0:
-        return {"action": "error", "model": "", "error": error or output}
+        return {
+            "ok": False, "read_only": True, "device_ids": [],
+            "official_sources": [], "recovery_suggestions": [],
+            "risk_notice": "兼容性帮助当前不可用。",
+            "error": error or output or "兼容性帮助没有返回结果。",
+        }
     try:
-        return json.loads(output)
+        result = json.loads(output)
     except (TypeError, ValueError):
-        return {"action": "error", "model": "", "error": "驱动检测返回了无效数据"}
+        return {
+            "ok": False, "read_only": True, "device_ids": [],
+            "official_sources": [], "recovery_suggestions": [],
+            "risk_notice": "兼容性帮助返回了无效数据。",
+            "error": "兼容性帮助返回了无效数据。",
+        }
+    if not isinstance(result, dict):
+        return {
+            "ok": False, "read_only": True, "device_ids": [],
+            "official_sources": [], "recovery_suggestions": [],
+            "risk_notice": "兼容性帮助返回了无效数据。",
+            "error": "兼容性帮助返回了无效数据。",
+        }
+    if "ok" in result and result.get("ok") is not True:
+        result["ok"] = False
+        result["read_only"] = True
+        result.setdefault("error", "兼容性帮助接口报告失败。")
+        return result
+    result["ok"] = True
+    result["read_only"] = True
+    for key in ("device_ids", "official_sources", "recovery_suggestions"):
+        if not isinstance(result.get(key), list):
+            result[key] = []
+    result.setdefault("risk_notice", "该帮助不会修改系统。")
+    result.setdefault("error", "")
+    return result
 
 
 def hardware_probe_snapshot():
@@ -865,7 +899,7 @@ def hardware_probe_snapshot():
             "Network controller|Wireless controller|Ethernet controller|802\\.11"),
         "graphics": pci_driver_summary(
             "VGA compatible controller|3D controller|Display controller"),
-        "broadcom": read_broadcom_status_snapshot(),
+        "compatibility_help": read_compatibility_help_snapshot(),
     }
 
 
@@ -894,6 +928,8 @@ class MingSettings(Adw.ApplicationWindow):
         self.page_built = set()
         self.page_builders = {}
         self.hardware_probe_state = GenerationState()
+        self.compatibility_probe_state = GenerationState()
+        self.compatibility_probe_active = False
         self.wifi_probe_state = GenerationState()
         self.wifi_repair_state = GenerationState()
         self.wifi_connect_state = GenerationState()
@@ -1169,6 +1205,8 @@ class MingSettings(Adw.ApplicationWindow):
 
     def on_close_request(self, _window):
         self.hardware_probe_state.invalidate()
+        self.compatibility_probe_state.invalidate()
+        self.compatibility_probe_active = False
         self.wifi_probe_state.invalidate()
         self.wifi_repair_state.invalidate()
         self.wifi_connect_state.invalidate()
@@ -3313,18 +3351,17 @@ class MingSettings(Adw.ApplicationWindow):
             "无线网络修复", "重新扫描并连接当前无线接口，不影响有线连接。", wpa))
         net_grp.add(self.button_row("驱动检测", "查看显卡、声卡、无线网卡和缺失 firmware 线索。", scan))
 
-        broadcom_grp = Adw.PreferencesGroup(
-            title="Broadcom 无线兼容",
-            description="默认使用内核开源驱动；仅在官方支持的设备没有无线接口时提供离线 STA 备选。")
-        box.append(broadcom_grp)
-        self.broadcom_row = Adw.ActionRow(title="Broadcom 无线驱动")
-        self.broadcom_button = Gtk.Button()
-        self.broadcom_button.set_valign(Gtk.Align.CENTER)
-        self.broadcom_button.connect("clicked", self.on_broadcom_action)
-        self.broadcom_row.add_suffix(self.broadcom_button)
-        broadcom_grp.add(self.broadcom_row)
-        self.broadcom_row.set_subtitle("正在后台检测设备与驱动状态...")
-        self.broadcom_button.set_visible(False)
+        compatibility_grp = Adw.PreferencesGroup(
+            title="特定硬件兼容性帮助",
+            description="仅提供设备 ID、官方来源和恢复建议；本页不下载或安装 firmware。")
+        box.append(compatibility_grp)
+        self.compatibility_row = Adw.ActionRow(title="正在读取兼容性信息")
+        self.compatibility_button = Gtk.Button(label="查看兼容性帮助")
+        self.compatibility_button.set_valign(Gtk.Align.CENTER)
+        self.compatibility_button.connect("clicked", self.on_compatibility_help)
+        self.compatibility_row.add_suffix(self.compatibility_button)
+        compatibility_grp.add(self.compatibility_row)
+        self.compatibility_row.set_subtitle("正在后台读取设备 ID 与只读兼容性说明...")
 
         print_grp = Adw.PreferencesGroup(title="打印机与扫描仪", description="支持 USB 打印、局域网 IPP/AirPrint、常见打印机驱动和基础扫描。")
         box.append(print_grp)
@@ -3437,8 +3474,8 @@ class MingSettings(Adw.ApplicationWindow):
             self.hardware_refresh_button.set_sensitive(True)
             self.hardware_refresh_button.set_label("刷新硬件信息")
             snapshot = snapshot or {"ok": False, "error": error or "未知错误", "devices": {}}
-            broadcom = snapshot.get("broadcom") or {
-                "action": "error", "error": "未返回 Broadcom 驱动状态。"}
+            compatibility_help = snapshot.get("compatibility_help") or {
+                "ok": False, "error": "未返回兼容性帮助状态。"}
             if not snapshot.get("ok"):
                 message = "硬件状态读取失败：%s" % (snapshot.get("error") or "未知错误")
                 self.hardware_summary_row.set_title("硬件状态读取失败")
@@ -3448,7 +3485,7 @@ class MingSettings(Adw.ApplicationWindow):
                                    ("网络", self.hardware_network_row)):
                     row.set_title("%s — 失败" % title)
                     row.set_subtitle(message)
-                self.apply_broadcom_status(broadcom)
+                self.apply_compatibility_help(compatibility_help)
                 return False
             devices = snapshot["devices"]
             states = {"normal": "正常", "attention": "注意", "failure": "失败"}
@@ -3464,7 +3501,7 @@ class MingSettings(Adw.ApplicationWindow):
                     card.get("recommendation") or "请导出原始诊断以继续排查。"))
             self.hardware_summary_row.set_title("硬件状态已更新")
             self.hardware_summary_row.set_subtitle("显卡、声卡与网络卡片均已读取；原始证据仅在导出或复制时提供。")
-            self.apply_broadcom_status(broadcom)
+            self.apply_compatibility_help(compatibility_help)
             return False
 
         run_task_async(hardware_status_snapshot, done)
@@ -3498,98 +3535,66 @@ class MingSettings(Adw.ApplicationWindow):
 
         run_task_async(hardware_export_snapshot, done)
 
-    def read_broadcom_status(self):
-        return read_broadcom_status_snapshot()
-
-    def refresh_broadcom_status(self):
-        self.refresh_hardware_status()
-
-    def apply_broadcom_status(self, status):
-        action = status.get("action", "error")
-        model = status.get("model") or "未检测到 Broadcom 无线设备"
-        module = status.get("active_module") or "none"
-        pci_id = status.get("pci_id") or "未知"
-        self.broadcom_action = None
-        self.broadcom_row.set_title(model)
-        self.broadcom_button.set_visible(False)
-        self.broadcom_button.set_sensitive(False)
-        self.broadcom_button.remove_css_class("suggested-action")
-
-        if action == "install":
-            self.broadcom_row.set_subtitle(
-                "设备 ID %s，当前驱动 %s；未发现无线接口，可安装 ISO 内的离线兼容驱动。" % (pci_id, module))
-            self.broadcom_button.set_label("安装 Broadcom 兼容驱动")
-            self.broadcom_button.set_visible(True)
-            self.broadcom_button.set_sensitive(True)
-            self.broadcom_button.add_css_class("suggested-action")
-            self.broadcom_action = "install"
-        elif action == "restore":
-            self.broadcom_row.set_subtitle(
-                "当前已安装 Broadcom STA。恢复后将重新使用 Linux 内核开源驱动。")
-            self.broadcom_button.set_label("恢复开源驱动")
-            self.broadcom_button.set_visible(True)
-            self.broadcom_button.set_sensitive(True)
-            self.broadcom_button.remove_css_class("suggested-action")
-            self.broadcom_action = "restore"
-        elif action == "blocked_secure_boot":
-            self.broadcom_row.set_subtitle(
-                "设备受 STA 支持，但 Secure Boot 已开启或状态未知，不能加载未注册 MOK 的 DKMS 模块。")
-            self.broadcom_button.set_label("Secure Boot 阻止安装")
-            self.broadcom_button.set_visible(True)
-            self.broadcom_button.set_sensitive(False)
-        elif action == "none" and status.get("detected"):
-            self.broadcom_row.set_subtitle(
-                "无线接口工作正常，当前驱动 %s，无需更改。" % module)
-        elif action == "unsupported" and status.get("detected"):
-            self.broadcom_row.set_subtitle(
-                "设备 ID %s 不在 Debian STA 推荐列表中，继续使用内核开源驱动。" % pci_id)
-        elif action == "error":
-            self.broadcom_row.set_subtitle(
-                "暂时无法读取驱动状态：%s" % status.get("error", "未知错误"))
-        else:
-            self.broadcom_row.set_subtitle("没有需要处理的 Broadcom 无线设备。")
-
-    def on_broadcom_action(self, _button):
-        action = self.broadcom_action
-        if action not in ("install", "restore"):
+    def apply_compatibility_help(self, status):
+        status = status or {}
+        if not self.compatibility_probe_active:
+            self.compatibility_button.set_sensitive(True)
+            self.compatibility_button.set_label("查看兼容性帮助")
+        if not status.get("ok"):
+            self.compatibility_row.set_title("兼容性帮助暂不可用")
+            self.compatibility_row.set_subtitle(
+                status.get("error") or "未能读取本机设备兼容性信息。")
             return
-        installing = action == "install"
-        heading = "安装 Broadcom 兼容驱动？" if installing else "恢复开源驱动？"
-        body = (
-            "系统将校验 ISO 内的 Debian 驱动包，构建 wl 模块并更新 initramfs。"
-            "当前网络模块不会被强制卸载，完成后需要重启。"
-            if installing else
-            "系统将卸载 Broadcom STA、移除其黑名单并重建 initramfs。完成后需要重启。"
-        )
-        dlg = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
-        dlg.add_response("cancel", "取消")
-        dlg.add_response("apply", "确认执行")
-        dlg.set_default_response("cancel")
-        dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        device_ids = [str(item) for item in status.get("device_ids", []) if item]
 
-        def on_response(_dialog, response):
-            if response != "apply":
-                return
-            operation_generation = self.hardware_probe_state.begin()
-            self.broadcom_button.set_sensitive(False)
-            cmd = self.pkexec_cmd("/usr/local/sbin/ming-broadcom-driver", action)
+        if device_ids:
+            self.compatibility_row.set_title("检测到需要兼容性说明的硬件")
+            self.compatibility_row.set_subtitle(
+                "设备 ID：%s。该帮助只提供官方来源与恢复建议。" % ", ".join(device_ids))
+        else:
+            self.compatibility_row.set_title("未检测到需要兼容性说明的硬件")
+            self.compatibility_row.set_subtitle(
+                "仍可查看官方来源、风险说明和有线或 USB 适配器恢复建议。")
 
-            def done(rc):
-                if not self.hardware_probe_state.accept(operation_generation):
-                    return False
-                if self.hardware_page.get_root() is not self:
-                    return False
-                self.refresh_broadcom_status()
-                if rc == 0:
-                    self.toast("驱动操作完成，请重启电脑。日志：/var/log/ming-broadcom-driver.log")
-                else:
-                    self.toast("驱动操作未成功，系统已保留或恢复原配置。日志：/var/log/ming-broadcom-driver.log")
+    def on_compatibility_help(self, _button):
+        generation = self.compatibility_probe_state.begin()
+        self.compatibility_probe_active = True
+        self.compatibility_button.set_sensitive(False)
+        self.compatibility_button.set_label("正在读取...")
+
+        def done(status, error):
+            if not self.compatibility_probe_state.accept(generation):
                 return False
+            self.compatibility_probe_active = False
+            if self.hardware_page.get_root() is not self:
+                return False
+            status = status or {
+                "ok": False,
+                "error": error or "兼容性帮助未返回结果。",
+            }
+            self.apply_compatibility_help(status)
+            if not status.get("ok"):
+                self.toast("兼容性帮助读取失败：%s" % (
+                    status.get("error") or "未返回可读原因。"), "warning")
+                return False
+            device_ids = ", ".join(str(item) for item in status.get("device_ids", []) if item)
+            sources = "\n".join(str(item) for item in status.get("official_sources", []) if item)
+            suggestions = "\n".join(
+                str(item) for item in status.get("recovery_suggestions", []) if item)
+            body = "设备 ID：%s\n\n官方来源：%s\n\n恢复建议：%s\n\n%s" % (
+                device_ids or "未检测到特定设备",
+                sources or "请查看设备厂商支持页面或 Debian 官方文档。",
+                suggestions or "可先使用有线网络或受支持的 USB 网卡/蓝牙适配器恢复连接。",
+                status.get("risk_notice") or "该帮助不会修改系统。",
+            )
+            dialog = Adw.MessageDialog(
+                transient_for=self, heading="硬件兼容性帮助", body=body)
+            dialog.add_response("close", "关闭")
+            dialog.set_default_response("close")
+            dialog.present()
+            return False
 
-            run_async(cmd, on_done=done)
-
-        dlg.connect("response", on_response)
-        dlg.present()
+        run_task_async(read_compatibility_help_snapshot, done)
 
     def button_row(self, title, subtitle, button):
         row = Adw.ActionRow(title=title, subtitle=subtitle)

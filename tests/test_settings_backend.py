@@ -432,9 +432,9 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
     def test_hardware_page_build_and_refresh_never_run_probes_on_gtk_thread(self):
         self.assertIn("    def refresh_hardware_status", self.source)
         build = self.source[self.source.index("    def build_hardware"):
-                            self.source.index("    def read_broadcom_status")]
+                            self.source.index("    def on_wifi_repair")]
         refresh = self.source[self.source.index("    def refresh_hardware_status"):
-                              self.source.index("    def read_broadcom_status")]
+                              self.source.index("    def export_hardware_diagnostics")]
         self.assertNotIn("run([", build)
         self.assertNotIn("pci_driver_summary(", build)
         self.assertIn("refresh_hardware_status", build)
@@ -447,7 +447,7 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
         self.assertIn("def hardware_probe_snapshot", self.source)
         probe = self.source[self.source.index("def hardware_probe_snapshot"):
                             self.source.index("PAGE_ALIASES")]
-        for marker in ["lscpu", "uname", "pci_driver_summary", "read_broadcom_status_snapshot"]:
+        for marker in ["lscpu", "uname", "pci_driver_summary", "read_compatibility_help_snapshot"]:
             self.assertIn(marker, probe)
 
     def test_compositor_failure_parses_backend_error_and_reconciles_combo(self):
@@ -474,13 +474,15 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
         )
         self.assertIn("set_selected", combo)
 
-    def test_broadcom_completion_checks_operation_generation_and_page_root(self):
-        action = self.source[self.source.index("    def on_broadcom_action"):
+    def test_compatibility_help_completion_checks_operation_generation_and_page_root(self):
+        action = self.source[self.source.index("    def on_compatibility_help"):
                              self.source.index("    def button_row")]
-        self.assertIn("operation_generation", action)
-        accept = action.index("self.hardware_probe_state.accept(operation_generation)")
+        self.assertIn("run_task_async(read_compatibility_help_snapshot, done)", action)
+        self.assertNotIn("pkexec", action)
+        self.assertNotIn("ming-broadcom-driver", action)
+        accept = action.index("self.compatibility_probe_state.accept(generation)")
         root = action.index("self.hardware_page.get_root()")
-        refresh = action.index("self.refresh_broadcom_status()")
+        refresh = action.index("self.apply_compatibility_help(status)")
         toast = action.index("self.toast(")
         self.assertLess(accept, refresh)
         self.assertLess(root, refresh)

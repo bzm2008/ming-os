@@ -280,40 +280,55 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
         self.assertEqual(2, len(results))
         self.assertTrue(all(result is results[0] and result.ready for result in results))
 
-    def test_hardware_probe_collects_broadcom_off_the_gtk_callback(self):
+    def test_hardware_probe_collects_compatibility_help_off_the_gtk_callback(self):
         calls = []
 
         def fake_run(command, timeout):
             calls.append(("hardware", tuple(command), timeout))
             return 0, '{"devices": {"graphics": {}, "audio": {}, "network": {}}}', ""
 
-        def fake_broadcom():
-            calls.append(("broadcom",))
-            return {"action": "none", "detected": False}
+        def fake_compatibility_help():
+            calls.append(("compatibility_help",))
+            return {"ok": True, "read_only": True, "device_ids": []}
 
         snapshot = executable_function(
             "hardware_status_snapshot", {"run": fake_run, "json": __import__("json"),
-                                         "read_broadcom_status_snapshot": fake_broadcom})()
+                                         "read_compatibility_help_snapshot": fake_compatibility_help})()
 
         self.assertTrue(snapshot["ok"])
-        self.assertIn("broadcom", snapshot)
-        self.assertEqual({"action": "none", "detected": False}, snapshot["broadcom"])
-        self.assertEqual("broadcom", calls[-1][0])
+        self.assertIn("compatibility_help", snapshot)
+        self.assertEqual(
+            {"ok": True, "read_only": True, "device_ids": []},
+            snapshot["compatibility_help"])
+        self.assertEqual("compatibility_help", calls[-1][0])
 
-    def test_hardware_renderer_consumes_probe_broadcom_without_reading_on_callback(self):
+    def test_compatibility_help_preserves_helper_failure_instead_of_forcing_success(self):
+        def fake_run(_command, timeout):
+            self.assertEqual(8, timeout)
+            return 0, '{"ok": false, "error": "设备探测失败"}', ""
+
+        snapshot = executable_function(
+            "read_compatibility_help_snapshot",
+            {"run": fake_run, "json": __import__("json")})()
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual("设备探测失败", snapshot["error"])
+        self.assertTrue(snapshot["read_only"])
+
+    def test_hardware_renderer_consumes_probe_compatibility_help_without_reading_on_callback(self):
         GenerationState = generation_state_type()
         queued = []
 
         def enqueue(task, on_done):
             queued.append((task, on_done))
 
-        def unexpected_broadcom_read():
-            raise AssertionError("Broadcom status must be read by the worker probe, not the GTK callback")
+        def unexpected_compatibility_read():
+            raise AssertionError("Compatibility help must be read by the worker probe, not the GTK callback")
 
         refresh = executable_function("refresh_hardware_status", {
             "run_task_async": enqueue,
             "hardware_status_snapshot": lambda: None,
-            "read_broadcom_status_snapshot": unexpected_broadcom_read,
+            "read_compatibility_help_snapshot": unexpected_compatibility_read,
         }, "MingSettings")
 
         window = types.SimpleNamespace()
@@ -324,17 +339,19 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
         window.hardware_graphics_row = Recorder()
         window.hardware_audio_row = Recorder()
         window.hardware_network_row = Recorder()
-        window.applied_broadcom = []
-        window.apply_broadcom_status = window.applied_broadcom.append
+        window.applied_compatibility_help = []
+        window.apply_compatibility_help = window.applied_compatibility_help.append
 
         refresh(window)
         queued[0][1]({
             "ok": True,
             "devices": {"graphics": {}, "audio": {}, "network": {}},
-            "broadcom": {"action": "none", "detected": False},
+            "compatibility_help": {"ok": True, "read_only": True, "device_ids": []},
         }, None)
 
-        self.assertEqual([{"action": "none", "detected": False}], window.applied_broadcom)
+        self.assertEqual(
+            [{"ok": True, "read_only": True, "device_ids": []}],
+            window.applied_compatibility_help)
 
     def test_bluetooth_repair_refuses_hard_rfkill_after_current_state_recheck(self):
         queued, commands = [], []

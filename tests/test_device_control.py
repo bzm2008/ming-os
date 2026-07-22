@@ -211,6 +211,7 @@ class WifiClassificationTests(unittest.TestCase):
         self.assertIn("pci:14e4:432b", help_data["device_ids"])
         self.assertIn("usb:413c:8197", help_data["device_ids"])
         self.assertIn("firmware-b43-installer", help_data["official_sources"])
+        self.assertTrue(help_data["recovery_suggestions"])
         self.assertIn("不自动下载", help_data["risk_notice"])
 
     def test_suspicious_unknown_usb_network_adapter_needs_diagnosis(self):

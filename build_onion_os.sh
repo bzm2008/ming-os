@@ -1727,6 +1727,17 @@ def rootfs_file(path):
             return candidate
     return None
 
+def rootfs_glob(relative_dir, pattern):
+    """Glob only inside a rootfs-local directory and ignore escaping links."""
+    directory = rootfs_file(root / relative_dir)
+    if directory is None or not directory.is_dir():
+        return []
+    return [
+        candidate
+        for candidate in directory.glob(pattern)
+        if rootfs_file(candidate) is not None
+    ]
+
 def require_file(relative_path, marker=None):
     path = root / relative_path
     candidate = rootfs_file(path)
@@ -2598,16 +2609,41 @@ for module, pattern in kernel_module_patterns.items():
     if not any(any(kernel_dir.glob(pattern)) for kernel_dir in kernel_dirs):
         errors.append(f"kernel is missing required in-tree module {module}")
 
-broadcom_cache = root / "usr/share/ming-os/driver-cache/broadcom"
-broadcom_debs = list(broadcom_cache.glob("broadcom-sta-dkms_*.deb"))
-if len(broadcom_debs) != 1 or broadcom_debs[0].stat().st_size == 0:
-    errors.append("Broadcom offline cache must contain exactly one non-empty broadcom-sta-dkms deb")
-require_file("usr/share/ming-os/driver-cache/broadcom/broadcom-sta.ids")
-broadcom_sums = require_file("usr/share/ming-os/driver-cache/broadcom/SHA256SUMS", "broadcom-sta.ids")
-if broadcom_debs and broadcom_debs[0].name not in broadcom_sums:
-    errors.append("Broadcom SHA256SUMS does not cover the cached STA deb")
-if (root / "var/lib/dpkg/info/broadcom-sta-dkms.list").exists():
-    errors.append("broadcom-sta-dkms must be cached but not installed by default")
+# Never carry the prohibited Broadcom STA/DKMS fallback into a new image or a
+# resumed rootfs. The supported path is the in-tree kernel driver plus the
+# official Debian firmware packages checked above.
+dpkg_status_path = rootfs_file(root / "var/lib/dpkg/status")
+dpkg_status = (dpkg_status_path.read_text(encoding="utf-8", errors="replace")
+               if dpkg_status_path is not None and dpkg_status_path.is_file() else "")
+installed_packages = set()
+for stanza in re.split(r"\n\s*\n", dpkg_status):
+    package_match = re.search(r"(?m)^Package:\s*(\S+)$", stanza)
+    status_match = re.search(r"(?m)^Status:\s*install ok installed$", stanza)
+    if package_match and status_match:
+        installed_packages.add(package_match.group(1).split(":", 1)[0])
+for forbidden_package in ["broadcom-sta-dkms", "dkms"]:
+    info_path = rootfs_file(root / f"var/lib/dpkg/info/{forbidden_package}.list")
+    if ((info_path is not None and info_path.exists())
+            or forbidden_package in installed_packages):
+        errors.append(f"{forbidden_package} must not be installed in the ISO rootfs")
+
+for stale_path in [
+    "usr/share/ming-os/driver-cache/broadcom",
+    "usr/local/sbin/ming-broadcom-driver",
+]:
+    candidate = rootfs_file(root / stale_path)
+    if candidate is not None and candidate.exists():
+        errors.append(f"{stale_path} must not be shipped in the ISO rootfs")
+for stale_dkms_dir in rootfs_glob("var/lib/dkms", "broadcom-sta*"):
+    errors.append(f"{stale_dkms_dir.relative_to(root)} must not be shipped in the ISO rootfs")
+for stale_module in rootfs_glob("lib/modules", "*/updates/dkms/wl.*"):
+    errors.append(f"{stale_module.relative_to(root)} must not be shipped in the ISO rootfs")
+for archive_pattern in ["broadcom-sta-dkms_*.deb", "dkms_*.deb"]:
+    for stale_archive in rootfs_glob("var/cache/apt/archives", archive_pattern):
+        errors.append(f"{stale_archive.relative_to(root)} must not be shipped in the ISO rootfs")
+for stale_source in rootfs_glob("usr/src", "broadcom-sta*"):
+    errors.append(f"{stale_source.relative_to(root)} must not be shipped in the ISO rootfs")
+
 for installer_package in ["firmware-b43-installer", "firmware-b43legacy-installer"]:
     if (root / f"var/lib/dpkg/info/{installer_package}.list").exists():
         errors.append(f"{installer_package} must not run during the ISO build because its postinst downloads from GitHub")
@@ -2637,24 +2673,29 @@ for marker in ["spi_pxa2xx_platform", "intel_lpss_pci"]:
     if marker not in initramfs_modules:
         errors.append(f"initramfs module list missing MacBook dependency {marker}")
 
-broadcom_manager = require_file("usr/local/sbin/ming-broadcom-driver", "status --json")
 for marker in [
-    "broadcom-sta.ids", "SHA256SUMS", "mokutil --sb-state", "install)",
-    "restore)", "/var/log/ming-broadcom-driver.log", "update-initramfs -u -k all",
+    "read_compatibility_help_snapshot", "on_compatibility_help",
+    "compatibility-help", "不下载或安装",
 ]:
-    if marker not in broadcom_manager:
-        errors.append(f"ming-broadcom-driver missing marker {marker}")
-for marker in ["ming-broadcom-driver", "安装 Broadcom 兼容驱动", "恢复开源驱动"]:
     if marker not in settings:
-        errors.append(f"ming-settings missing Broadcom integration marker {marker}")
+        errors.append(f"ming-settings missing read-only compatibility help marker {marker}")
+for forbidden_marker in [
+    "ming-broadcom-driver", "broadcom-sta", "安装 Broadcom 兼容驱动",
+    "恢复开源驱动", "DKMS 模块",
+]:
+    if forbidden_marker in settings:
+        errors.append(f"ming-settings must not ship Broadcom STA action {forbidden_marker}")
 
 driver_diagnose = require_file("usr/local/bin/ming-driver-diagnose", "Ming OS driver diagnose")
 for marker in [
-    "Broadcom driver recommendation", "mokutil --sb-state", "dkms status",
-    "vainfo", "lsinitramfs", "rtw88_8821cu", "applespi",
+    "Broadcom compatibility help", "ming-device-control compatibility-help",
+    "mokutil --sb-state", "vainfo", "lsinitramfs", "rtw88_8821cu", "applespi",
 ]:
     if marker not in driver_diagnose:
         errors.append(f"ming-driver-diagnose missing legacy compatibility marker {marker}")
+for forbidden_marker in ["ming-broadcom-driver", "broadcom-sta", "dkms status"]:
+    if forbidden_marker in driver_diagnose:
+        errors.append(f"ming-driver-diagnose must not reference Broadcom STA/DKMS marker {forbidden_marker}")
 
 require_path("usr/sbin/mbpfan")
 require_path("usr/sbin/smartctl")
