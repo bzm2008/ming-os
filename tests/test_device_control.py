@@ -167,6 +167,37 @@ class WifiClassificationTests(unittest.TestCase):
         self.assertEqual("driver_missing", status["state"])
         self.assertIn(c_command("lspci", "-nnk"), runner.commands)
 
+    def test_b43_status_reports_required_firmware_file_and_presence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            firmware = pathlib.Path(directory)
+            runner = FakeRunner({
+                c_command("lspci", "-nnk"): (
+                    0,
+                    "02:00.0 Network controller [0280]: Broadcom BCM4322 [14e4:432b]\n"
+                    "\tKernel driver in use: b43\n\tKernel modules: b43",
+                    "",
+                ),
+                c_command("lsusb"): (0, "", ""),
+            })
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda _name: True,
+                firmware_root=firmware)
+
+            missing = controller.wifi_status()
+            self.assertEqual("pci:14e4:432b", missing["firmware"]["device_id"])
+            self.assertEqual("b43", missing["firmware"]["driver"])
+            self.assertEqual("E_FIRMWARE_MISSING", missing["firmware"]["error_code"])
+            self.assertEqual(["b43/ucode30_mimo.fw"],
+                             missing["firmware"]["required_files"])
+            self.assertEqual("firmware_missing", missing["state"])
+
+            target = firmware / "b43/ucode30_mimo.fw"
+            target.parent.mkdir()
+            target.write_bytes(b"firmware")
+            present = controller.wifi_status()
+            self.assertTrue(present["firmware"]["complete"])
+            self.assertEqual("", present["firmware"]["error_code"])
+
     def test_suspicious_unknown_usb_network_adapter_needs_diagnosis(self):
         runner = FakeRunner({
             c_command("lspci", "-nnk"): (0, "", ""),
@@ -215,6 +246,34 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(63, result["requested"])
+
+    def test_widget_audio_performs_one_bounded_pulseaudio_recovery_then_reads_sink(self):
+        calls = []
+        info_calls = [
+            (1, "", "Connection refused"),
+            (0, "Default Sink: alsa_output.pci.analog-stereo\nDefault Source: alsa_input.pci.analog-stereo", ""),
+        ]
+
+        def runner(argv, timeout=8):
+            calls.append((tuple(argv), timeout))
+            if argv == ["pactl", "info"]:
+                return info_calls.pop(0)
+            if argv == ["pulseaudio", "--start"]:
+                return 0, "", ""
+            if argv == ["pactl", "get-sink-volume", "@DEFAULT_SINK@"]:
+                return 0, "Volume: front-left: 50%", ""
+            if argv == ["pactl", "list", "short", "sinks"]:
+                return 0, "0\talsa_output.pci.analog-stereo\tmodule-alsa-card.c\ts16le 2ch 44100Hz\tRUNNING", ""
+            if argv == ["pactl", "get-sink-mute", "@DEFAULT_SINK@"]:
+                return 0, "Mute: no", ""
+            return 1, "", "unexpected"
+
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "pulseaudio"})
+        status = controller.audio_widget_status()
+        self.assertTrue(status["available"])
+        self.assertEqual(50, status["value"])
+        self.assertIn((("pulseaudio", "--start"), 3), calls)
 
     def test_volume_targets_valid_selected_sink_unmutes_and_reads_back(self):
         sink = "alsa_output.usb-Headset.analog-stereo"
@@ -1244,6 +1303,51 @@ class BluetoothStatusTests(unittest.TestCase):
         self.assertEqual("firmware_missing", firmware_status["state"])
         self.assertEqual("install_firmware", firmware_status["action"])
         self.assertEqual("driver_missing", driver_status["state"])
+
+    def test_dell_413c_8197_reports_both_kernel_firmware_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            firmware_root = pathlib.Path(directory)
+            controller = self.device.DeviceController(
+                runner=FakeRunner({
+                    ("lsusb",): (
+                        0,
+                        "Bus 001 Device 003: ID 413c:8197 Dell Computer Corp. Bluetooth",
+                        "",
+                    ),
+                    ("lsmod",): (0, "btusb 65536 0\nbtbcm 24576 1 btusb", ""),
+                }),
+                executable=lambda _name: True,
+                firmware_root=firmware_root,
+            )
+
+            missing = controller.bluetooth_status()
+            self.assertEqual("usb:413c:8197", missing["firmware"]["device_id"])
+            self.assertEqual("btbcm", missing["firmware"]["driver"])
+            self.assertEqual([
+                "brcm/BCM-413c-8197.hcd",
+                "brcm/BCM20702A1-413c-8197.hcd",
+            ], missing["firmware"]["required_files"])
+            self.assertEqual("E_FIRMWARE_MISSING", missing["firmware"]["error_code"])
+            self.assertEqual("firmware_missing", missing["state"])
+
+            for name in missing["firmware"]["required_files"]:
+                target = firmware_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"same reviewed payload")
+            complete = controller.bluetooth_status()
+            self.assertTrue(complete["firmware"]["complete"])
+            self.assertEqual("", complete["firmware"]["error_code"])
+            self.assertEqual(
+                complete["firmware"]["files"][0]["sha256"],
+                complete["firmware"]["files"][1]["sha256"],
+            )
+
+            (firmware_root / "brcm/BCM-413c-8197.hcd").write_bytes(b"different")
+            mismatch = controller.bluetooth_status()
+            self.assertFalse(mismatch["firmware"]["complete"])
+            self.assertEqual("E_FIRMWARE_ALIAS_MISMATCH",
+                             mismatch["firmware"]["error_code"])
+            self.assertEqual("firmware_missing", mismatch["state"])
 
     def test_controller_off_when_service_is_active_but_not_powered(self):
         controller = self.controller_for({

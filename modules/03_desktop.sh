@@ -114,19 +114,40 @@ exec /usr/local/bin/ming-settings "$@"
 MINGCONTROLWRAPPER
     chmod 0755 /usr/local/bin/ming-control-center
 
-    # The Xfce backend remains installed, but its obsolete visible control
-    # center must not compete with Ming Settings in launchers or search.
-    local desktop_file
-    for desktop_file in \
-        /usr/share/applications/xfce-settings-manager.desktop \
-        /usr/share/applications/xfce4-settings-manager.desktop \
-        /usr/share/applications/xfce4-display-settings.desktop; do
-        [[ -f "${desktop_file}" ]] || continue
-        if grep -q '^NoDisplay=' "${desktop_file}"; then
-            sed -i 's/^NoDisplay=.*/NoDisplay=true/' "${desktop_file}"
-        else
-            sed -i '/^\[Desktop Entry\]/a NoDisplay=true' "${desktop_file}"
-        fi
+    # Keep dpkg-owned launchers intact.  XDG gives /usr/local precedence, so
+    # same-name Ming overrides can hide the compatibility control surface and
+    # be re-applied after package upgrades without touching user launchers.
+    local desktop_name
+    install -d -m 0755 /usr/local/share/applications
+    for desktop_name in \
+        xfce4-about.desktop \
+        xfce4-accessibility-settings.desktop \
+        xfce4-appearance-settings.desktop \
+        xfce4-display-settings.desktop \
+        xfce4-keyboard-settings.desktop \
+        xfce4-mime-settings.desktop \
+        xfce4-mouse-settings.desktop \
+        xfce4-notifyd-config.desktop \
+        xfce4-panel.desktop \
+        xfce4-power-manager-settings.desktop \
+        xfce4-screensaver-preferences.desktop \
+        xfce4-session-logout.desktop \
+        xfce4-session-settings.desktop \
+        xfce4-settings-editor.desktop \
+        xfce4-settings-manager.desktop \
+        xfce4-taskmanager.desktop \
+        xfce4-workspaces-settings.desktop \
+        xfce-settings-manager.desktop \
+        xfdesktop-settings.desktop; do
+        cat > "/usr/local/share/applications/${desktop_name}" << EOF
+[Desktop Entry]
+Type=Application
+Name=Ming OS compatibility control override
+Hidden=true
+NoDisplay=true
+X-Ming-Managed=true
+EOF
+        chmod 0644 "/usr/local/share/applications/${desktop_name}"
     done
 
     # Some applications invoke the old executable directly instead of its
@@ -4305,6 +4326,10 @@ boolean = lambda name: os.environ.get(name) == "true"
 integer = lambda name: int(os.environ.get(name, "0") or 0)
 payload = {
     "timestamp": datetime.now(timezone.utc).isoformat(),
+    "boot_id": (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        if Path("/proc/sys/kernel/random/boot_id").is_file() else ""
+    ),
     "phase": os.environ.get("MING_PHASE", "unknown"),
     "phone_desktop": {
         "enabled": boolean("MING_PHONE_ENABLED"),
@@ -5730,7 +5755,7 @@ metadata remain pending the final installation and hardware regression pass.
 Install the official signed bootstrap once, verify its SHA256, detached
 signature and public-key fingerprint, then use Ming Settings to check and
 apply the signed 26.4.0.1 manifest. The manifest must declare
-`from_versions: ["26.3.2", "26.3.3", "26.4.0"]` and `version: "26.4.0.1"`. The transaction engine
+`from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]` and `version: "26.4.0.1"`. The transaction engine
 preserves `/home`, uses a one-time `grub-reboot` entry, and automatically
 confirms or rolls back after health checks. It does not call Calamares,
 partition tools, mkfs or resize operations.

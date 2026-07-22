@@ -16,17 +16,17 @@ access="$(prepare_grub_to_access_device "${device}" | sed 's/^/    /')"
 cat <<EOF
 menuentry 'Ming OS Legacy Root' --id 'ming-legacy' {
 ${access}
-    linux /vmlinuz root=UUID=${uuid} ro ming.slot=legacy
+    linux /vmlinuz root=UUID=${uuid} ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 ming.entry=ming-legacy ming.slot=legacy
     initrd /initrd.img
 }
 menuentry 'Ming OS Slot A' --id 'ming-slot-a' {
 ${access}
-    linux /vmlinuz root=UUID=${uuid} ro ming.slot=A
+    linux /vmlinuz root=UUID=${uuid} ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 ming.entry=ming-slot-a ming.slot=A
     initrd /initrd.img
 }
 menuentry 'Ming OS Slot B' --id 'ming-slot-b' {
 ${access}
-    linux /vmlinuz root=UUID=${uuid} ro ming.slot=B
+    linux /vmlinuz root=UUID=${uuid} ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 ming.entry=ming-slot-b ming.slot=B
     initrd /initrd.img
 }
 menuentry 'Ming OS Recovery (previous committed root)' --id 'ming-recovery-manual' {

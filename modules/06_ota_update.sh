@@ -98,6 +98,7 @@ deploy_transaction_runtime() {
     install -m 0755 "${source}/grub/40_ming_transaction" /etc/grub.d/40_ming_transaction
     install -m 0644 "${source}/systemd/ming-transaction-health.service" /etc/systemd/system/ming-transaction-health.service
     install -m 0644 "${source}/systemd/ming-transaction-reconcile.service" /etc/systemd/system/ming-transaction-reconcile.service
+    install -m 0644 "${source}/systemd/ming-ota-capability-refresh.service" /etc/systemd/system/ming-ota-capability-refresh.service
     install -m 0644 "${source}/systemd/ming-transaction-rollback-reboot.service" /etc/systemd/system/ming-transaction-rollback-reboot.service
     install -m 0644 "${source}/systemd/display-manager.service.d/20-ming-transaction-health.conf" /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
     install -m 0644 "${source}/polkit/org.mingos.update.policy" /usr/share/polkit-1/actions/org.mingos.update.policy
@@ -134,6 +135,7 @@ GRUBTRANSACTION
     install -d -m 0755 /etc/systemd/system/multi-user.target.wants
     ln -sfn ../ming-transaction-health.service /etc/systemd/system/multi-user.target.wants/ming-transaction-health.service
     ln -sfn ../ming-transaction-reconcile.service /etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service
+    ln -sfn ../ming-ota-capability-refresh.service /etc/systemd/system/multi-user.target.wants/ming-ota-capability-refresh.service
     /usr/local/lib/ming-update/ming-ota-bootstrap-capability.py --write-marker >/dev/null
 }
 

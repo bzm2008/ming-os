@@ -20,6 +20,7 @@ from pathlib import Path
 RFKILL = "/usr/sbin/rfkill"
 BACKLIGHT_ROOT = Path("/sys/class/backlight")
 MING_DISPLAY_CONTROL = "/usr/local/bin/ming-display-control"
+FIRMWARE_ROOT = Path("/usr/lib/firmware")
 BLUETOOTH_MODULES = {"btusb", "btintel", "btrtl", "btbcm", "ath3k"}
 BLUETOOTH_USB_VENDOR_IDS = {
     "8087",  # Intel
@@ -945,7 +946,7 @@ class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
                  backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
                  settings_path=None, network_backend=None, sysfs_root="/sys",
-                 display_control=MING_DISPLAY_CONTROL):
+                 display_control=MING_DISPLAY_CONTROL, firmware_root=FIRMWARE_ROOT):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
@@ -955,6 +956,7 @@ class DeviceController:
             Path.home() / ".config" / "ming-os" / "settings.json")
         self.network_backend = network_backend
         self.display_control = str(display_control)
+        self.firmware_root = Path(firmware_root)
         self._network_backend_checked = network_backend is not None
         self._carrier_snapshots = {}
 
@@ -1915,6 +1917,50 @@ class DeviceController:
         return "\n".join(
             line for line in (output or "").splitlines() if pattern.search(line))
 
+    def _firmware_snapshot(self, device_id="", driver="", required_files=None,
+                           source="system-firmware", aliases_must_match=False):
+        records = []
+        for name in required_files or []:
+            path = self.firmware_root / name
+            present = path.is_file() and not path.is_symlink()
+            digest = ""
+            if present:
+                try:
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    present = False
+            records.append({"path": name, "present": present, "sha256": digest})
+        complete = bool(records) and all(item["present"] for item in records)
+        alias_mismatch = bool(
+            complete and aliases_must_match and
+            len({item["sha256"] for item in records}) != 1
+        )
+        if alias_mismatch:
+            complete = False
+        return {
+            "device_id": device_id,
+            "driver": driver,
+            "required_files": [item["path"] for item in records],
+            "files": records,
+            "complete": complete,
+            "source": source if records else "",
+            "error_code": (
+                "E_FIRMWARE_ALIAS_MISMATCH" if alias_mismatch else
+                "" if complete or not records else "E_FIRMWARE_MISSING"
+            ),
+        }
+
+    def _wifi_firmware_snapshot(self, pci_output):
+        identity = re.search(r"\[(14e4:[0-9a-f]{4})\]", pci_output or "", re.I)
+        driver = re.search(r"Kernel driver in use:\s*([A-Za-z0-9_-]+)",
+                           pci_output or "", re.I)
+        driver_name = driver.group(1).lower() if driver else ""
+        if identity and driver_name in {"b43", "bcma"}:
+            return self._firmware_snapshot(
+                "pci:" + identity.group(1).lower(), driver_name,
+                ["b43/ucode30_mimo.fw"], "ming-audited-offline-bundle")
+        return self._firmware_snapshot()
+
     def wifi_radio_status(self):
         backend = self._get_network_backend()
         if backend is not None:
@@ -1957,10 +2003,12 @@ class DeviceController:
                     state = backend._state_name(device)
                     devices.append((ifname, state))
                 if devices:
-                    return classify_wifi(
+                    status = classify_wifi(
                         wifi_devices=devices, pci_output="", usb_output="",
                         rfkill_output="", firmware_output="",
                         hardware_probes_ok=True)
+                    status["firmware"] = self._firmware_snapshot()
+                    return status
             except Exception:
                 # Keep the bounded diagnostics fallback available on old libnm.
                 pass
@@ -1981,7 +2029,7 @@ class DeviceController:
             "firmware.*(failed|missing|not found)|failed to load.*firmware",
             "-n", "8",
         ])
-        return classify_wifi(
+        status = classify_wifi(
             wifi_devices=devices,
             pci_output=self._wireless_pci(pci_all),
             usb_output=self._wireless_usb(usb_all),
@@ -1991,6 +2039,17 @@ class DeviceController:
             hardware_probes_ok=nm_rc == 0 and pci_rc == 0 and usb_rc == 0,
             suspicious_usb_output=self._suspicious_wireless_usb(usb_all),
         )
+        status["firmware"] = self._wifi_firmware_snapshot(pci_all)
+        if (status["firmware"]["error_code"] and
+                status.get("state") not in {"rfkill_blocked", "diagnostic_unavailable"}):
+            status.update({
+                "state": "firmware_missing",
+                "title": "无线硬件缺少固件",
+                "detail": "缺少内核请求的无线固件：%s" % "、".join(
+                    status["firmware"]["required_files"]),
+                "action": "install_firmware",
+            })
+        return status
 
     def wifi_scan(self):
         backend = self._get_network_backend()
@@ -2290,6 +2349,16 @@ class DeviceController:
         suspected_hardware = self._bluetooth_usb_suspects(usb_output)
         modules = self._bluetooth_modules(modules_output)
         firmware_evidence = self._bluetooth_firmware(firmware_output)
+        dell_8197 = next((item for item in hardware + suspected_hardware
+                          if item.get("bus") == "usb" and item.get("id") == "413c:8197"), None)
+        if dell_8197:
+            firmware = self._firmware_snapshot(
+                "usb:413c:8197", "btbcm", [
+                    "brcm/BCM-413c-8197.hcd",
+                    "brcm/BCM20702A1-413c-8197.hcd",
+                ], "ming-audited-offline-bundle", aliases_must_match=True)
+        else:
+            firmware = self._firmware_snapshot()
         rfkill = {
             "soft_blocked": bool(re.search(r"Soft blocked:\s*yes", rfkill_output or "", re.I)),
             "hard_blocked": bool(re.search(r"Hard blocked:\s*yes", rfkill_output or "", re.I)),
@@ -2331,6 +2400,12 @@ class DeviceController:
             title = "蓝牙已被禁用"
             detail = "请解除蓝牙的 rfkill 软件或硬件阻止。"
             action = "unblock_rfkill"
+        elif firmware["error_code"]:
+            state = "firmware_missing"
+            title = "蓝牙硬件缺少固件"
+            detail = "内核请求的蓝牙固件不完整或别名内容不一致：%s" % "、".join(
+                firmware["required_files"])
+            action = "install_firmware"
         elif not modules:
             state = "driver_missing"
             title = "蓝牙硬件未绑定驱动"
@@ -2363,6 +2438,7 @@ class DeviceController:
             "suspected_hardware": suspected_hardware,
             "modules": modules,
             "firmware_evidence": firmware_evidence,
+            "firmware": firmware,
             "rfkill": rfkill,
             "service": service,
             "controller": controller,
@@ -2619,6 +2695,15 @@ class DeviceController:
         if not self._can_run("pactl"):
             return self._audio_status_result(state="unavailable", error="pactl 不可用")
         info_rc, info, info_error = self._run(["pactl", "info"])
+        if info_rc != 0 and self._can_run("pulseaudio"):
+            # One bounded recovery attempt is enough for a login race.  Never
+            # loop or block GTK while waiting for a missing audio daemon.
+            start_rc, _start_output, start_error = self._run(
+                ["pulseaudio", "--start"], timeout=3)
+            if start_rc == 0:
+                info_rc, info, info_error = self._run(["pactl", "info"])
+            elif not info_error:
+                info_error = start_error
         if info_rc != 0:
             return self._audio_status_result(
                 state="no_server", backend="pactl", error=info_error or info or "PulseAudio 服务没有运行。")

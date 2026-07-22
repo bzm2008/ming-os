@@ -145,6 +145,7 @@ install -m 0755 "${root}/assets/initramfs/ming-transaction-hook" "${pkg}/etc/ini
 install -m 0755 "${root}/assets/grub/40_ming_transaction" "${pkg}/etc/grub.d/40_ming_transaction"
 install -m 0644 "${root}/assets/systemd/ming-transaction-health.service" "${pkg}/etc/systemd/system/ming-transaction-health.service"
 install -m 0644 "${root}/assets/systemd/ming-transaction-reconcile.service" "${pkg}/etc/systemd/system/ming-transaction-reconcile.service"
+install -m 0644 "${root}/assets/systemd/ming-ota-capability-refresh.service" "${pkg}/etc/systemd/system/ming-ota-capability-refresh.service"
 install -m 0644 "${root}/assets/systemd/ming-transaction-rollback-reboot.service" "${pkg}/etc/systemd/system/ming-transaction-rollback-reboot.service"
 install -d -m 0755 "${pkg}/etc/systemd/system/display-manager.service.d"
 install -m 0644 "${root}/assets/systemd/display-manager.service.d/20-ming-transaction-health.conf" "${pkg}/etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf"

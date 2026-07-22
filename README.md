@@ -135,7 +135,7 @@ Legacy website download response (transactional discovery remains separate):
 
 The 26.3.2 client must first install the official signed bootstrap. The
 transactional path remains unavailable until the release owner publishes and
-verifies a manifest with `from_versions: ["26.3.2", "26.3.3", "26.4.0"]`,
+verifies a manifest with `from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]`,
 target `version: "26.4.0.1"`, and a matching content index,
 payload and detached signatures. Until then the discovery endpoint returns
 `delivery:none`; no manual GRUB step or recovery-ISO shortcut is offered. Recovery

@@ -1,0 +1,11 @@
+[Unit]
+Description=Ming OS transactional OTA capability verification
+After=local-fs.target
+Before=ming-update-check.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ming-update/ming-ota-bootstrap-capability.py --write-marker
+
+[Install]
+WantedBy=multi-user.target

@@ -129,6 +129,12 @@ class DesktopSourceTests(unittest.TestCase):
         ]:
             self.assertIn(marker, self.drawer)
 
+    def test_drawer_hides_fixed_xfce_control_surface_without_hiding_third_party_apps(self):
+        self.assertIn("LEGACY_XFCE_LAUNCHERS", self.drawer)
+        self.assertIn("def should_hide_legacy_launcher", self.drawer)
+        self.assertIn("xfce4-mouse-settings.desktop", self.drawer)
+        self.assertIn("xfce4-notifyd-config.desktop", self.drawer)
+
     def test_desktop_preserves_last_known_good_layout_and_has_a_blank_area_menu(self):
         for marker in [
             "LAST_GOOD_LAYOUT_PATH",

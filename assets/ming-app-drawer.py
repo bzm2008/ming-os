@@ -17,6 +17,7 @@ ANIMATION_DURATION_MS = 200
 SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 DRAWER_HEIGHT_RATIO = 0.72
 IPC_VERSION = 1
+_GTK_LOADED = False
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
 _CATEGORY_RULES = (
     ("网络", {"Network", "WebBrowser", "Email", "Chat"}),
@@ -45,6 +46,41 @@ CANONICAL_PREFERENCE = {
     "edge": "ming-edge.desktop",
 }
 
+# Compatibility backends remain installed, but Ming Settings owns their user
+# surface.  Match exact launcher IDs only so third-party and user launchers are
+# never hidden merely because they use Xfce libraries or categories.
+LEGACY_XFCE_LAUNCHERS = frozenset({
+    "xfce4-about.desktop",
+    "xfce4-accessibility-settings.desktop",
+    "xfce4-appearance-settings.desktop",
+    "xfce4-display-settings.desktop",
+    "xfce4-keyboard-settings.desktop",
+    "xfce4-mime-settings.desktop",
+    "xfce4-mouse-settings.desktop",
+    "xfce4-notifyd-config.desktop",
+    "xfce4-panel.desktop",
+    "xfce4-power-manager-settings.desktop",
+    "xfce4-screensaver-preferences.desktop",
+    "xfce4-session-logout.desktop",
+    "xfce4-session-settings.desktop",
+    "xfce4-settings-editor.desktop",
+    "xfce4-settings-manager.desktop",
+    "xfce4-taskmanager.desktop",
+    "xfce4-workspaces-settings.desktop",
+    "xfce-settings-manager.desktop",
+    "xfdesktop-settings.desktop",
+})
+
+
+def should_hide_legacy_launcher(path):
+    candidate = pathlib.Path(path)
+    if candidate.name not in LEGACY_XFCE_LAUNCHERS:
+        return False
+    return candidate.parent in {
+        SYSTEM_APPLICATION_DIR,
+        pathlib.Path("/usr/local/share/applications"),
+    }
+
 
 def _load_common():
     path = pathlib.Path(__file__).with_name("ming-shell-common.py")
@@ -71,7 +107,7 @@ def resolved_icon_image(Gtk, icon, pixel_size):
 
 
 def gtk_loaded():
-    return "gi" in sys.modules
+    return _GTK_LOADED
 
 
 def category_for(app):
@@ -108,7 +144,7 @@ def deduplicate_apps(apps):
     selected = {}
     for app in apps:
         basename = pathlib.Path(app.path).name
-        if basename == "ming-update.desktop":
+        if basename == "ming-update.desktop" or should_hide_legacy_launcher(app.path):
             continue
         identity = canonical_identity(app)
         preferred = CANONICAL_PREFERENCE.get(identity)
@@ -311,10 +347,12 @@ def send_toggle(rect=None):
 
 
 def _load_gtk():
+    global _GTK_LOADED
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, GLib, Gtk
+    _GTK_LOADED = True
     return Gdk, GLib, Gtk
 
 

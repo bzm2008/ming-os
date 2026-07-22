@@ -279,7 +279,7 @@ class ReleaseGateContracts(unittest.TestCase):
             '"update_type": "major"',
             "26.3.2",
             '"version": "26.4.0.1"',
-            'from_versions: ["26.3.2", "26.3.3", "26.4.0"]',
+            'from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]',
             "no manual GRUB",
         ):
             self.assertIn(marker, readme)

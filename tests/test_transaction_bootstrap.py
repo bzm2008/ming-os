@@ -112,6 +112,17 @@ class TransactionBootstrapTests(unittest.TestCase):
         self.assertIn("write_capability_marker", source)
         self.assertIn("detect_capability", source)
 
+    def test_image_deploys_root_capability_refresh_oneshot(self):
+        module = (ROOT / "modules" / "06_ota_update.sh").read_text(encoding="utf-8")
+        unit = ROOT / "assets" / "systemd" / "ming-ota-capability-refresh.service"
+        self.assertTrue(unit.is_file())
+        source = unit.read_text(encoding="utf-8")
+        self.assertIn("Type=oneshot", source)
+        self.assertIn("ming-ota-bootstrap-capability.py --write-marker", source)
+        self.assertIn("Before=ming-update-check.service", source)
+        self.assertIn("ming-ota-capability-refresh.service", module)
+        self.assertIn("multi-user.target.wants/ming-ota-capability-refresh.service", module)
+
     @unittest.skipIf(os.name == "nt", "Windows does not expose POSIX file-mode semantics")
     def test_capability_marker_is_readable_by_the_unprivileged_json_client(self):
         """The marker is integrity metadata, not a secret; `ming-update status` runs as the desktop user."""

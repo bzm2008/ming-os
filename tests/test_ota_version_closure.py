@@ -100,7 +100,7 @@ class FormalOtaFixtureContracts(unittest.TestCase):
         self.assertEqual("stable", manifest["channel"])
         self.assertEqual("transactional-slot-v1", manifest["delivery"])
         self.assertEqual(
-            ["26.3.2", "26.3.3", "26.4.0"],
+            ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"],
             manifest["from_versions"],
         )
 
@@ -125,7 +125,7 @@ class DesktopOtaVersionContracts(unittest.TestCase):
     def test_installed_release_handoff_uses_the_formal_manifest_contract(self):
         desktop = DESKTOP.read_text(encoding="utf-8")
         self.assertIn(
-            '`from_versions: ["26.3.2", "26.3.3", "26.4.0"]`',
+            '`from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]`',
             desktop,
         )
         self.assertIn('`version: "26.4.0.1"`', desktop)

@@ -96,6 +96,8 @@ install_base_packages() {
         grub-efi-amd64-bin \
         grub-efi-amd64-signed \
         shim-signed \
+        plymouth \
+        plymouth-themes \
         efibootmgr \
         eject \
         wmctrl \
@@ -181,6 +183,7 @@ install_base_packages() {
     # mandatory: a missing regulatory database or Bluetooth/Wi-Fi firmware is
     # a build error, not an optional hardware enhancement.
     install_required_radio_firmware || return 1
+    install_audited_radio_firmware || return 1
 
     # Firmware and microcode packaging shifts across Debian snapshots. Install
     # what exists without letting renamed packages break the whole base system.
@@ -324,6 +327,86 @@ install_required_wifi_firmware() {
     install_required_radio_firmware
 }
 
+install_audited_radio_firmware() {
+    local bundle=/tmp/ming-build/assets/radio-firmware
+    local manifest=${bundle}/manifest.json
+    local audit=/usr/share/ming-os/radio-firmware
+    local list=/usr/share/ming-os/radio-firmware-initramfs.list
+    local tmp_list required
+    [[ -s "${manifest}" && ! -L "${manifest}" ]] || {
+        echo '[ERROR] audited radio firmware manifest missing or unsafe' >&2
+        return 1
+    }
+    install -m 0755 /tmp/ming-build/assets/ming-radio-firmware.py \
+        /usr/local/sbin/ming-radio-firmware || return 1
+    /usr/local/sbin/ming-radio-firmware deploy \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    /usr/local/sbin/ming-radio-firmware verify \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    rm -rf "${audit}"
+    install -d -m 0755 "$(dirname "${audit}")"
+    cp -a "${bundle}" "${audit}" || return 1
+    tmp_list=$(mktemp "${list}.XXXXXX") || return 1
+    if ! /usr/local/sbin/ming-radio-firmware initramfs-files \
+        --manifest "${audit}/manifest.json" > "${tmp_list}"; then
+        rm -f "${tmp_list}"
+        return 1
+    fi
+    for required in \
+        /usr/lib/firmware/b43/ucode30_mimo.fw \
+        /usr/lib/firmware/brcm/BCM-413c-8197.hcd \
+        /usr/lib/firmware/brcm/BCM20702A1-413c-8197.hcd; do
+        if ! grep -Fxq "${required}" "${tmp_list}"; then
+            echo "[ERROR] audited firmware missing initramfs target: ${required}" >&2
+            rm -f "${tmp_list}"
+            return 1
+        fi
+    done
+    chmod 0644 "${tmp_list}" && mv -f "${tmp_list}" "${list}" || return 1
+    cat > /etc/initramfs-tools/hooks/ming-radio-firmware <<'RADIOHOOK'
+#!/bin/sh
+set -e
+PREREQ=''
+prereqs() { echo "${PREREQ}"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+while IFS= read -r firmware; do
+    case "${firmware}" in /usr/lib/firmware/*) ;; *) exit 1 ;; esac
+    [ -f "${firmware}" ] || exit 1
+    copy_file firmware "${firmware}" "${firmware}"
+done < /usr/share/ming-os/radio-firmware-initramfs.list
+RADIOHOOK
+    chmod 0755 /etc/initramfs-tools/hooks/ming-radio-firmware || return 1
+}
+
+verify_audited_radio_initramfs() {
+    local manifest=/usr/share/ming-os/radio-firmware/manifest.json
+    local list=/usr/share/ming-os/radio-firmware-initramfs.list
+    local initrd listing firmware relative found=false
+    /usr/local/sbin/ming-radio-firmware verify \
+        --manifest "${manifest}" --firmware-root /usr/lib/firmware || return 1
+    [[ -s "${list}" && ! -L "${list}" ]] || return 1
+    for initrd in /boot/initrd.img-*; do
+        [[ -s "${initrd}" ]] || continue
+        found=true
+        listing=$(mktemp) || return 1
+        if ! lsinitramfs "${initrd}" > "${listing}"; then
+            rm -f "${listing}"
+            return 1
+        fi
+        while IFS= read -r firmware; do
+            relative=${firmware#/}
+            if ! grep -Fxq "${relative}" "${listing}"; then
+                echo "[ERROR] ${firmware} missing from ${initrd}" >&2
+                rm -f "${listing}"
+                return 1
+            fi
+        done < "${list}"
+        rm -f "${listing}"
+    done
+    [[ "${found}" == true ]]
+}
+
 cache_broadcom_sta_driver() {
     local cache_dir="/usr/share/ming-os/driver-cache/broadcom"
     local extract_dir
@@ -395,6 +478,7 @@ configure_macbook_input_modules() {
     done
 
     update-initramfs -u -k all || return 1
+    verify_audited_radio_initramfs || return 1
     initrd=$(find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print 2>/dev/null \
         | sort -V | tail -1)
     if [[ -z "${initrd}" || ! -s "${initrd}" ]]; then
@@ -1934,21 +2018,34 @@ LSBRELEASE
     cat > /etc/ming-release << RELEASE
 Ming OS ${MING_OS_VERSION} ${MING_OS_RELEASE_LABEL}
 RELEASE
-    mkdir -p /usr/share /etc/default/grub.d /boot/grub/themes/ming
+    mkdir -p /usr/share /etc/default/grub.d /boot/grub/themes/ming /etc/plymouth
     ln -sf /etc/ming-release /usr/share/ming-release
     if [[ ! -s /tmp/ming-build/assets/grub-theme/theme.txt ]]; then
         echo "ERROR: Ming GRUB theme asset is missing" >&2
         return 1
     fi
     install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
+    install -m 0755 /tmp/ming-build/assets/ming-boot-policy.py /usr/local/sbin/ming-boot-policy
+    install -m 0644 /tmp/ming-build/assets/systemd/ming-boot-policy.service \
+        /etc/systemd/system/ming-boot-policy.service
+    mkdir -p /etc/systemd/system/graphical.target.wants
+    ln -sfn ../ming-boot-policy.service \
+        /etc/systemd/system/graphical.target.wants/ming-boot-policy.service
+    cat > /etc/plymouth/plymouthd.conf <<'PLYMOUTHCONF'
+[Daemon]
+Theme=spinner
+ShowDelay=0
+PLYMOUTHCONF
     cat > /etc/default/grub.d/10-ming-os.cfg << GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog"
 GRUB_TERMINAL_INPUT=console
-GRUB_TIMEOUT=3
+GRUB_DEFAULT=saved
+GRUB_SAVEDEFAULT=false
+GRUB_TIMEOUT=8
 GRUB_TIMEOUT_STYLE=menu
-GRUB_RECORDFAIL_TIMEOUT=0
+GRUB_RECORDFAIL_TIMEOUT=8
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
@@ -2444,58 +2541,58 @@ cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBENTRY'
 set -e
 
 cat <<'EOF'
-menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os --id 'ming-normal' {
     load_video
     insmod gzio
     insmod part_msdos
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os --id 'ming-safe-graphics' {
     load_video
     insmod gzio
     insmod part_msdos
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog ming.safe_graphics=1 nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os --id 'ming-old-intel' {
     load_video
     insmod gzio
     insmod part_msdos
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-legacy' {
     load_video
     insmod gzio
     insmod part_msdos
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-gcn' {
     load_video
     insmod gzio
     insmod part_msdos
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF
@@ -2549,11 +2646,13 @@ cat > "${target}/etc/default/grub.d/10-ming-os.cfg" <<GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
 # 老旧硬件友好 + 隐藏内核日志：安静启动、低日志级别、隐藏 systemd 状态刷屏
-GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog"
 GRUB_TERMINAL_INPUT=console
-GRUB_TIMEOUT=3
+GRUB_DEFAULT=saved
+GRUB_SAVEDEFAULT=false
+GRUB_TIMEOUT=8
 GRUB_TIMEOUT_STYLE=menu
-GRUB_RECORDFAIL_TIMEOUT=0
+GRUB_RECORDFAIL_TIMEOUT=8
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
@@ -4348,29 +4447,29 @@ STATICNETMOD
 set -e
 
 cat <<'EOF'
-menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os --id 'ming-normal' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
     initrd /initrd.img
 }
-menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os --id 'ming-safe-graphics' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog ming.safe_graphics=1 nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
-menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os --id 'ming-old-intel' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
     initrd /initrd.img
 }
-menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-legacy' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
     initrd /initrd.img
 }
-menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-gcn' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF

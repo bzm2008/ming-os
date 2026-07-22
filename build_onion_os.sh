@@ -502,6 +502,7 @@ validate_transactional_ota_runtime() {
             /etc/grub.d/40_ming_transaction
             /etc/systemd/system/ming-transaction-health.service
             /etc/systemd/system/ming-transaction-reconcile.service
+            /etc/systemd/system/ming-ota-capability-refresh.service
             /etc/systemd/system/ming-transaction-rollback-reboot.service
             /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
             /var/lib/ming-update/protocol-version
@@ -540,9 +541,10 @@ PY
         grep -Fxq scripts/local-bottom/ming-transaction <<< "${initramfs_listing}"
         test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-health.service
         test -L /etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service
+        test -L /etc/systemd/system/multi-user.target.wants/ming-ota-capability-refresh.service
         grep -Fxq "OnFailure=ming-transaction-rollback-reboot.service" /etc/systemd/system/ming-transaction-health.service
         grep -Fxq "Requires=ming-transaction-health.service" /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf
-        systemd-analyze verify /etc/systemd/system/ming-transaction-health.service /etc/systemd/system/ming-transaction-reconcile.service /etc/systemd/system/ming-transaction-rollback-reboot.service
+        systemd-analyze verify /etc/systemd/system/ming-transaction-health.service /etc/systemd/system/ming-transaction-reconcile.service /etc/systemd/system/ming-ota-capability-refresh.service /etc/systemd/system/ming-transaction-rollback-reboot.service
     '
     log_info "事务型 OTA 运行时验证通过"
 }
@@ -1188,6 +1190,7 @@ from pathlib import Path
 import configparser
 import hashlib
 import io
+import json
 import os
 import posixpath
 import shlex
@@ -2146,6 +2149,7 @@ for helper in [
     "usr/local/bin/ming-edge",
     "usr/local/bin/ming-spark-store",
     "usr/local/bin/ming-audio-session",
+    "usr/local/sbin/ming-boot-policy",
     "usr/local/bin/ming-window-resource-monitor",
     "usr/local/sbin/ming-package-installer",
     "usr/local/sbin/ming-spark-package-helper",
@@ -2374,10 +2378,14 @@ for relative_path in [
     "etc/systemd/system/ming-resource-policy.service",
     "etc/systemd/system/ming-oom-profile.service",
     "etc/systemd/system/ming-ota.slice",
+    "etc/systemd/system/ming-boot-policy.service",
+    "etc/systemd/system/ming-ota-capability-refresh.service",
 ]:
     validate_systemd_unit(relative_path)
 if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():
     errors.append("NetworkManager-wait-online drop-ins must not gate graphical boot")
+if not (root / "etc/systemd/system/graphical.target.wants/ming-boot-policy.service").is_symlink():
+    errors.append("ming-boot-policy.service must run after graphical login")
 
 display_control = require_file("usr/local/bin/ming-display-control", "parse_xrandr_snapshot")
 for marker in ["status", "apply", "confirm", "rollback", "CONFIRM_SECONDS = 15", "request_is_supported"]:
@@ -2578,6 +2586,46 @@ for firmware_package in [
     "firmware-brcm80211",
 ]:
     require_path(f"var/lib/dpkg/info/{firmware_package}.list")
+
+radio_manifest_path = root / "usr/share/ming-os/radio-firmware/manifest.json"
+radio_helper = require_file("usr/local/sbin/ming-radio-firmware", "verify_deployed")
+radio_hook = require_file(
+    "etc/initramfs-tools/hooks/ming-radio-firmware",
+    "radio-firmware-initramfs.list",
+)
+radio_list = require_file("usr/share/ming-os/radio-firmware-initramfs.list")
+try:
+    radio_manifest = json.loads(radio_manifest_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    errors.append("audited radio firmware manifest is missing or invalid")
+    radio_manifest = {"entries": []}
+expected_radio = {}
+for entry in radio_manifest.get("entries", []):
+    if not isinstance(entry, dict):
+        continue
+    digest = entry.get("sha256")
+    for target in entry.get("targets", []):
+        if isinstance(target, str):
+            expected_radio[target] = digest
+for target in [
+    "b43/ucode30_mimo.fw",
+    "brcm/BCM-413c-8197.hcd",
+    "brcm/BCM20702A1-413c-8197.hcd",
+]:
+    deployed = root / "usr/lib/firmware" / target
+    if target not in expected_radio or f"/usr/lib/firmware/{target}" not in radio_list:
+        errors.append(f"audited radio firmware contract is missing {target}")
+    elif not deployed.is_file() or deployed.is_symlink():
+        errors.append(f"audited radio firmware target is missing or unsafe: {target}")
+    elif hashlib.sha256(deployed.read_bytes()).hexdigest() != expected_radio[target]:
+        errors.append(f"audited radio firmware hash differs after deployment: {target}")
+dell_aliases = [
+    root / "usr/lib/firmware/brcm/BCM-413c-8197.hcd",
+    root / "usr/lib/firmware/brcm/BCM20702A1-413c-8197.hcd",
+]
+if all(path.is_file() for path in dell_aliases):
+    if hashlib.sha256(dell_aliases[0].read_bytes()).digest() != hashlib.sha256(dell_aliases[1].read_bytes()).digest():
+        errors.append("Dell 413c:8197 firmware aliases must have identical content")
 
 kernel_module_patterns = {
     "rtw88_8821cu": "kernel/drivers/net/wireless/realtek/rtw88/rtw88_8821cu.ko*",
@@ -2800,6 +2848,7 @@ for required in [
     "etc/grub.d/40_ming_transaction",
     "etc/systemd/system/ming-transaction-health.service",
     "etc/systemd/system/ming-transaction-reconcile.service",
+    "etc/systemd/system/ming-ota-capability-refresh.service",
     "var/lib/ming-update/protocol-version",
     "var/lib/ming-update/capability.json",
 ]:
@@ -2810,6 +2859,7 @@ if "transactional-slot-v1" in recovery_client or "ming-transaction-engine" in re
 for required_link in [
     "etc/systemd/system/multi-user.target.wants/ming-transaction-health.service",
     "etc/systemd/system/multi-user.target.wants/ming-transaction-reconcile.service",
+    "etc/systemd/system/multi-user.target.wants/ming-ota-capability-refresh.service",
 ]:
     if not (root / required_link).is_symlink():
         errors.append(f"transaction unit must be enabled: {required_link}")

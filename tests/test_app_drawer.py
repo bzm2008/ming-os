@@ -113,6 +113,16 @@ class AppDrawerCoreTests(unittest.TestCase):
             )
             self.assertEqual("User", self.drawer.discover_apps((user, system))[0].name)
 
+    def test_legacy_xfce_filter_only_hides_system_catalog_not_user_launcher(self):
+        system_app = FakeApp(
+            "Mouse", path="/usr/share/applications/xfce4-mouse-settings.desktop")
+        user_app = FakeApp(
+            "My Mouse Tool",
+            path=str(pathlib.Path.home() / ".local/share/applications/xfce4-mouse-settings.desktop"),
+        )
+        self.assertEqual([], self.drawer.deduplicate_apps([system_app]))
+        self.assertEqual([user_app], self.drawer.deduplicate_apps([user_app]))
+
     def test_system_catalog_hides_desktop_environment_mismatch_but_user_entry_stays_visible(self):
         """The drawer must not offer a system app that the broker will reject."""
         with tempfile.TemporaryDirectory() as tempdir:

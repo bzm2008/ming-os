@@ -552,6 +552,36 @@ class DesktopAppearanceBehaviorTests(unittest.TestCase):
                 self.assertLessEqual(item["y"] + tile_h, 600 - 92)
             self.assertEqual(["a", "b"], result["items"][1]["children"])
 
+    def test_tile_metrics_expand_for_font_and_icon_without_changing_hit_geometry(self):
+        path = ROOT / "assets/ming-phone-desktop.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "scaled_tile_metrics"
+        )
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                     str(path), "exec"), namespace)
+        metrics = namespace["scaled_tile_metrics"]
+        normal = metrics(1.0, {"font_size": 11, "desktop_icon_size": 34})
+        large = metrics(1.0, {"font_size": 18, "desktop_icon_size": 64})
+        self.assertGreater(large[0], normal[0])
+        self.assertGreater(large[1], normal[1])
+        phone = path.read_text(encoding="utf-8")
+        self.assertIn("cr.clip()", phone)
+        self.assertGreaterEqual(phone.count("scaled_tile_metrics("), 6)
+        self.assertIn("source_width, source_height = scaled_tile_metrics(", phone)
+
+        layout = {"items": [{"id": "app", "type": "app", "x": 34, "y": 92}]}
+        ns = self.phone_functions({"reflow_layout_for_icon_scale", "scaled_tile_metrics"})
+        migrated = ns["reflow_layout_for_icon_scale"](
+            layout, 1.0, 1.0, 800, 600,
+            {"font_size": 11, "desktop_icon_size": 34},
+            {"font_size": 18, "desktop_icon_size": 64},
+        )
+        self.assertEqual(18, migrated["desktop_font_size"])
+        self.assertEqual(64, migrated["desktop_icon_size"])
+
     def test_custom_wallpaper_is_selected_only_while_valid(self):
         ns = self.phone_functions({"appearance_wallpaper_paths", "safe_wallpaper_dimensions"})
         with tempfile.TemporaryDirectory() as temp:

@@ -26,8 +26,8 @@ DEFAULT_CACHE_ROOT = pathlib.Path("/var/cache/ming-update")
 DEFAULT_KEYRING = pathlib.Path("/usr/share/ming-update/trust/release-keyring.gpg")
 DEFAULT_KEY_POLICY = pathlib.Path("/usr/share/ming-update/trust/key-policy.json")
 DEFAULT_DISCOVERY_URL = "https://ming.scallion.uno/api/onion-update/check"
-# Kept disabled until the replacement domain is registered/production ready.  The
-# signed discovery response remains the source of truth when this is enabled.
+# The replacement endpoint is a transport fallback only. Every object it
+# advertises remains subject to the same offline key policy and signatures.
 FALLBACK_DISCOVERY_URL = "https://ming.sca-hub.cn/api/onion-update/check"
 DISCOVERY_FALLBACK_ENV = "MING_UPDATE_ENABLE_FALLBACK_DOMAIN"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
@@ -329,6 +329,7 @@ class UpdateController:
         architecture=None,
         kernel_release=None,
         capability_loader=None,
+        embedded_capability_loader=None,
         discovery_fetcher=None,
         discovery_fallback_enabled=None,
         artifact_fetcher=None,
@@ -343,10 +344,14 @@ class UpdateController:
         self.architecture = architecture or _architecture()
         self.kernel_release = kernel_release or os.uname().release
         self.capability_loader = capability_loader or (lambda: bootstrap_module.detect_capability("/"))
+        self.embedded_capability_loader = embedded_capability_loader or (
+            lambda: bootstrap_module.detect_capability("/", require_marker=False)
+        )
         self.discovery_fetcher = discovery_fetcher or self._fetch_discovery
         if discovery_fallback_enabled is None:
-            discovery_fallback_enabled = os.environ.get(DISCOVERY_FALLBACK_ENV, "0").strip().lower() in {
-                "1", "true", "yes", "on",
+            configured = os.environ.get(DISCOVERY_FALLBACK_ENV)
+            discovery_fallback_enabled = configured is None or configured.strip().lower() not in {
+                "0", "false", "no", "off",
             }
         self.discovery_fallback_enabled = bool(discovery_fallback_enabled)
         self.artifact_fetcher = artifact_fetcher or self._download_artifact
@@ -532,6 +537,37 @@ class UpdateController:
             raise UpdateError("E_BOOTSTRAP_REQUIRED", "transaction bootstrap capability is unavailable")
         return value
 
+    def _status_capability(self):
+        capability = self._capability()
+        if capability.get("available") is True:
+            return capability
+        # 26.4 images embed the complete transaction runtime. A root oneshot
+        # recreates its non-secret receipt at boot; until that runs, status is
+        # allowed to report local idle only when the receipt is the sole
+        # missing artifact and an independent full runtime verification passes.
+        missing = capability.get("missing")
+        unsafe = capability.get("unsafe")
+        marker_only = (
+            self.current_version.startswith("26.4.")
+            and isinstance(missing, list)
+            and bool(missing)
+            and all(pathlib.Path(str(path)).name == "capability.json" for path in missing)
+            and unsafe == []
+        )
+        if not marker_only:
+            return capability
+        try:
+            embedded = self.embedded_capability_loader()
+        except Exception:
+            return capability
+        if (
+            isinstance(embedded, dict)
+            and embedded.get("available") is True
+            and embedded.get("capability") == "transactional-slot-v1"
+        ):
+            return embedded
+        return capability
+
     def _fetch_discovery(self):
         query_values = {
             "version": self.current_version,
@@ -658,7 +694,7 @@ class UpdateController:
         return self._response("check", ok=True, state="available", action="apply", update=update, message_key="update.status.available")
 
     def status(self):
-        capability = self._capability()
+        capability = self._status_capability()
         if not capability.get("available") or capability.get("capability") != "transactional-slot-v1":
             return self._bootstrap_response("status")
         pointer = self.state_root / "active-transaction.json"

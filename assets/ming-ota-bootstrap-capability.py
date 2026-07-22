@@ -36,6 +36,7 @@ REQUIRED_RELATIVE_PATHS = (
     "etc/default/grub.d/40-ming-transaction.cfg",
     "etc/systemd/system/ming-transaction-health.service",
     "etc/systemd/system/ming-transaction-reconcile.service",
+    "etc/systemd/system/ming-ota-capability-refresh.service",
     "etc/systemd/system/ming-transaction-rollback-reboot.service",
     "etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf",
     "boot/grub/grubenv",
@@ -44,6 +45,7 @@ REQUIRED_RELATIVE_PATHS = (
 REQUIRED_ENABLED_UNITS = (
     "ming-transaction-health.service",
     "ming-transaction-reconcile.service",
+    "ming-ota-capability-refresh.service",
 )
 CAPABILITY_MARKER = "var/lib/ming-update/capability.json"
 
@@ -146,7 +148,16 @@ def detect_capability(root="/", *, require_marker=True, grubenv_reader=_read_gru
         except BootstrapError:
             unsafe.append(str(grubenv))
         else:
-            if saved_entry not in {"ming-legacy", "ming-slot-a", "ming-slot-b"}:
+            if saved_entry not in {
+                "ming-normal",
+                "ming-safe-graphics",
+                "ming-old-intel",
+                "ming-radeon-legacy",
+                "ming-radeon-gcn",
+                "ming-legacy",
+                "ming-slot-a",
+                "ming-slot-b",
+            }:
                 unsafe.append(str(grubenv))
     if require_marker and not _marker_is_valid(root / CAPABILITY_MARKER):
         missing.append(str(root / CAPABILITY_MARKER))

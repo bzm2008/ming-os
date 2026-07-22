@@ -372,7 +372,7 @@ class UpdateCliContractTests(unittest.TestCase):
         self.assertNotIn("capabilities", unbootstrapped_query)
         self.assertNotIn("bootstrap_version", unbootstrapped_query)
 
-    def test_discovery_fallback_domain_is_disabled_by_default(self):
+    def test_discovery_fallback_domain_is_automatic_after_primary_network_failure(self):
         calls = []
 
         class Response:
@@ -389,7 +389,9 @@ class UpdateCliContractTests(unittest.TestCase):
 
         def urlopen(url, timeout):
             calls.append(url)
-            raise self.cli.urllib.error.URLError("primary unavailable")
+            if urllib.parse.urlsplit(url).netloc == "ming.scallion.uno":
+                raise self.cli.urllib.error.URLError("primary unavailable")
+            return Response()
 
         self.cli.urllib.request.urlopen = urlopen
         try:
@@ -403,14 +405,69 @@ class UpdateCliContractTests(unittest.TestCase):
                     "bootstrap_version": "1.0.0",
                 },
             )
-            with self.assertRaises(self.cli.UpdateError) as caught:
-                controller._fetch_discovery()
+            value = controller._fetch_discovery()
         finally:
             self.cli.urllib.request.urlopen = original_urlopen
 
-        self.assertEqual("E_NETWORK", caught.exception.code)
-        self.assertEqual(1, len(calls))
+        self.assertEqual({"schema": "ming.update.discovery.v1"}, value)
+        self.assertEqual(2, len(calls))
         self.assertEqual("ming.scallion.uno", urllib.parse.urlsplit(calls[0]).netloc)
+        self.assertEqual("ming.sca-hub.cn", urllib.parse.urlsplit(calls[1]).netloc)
+
+    def test_development_build_can_discover_same_numeric_stable_release(self):
+        manifest_hash = hashlib.sha256(b"stable manifest").hexdigest()
+        discovery = {
+            "schema": "ming.update.discovery.v1",
+            "available": True,
+            "current_version": "26.4.0.1-development",
+            "architecture": "amd64",
+            "capability": "transactional-slot-v1",
+            "delivery": "transactional-slot-v1",
+            "release_id": "ming-os-26.4.0.1-amd64-20260722.1",
+            "version": "26.4.0.1",
+            "minimum_bootstrap": "1.0.0",
+            "manifest_url": "https://updates.example/objects/" + manifest_hash,
+            "manifest_signature_url": "https://updates.example/objects/" + ("c" * 64),
+            "manifest_sha256": manifest_hash,
+        }
+
+        parsed = self.cli.validate_discovery(
+            discovery, "amd64", "26.4.0.1-development"
+        )
+
+        self.assertTrue(parsed["available"])
+        self.assertEqual("26.4.0.1", parsed["version"])
+
+    def test_264_status_uses_verified_embedded_runtime_when_only_marker_is_bad(self):
+        controller = self.cli.UpdateController(
+            state_root=self.root / "state",
+            cache_root=self.root / "cache",
+            keyring=self.keyring,
+            key_policy=self.policy,
+            current_version="26.4.0.1-development",
+            architecture="amd64",
+            kernel_release="6.12.0-amd64",
+            capability_loader=lambda: {
+                "available": False,
+                "capability": None,
+                "missing": ["/var/lib/ming-update/capability.json"],
+                "unsafe": [],
+            },
+            embedded_capability_loader=lambda: {
+                "available": True,
+                "capability": "transactional-slot-v1",
+                "bootstrap_version": "1.0.0",
+                "missing": [],
+                "unsafe": [],
+            },
+        )
+
+        value = controller.status()
+
+        self.assertTrue(value["ok"])
+        self.assertEqual("idle", value["state"])
+        self.assertEqual("none", value["action"])
+        self.assertIsNone(value["error_code"])
 
     def test_enabled_discovery_fallback_is_used_only_after_primary_network_failure(self):
         calls = []

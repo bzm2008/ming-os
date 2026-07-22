@@ -1,0 +1,11 @@
+[Unit]
+Description=Ming OS healthy boot menu policy confirmation
+After=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-boot-policy confirm --wait 90 --json
+TimeoutStartSec=100
+
+[Install]
+WantedBy=graphical.target
