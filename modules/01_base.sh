@@ -1715,9 +1715,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.show_status=false rd
 GRUB_TERMINAL_INPUT=console
 GRUB_DEFAULT=saved
 GRUB_SAVEDEFAULT=false
-GRUB_TIMEOUT=8
+GRUB_TIMEOUT=3
 GRUB_TIMEOUT_STYLE=menu
-GRUB_RECORDFAIL_TIMEOUT=8
+GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
@@ -2220,7 +2220,7 @@ menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os --id '
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
     initrd /initrd.img
 }
 
@@ -2231,7 +2231,7 @@ menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu -
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
 
@@ -2242,7 +2242,7 @@ menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-li
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
     initrd /initrd.img
 }
 
@@ -2253,7 +2253,7 @@ menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --cl
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
     initrd /initrd.img
 }
 
@@ -2264,7 +2264,7 @@ menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux 
     insmod part_gpt
     insmod ext2
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF
@@ -2322,9 +2322,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.show_status=false rd
 GRUB_TERMINAL_INPUT=console
 GRUB_DEFAULT=saved
 GRUB_SAVEDEFAULT=false
-GRUB_TIMEOUT=8
+GRUB_TIMEOUT=3
 GRUB_TIMEOUT_STYLE=menu
-GRUB_RECORDFAIL_TIMEOUT=8
+GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISABLE_SUBMENU=true
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
@@ -4121,27 +4121,27 @@ set -e
 cat <<'EOF'
 menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os --id 'ming-normal' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-normal
     initrd /initrd.img
 }
 menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os --id 'ming-safe-graphics' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-safe-graphics ming.safe_graphics=1 nomodeset vga=791
     initrd /initrd.img
 }
 menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os --id 'ming-old-intel' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-old-intel
     initrd /initrd.img
 }
 menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-legacy' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-legacy radeon.modeset=1 amdgpu.modeset=0
     initrd /initrd.img
 }
 menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os --id 'ming-radeon-gcn' {
     search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet splash loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=0 systemd.show_status=false rd.systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 nowatchdog ming.entry=ming-radeon-gcn amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
     initrd /initrd.img
 }
 EOF

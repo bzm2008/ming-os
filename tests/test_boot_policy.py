@@ -25,8 +25,9 @@ class BootPolicyContracts(unittest.TestCase):
         )[1].split("\nTARGETGRUBENTRY\n", 1)[0]
         self.assertIn("--id 'ming-normal'", grub)
         self.assertIn("ming.entry=ming-normal", grub)
+        self.assertNotIn(" splash", grub)
         for marker in (
-            "quiet splash",
+            "quiet",
             "loglevel=0",
             "systemd.show_status=false",
             "rd.systemd.show_status=false",
@@ -41,7 +42,8 @@ class BootPolicyContracts(unittest.TestCase):
         for marker in (
             "GRUB_DEFAULT=saved",
             "GRUB_TIMEOUT_STYLE=menu",
-            "GRUB_TIMEOUT=8",
+            "GRUB_TIMEOUT=3",
+            "GRUB_RECORDFAIL_TIMEOUT=0",
             "ming-boot-policy",
             "ming-boot-policy.service",
         ):
