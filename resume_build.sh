@@ -37,7 +37,7 @@ seed_resume_package_installer() {
         log_error "resume 构建缺少受控的 ming-package-installer/ming-shell-common 资产"
         return 1
     fi
-    contract="$(chroot_exec python3 - "${installer_source}" <<'PY'
+    contract="$(chroot_exec python3 -c '
 import ast
 import pathlib
 import sys
@@ -53,8 +53,7 @@ values = {
 }
 print(values.get("PACKAGE_INSTALLER_CONTRACT", ""))
 print(values.get("REQUIRED_COMMON_SHA256", ""))
-PY
-)" || return 1
+' "${installer_source}")" || return 1
     required_common_sha="$(printf '%s\n' "${contract}" | sed -n '2p')"
     contract="$(printf '%s\n' "${contract}" | sed -n '1p')"
     if [[ ! "${contract}" =~ ^[a-z0-9.-]+$ \

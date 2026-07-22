@@ -175,6 +175,21 @@ repair_default_user_ownership() {
     chmod 0755 "${USER_HOME}/.cache" "${USER_HOME}/.cache/ming-os" 2>/dev/null || true
 }
 
+# Reused build roots can contain the pre-26.4 Spark readiness units. They are
+# intentionally retired and must be removed before the rootfs security gate;
+# this is idempotent and does not affect the current on-demand installer.
+cleanup_retired_spark_readiness_units() {
+    local unit
+    for unit in \
+        /etc/systemd/system/ming-appstore-ready.service \
+        /etc/systemd/system/ming-appstore-ready.timer; do
+        if [[ -e "${unit}" || -L "${unit}" ]]; then
+            rm -f -- "${unit}"
+            echo "[07_finalize] removed retired Spark readiness unit: ${unit}"
+        fi
+    done
+}
+
 # ======================== 同步用户配置到 /etc/skel ========================
 
 seed_skel() {
@@ -252,6 +267,7 @@ main() {
     refresh_dock_launchers || return 1
     seed_skel
     constrain_default_desktop
+    cleanup_retired_spark_readiness_units
     seed_trusted_core_desktop_receipts || return 1
     repair_default_user_ownership
     verify_appearance_assets

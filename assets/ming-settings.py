@@ -2446,7 +2446,7 @@ class MingSettings(Adw.ApplicationWindow):
         sc, box = self.page_scroller()
         screen_grp = Adw.PreferencesGroup(
             title="屏幕",
-            description="分辨率与刷新率来自当前显示器；应用后请在 15 秒内确认，否则自动恢复。")
+            description="分辨率与刷新率来自当前显示器；界面缩放以 100% 标准为基准。应用后请在 15 秒内确认，否则自动恢复。")
         box.append(screen_grp)
         self.display_summary_row = Adw.ActionRow(
             title="正在读取显示器", subtitle="请稍候…")

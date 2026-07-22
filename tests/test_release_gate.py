@@ -141,7 +141,7 @@ class ReleaseGateContracts(unittest.TestCase):
         """A completed image must reject malformed recovery helpers before release."""
         for marker in [
             "def validate_generated_executable",
-            'subprocess.run(["bash", "-n", str(path)]',
+            'subprocess.run(["bash", "-n", str(candidate)]',
             '"-m", "py_compile"',
             "def validate_systemd_unit",
             "systemd-analyze verify",
@@ -344,6 +344,16 @@ class ReleaseGateContracts(unittest.TestCase):
             "    ensure_resume_runtime_packages"
         )
         self.assertIn(expected_order, main)
+
+    def test_resume_contract_probe_does_not_depend_on_chroot_stdin(self):
+        """chroot_exec intentionally closes stdin, so the probe must be argv-based."""
+        resume = RESUME.read_text(encoding="utf-8")
+        seed = resume.split("seed_resume_package_installer() {", 1)[1].split(
+            "\n}\n\nensure_resume_runtime_packages", 1
+        )[0]
+        self.assertNotIn('chroot_exec python3 - "${installer_source}" <<', seed)
+        self.assertIn("chroot_exec python3 -c", seed)
+        self.assertIn('"${installer_source}"', seed)
 
     def test_resume_atomically_seeds_a_matching_installer_and_common_runtime(self):
         resume = RESUME.read_text(encoding="utf-8")

@@ -92,6 +92,12 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertNotIn("ming-appstore-ready.service", APPS)
         self.assertNotIn("OnBootSec=90s", APPS)
 
+    def test_finalize_removes_retired_spark_readiness_units_from_reused_rootfs(self):
+        finalize = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+        self.assertIn("cleanup_retired_spark_readiness_units", finalize)
+        self.assertIn("/etc/systemd/system/ming-appstore-ready.service", finalize)
+        self.assertIn("/etc/systemd/system/ming-appstore-ready.timer", finalize)
+
     def test_vendor_spark_notifier_is_masked_after_every_store_install(self):
         """The vendor notifier is not allowed into the graphical boot chain."""
         installer = APPS.split(

@@ -1697,12 +1697,40 @@ errors = []
 # usr/local/bin/ming-audio-session
 # usr/local/sbin/ming-package-installer
 
+def rootfs_file(path):
+    """Resolve a rootfs-local symlink without following it on the host root."""
+    candidate = path
+    for _ in range(40):
+        try:
+            parts = candidate.relative_to(root).parts
+        except ValueError:
+            return None
+        prefix = root
+        resolved = False
+        for index, component in enumerate(parts):
+            prefix = prefix / component
+            if not prefix.is_symlink():
+                continue
+            target = os.readlink(prefix)
+            remainder = parts[index + 1:]
+            candidate = ((root / target.lstrip("/")) if target.startswith("/")
+                         else (prefix.parent / target))
+            for item in remainder:
+                candidate = candidate / item
+            candidate = Path(os.path.normpath(str(candidate)))
+            resolved = True
+            break
+        if not resolved:
+            return candidate
+    return None
+
 def require_file(relative_path, marker=None):
     path = root / relative_path
-    if not path.is_file() or path.stat().st_size == 0:
+    candidate = rootfs_file(path)
+    if candidate is None or not candidate.is_file() or candidate.stat().st_size == 0:
         errors.append(f"missing or empty {relative_path}")
         return ""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = candidate.read_text(encoding="utf-8", errors="replace")
     if marker and marker not in text:
         errors.append(f"{relative_path} missing marker {marker!r}")
     return text
@@ -1781,20 +1809,21 @@ def require_absent(relative_path, reason):
 def validate_generated_executable(relative_path, language):
     """Reject a missing, non-executable, or syntactically invalid shipped helper."""
     path = root / relative_path
-    if not path.is_file() or path.stat().st_size == 0:
+    candidate = rootfs_file(path)
+    if candidate is None or not candidate.is_file() or candidate.stat().st_size == 0:
         errors.append(f"missing or empty generated helper {relative_path}")
         return
-    if not os.access(path, os.X_OK):
+    if not os.access(candidate, os.X_OK):
         errors.append(f"{relative_path} must be executable")
         return
     if language == "bash":
-        parsed = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        parsed = subprocess.run(["bash", "-n", str(candidate)], capture_output=True, text=True)
     elif language == "python":
         with tempfile.TemporaryDirectory(prefix="ming-rootfs-pycache-") as pycache:
             environment = os.environ.copy()
             environment["PYTHONPYCACHEPREFIX"] = pycache
             parsed = subprocess.run(
-                [sys.executable, "-m", "py_compile", str(path)],
+                [sys.executable, "-m", "py_compile", str(candidate)],
                 capture_output=True,
                 text=True,
                 env=environment,

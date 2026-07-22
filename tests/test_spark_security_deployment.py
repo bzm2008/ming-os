@@ -68,6 +68,23 @@ def write_file(root, relative, content):
 
 
 class SparkSecurityAssetTests(unittest.TestCase):
+    def test_vendor_fingerprint_probe_uses_an_isolated_gnupg_home(self):
+        module = load_converger()
+        runner = ConvergenceRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            key = write_file(
+                pathlib.Path(directory),
+                "opt/durapps/spark-store/bin/spark-store.asc",
+                "vendor key",
+            )
+            converger = module.SparkSecurityConverger(
+                root=pathlib.Path(directory), runner=runner, euid_getter=lambda: 0)
+            converger._primary_fingerprint(key)
+
+        command = next(command for command in runner.commands if "--show-keys" in command)
+        self.assertIn("--homedir", command)
+        self.assertTrue(command[command.index("--homedir") + 1])
+
     def test_converge_and_narrow_policy_assets_exist(self):
         self.assertTrue(CONVERGE.is_file(), "Spark security converge asset is missing")
         self.assertTrue(POLICY.is_file(), "Spark narrow polkit policy asset is missing")

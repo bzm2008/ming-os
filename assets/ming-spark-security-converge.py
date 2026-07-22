@@ -213,10 +213,13 @@ class SparkSecurityConverger:
             self._move_to_vendor(path)
 
     def _primary_fingerprint(self, key_path):
-        code, output, _error = self._call((
-            "/usr/bin/gpg", "--batch", "--no-options", "--with-colons",
-            "--show-keys", str(key_path),
-        ), timeout=30)
+        # GnuPG otherwise tries to open /root/.gnupg even for a read-only key
+        # inspection.  Build chroots deliberately do not carry a user keyring.
+        with tempfile.TemporaryDirectory(prefix="ming-spark-gpg-") as gpg_home:
+            code, output, _error = self._call((
+                "/usr/bin/gpg", "--batch", "--no-options", "--homedir", gpg_home,
+                "--with-colons", "--show-keys", str(key_path),
+            ), timeout=30)
         if code != 0:
             raise ConvergenceError("E_VENDOR_KEY_INVALID", "unable to inspect vendor key")
         saw_primary = False

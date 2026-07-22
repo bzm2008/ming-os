@@ -1370,7 +1370,9 @@ deploy_performance_status() {
         return 1
     fi
     install -d -m 0755 /usr/local/lib/ming-os /usr/local/sbin || return 1
-    install -m 0644 "${asset}" "${library}" || return 1
+    # The helper is both importable by the desktop and directly executable for
+    # diagnostics; keep the installed copy's mode aligned with the rootfs gate.
+    install -m 0755 "${asset}" "${library}" || return 1
     cat > "${target}" <<'PERFORMANCESTATUSWRAPPER'
 #!/bin/sh
 exec /usr/bin/python3 /usr/local/lib/ming-os/ming-performance-status.py "$@"
