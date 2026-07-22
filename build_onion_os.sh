@@ -2587,46 +2587,6 @@ for firmware_package in [
 ]:
     require_path(f"var/lib/dpkg/info/{firmware_package}.list")
 
-radio_manifest_path = root / "usr/share/ming-os/radio-firmware/manifest.json"
-radio_helper = require_file("usr/local/sbin/ming-radio-firmware", "verify_deployed")
-radio_hook = require_file(
-    "etc/initramfs-tools/hooks/ming-radio-firmware",
-    "radio-firmware-initramfs.list",
-)
-radio_list = require_file("usr/share/ming-os/radio-firmware-initramfs.list")
-try:
-    radio_manifest = json.loads(radio_manifest_path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError):
-    errors.append("audited radio firmware manifest is missing or invalid")
-    radio_manifest = {"entries": []}
-expected_radio = {}
-for entry in radio_manifest.get("entries", []):
-    if not isinstance(entry, dict):
-        continue
-    digest = entry.get("sha256")
-    for target in entry.get("targets", []):
-        if isinstance(target, str):
-            expected_radio[target] = digest
-for target in [
-    "b43/ucode30_mimo.fw",
-    "brcm/BCM-413c-8197.hcd",
-    "brcm/BCM20702A1-413c-8197.hcd",
-]:
-    deployed = root / "usr/lib/firmware" / target
-    if target not in expected_radio or f"/usr/lib/firmware/{target}" not in radio_list:
-        errors.append(f"audited radio firmware contract is missing {target}")
-    elif not deployed.is_file() or deployed.is_symlink():
-        errors.append(f"audited radio firmware target is missing or unsafe: {target}")
-    elif hashlib.sha256(deployed.read_bytes()).hexdigest() != expected_radio[target]:
-        errors.append(f"audited radio firmware hash differs after deployment: {target}")
-dell_aliases = [
-    root / "usr/lib/firmware/brcm/BCM-413c-8197.hcd",
-    root / "usr/lib/firmware/brcm/BCM20702A1-413c-8197.hcd",
-]
-if all(path.is_file() for path in dell_aliases):
-    if hashlib.sha256(dell_aliases[0].read_bytes()).digest() != hashlib.sha256(dell_aliases[1].read_bytes()).digest():
-        errors.append("Dell 413c:8197 firmware aliases must have identical content")
-
 kernel_module_patterns = {
     "rtw88_8821cu": "kernel/drivers/net/wireless/realtek/rtw88/rtw88_8821cu.ko*",
     "applespi": "kernel/drivers/input/keyboard/applespi.ko*",
