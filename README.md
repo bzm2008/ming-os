@@ -11,16 +11,16 @@ Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, fami
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
 | ISO | `ming-os-26.4.0-home-amd64-formal.iso` |
-| Size | `<FINAL_ISO_SIZE_AFTER_BUILD>` |
-| SHA256 | `<FINAL_ISO_SHA256_AFTER_BUILD>` |
-| Release state | Formal candidate; website and transactional OTA remain disabled until signed release validation passes |
+| Size | `2063597568` bytes |
+| SHA256 | `13ba69a727f28563a812f824f503ce0815cbd205523e9f488d4536e2d5d47a6` |
+| Release state | 26.4.0 formal ISO published; transactional OTA remains fail-closed until signed metadata is available |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
 Official download path:
 
 ```text
-https://ming.scallion.uno/iso/ming-os-26.4.0-home-amd64-formal.download
+https://ming.sca-hub.cn/iso/ming-os-26.4.0-home-amd64-formal.download
 ```
 
 OTA endpoint:
@@ -159,6 +159,11 @@ published alongside the release asset.
 
 ## Verification Status
 
+The formal ISO was built with a complete module replay and verified for the
+`MING_OS_2640` volume label, BIOS/isolinux and UEFI/GRUB El Torito entries,
+and the embedded Live payload. The published checksum is the checksum of that
+immutable formal artifact.
+
 ## Release Trust Operations
 
 Release operators must read [`docs/releases/ming-release-vault-operations.md`](docs/releases/ming-release-vault-operations.md)
@@ -195,4 +200,6 @@ Recommended remaining field tests:
 - Ming OS can run on low-memory machines, but optional WeChat/WPS installs may become the largest memory consumers.
 - The normal user path should be buttons, Settings, update UI, app folders, and graphical repair tools.
 - Command-line usage is for advanced support, not daily operation.
-- Ming OS 26.4.0 is published only after the ISO, checksum, GitHub tag, and server manifest are all verified.
+- Ming OS 26.4.0 ISO and checksum are published. Transactional OTA remains
+  `delivery:none` until the release owner supplies and verifies the signed
+  manifest, content index, payload, detached signatures, and 26.3.2 bootstrap.
