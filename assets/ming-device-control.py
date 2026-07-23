@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -179,13 +180,17 @@ def classify_wifi(
 class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
                  backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
-                 settings_path=None):
+                 settings_path=None, software_brightness_path=None, environment=None):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
         self.backlight_root = Path(backlight_root)
         self.settings_path = Path(settings_path) if settings_path else (
             Path.home() / ".config" / "ming-os" / "settings.json")
+        self.software_brightness_path = (
+            Path(software_brightness_path) if software_brightness_path else
+            Path.home() / ".config" / "ming-os" / "software-brightness.json")
+        self.environment = environment if environment is not None else os.environ
 
     def _run(self, command, timeout=8):
         return self.runner(command, timeout=timeout)
@@ -915,8 +920,20 @@ class DeviceController:
                 continue
             write_succeeded = True
             last_backend = backend
+            if backend == "pactl":
+                mute_rc, mute_output, mute_error = self._run(
+                    ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"])
+                if mute_rc != 0:
+                    errors.append(mute_error or mute_output or "无法解除当前输出静音")
+                    continue
             ok, effective, read_error = self._read_volume(backend)
             if ok:
+                if backend == "pactl":
+                    mute_rc, mute_output, mute_error = self._run(
+                        ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
+                    if mute_rc != 0 or re.search(r"Mute:\s*yes", mute_output or "", re.I):
+                        errors.append(mute_error or mute_output or "无法确认当前输出静音状态")
+                        continue
                 return self._control_result(
                     True, requested=value, value=effective, backend=backend,
                     available=True)
@@ -936,13 +953,127 @@ class DeviceController:
         except OSError:
             return False
 
-    def brightness_status(self):
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+    def _x11_software_outputs(self):
+        if not self.environment.get("DISPLAY"):
+            return [], "当前不是 X11 图形会话，无法使用软件调暗。"
+        if not self._can_run("xrandr"):
+            return [], "系统未安装 xrandr，无法使用软件调暗。"
+        rc, output, error = self._run(["xrandr", "--query"])
+        if rc != 0:
+            return [], error or output or "无法读取 X11 显示器状态。"
+        outputs = []
+        for line in output.splitlines():
+            match = re.match(r"^(\S+)\s+connected\b", line)
+            if match:
+                outputs.append(match.group(1))
+        if not outputs:
+            return [], "X11 未检测到已连接的显示器。"
+        return outputs, ""
+
+    def _software_brightness_state(self):
+        try:
+            state = json.loads(self.software_brightness_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return {"value": 100, "outputs": []}
+        value = state.get("value", 100) if isinstance(state, dict) else 100
+        try:
+            value = clamp_percent(value)
+        except (TypeError, ValueError):
+            value = 100
+        outputs = state.get("outputs", []) if isinstance(state, dict) else []
+        return {"value": value, "outputs": [str(item) for item in outputs if item]}
+
+    def _save_software_brightness_state(self, value, outputs):
+        self.software_brightness_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.software_brightness_path.with_name(
+            self.software_brightness_path.name + ".tmp")
+        try:
+            temporary.write_text(json.dumps({
+                "schema": 1, "value": value, "outputs": list(outputs),
+            }, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temporary, self.software_brightness_path)
+            return ""
+        except OSError as exc:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            return str(exc)
+
+    @staticmethod
+    def _software_brightness_result(ok, requested=None, value=None, outputs=None,
+                                    error="", state=None):
+        return {
+            "ok": bool(ok),
+            "available": bool(ok),
+            "state": state or ("ready" if ok else "unavailable"),
+            "backend": "xrandr-software" if ok else "",
+            "requested": requested,
+            "value": value,
+            "outputs": list(outputs or []),
+            "error": error or "",
+        }
+
+    def _software_brightness_status(self):
+        outputs, error = self._x11_software_outputs()
+        if not outputs:
             return {
                 "available": False,
                 "value": None,
-                "error": "unavailable",
+                "error": error,
                 "backend": "",
+                "state": "unavailable",
+                "outputs": [],
+            }
+        state = self._software_brightness_state()
+        return {
+            "available": True,
+            "value": state["value"],
+            "error": "",
+            "backend": "xrandr-software",
+            "state": "ready",
+            "outputs": outputs,
+        }
+
+    def _set_software_brightness(self, value, persist=True):
+        outputs, error = self._x11_software_outputs()
+        if not outputs:
+            return self._software_brightness_result(
+                False, requested=value, error=error, state="unavailable")
+        previous = self._software_brightness_state()["value"]
+        factor = "%.2f" % (max(20, value) / 100.0)
+        previous_factor = "%.2f" % (max(20, previous) / 100.0)
+        modified = []
+        for output_name in outputs:
+            rc, command_output, command_error = self._run(
+                ["xrandr", "--output", output_name, "--brightness", factor])
+            if rc == 0:
+                modified.append(output_name)
+                continue
+            for changed_name in modified:
+                self._run(["xrandr", "--output", changed_name, "--brightness", previous_factor])
+            return self._software_brightness_result(
+                False, requested=value, value=previous, outputs=outputs,
+                error=command_error or command_output or "设置软件亮度失败", state="error")
+        if persist:
+            save_error = self._save_software_brightness_state(value, outputs)
+            if save_error:
+                return self._software_brightness_result(
+                    False, requested=value, value=value, outputs=outputs,
+                    error="软件亮度已应用，但无法保存恢复状态：%s" % save_error,
+                    state="error")
+        return self._software_brightness_result(
+            True, requested=value, value=value, outputs=outputs)
+
+    def brightness_status(self):
+        if not self._has_backlight():
+            return self._software_brightness_status()
+        if not self._can_run("brightnessctl"):
+            return {
+                "available": False,
+                "value": None,
+                "error": "物理背光控制不可用。",
+                "backend": "brightnessctl",
                 "state": "unavailable",
             }
         rc, output, error = self._run(["brightnessctl", "-m"])
@@ -973,9 +1104,12 @@ class DeviceController:
                 requested = None
             return self._control_result(
                 False, requested=requested, error=str(exc), state="invalid")
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+        if not self._has_backlight():
+            return self._set_software_brightness(value)
+        if not self._can_run("brightnessctl"):
             return self._control_result(
-                False, requested=value, error="unavailable", state="unavailable")
+                False, requested=value, error="物理背光控制不可用。",
+                backend="brightnessctl", state="unavailable")
         rc, output, error = self._run(["brightnessctl", "set", "%d%%" % value])
         if rc != 0:
             return self._control_result(
@@ -993,6 +1127,13 @@ class DeviceController:
             state=("ready" if status["available"] and status["value"] is not None
                    else "error"),
         )
+
+    def restore_software_brightness(self):
+        if self._has_backlight():
+            return self._software_brightness_result(
+                True, value=None, outputs=[], state="physical_backlight")
+        state = self._software_brightness_state()
+        return self._set_software_brightness(state["value"], persist=False)
 
     @staticmethod
     def _wireless_pci(output):
@@ -1425,6 +1566,7 @@ def build_parser():
     volume.add_argument("value", type=int)
     brightness = subparsers.add_parser("set-brightness")
     brightness.add_argument("value", type=int)
+    subparsers.add_parser("restore-brightness")
     return parser
 
 
@@ -1465,6 +1607,8 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.audio_select_output(args.output_id)
     elif args.action == "set-volume":
         result = controller.set_volume(args.value)
+    elif args.action == "restore-brightness":
+        result = controller.restore_software_brightness()
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)

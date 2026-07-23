@@ -187,8 +187,10 @@ class DeviceControlTests(unittest.TestCase):
     def test_volume_prefers_pactl_and_reads_back_effective_value(self):
         runner = FakeRunner({
             ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "63%"): (0, "", ""),
+            ("pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"): (0, "", ""),
             ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (
                 0, "Volume: front-left: 41287 /  63% / -12.00 dB", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
         })
         controller = self.device.DeviceController(
             runner=runner,
@@ -202,6 +204,22 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("ready", result["state"])
         self.assertEqual(63, result["requested"])
         self.assertTrue(0 <= result["value"] <= 100)
+
+    def test_volume_unmutes_the_current_sink_and_reads_back_its_mute_state(self):
+        runner = FakeRunner({
+            ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "63%"): (0, "", ""),
+            ("pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"): (0, "", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 63%", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+
+        result = controller.set_volume(63)
+
+        self.assertTrue(result["ok"])
+        self.assertIn(("pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"), runner.commands)
+        self.assertIn(("pactl", "get-sink-mute", "@DEFAULT_SINK@"), runner.commands)
 
     def test_volume_without_usable_backend_is_explicitly_unavailable(self):
         controller = self.device.DeviceController(
@@ -735,7 +753,7 @@ class DeviceControlTests(unittest.TestCase):
             )
             result = controller.set_brightness(50)
         self.assertFalse(result["ok"])
-        self.assertEqual("unavailable", result["error"])
+        self.assertIn("X11", result["error"])
 
     def test_brightness_rejects_zero_before_running_a_command(self):
         runner = FakeRunner({})
@@ -815,6 +833,82 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(50, result["requested"])
+
+    def test_brightness_uses_reversible_x11_fallback_without_physical_backlight(self):
+        runner = FakeRunner({
+            ("xrandr", "--query"): [
+                (0, "HDMI-1 connected 1920x1080+0+0\nDP-1 connected 1920x1080+0+0", ""),
+                (0, "HDMI-1 connected 1920x1080+0+0\nDP-1 connected 1920x1080+0+0", ""),
+            ],
+            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+            ("xrandr", "--output", "DP-1", "--brightness", "0.45"): (0, "", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "xrandr",
+                backlight_root=pathlib.Path(directory) / "backlight",
+                software_brightness_path=pathlib.Path(directory) / "software-brightness.json",
+                environment={"DISPLAY": ":0"},
+            )
+            result = controller.set_brightness(45)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("xrandr-software", result["backend"])
+        self.assertEqual(45, result["value"])
+        self.assertEqual(["HDMI-1", "DP-1"], result["outputs"])
+
+    def test_software_brightness_rolls_back_previously_changed_outputs_on_failure(self):
+        runner = FakeRunner({
+            ("xrandr", "--query"): (0, "HDMI-1 connected\nDP-1 connected", ""),
+            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+            ("xrandr", "--output", "DP-1", "--brightness", "0.45"): (1, "", "output failed"),
+            ("xrandr", "--output", "HDMI-1", "--brightness", "1.00"): (0, "", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "xrandr",
+                backlight_root=pathlib.Path(directory) / "backlight",
+                software_brightness_path=pathlib.Path(directory) / "software-brightness.json",
+                environment={"DISPLAY": ":0"},
+            )
+            result = controller.set_brightness(45)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("error", result["state"])
+        self.assertIn(("xrandr", "--output", "HDMI-1", "--brightness", "1.00"), runner.commands)
+
+    def test_software_brightness_state_is_restored_in_a_later_x11_session(self):
+        initial_runner = FakeRunner({
+            ("xrandr", "--query"): (0, "HDMI-1 connected", ""),
+            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = pathlib.Path(directory) / "software-brightness.json"
+            initial = self.device.DeviceController(
+                runner=initial_runner,
+                executable=lambda name: name == "xrandr",
+                backlight_root=pathlib.Path(directory) / "backlight",
+                software_brightness_path=state_path,
+                environment={"DISPLAY": ":0"},
+            )
+            self.assertTrue(initial.set_brightness(45)["ok"])
+
+            restore_runner = FakeRunner({
+                ("xrandr", "--query"): (0, "HDMI-1 connected", ""),
+                ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+            })
+            restored = self.device.DeviceController(
+                runner=restore_runner,
+                executable=lambda name: name == "xrandr",
+                backlight_root=pathlib.Path(directory) / "backlight",
+                software_brightness_path=state_path,
+                environment={"DISPLAY": ":0"},
+            ).restore_software_brightness()
+
+        self.assertTrue(restored["ok"])
+        self.assertIn(("xrandr", "--output", "HDMI-1", "--brightness", "0.45"), restore_runner.commands)
 
     def test_status_json_cli_has_stable_sections(self):
         output = io.StringIO()

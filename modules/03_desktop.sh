@@ -383,6 +383,19 @@ MINGAUDIOAUTO
     chown "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.config/autostart/ming-audio-session.desktop"
 
+    cat > "/home/${MING_USER}/.config/autostart/ming-software-brightness.desktop" << 'MINGSOFTWAREBRIGHTNESSAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Software Brightness Restore
+Exec=/usr/local/bin/ming-device-control restore-brightness
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+MINGSOFTWAREBRIGHTNESSAUTO
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/autostart/ming-software-brightness.desktop"
+
     cat > /usr/local/bin/ming-app-library << 'MINGDRAWERCOMPAT'
 #!/usr/bin/env bash
 set -euo pipefail

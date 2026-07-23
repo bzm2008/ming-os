@@ -40,6 +40,7 @@ REQUIRED_PACKAGES = [
     "lxpolkit",
     "libnotify-bin",
     "x11-utils",
+    "x11-xserver-utils",
     "desktop-file-utils",
 ]
 
