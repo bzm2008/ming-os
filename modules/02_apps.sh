@@ -632,19 +632,73 @@ if command -v ming-audio-session >/dev/null 2>&1; then
     mkdir -p "$(dirname "${audio_log}")" 2>/dev/null || true
     (timeout 3 ming-audio-session ensure --json >>"${audio_log}" 2>&1 &) || true
 fi
+
+# Do not fall back to xdg-open here.  Ming Edge is the default browser, so
+# that fallback can invoke this wrapper again and leave the user with a click
+# that appears to do nothing.  Keep a small structured receipt and a desktop
+# notification instead, so a missing binary or dynamic library is actionable.
+edge_log="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/edge-launch.jsonl"
+edge_diagnostic() {
+    local code="$1"
+    local message="$2"
+    mkdir -p "$(dirname "${edge_log}")" 2>/dev/null || true
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${edge_log}" "${code}" "${message}" <<'PY' 2>/dev/null || true
+import json
+import pathlib
+import sys
+import time
+
+payload = {
+    "ok": False,
+    "error_code": sys.argv[2],
+    "message": sys.argv[3],
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+}
+try:
+    path = pathlib.Path(sys.argv[1])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\\n")
+except OSError:
+    pass
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)
+PY
+    else
+        printf '{"ok":false,"error_code":"%s"}\n' "${code}" >&2
+    fi
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical -i dialog-error "Microsoft Edge 无法启动" "${message}" 2>/dev/null || true
+    fi
+    exit 127
+}
+
+edge_binary=""
+if command -v microsoft-edge-stable >/dev/null 2>&1; then
+    edge_binary="$(command -v microsoft-edge-stable)"
+elif command -v microsoft-edge >/dev/null 2>&1; then
+    edge_binary="$(command -v microsoft-edge)"
+fi
+if [[ -z "${edge_binary}" || ! -x "${edge_binary}" ]]; then
+    edge_diagnostic "E_EDGE_BINARY_MISSING" "未检测到 Microsoft Edge。请通过应用商店重新安装后再试。"
+fi
+
+# Distribution launch scripts are not ELF binaries themselves.  Only use ldd
+# when the resolved target is an ELF executable, so a normal vendor wrapper is
+# never falsely rejected.
+edge_target="$(readlink -f -- "${edge_binary}" 2>/dev/null || printf '%s' "${edge_binary}")"
+if [[ -f "${edge_target}" && "$(head -c 4 -- "${edge_target}" 2>/dev/null || true)" == $'\177ELF' ]] \
+    && command -v ldd >/dev/null 2>&1; then
+    edge_missing_libraries="$(ldd "${edge_target}" 2>/dev/null | awk '/not found/ {print $1}' | head -n 3)"
+    if [[ -n "${edge_missing_libraries}" ]]; then
+        edge_diagnostic "E_EDGE_DEPENDENCY_MISSING" "Microsoft Edge 缺少运行库：${edge_missing_libraries}。请重新安装 Edge 后再试。"
+    fi
+fi
+
 if [[ "$#" -eq 0 ]] && [[ -r "${homepage}" ]]; then
     set -- "file://${homepage}"
 fi
-if command -v microsoft-edge-stable >/dev/null 2>&1; then
-    exec microsoft-edge-stable "${edge_args[@]}" "$@"
-elif command -v microsoft-edge >/dev/null 2>&1; then
-    exec microsoft-edge "${edge_args[@]}" "$@"
-elif command -v xdg-open >/dev/null 2>&1 && [[ "$#" -gt 0 ]]; then
-    exec xdg-open "$1"
-else
-    echo "Microsoft Edge is not installed." >&2
-    exit 127
-fi
+exec "${edge_binary}" "${edge_args[@]}" "$@"
 MINGEDGE
     chmod 0755 /usr/local/bin/ming-edge
 

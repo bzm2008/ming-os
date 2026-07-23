@@ -307,6 +307,31 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
     install -m 0755 "${asset_dir}/ming-window-resource-monitor.py" /usr/local/bin/ming-window-resource-monitor
 
+    # Older Spark/aptss packages can have a valid dpkg installation but miss
+    # their Ming-owned /opt/apps desktop proxy after an interrupted upgrade.
+    # Reconcile once per boot through the same fail-closed installer validation;
+    # this does not run apt, execute third-party desktop entries, or delay the
+    # graphical session when /opt/apps is absent.
+    install -d -m 0755 /etc/systemd/system /etc/systemd/system/multi-user.target.wants
+    cat > /etc/systemd/system/ming-launcher-reconcile.service << 'MINGLAUNCHERRECONCILE'
+[Unit]
+Description=Ming managed application launcher reconciliation
+After=local-fs.target
+ConditionPathIsDirectory=/opt/apps
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-package-installer reconcile-launchers --json
+TimeoutStartSec=45
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
+MINGLAUNCHERRECONCILE
+    ln -sfn ../ming-launcher-reconcile.service \
+        /etc/systemd/system/multi-user.target.wants/ming-launcher-reconcile.service
+
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
     # its structured result into an explicit success/failure dialog and asks
@@ -5876,18 +5901,23 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 FIRSTRUN
 
-    # Keep a disabled compatibility entry so upgrades cannot leave an old
-    # autostarted installer behind. Live mode exposes a desktop tile instead.
+    # The helper checks for a Live filesystem before doing anything, so this
+    # same entry is harmless in an installed system.  It opens Calamares once
+    # after the graphical Ming shell is ready and leaves the visible desktop
+    # tile available for a deliberate retry.
     cat > "${autostart_dir}/calamares-live.desktop" << CALAMARES
 [Desktop Entry]
 Type=Application
 Name=Install Ming OS
 Name[zh_CN]=安装 Ming OS
 Comment=系统安装程序
-Exec=/usr/local/bin/ming-live-installer.sh
-Hidden=true
+Exec=/usr/local/bin/ming-live-installer-autostart
+Hidden=false
 NoDisplay=true
-X-GNOME-Autostart-enabled=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Applications
+X-GNOME-Autostart-Delay=2
+X-Ming-Live-Only=true
 CALAMARES
 
     rm -f \
@@ -7026,6 +7056,57 @@ exec /usr/local/bin/ming-calamares-launcher
 LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
+
+    cat > /usr/local/bin/ming-live-installer-autostart << 'LIVEINSTALLERAUTOSTART'
+#!/usr/bin/env bash
+# Open Calamares once from a normal Live desktop, after X11 and the Ming shell
+# have had a chance to claim the desktop.  This is deliberately per-boot state
+# under XDG_RUNTIME_DIR, never a persistent installed-system preference.
+set -u
+
+is_live_environment() {
+    grep -q "boot=live" /proc/cmdline 2>/dev/null && return 0
+    grep -q "live-config" /proc/cmdline 2>/dev/null && return 0
+    [ -d /lib/live/mount/medium ] && return 0
+    [ -f /.disk/info ] && return 0
+    [ -f /lib/live/boot/boot.sh ] && return 0
+    return 1
+}
+
+is_live_environment || exit 0
+runtime_root="${XDG_RUNTIME_DIR:-/tmp/ming-live-$(id -u)}"
+state_dir="${runtime_root}/ming-os"
+done_file="${state_dir}/live-installer-autostart.done"
+lock_dir="${state_dir}/live-installer-autostart.lock"
+mkdir -p "${state_dir}" 2>/dev/null || exit 0
+chmod 700 "${state_dir}" 2>/dev/null || true
+[ -e "${done_file}" ] && exit 0
+mkdir "${lock_dir}" 2>/dev/null || exit 0
+trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
+
+# XDG autostart can run before the phone desktop's session coordinator.  Wait
+# briefly for a usable display and its process, then continue rather than leave
+# a broken Live desktop without an installer on a degraded graphics stack.
+for _ready_try in $(seq 1 32); do
+    display_ready=false
+    if [ -n "${DISPLAY:-}" ]; then
+        if command -v xdpyinfo >/dev/null 2>&1; then
+            xdpyinfo >/dev/null 2>&1 && display_ready=true
+        else
+            display_ready=true
+        fi
+    fi
+    if [ "${display_ready}" = true ] \
+        && pgrep -u "$(id -u)" -f 'ming-phone-desktop' >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.25
+done
+
+touch "${done_file}" 2>/dev/null || exit 0
+exec env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh
+LIVEINSTALLERAUTOSTART
+    chmod 0755 /usr/local/bin/ming-live-installer-autostart
 
     # Live mode deliberately starts a normal desktop. This labelled launcher is
     # first in the phone-desktop order and uses a dedicated high-contrast icon.

@@ -24,7 +24,7 @@ class LiveModeContracts(unittest.TestCase):
         self.assertIn("LABEL live", BUILD)
 
     def test_live_desktop_keeps_an_explicit_visible_installer_launcher(self):
-        """Live mode must not autostart Calamares, but its install tile must be obvious."""
+        """Live mode auto-opens once and still keeps a visible install tile."""
         installer = DESKTOP.split("deploy_live_installer() {", 1)[1].split("# ======================== Xfce", 1)[0]
         autostart = DESKTOP.split("configure_autostart() {", 1)[1].split("# ======================== 首次启动", 1)[0]
 
@@ -37,7 +37,8 @@ class LiveModeContracts(unittest.TestCase):
             BUILD,
         )
         self.assertIn("calamares-live.desktop", autostart)
-        self.assertIn("X-GNOME-Autostart-enabled=false", autostart)
+        self.assertIn("Exec=/usr/local/bin/ming-live-installer-autostart", autostart)
+        self.assertIn("X-GNOME-Autostart-enabled=true", autostart)
         self.assertNotIn("installer-only image", installer)
         self.assertIn('"Install Ming OS.desktop",', PHONE)
         calamares = BASE.split(
@@ -57,13 +58,15 @@ class LiveModeContracts(unittest.TestCase):
         exec(compile(ast.Module(body=[core_names], type_ignores=[]), str(ROOT / "assets" / "ming-phone-desktop.py"), "exec"), namespace)
         self.assertIn("Install Ming OS.desktop", namespace["CORE_NAMES"])
 
-    def test_live_desktop_never_autostarts_the_installer(self):
-        """Only the explicit installer boot entry may start Calamares automatically."""
+    def test_live_desktop_autostarts_the_installer_once_after_graphical_readiness(self):
+        """Live starts Calamares once through the guarded desktop autostart path."""
         installer = DESKTOP.split("deploy_live_installer() {", 1)[1].split("# ======================== Xfce", 1)[0]
         service = installer.split("cat > /etc/systemd/system/ming-live-installer.service", 1)[1].split("systemctl disable ming-live-installer.service", 1)[0]
+
         self.assertIn("ConditionKernelCommandLine=ming.installer=1", service)
-        self.assertNotIn("ConditionKernelCommandLine=|boot=live", service)
-        self.assertNotIn("ConditionKernelCommandLine=|live-config", service)
+        self.assertIn("ming-live-installer-autostart", installer)
+        self.assertIn("live-installer-autostart.done", installer)
+        self.assertIn("MING_LIVE_INSTALL_REQUEST=1", installer)
 
     def test_regular_live_mode_requires_an_explicit_desktop_install_request(self):
         """A stale autostart must not turn an ordinary Live desktop into Calamares."""

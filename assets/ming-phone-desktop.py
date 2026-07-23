@@ -3416,17 +3416,13 @@ class PhoneDesktop(Gtk.Window):
             tile_w, tile_h = scaled_tile_metrics(
                 self.appearance.get("desktop_icon_scale", 1.0), self.appearance)
             profile = COMMON.shell_visual_profile(self.appearance)
-            self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 8)
             if is_folder:
+                self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 8)
                 cr.set_source_rgba(0.91, 0.97, 0.95, profile["surface_alpha"])
-            elif profile["theme"] == "dark":
-                cr.set_source_rgba(0.16, 0.18, 0.17, profile["surface_alpha"])
-            else:
-                cr.set_source_rgba(1, 1, 1, profile["surface_alpha"])
-            cr.fill_preserve()
-            cr.set_source_rgba(0.14, 0.53, 0.45, 0.70)
-            cr.set_line_width(1)
-            cr.stroke()
+                cr.fill_preserve()
+                cr.set_source_rgba(0.14, 0.53, 0.45, 0.70)
+                cr.set_line_width(1)
+                cr.stroke()
             icon_name = "folder" if is_folder else (item.get("icon") or "application-x-executable")
             try:
                 icon_size = appearance_icon_size(self.appearance)
@@ -3449,14 +3445,19 @@ class PhoneDesktop(Gtk.Window):
             font_name = str(self.appearance.get("font_family", "Noto Sans CJK SC")).replace('"', "")
             font_size = max(9, min(16, COMMON.appearance_font_size(self.appearance) - 1))
             layout.set_font_description(Pango.FontDescription("%s Bold %d" % (font_name, font_size)))
-            if profile["theme"] == "dark":
-                cr.set_source_rgba(0.95, 0.97, 0.96, 1.0)
-            else:
-                cr.set_source_rgba(0.09, 0.13, 0.11, 1.0)
             cr.save()
             cr.rectangle(x + 4, label_y, tile_w - 12, label_height)
             cr.clip()
-            cr.move_to(x + int((tile_w - label_width) / 2), label_y)
+            label_x = x + int((tile_w - label_width) / 2)
+            # Apps no longer receive an opaque white tray.  A thin dark outline
+            # lets the same white label remain readable over either a light or
+            # dark custom wallpaper without changing the transparent hit area.
+            for shadow_x, shadow_y in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                cr.set_source_rgba(0.03, 0.06, 0.05, 0.78)
+                cr.move_to(label_x + shadow_x, label_y + shadow_y)
+                PangoCairo.show_layout(cr, layout)
+            cr.set_source_rgba(0.98, 0.99, 0.98, 1.0)
+            cr.move_to(label_x, label_y)
             PangoCairo.show_layout(cr, layout)
             cr.restore()
 

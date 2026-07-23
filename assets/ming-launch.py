@@ -55,6 +55,23 @@ COMMON = _load_common()
 _EVENT_LOCK = threading.Lock()
 
 
+def launch_error_code(error):
+    """Return a stable, user-facing code without exposing command arguments."""
+    if isinstance(error, FileNotFoundError):
+        return "E_LAUNCH_BINARY_MISSING"
+    detail = str(error or "").replace("\x00", " ").casefold()
+    if any(token in detail for token in (
+            "not found", "missing", "不存在", "不可执行", "找不到启动命令")):
+        return "E_LAUNCH_BINARY_MISSING"
+    if any(token in detail for token in ("运行库", "shared library", "dependency")):
+        return "E_LAUNCH_DEPENDENCY_MISSING"
+    if "verification" in detail or "校验" in detail or "所有权" in detail:
+        return "E_LAUNCH_VERIFICATION_FAILED"
+    if "window" in detail or "窗口" in detail:
+        return "E_LAUNCH_WINDOW_TIMEOUT"
+    return "E_LAUNCH_FAILED"
+
+
 def record_launch_event(request, status, detail="", path=None):
     event_path = pathlib.Path(path) if path else COMMON.runtime_path("launch-events.jsonl")
     event = {
@@ -65,12 +82,54 @@ def record_launch_event(request, status, detail="", path=None):
         "command": request.argv[0] if request.argv else request.desktop_file,
         "detail": str(detail)[:1024],
     }
+    if detail:
+        event["error_code"] = launch_error_code(detail)
     try:
         event_path.parent.mkdir(parents=True, exist_ok=True)
         with _EVENT_LOCK, event_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
     except OSError:
         pass
+
+
+def _request_launch_diagnostic(request):
+    """Return the strict parser's readable diagnosis, without ever launching."""
+    try:
+        diagnostic = getattr(COMMON, "desktop_launch_diagnostic", None)
+        if request.argv and callable(diagnostic):
+            message = diagnostic(request.argv)
+            if message:
+                return str(message)
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    try:
+        diagnose = getattr(COMMON, "diagnose_desktop_file", None)
+        if request.desktop_file and callable(diagnose):
+            entry = diagnose(
+                request.desktop_file,
+                respect_desktop_environment=_is_system_catalog_desktop_file(
+                    request.desktop_file),
+            )
+            message = getattr(entry, "diagnostic", "") if entry is not None else ""
+            if message:
+                return str(message)
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    return ""
+
+
+def launch_error_payload(request, error):
+    """Produce one bounded JSON-safe launch failure record for UI and support."""
+    diagnostic = _request_launch_diagnostic(request)
+    fallback = str(error or "应用未能启动").replace("\x00", " ").strip()
+    message = diagnostic or fallback or "应用未能启动"
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ok": False,
+        "error_code": launch_error_code(diagnostic or error),
+        "desktop_file": str(request.desktop_file or "")[:1024],
+        "message": message[:1024],
+    }
 
 
 class LaunchRequest:
@@ -764,17 +823,62 @@ def probe_window_async(
 
 
 def report_launch_error(request, error):
-    message = "{}: {}\n".format(time.strftime("%Y-%m-%dT%H:%M:%S"), error)
+    payload = launch_error_payload(request, error)
+    message = "{} [{}]: {}\n".format(
+        payload["timestamp"], payload["error_code"], payload["message"])
     try:
         log_path = COMMON.runtime_path("launch-errors.log")
         with log_path.open("a", encoding="utf-8") as stream:
             stream.write(message[:4096])
     except OSError:
         pass
-    label = pathlib.Path(request.desktop_file).stem if request.desktop_file else request.argv[0]
+    try:
+        json_log_path = COMMON.runtime_path("launch-errors.jsonl")
+        with _EVENT_LOCK, json_log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+    label = pathlib.Path(request.desktop_file).stem if request.desktop_file else (
+        request.argv[0] if request.argv else "应用")
     COMMON.run_command(
-        ["notify-send", "Ming OS", "无法启动 {}".format(label)], timeout=2
+        [
+            "notify-send", "-u", "critical", "Ming OS",
+            "无法启动 {}：{}".format(label, payload["message"][:300]),
+        ], timeout=2
     )
+
+
+def check_desktop(desktop_file, allowed_dirs=None):
+    """Read and validate a desktop entry without spawning or activating it."""
+    payload = {
+        "ok": False,
+        "launch_ready": False,
+        "desktop_file": str(desktop_file or ""),
+        "mode": "",
+        "error_code": "",
+        "error": "",
+    }
+    try:
+        request = request_from_desktop_file(
+            desktop_file, allowed_dirs=allowed_dirs)
+        payload["desktop_file"] = request.desktop_file
+        payload["mode"] = request.mode
+        diagnostic = _request_launch_diagnostic(request)
+        if diagnostic:
+            payload.update(
+                error_code=launch_error_code(diagnostic),
+                error=diagnostic[:1024],
+            )
+            return payload
+        payload.update(ok=True, launch_ready=True)
+        return payload
+    except (OSError, TypeError, ValueError) as error:
+        detail = str(error) or "启动器不可用"
+        payload.update(
+            error_code=launch_error_code(detail),
+            error=detail[:1024],
+        )
+        return payload
 
 
 def activate_desktop_app_info(desktop_file):
@@ -941,7 +1045,8 @@ class LaunchBroker:
             self.report_error(request, error)
 
         def timed_out():
-            self.record_event(request, "window_timeout")
+            error = RuntimeError("application did not create an X11 window")
+            self.record_event(request, "window_timeout", error)
             if callable(finish):
                 finish()
 
@@ -1267,13 +1372,26 @@ def request_from_args(args):
     raise ValueError("an allowlisted desktop file is required")
 
 
-def main(argv=None):
+def main(argv=None, stdout=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("action", nargs="?", choices=("check-desktop",))
+    parser.add_argument("file", nargs="?")
     parser.add_argument("--desktop-file")
     parser.add_argument("--source", default="unknown", choices=("desktop", "drawer", "dock", "unknown"))
     parser.add_argument("--rect")
     parser.add_argument("--server", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    stdout = stdout or sys.stdout
+    if args.action == "check-desktop":
+        if not args.file:
+            parser.error("check-desktop requires a desktop file")
+        payload = check_desktop(args.file)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=stdout)
+        else:
+            print(payload["error"] or "启动器可以启动。", file=stdout)
+        return 0 if payload["launch_ready"] else 1
     if args.server:
         try:
             LaunchServer().serve_forever()

@@ -44,6 +44,7 @@ PACKAGE_MANAGER_LOCK = "/run/lock/ming-package-manager.lock"
 PACKAGE_MANAGER_LOCK_TIMEOUT = 30
 DPKG_LOCK_TIMEOUT = 60
 PACKAGE_MANAGER_BUSY_EXIT = 75
+RECONCILE_OPT_SOURCE_LIMIT = 256
 DEFAULT_LOG_PATH = "/var/log/ming-os/package-installer.jsonl"
 SPARK_DEPENDENCY_SOURCE_LIST = "/etc/apt/sources.list"
 OPT_APPS_ROOT = pathlib.Path("/opt/apps")
@@ -1558,6 +1559,60 @@ class PackageInstaller:
             return None
         return path
 
+    def _discover_reconcile_packages(self):
+        """Find only installed packages owning protected /opt/apps desktop files.
+
+        This is deliberately bounded and never treats a path under /opt/apps as
+        trusted based on its name alone.  The existing package ownership helper
+        confirms both the exact dpkg owner and installed state before a package
+        can enter the normal proxy transaction.
+        """
+        root = self.opt_apps_root
+        if not root.exists():
+            return (), ()
+        if self._protected_metadata(root, directory=True) is None:
+            return (), ("/opt/apps 目录权限或所有者不安全，未处理历史启动器。",)
+        try:
+            app_roots = sorted(root.iterdir(), key=lambda item: item.name)
+        except OSError as error:
+            return (), ("无法枚举 /opt/apps：%s" % error,)
+
+        packages = set()
+        warnings = []
+        sources = 0
+        for app_root in app_roots:
+            candidate_dir = app_root / "entries" / "applications"
+            try:
+                entries = sorted(candidate_dir.iterdir(), key=lambda item: item.name)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                warnings.append("无法读取 %s：%s" % (candidate_dir, error))
+                continue
+            for source in entries:
+                if self._opt_apps_desktop_path(source) is None:
+                    continue
+                sources += 1
+                if sources > RECONCILE_OPT_SOURCE_LIMIT:
+                    warnings.append(
+                        "历史启动器数量超过安全上限 %d，未继续扫描。" % (
+                            RECONCILE_OPT_SOURCE_LIMIT,))
+                    return tuple(sorted(packages)), tuple(warnings)
+                if not self._safe_opt_apps_source(source):
+                    warnings.append("%s：启动器源文件不安全，未处理。" % source)
+                    continue
+                owner = ""
+                try:
+                    owner = COMMON.installed_package_owner(
+                        source, self._dpkg_query_runner)
+                except (AttributeError, OSError, TypeError, ValueError):
+                    owner = ""
+                if not owner:
+                    warnings.append("%s：无法验证 Debian 软件包所有权，未处理。" % source)
+                    continue
+                packages.add(owner)
+        return tuple(sorted(packages)), tuple(warnings)
+
     def _package_launchers(self, package):
         """Validate direct system entries and bounded /opt/apps proxy sources."""
         returncode, output, command_error = self._call(
@@ -1584,6 +1639,63 @@ class PackageInstaller:
         proxies, proxy_error = self._sync_desktop_proxies(package, opt_paths)
         launchers.extend(proxies)
         return launchers, proxy_error
+
+    def reconcile_launchers(self):
+        """Repair stale managed /opt/apps proxies without an APT transaction."""
+        if self.uid_getter() != 0:
+            return self._result(
+                False,
+                action="reconcile-launchers",
+                state="permission_denied",
+                error="修复已安装软件的启动器需要管理员权限。",
+            )
+        packages, discovery_warnings = self._discover_reconcile_packages()
+        launchers = []
+        warnings = [
+            {
+                "path": "", "name": "历史启动器", "ok": False,
+                "visible": True, "activation": "", "error": str(detail),
+            }
+            for detail in discovery_warnings
+        ]
+        failures = []
+        for package in packages:
+            records, enumeration_error = self._package_launchers(package)
+            launchers.extend(records)
+            warnings.extend(record for record in records if not record.get("ok"))
+            if enumeration_error:
+                failures.append("%s：%s" % (package, enumeration_error))
+                warnings.append({
+                    "path": "", "name": package, "ok": False,
+                    "visible": True, "activation": "", "error": enumeration_error,
+                })
+        refresh = self._refresh_caches()
+        details = [str(item.get("error") or "") for item in warnings]
+        details.extend(failures)
+        error = "；".join(item for item in details if item)[:2048]
+        state = "reconciled"
+        if failures:
+            state = "reconcile_failed"
+        elif warnings:
+            state = "reconciled_with_warnings"
+        self._log(
+            "launcher reconciliation %s for packages: %s" % (
+                state, ", ".join(packages) or "<none>"))
+        proxy_fields = self._proxy_result_fields(launchers)
+        return self._result(
+            not failures,
+            action="reconcile-launchers",
+            state=state,
+            installed=bool(packages),
+            packages=list(packages),
+            launch_ready=not bool(warnings or failures),
+            launchers=launchers,
+            launcher_warnings=warnings,
+            error=error,
+            error_code=(E_LAUNCH_NOT_READY if warnings or failures else ""),
+            refresh=refresh,
+            **proxy_fields,
+        )
 
     def _launch_readiness(self, launchers, completed_state, enumeration_error=""):
         if enumeration_error:
@@ -1891,6 +2003,8 @@ def build_parser():
     install.add_argument("--json", action="store_true")
     repair = actions.add_parser("repair")
     repair.add_argument("package")
+    reconcile = actions.add_parser("reconcile-launchers")
+    reconcile.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1912,6 +2026,8 @@ def main(argv=None, installer=None, stdout=None):
         result = installer.inspect(args.file)
     elif args.action == "install":
         result = installer.install(args.file, resolver=args.resolver)
+    elif args.action == "reconcile-launchers":
+        result = installer.reconcile_launchers()
     else:
         result = installer.repair(args.package)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
