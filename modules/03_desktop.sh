@@ -285,7 +285,9 @@ try:
     result = json.loads(raw)
 except (TypeError, ValueError):
     result = {}
-ok = bool(result.get("ok")) and return_code == 0
+installed = bool(result.get("installed"))
+launch_ready = bool(result.get("launch_ready"))
+ok = bool(result.get("ok")) and installed and launch_ready and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
 log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
@@ -300,6 +302,10 @@ if ok:
         warnings = [str(item.get("error") or "启动器不可用")
                     for item in launcher_warnings if isinstance(item, dict)]
         detail += "\n\n注意：" + "；".join(warnings[:3])
+elif installed and not launch_ready:
+    title = "软件已安装，但无法确认可启动"
+    reason = str(result.get("error") or "未找到可验证的图形启动器。")
+    detail = "%s\n日志：%s" % (reason[:1200], log_path)
 else:
     title = "软件安装失败"
     reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
@@ -324,6 +330,28 @@ fi
 exit 1
 MINGPACKAGEGUI
     chmod 0755 /usr/local/bin/ming-package-install-gui
+
+    # Both browser downloads and Ming Files resolve Debian packages through
+    # this unprivileged MIME handler.  Only the installer itself requests the
+    # narrowly scoped polkit privilege.
+    cat > /usr/share/applications/ming-package-installer.desktop << 'MINGPACKAGEINSTALLERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=安装 DEB 软件包
+Name[zh_CN]=安装 DEB 软件包
+Comment=验证并安装本地 Debian 软件包
+Comment[zh_CN]=验证并安装本地 Debian 软件包
+Exec=/usr/local/bin/ming-package-install-gui %f
+Icon=package-x-generic
+Terminal=false
+MimeType=application/vnd.debian.binary-package;
+NoDisplay=true
+StartupNotify=true
+MINGPACKAGEINSTALLERDESKTOP
+    cp /usr/share/applications/ming-package-installer.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-package-installer.desktop"
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop" << 'MINGLAUNCHAUTO'
@@ -438,6 +466,7 @@ for section in ("Default Applications", "Added Associations"):
         config.add_section(section)
 config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
+config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
 existing = config["Added Associations"].get("inode/directory", "")
 items = [item for item in existing.split(";") if item]
 items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]

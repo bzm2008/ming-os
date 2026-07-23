@@ -113,6 +113,15 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("以管理员身份打开", final_menu)
         self.assertIn("询问 Garlic Claw", final_menu)
 
+    def test_downloaded_debs_have_a_default_mime_handler_not_just_a_context_menu(self):
+        self.assertIn("ming-package-installer.desktop", DESKTOP)
+        self.assertIn("MimeType=application/vnd.debian.binary-package;", DESKTOP)
+        self.assertIn("Exec=/usr/local/bin/ming-package-install-gui %f", DESKTOP)
+        self.assertIn(
+            'config["Default Applications"]["application/vnd.debian.binary-package"]',
+            DESKTOP,
+        )
+
     def test_apps_module_has_a_dedicated_required_runtime_package_set(self):
         block = APPS.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0]
         for package in REQUIRED_PACKAGES:
@@ -132,7 +141,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('run_required_step install_required_desktop_runtime', main)
         self.assertIn('run_required_step install_fcitx5', main)
         self.assertIn('run_optional_step install_edge', main)
-        self.assertIn('run_optional_step install_app_store', main)
+        self.assertIn('run_required_step install_app_store', main)
 
     def test_every_required_install_function_propagates_mandatory_command_failures(self):
         expected_guards = {
@@ -221,11 +230,11 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("Spark Store repair fallback", result.stderr)
 
-            write_executable(root, "usr/local/bin/ming-install-spark-store")
+            write_executable(root, "usr/local/bin/ming-package-install-gui")
             write_executable(
                 root,
                 "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec pkexec /usr/local/bin/ming-install-spark-store \"$@\"\n",
+                "#!/bin/sh\nexec /usr/local/bin/ming-package-install-gui /usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb\n",
             )
             result = run_backend_validator(root)
             self.assertEqual(0, result.returncode, result.stderr)

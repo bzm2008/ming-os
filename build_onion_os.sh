@@ -951,13 +951,13 @@ spark_backends = [
 ]
 if not any(path.is_file() and os.access(path, os.X_OK) for path in spark_backends):
     spark_wrapper = root / "usr/local/bin/ming-spark-store"
-    spark_installer = root / "usr/local/bin/ming-install-spark-store"
+    spark_gui = root / "usr/local/bin/ming-package-install-gui"
     wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
     has_repair_fallback = (
         desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
-        and spark_installer.is_file()
-        and os.access(spark_installer, os.X_OK)
-        and 'exec pkexec /usr/local/bin/ming-install-spark-store "$@"' in wrapper_text
+        and spark_gui.is_file()
+        and os.access(spark_gui, os.X_OK)
+        and "exec /usr/local/bin/ming-package-install-gui" in wrapper_text
     )
     if not has_repair_fallback:
         errors.append("Spark Store repair fallback is missing or not executable")
@@ -985,6 +985,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import hashlib
 
 root = Path(sys.argv[1])
 errors = []
@@ -1159,6 +1160,19 @@ for path, marker in [
 ]:
     require_file(path, marker)
 
+spark_asset = root / "usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+spark_expected_sha256 = "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
+if not spark_asset.is_file() or spark_asset.stat().st_size == 0:
+    errors.append("missing or empty verified Spark Store asset")
+else:
+    spark_hasher = hashlib.sha256()
+    with spark_asset.open("rb") as spark_handle:
+        for spark_chunk in iter(lambda: spark_handle.read(1024 * 1024), b""):
+            spark_hasher.update(spark_chunk)
+    spark_actual_sha256 = spark_hasher.hexdigest().upper()
+    if spark_actual_sha256 != spark_expected_sha256:
+        errors.append("verified Spark Store asset SHA256 mismatch")
+
 ota_backup = require_file("usr/local/sbin/ming-ota-backup", "--system-target")
 for marker in ["sha256", "readlink", "headroom", "verify_command"]:
     if marker not in ota_backup:
@@ -1251,7 +1265,6 @@ for relative_path in [
 for relative_path in [
     "etc/systemd/system/ming-service-profile.service",
     "etc/systemd/system/ming-power-profile.service",
-    "etc/systemd/system/ming-appstore-ready.timer",
 ]:
     validate_systemd_unit(relative_path)
 for relative_path, marker in [

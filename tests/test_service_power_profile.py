@@ -78,15 +78,10 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertNotIn("systemd-udev-settle.service", service)
         self.assertNotIn("Wants=systemd-udev-settle.service", service)
 
-    def test_spark_readiness_is_delayed_by_timer_without_network_online(self):
-        service = APPS.split(
-            "cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'",
-            1,
-        )[1].split("SVCUNIT", 1)[0]
-        self.assertNotIn("network-online.target", service)
-        self.assertIn("ming-appstore-ready.timer", APPS)
-        self.assertIn("OnBootSec=90s", APPS)
-        self.assertIn("After=graphical.target", service)
+    def test_spark_is_not_installed_or_refreshed_by_a_login_timer(self):
+        self.assertNotIn("ming-appstore-ready.service", APPS)
+        self.assertNotIn("ming-appstore-ready.timer", APPS)
+        self.assertNotIn("OnBootSec=90s", APPS)
 
     def test_modem_manager_is_disabled_by_default_but_has_explicit_opt_in(self):
         network = BASE.split("configure_network() {", 1)[1].split(

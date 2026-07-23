@@ -1817,59 +1817,72 @@ MINGINPUTCONTROL
 # ======================== 应用商店 (星火应用商店) ========================
 
 install_app_store() {
+    local asset="/tmp/ming-build/assets/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+    local target="/usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+    local expected_sha256="88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
+
+    if [[ ! -s "${asset}" ]]; then
+        echo "[ERROR] verified Spark Store build asset is missing: ${asset}" >&2
+        return 1
+    fi
+    if ! printf '%s  %s\n' "${expected_sha256}" "${asset}" | sha256sum -c -; then
+        echo "[ERROR] Spark Store build asset SHA256 verification failed" >&2
+        return 1
+    fi
+    if [[ "$(dpkg-deb -f "${asset}" Package 2>/dev/null || true)" != "spark-store" \
+        || "$(dpkg-deb -f "${asset}" Version 2>/dev/null || true)" != "5.2.1.0" \
+        || "$(dpkg-deb -f "${asset}" Architecture 2>/dev/null || true)" != "amd64" ]]; then
+        echo "[ERROR] Spark Store build asset metadata does not match the approved release" >&2
+        return 1
+    fi
+
     apt install -y --no-install-recommends \
-        curl \
-        jq \
-        wget \
-        apt-transport-https \
         xdg-utils \
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
-        libnotify-bin
+        libnotify-bin || return 1
+
+    install -d -m 0755 /usr/share/ming-os/vendor/spark-store
+    install -m 0644 "${asset}" "${target}"
+    if ! printf '%s  %s\n' "${expected_sha256}" "${target}" | sha256sum -c -; then
+        echo "[ERROR] copied Spark Store asset SHA256 verification failed" >&2
+        return 1
+    fi
+    if ! apt-get -y -o Dpkg::Use-Pty=0 install "${asset}"; then
+        echo "[ERROR] failed to install approved Spark Store build asset" >&2
+        return 1
+    fi
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -qx 'ii '; then
+        echo "[ERROR] Spark Store package was not installed" >&2
+        return 1
+    fi
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash
 set -euo pipefail
 
-api="https://gitee.com/api/v5/repos/spark-store-project/spark-store/releases/latest"
-fallback="https://gitee.com/spark-store-project/spark-store/releases/download/5.1.1/spark-store_5.1.1_amd64.deb"
-deb="/tmp/spark-store.deb"
+deb="/usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+expected_sha256="88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
 log="/var/log/ming-spark-store-install.log"
 
-cleanup() {
-    rm -f "${deb}"
-}
-trap cleanup EXIT
-
-echo "Resolving latest Spark Store release..."
-url="$(curl -fsSL "${api}" 2>/dev/null | jq -r '.assets[]? | select(.name | test("_amd64\\.deb$")) | .browser_download_url' | head -n1 || true)"
-if [[ -z "${url}" || "${url}" == "null" ]]; then
-    url="${fallback}"
-fi
-
-echo "Downloading Spark Store: ${url}"
-wget -c --show-progress -O "${deb}" "${url}"
-mkdir -p /root/.config "${HOME:-/root}/.config"
-touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     echo "Administrator privileges are required to install Spark Store." >&2
     exit 1
 fi
-
-# At runtime the shared local-package installer validates architecture and
-# metadata, performs one controlled dependency repair, verifies dpkg state and
-# refreshes desktop/icon caches.  During the early image build 03_desktop has
-# not deployed it yet, so retain a strictly verified bootstrap fallback.
-if [[ -x /usr/local/sbin/ming-package-installer ]]; then
-    /usr/local/sbin/ming-package-installer install "${deb}" | tee -a "${log}"
-else
-    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1 \
-        || { apt-get -y -o Dpkg::Use-Pty=0 -f install >>"${log}" 2>&1 && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1; }
-    dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii' \
-        || { echo "Spark Store package verification failed." >&2; exit 1; }
-    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
-    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+if [[ ! -s "${deb}" ]] || ! printf '%s  %s\n' "${expected_sha256}" "${deb}" | sha256sum -c -; then
+    echo "The approved Spark Store recovery package is missing or invalid." >&2
+    exit 1
 fi
+if [[ ! -x /usr/local/sbin/ming-package-installer ]]; then
+    echo "Ming package installer is unavailable." >&2
+    exit 1
+fi
+
+if ! result="$(/usr/local/sbin/ming-package-installer install "${deb}" 2>>"${log}")"; then
+    printf '%s\n' "${result}"
+    exit 1
+fi
+printf '%s\n' "${result}"
 
 # A graphical user may already be logged in while a package is installed.
 # Trigger a bounded catalog sync; the drawer also rescans when it opens.
@@ -1882,13 +1895,8 @@ fi
 if [[ -n "${target_user}" ]]; then
     runuser -u "${target_user}" -- ming-phone-desktop --sync >>"${log}" 2>&1 || true
 fi
-echo "Spark Store installed."
 SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
-
-    if ! /usr/local/bin/ming-install-spark-store; then
-        echo "[WARN] 星火应用商店安装失败，保留 ming-install-spark-store 供用户联网后重试。"
-    fi
 
     cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'
 #!/usr/bin/env bash
@@ -1908,8 +1916,9 @@ done
 if [[ -z "${spark_bin}" ]]; then
     notify-send -i dialog-error "星火应用商店" "应用商店尚未安装，请从应用库运行“修复星火应用商店”。" 2>/dev/null || true
     printf '[%s] Spark Store binary is missing\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
-    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/bin/ming-install-spark-store ]]; then
-        exec pkexec /usr/local/bin/ming-install-spark-store "$@"
+    if [[ -x /usr/local/bin/ming-package-install-gui ]]; then
+        exec /usr/local/bin/ming-package-install-gui \
+            /usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb
     fi
     exit 127
 fi
@@ -2026,8 +2035,8 @@ SPARKSYSDESKTOP
 [Desktop Entry]
 Name=修复星火应用商店
 Name[zh_CN]=修复星火应用商店
-Comment=Download and install Spark Store if it was not bundled during image build
-Exec=pkexec /usr/local/bin/ming-install-spark-store
+Comment=Reinstall the verified bundled Spark Store package
+Exec=/usr/local/bin/ming-package-install-gui /usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb
 Icon=ming-app-store
 Terminal=true
 Type=Application
@@ -2050,37 +2059,6 @@ X-GNOME-Autostart-Delay=15
 APPRECAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-app-recommend.desktop"
 
-    cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'
-[Unit]
-Description=Ming OS App Store Readiness (delayed, non-blocking)
-After=graphical.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'command -v spark-store >/dev/null 2>&1 || /usr/local/bin/ming-install-spark-store || true'
-TimeoutStartSec=90
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVCUNIT
-
-    cat > /etc/systemd/system/ming-appstore-ready.timer << 'SPARKTIMER'
-[Unit]
-Description=Ming OS delayed Spark Store readiness
-After=graphical.target
-
-[Timer]
-OnBootSec=90s
-AccuracySec=30s
-Unit=ming-appstore-ready.service
-
-[Install]
-WantedBy=timers.target
-SPARKTIMER
-
-    systemctl disable --now ming-appstore-ready.service 2>/dev/null || true
-    systemctl enable ming-appstore-ready.timer 2>/dev/null || true
 }
 
 # ======================== 附加实用工具 ========================
@@ -2203,7 +2181,7 @@ main() {
     run_optional_step install_edge
     run_optional_step install_wps_office
     run_optional_step install_wechat
-    run_optional_step install_app_store
+    run_required_step install_app_store || return 1
     run_optional_step install_utilities
 
     echo "=====> [02_apps] 应用软件安装完成 <====="

@@ -48,6 +48,9 @@ class PackageInstaller:
             "architecture": "",
             "error": "",
             "state": "",
+            "error_code": "",
+            "installed": False,
+            "launch_ready": False,
             "log_path": str(self.log_path),
             "launchers": [],
             "launcher_warnings": [],
@@ -136,18 +139,32 @@ class PackageInstaller:
 
     @staticmethod
     def _apt_install_command(package_file):
-        return ("apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package_file))
+        return (
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            "-o", "Dpkg::Lock::Timeout=30", "install", str(package_file),
+        )
 
     @staticmethod
     def _apt_fix_command():
-        return ("apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-f", "install")
+        return (
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            "-o", "Dpkg::Lock::Timeout=30", "-f", "install",
+        )
 
     @staticmethod
     def _apt_reinstall_command(package):
         return (
             "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
-            "install", package,
+            "-o", "Dpkg::Lock::Timeout=30", "install", package,
         )
+
+    @staticmethod
+    def _install_failure(error):
+        """Classify apt failures without exposing repository URLs or raw output."""
+        text = (error or "").lower()
+        if "lock" in text or "could not get" in text:
+            return "package_busy", "E_PACKAGE_BUSY", "软件安装器正在被其他任务使用，请稍后重试。"
+        return "install_failed", "E_RESOLVER_FAILED", "无法满足软件包依赖或完成安装，请检查软件包和网络后重试。"
 
     def _installed(self, package):
         command = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", package)
@@ -284,13 +301,15 @@ class PackageInstaller:
                 error = fix_error or error
         if returncode != 0:
             self._log("install failed for %s: %s" % (inspected["file"], error.strip()))
+            state, error_code, message = self._install_failure(error)
             return self._result(
                 False,
                 action="install",
-                state="install_failed",
+                state=state,
+                error_code=error_code,
                 dependency_repair_attempted=dependency_repair_attempted,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
-                error="安装 DEB 软件包失败：%s" % (error.strip() or "apt-get 失败"),
+                error=message,
             )
         if not self._installed(inspected["package"]):
             self._log("package verification failed for %s" % inspected["package"])
@@ -298,6 +317,7 @@ class PackageInstaller:
                 False,
                 action="install",
                 state="verification_failed",
+                error_code="E_INSTALL_NOT_VERIFIED",
                 dependency_repair_attempted=dependency_repair_attempted,
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
                 error="软件包安装后未处于已安装状态。",
@@ -305,11 +325,30 @@ class PackageInstaller:
         refresh = self._refresh_caches()
         launchers = self._package_launchers(inspected["package"])
         launcher_warnings = [record for record in launchers if not record.get("ok")]
+        launch_ready = not launcher_warnings
+        if not launch_ready:
+            self._log("launcher verification failed for %s" % inspected["package"])
+            return self._result(
+                False,
+                action="install",
+                state="installed_without_launcher",
+                error_code="E_LAUNCH_NOT_READY",
+                installed=True,
+                launch_ready=False,
+                dependency_repair_attempted=dependency_repair_attempted,
+                refresh=refresh,
+                launchers=launchers,
+                launcher_warnings=launcher_warnings,
+                error="软件包已安装，但没有可验证的图形启动器。",
+                **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
+            )
         self._log("installed %s from %s" % (inspected["package"], inspected["file"]))
         return self._result(
             True,
             action="install",
-            state="installed_with_launch_warning" if launcher_warnings else "installed",
+            state="installed",
+            installed=True,
+            launch_ready=True,
             dependency_repair_attempted=dependency_repair_attempted,
             refresh=refresh,
             launchers=launchers,
