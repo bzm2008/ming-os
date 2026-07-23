@@ -1,0 +1,17 @@
+{
+  "schema": "ming.content-index.v1",
+  "release_id": "ming-os-26.3.3-amd64-20260715.1",
+  "entries": [
+    {
+      "path": "usr/share/ming-os/example",
+      "type": "file",
+      "blob": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "mode": 420,
+      "uid": 0,
+      "gid": 0,
+      "config_policy": "replace"
+    }
+  ],
+  "deletions": ["usr/share/ming-os/obsolete"],
+  "packages": []
+}

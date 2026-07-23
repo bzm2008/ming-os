@@ -1,10 +1,13 @@
 import ast
+import importlib.util
 import json
 import os
 import pathlib
 import shutil
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -126,6 +129,12 @@ class DesktopSourceTests(unittest.TestCase):
         ]:
             self.assertIn(marker, self.drawer)
 
+    def test_drawer_hides_fixed_xfce_control_surface_without_hiding_third_party_apps(self):
+        self.assertIn("LEGACY_XFCE_LAUNCHERS", self.drawer)
+        self.assertIn("def should_hide_legacy_launcher", self.drawer)
+        self.assertIn("xfce4-mouse-settings.desktop", self.drawer)
+        self.assertIn("xfce4-notifyd-config.desktop", self.drawer)
+
     def test_desktop_preserves_last_known_good_layout_and_has_a_blank_area_menu(self):
         for marker in [
             "LAST_GOOD_LAYOUT_PATH",
@@ -154,13 +163,261 @@ class DesktopSourceTests(unittest.TestCase):
             self.phone,
         )
 
-    def test_shell_launches_use_socket_ack_and_direct_fallback(self):
+    def test_shell_launches_use_socket_ack_and_broker_fallback(self):
         common = (ROOT / "assets" / "ming-shell-common.py").read_text(encoding="utf-8")
         self.assertIn("def send_launch_request", common)
+        self.assertIn("def broker_fallback_argv", common)
         self.assertIn("COMMON = load_shell_common()", self.phone)
-        self.assertIn("COMMON.send_launch_request", self.phone)
+        self.assertIn('sender(path, "desktop", source_rect)', self.phone)
+        self.assertIn('fallback(path, "desktop")', self.phone)
         self.assertIn("COMMON.send_launch_request", self.drawer)
+        self.assertIn("COMMON.broker_fallback_argv", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
+
+    def test_phone_desktop_uses_async_broker_requests(self):
+        open_item = self.phone[
+            self.phone.index("    def open_item(self, item):"):
+            self.phone.index("    def show_folder", self.phone.index("    def open_item(self, item):"))
+        ]
+        self.assertIn("def launch_item_async", self.phone)
+        self.assertIn("launch_item_async(item, source_rect", open_item)
+
+    def test_phone_async_legacy_false_result_starts_safe_broker_fallback_without_success_ack(self):
+        """A partially updated old broker may recover safely, but has not launched yet."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        launch = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_item_async"
+        )
+        calls = []
+        results = []
+        path = "/usr/share/applications/store-wrapper.desktop"
+        expected = ("ming-launch", "--server")
+
+        class Common:
+            ASYNC_LAUNCH_REQUEST_TIMEOUT = 12.0
+
+            @staticmethod
+            def send_launch_request_async(desktop_file, source_name, rect, callback, timeout):
+                self.assertEqual((path, "desktop", None, 12.0), (
+                    desktop_file, source_name, rect, timeout))
+                callback(False)
+                return True
+
+            @staticmethod
+            def broker_fallback_argv(desktop_file, source_name):
+                self.assertEqual((path, "desktop"), (desktop_file, source_name))
+                return expected
+
+        namespace = {
+            "COMMON": Common(),
+            "log": lambda _message: None,
+            "subprocess": types.SimpleNamespace(
+                Popen=lambda argv, shell=False: calls.append((argv, shell)) or object(),
+            ),
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[launch], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+
+        self.assertTrue(namespace["launch_item_async"](
+            {"path": path, "diagnostic": ""}, on_result=results.append))
+        self.assertEqual([(expected, False)], calls)
+        self.assertEqual([False], results)
+
+    def test_phone_desktop_ignores_repeat_click_until_async_launch_settles(self):
+        """A pending desktop launch must not enqueue a second broker request."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        desktop = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        open_item = next(
+            node for node in desktop.body
+            if isinstance(node, ast.FunctionDef) and node.name == "open_item"
+        )
+        requests = []
+        feedback = []
+
+        class ImmediateGLib:
+            @staticmethod
+            def idle_add(callback):
+                callback()
+                return True
+
+        def launch_async(item, _rect, on_result):
+            requests.append(on_result)
+            return True
+
+        namespace = {
+            "GLib": ImmediateGLib(),
+            "Gtk": types.SimpleNamespace(),
+            "PAD_X": 20,
+            "PAD_Y": 20,
+            "log": lambda _message: None,
+            "scaled_tile_metrics": lambda _scale: (96, 96),
+            "launch_item_async": launch_async,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[open_item], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+        desktop = types.SimpleNamespace(
+            appearance={"desktop_icon_scale": 1.0},
+            window_origin=(0, 0),
+            launch_feedback=types.SimpleNamespace(begin=lambda item: feedback.append(("begin", item["path"]))),
+        )
+        item = {"path": "/usr/share/applications/store.desktop"}
+
+        namespace["open_item"](desktop, item)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(1, len(requests))
+        self.assertEqual([("begin", item["path"])], feedback)
+
+        requests[0](True)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(2, len(requests))
+
+    def test_phone_desktop_does_not_touch_gtk_when_idle_queue_rejects_a_worker_result(self):
+        """A GLib idle scheduling failure may clear state, but cannot render UI on the worker."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        phone_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop"
+        )
+        open_item = next(
+            node for node in phone_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "open_item"
+        )
+        requests = []
+        feedback = []
+        dialogs = []
+
+        class RejectedGLib:
+            @staticmethod
+            def idle_add(_callback):
+                return False
+
+        class Dialog:
+            def __init__(self, **kwargs):
+                dialogs.append(kwargs.get("text"))
+
+            def format_secondary_text(self, _text):
+                return None
+
+            def run(self):
+                return None
+
+            def destroy(self):
+                return None
+
+        def launch_async(item, _rect, on_result):
+            requests.append(on_result)
+            return True
+
+        namespace = {
+            "GLib": RejectedGLib(),
+            "Gtk": types.SimpleNamespace(
+                MessageDialog=Dialog,
+                MessageType=types.SimpleNamespace(ERROR="error"),
+                ButtonsType=types.SimpleNamespace(CLOSE="close"),
+            ),
+            "PAD_X": 20,
+            "PAD_Y": 20,
+            "log": lambda _message: None,
+            "scaled_tile_metrics": lambda _scale: (96, 96),
+            "launch_item_async": launch_async,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[open_item], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+        desktop = types.SimpleNamespace(
+            appearance={"desktop_icon_scale": 1.0},
+            window_origin=(0, 0),
+            launch_feedback=types.SimpleNamespace(
+                begin=lambda item: feedback.append(("begin", item["path"])),
+                finish=lambda: feedback.append(("finish",)),
+            ),
+        )
+        item = {"path": "/usr/share/applications/rejected-store.desktop"}
+
+        namespace["open_item"](desktop, item)
+        requests.pop()(False)
+        self.assertEqual([("begin", item["path"])], feedback)
+        self.assertEqual([], dialogs)
+        self.assertEqual(set(), desktop._pending_launch_paths)
+        namespace["open_item"](desktop, item)
+        self.assertEqual(1, len(requests))
+
+    def test_phone_fallback_starts_only_the_broker_without_reparsing_exec(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        launch = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_item"
+        )
+        calls = []
+        logs = []
+        path = "/usr/share/applications/store-wrapper.desktop"
+        expected = ("ming-launch", "--server")
+        responses = iter((False, True))
+
+        class Common:
+            @staticmethod
+            def send_launch_request(desktop_file, source_name, rect, timeout=None):
+                self.assertEqual((path, "desktop", None), (desktop_file, source_name, rect))
+                self.assertIn(timeout, (None, 1.0))
+                return next(responses)
+
+            @staticmethod
+            def broker_fallback_argv(desktop_file, source_name):
+                self.assertEqual((path, "desktop"), (desktop_file, source_name))
+                return expected
+
+            @staticmethod
+            def retry_launch_request_after_broker_start(desktop_file, source_name, rect):
+                self.assertEqual((path, "desktop", None), (desktop_file, source_name, rect))
+                return True
+
+        namespace = {
+            "COMMON": Common(),
+            "log": logs.append,
+            "subprocess": types.SimpleNamespace(
+                Popen=lambda argv, shell=False: calls.append((argv, shell)) or object(),
+            ),
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[launch], type_ignores=[])),
+                str(PHONE_DESKTOP),
+                "exec",
+            ),
+            namespace,
+        )
+
+        self.assertTrue(namespace["launch_item"]({"path": path, "diagnostic": ""}))
+        self.assertEqual([(expected, False)], calls)
+        self.assertTrue(any("source=desktop" in message for message in logs))
+        function_source = ast.get_source_segment(source, launch)
+        self.assertNotIn("parse_desktop_file", function_source)
+        self.assertNotIn("entry.argv", function_source)
 
     def test_status_panel_fills_its_allocated_width(self):
         self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)
@@ -212,7 +469,8 @@ class DesktopSourceTests(unittest.TestCase):
                 "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python -V %U\n",
                 encoding="utf-8",
             )
-            entry = namespace["legacy_desktop_entry"](launcher)
+            with mock.patch.object(shutil, "which", return_value="/usr/bin/python"):
+                entry = namespace["legacy_desktop_entry"](launcher)
         self.assertEqual(["python", "-V"], entry["argv"])
         self.assertEqual("", entry["diagnostic"])
         self.assertIn('legacy_argv = item.get("legacy_argv")', self.phone)
@@ -259,6 +517,131 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertEqual("工具", migrated["items"][1]["name"])
         self.assertEqual(["/tmp/a.desktop", "/tmp/b.desktop"], migrated["items"][1]["children"])
         self.assertEqual(7, migrated["version"])
+
+    def test_core_layout_path_migration_keeps_position_and_removes_stale_duplicates(self):
+        """A core app may move from a system launcher to a Ming-managed launcher after an upgrade."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"app_id", "canonicalize_core_layout_item"}
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+
+        canonical = {
+            "ming-trash.desktop": {
+                "id": "canonical-trash",
+                "type": "app",
+                "path": "/home/user/Desktop/ming-trash.desktop",
+                "basename": "ming-trash.desktop",
+                "name": "回收站",
+            },
+        }
+        seen = set()
+        old = {
+            "id": "old-trash-position",
+            "type": "app",
+            "path": "/usr/share/applications/ming-trash.desktop",
+            "x": 218,
+            "y": 200,
+            "pinned": True,
+        }
+        migrated = namespace["canonicalize_core_layout_item"](old, canonical, seen)
+        duplicate = namespace["canonicalize_core_layout_item"](
+            {**old, "id": "second-trash", "path": "/home/user/.local/share/applications/ming-trash.desktop"},
+            canonical,
+            seen,
+        )
+
+        self.assertEqual("/home/user/Desktop/ming-trash.desktop", migrated["path"])
+        self.assertEqual("old-trash-position", migrated["id"])
+        self.assertEqual((218, 200), (migrated["x"], migrated["y"]))
+        self.assertIsNone(duplicate)
+
+    def test_legacy_settings_and_edge_aliases_migrate_to_one_canonical_launcher(self):
+        """Old Desktop copies must not survive as broker-rejected duplicate core tiles."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"app_id", "canonicalize_core_layout_item"}
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
+        )
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+        )
+        body.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        namespace = {
+            "Path": pathlib.Path,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
+
+        canonical = {
+            "ming-settings.desktop": {
+                "id": "canonical-settings", "type": "app",
+                "path": "/usr/share/applications/ming-settings.desktop",
+                "basename": "ming-settings.desktop", "name": "Ming 设置",
+            },
+            "ming-edge.desktop": {
+                "id": "canonical-edge", "type": "app",
+                "path": "/usr/share/applications/ming-edge.desktop",
+                "basename": "ming-edge.desktop", "name": "Microsoft Edge",
+            },
+        }
+        seen = set()
+        settings = namespace["canonicalize_core_layout_item"]({
+            "id": "old-settings", "type": "app",
+            "path": "/home/user/Desktop/ming-control-center.desktop",
+            "x": 218, "y": 200, "pinned": True,
+        }, canonical, seen)
+        edge = namespace["canonicalize_core_layout_item"]({
+            "id": "old-edge", "type": "app",
+            "path": "/home/user/.local/share/applications/microsoft-edge-stable.desktop",
+            "x": 320, "y": 200,
+        }, canonical, seen)
+        duplicate_settings = namespace["canonicalize_core_layout_item"]({
+            "id": "second-settings", "type": "app",
+            "path": "/usr/share/applications/ming-settings.desktop",
+        }, canonical, seen)
+
+        self.assertEqual("/usr/share/applications/ming-settings.desktop", settings["path"])
+        self.assertEqual((218, 200), (settings["x"], settings["y"]))
+        self.assertEqual("/usr/share/applications/ming-edge.desktop", edge["path"])
+        self.assertEqual((320, 200), (edge["x"], edge["y"]))
+        self.assertIsNone(duplicate_settings)
+
+    def test_core_discovery_prefers_the_protected_system_launcher_over_a_desktop_seed(self):
+        """Live-image Desktop copies are display aids, never the canonical broker target."""
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        block = source.split("def add_core_app(apps_by_basename, basename):", 1)[1].split(
+            "\ndef load_apps", 1
+        )[0]
+        self.assertIn("SYSTEM_APPLICATION_DIR / basename", block)
+        self.assertIn("DESKTOP_DIR / basename", block)
+        self.assertLess(
+            block.index("SYSTEM_APPLICATION_DIR / basename"),
+            block.index("DESKTOP_DIR / basename"),
+        )
+        self.assertLess(
+            block.index("CORE_FALLBACKS.get"),
+            block.index("DESKTOP_DIR / basename"),
+        )
 
     def test_layout_save_is_atomic_and_bad_primary_keeps_last_good(self):
         source = PHONE_DESKTOP.read_text(encoding="utf-8")
@@ -310,7 +693,7 @@ class DesktopSourceTests(unittest.TestCase):
         tree = ast.parse(source)
         wanted = {
             "app_id", "safe_name", "legacy_desktop_entry", "read_app", "_desktop_has_marker", "_manifest_relative",
-            "_mark_desktop_file", "copy_desktop",
+            "_mark_desktop_file", "_confirm_file_durable", "_durable_replace", "copy_desktop",
             "empty_desktop_manifest", "load_desktop_manifest", "save_desktop_manifest",
             "_atomic_write_json", "sync_files",
         }
@@ -349,14 +732,27 @@ class DesktopSourceTests(unittest.TestCase):
                 "[Desktop Entry]\nType=Application\nName=Stale\nExec=stale\nX-Ming-Managed=true\n",
                 encoding="utf-8",
             )
+            reclaimed = desktop / "reclaimed.desktop"
+            reclaimed_text = "[Desktop Entry]\nType=Application\nName=Reclaimed\nExec=reclaimed\n"
+            reclaimed.write_text(reclaimed_text, encoding="utf-8")
             manifest = root / "desktop-generated-manifest.json"
-            manifest.write_text(json.dumps({"version": 1, "marker": "X-Ming-Managed", "managed_files": ["stale.desktop"]}), encoding="utf-8")
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "marker": "X-Ming-Managed",
+                "managed_files": ["stale.desktop", "reclaimed.desktop"],
+            }), encoding="utf-8")
             namespace["DESKTOP_DIR"] = desktop
             namespace["DESKTOP_MANIFEST_PATH"] = manifest
+            pending = namespace["_DESKTOP_DURABILITY_PENDING"]
+            stale_key = str(stale.absolute())
+            pending.add(stale_key)
             layout = {"items": [{"id": "alpha", "type": "app", "path": str(app), "name": "Alpha", "pinned": True}]}
             namespace["sync_files"](layout)
             self.assertTrue(user.exists())
             self.assertFalse(stale.exists())
+            self.assertNotIn(stale_key, pending)
+            self.assertTrue(reclaimed.exists())
+            self.assertEqual(reclaimed_text, reclaimed.read_text(encoding="utf-8"))
             generated = desktop / "Alpha.desktop"
             self.assertTrue(generated.exists())
             self.assertIn("X-Ming-Managed=true", generated.read_text(encoding="utf-8"))
@@ -409,7 +805,8 @@ class DesktopSourceTests(unittest.TestCase):
             "inactive-opacity = 1.0",
             "active-opacity = 1.0",
             "frame-opacity = 1.0",
-            'pkill -TERM -u "$(id -u)" -x xfce4-panel',
+            "X-Ming-Managed-Components=phone-desktop;plank;picom",
+            "Exec=/usr/local/bin/ming-session-healthcheck --session",
         ]:
             self.assertIn(marker, self.desktop)
 
@@ -418,6 +815,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.drawer = APP_DRAWER.read_text(encoding="utf-8")
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.apps = APPS_MODULE.read_text(encoding="utf-8")
         cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
@@ -484,6 +882,13 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("item_key", self.phone)
         self.assertIn("event_time == previous_event_time", self.phone)
 
+    def test_desktop_has_one_ming_trash_tile_and_filters_wrapper_aliases(self):
+        self.assertIn('"ming-trash.desktop"', self.phone)
+        self.assertIn('"ming-control-center.desktop"', self.phone)
+        self.assertIn("DESKTOP_WRAPPER_ALIASES", self.phone)
+        self.assertIn("user-trash", self.desktop)
+        self.assertIn("trash:///", self.desktop)
+
     def test_launch_feedback_has_a_bounded_window_aware_lifetime(self):
         self.assertIn("LAUNCH_FEEDBACK_TIMEOUT_MS = 4000", self.phone)
         self.assertIn("class LaunchFeedbackOverlay", self.phone)
@@ -496,9 +901,28 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("GLib.idle_add(self.apply_window_probe", self.phone)
         self.assertIn("self.launch_feedback.set_sensitive(False)", self.phone)
 
+    def test_launch_feedback_reveals_and_hides_with_a_bounded_transition(self):
+        """A successful click must retain visible launch feedback instead of popping in and out."""
+        overlay = self.phone[
+            self.phone.index("class LaunchFeedbackOverlay"):
+            self.phone.index("class StatusSlider")
+        ]
+        self.assertIn("Gtk.Revealer()", overlay)
+        self.assertIn("set_transition_duration(180)", overlay)
+        self.assertIn("set_reveal_child(True)", overlay)
+        self.assertIn("set_reveal_child(False)", overlay)
+
     def test_render_keeps_idle_launch_feedback_hidden(self):
         self.assertIn("if not self.launch_feedback.item:", self.phone)
         self.assertIn("self.launch_feedback.hide()", self.phone)
+
+    def test_desktop_launch_error_dialog_is_an_opaque_feedback_surface(self):
+        open_item = self.phone[
+            self.phone.index("    def open_item(self, item):"):
+            self.phone.index("    def show_folder", self.phone.index("    def open_item(self, item):"))
+        ]
+        self.assertIn('add_class("ming-launch-error-dialog")', open_item)
+        self.assertIn(".ming-launch-error-dialog", self.phone)
 
     def test_status_widget_exposes_radio_battery_and_settings(self):
         self.assertIn("class StatusWidget", self.phone)
@@ -522,11 +946,25 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("pgrep -f", self.apps)
         self.assertIn("wmctrl -lx", self.apps)
 
-    def test_settings_and_app_library_fit_the_monitor_workarea(self):
+    def test_settings_and_app_drawer_fit_the_monitor_workarea(self):
         self.assertIn("responsive_window_size", self.settings)
         self.assertNotIn("self.set_default_size(1000, 700)", self.settings)
-        self.assertIn("responsive_window_size", self.desktop)
-        self.assertNotIn("self.set_default_size(840, 560)", self.desktop)
+        self.assertIn("monitor.get_workarea()", self.drawer)
+        self.assertIn("geometry = drawer_geometry(self._workarea())", self.drawer)
+        self.assertIn("self.window.resize(int(geometry.width), int(geometry.height))", self.drawer)
+
+        spec = importlib.util.spec_from_file_location("ming_app_drawer_workarea_contract", APP_DRAWER)
+        drawer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drawer)
+        # The GDK workarea excludes the Dock and any other reserved screen edge.
+        dock_reserved_workarea = {"x": 8, "y": 24, "width": 1350, "height": 680}
+        geometry = drawer.drawer_geometry(dock_reserved_workarea)
+
+        self.assertEqual(8.0, geometry.x)
+        self.assertEqual(1350.0, geometry.width)
+        self.assertEqual(round(680 * drawer.DRAWER_HEIGHT_RATIO), geometry.height)
+        self.assertEqual(704.0, geometry.y + geometry.height)
+        self.assertLess(geometry.y + geometry.height, 768.0)
 
     def test_ota_resolves_home_before_user_paths(self):
         home_resolution = 'HOME="${HOME:-$(resolve_home)}"'
@@ -539,7 +977,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("find_cached_manifest()", self.ota)
         self.assertIn("/home/*/.cache/ming-update/update_info.json", self.ota)
         major = self.ota[self.ota.index("major_install_with_home_backup()"):
-                         self.ota.index("auto_shutdown_update()")]
+                         self.ota.index('case "${1:-help}" in')]
         self.assertIn("manifest=$(find_cached_manifest)", major)
 
     def test_edge_and_spark_have_vm_safe_wrappers(self):
@@ -575,9 +1013,14 @@ class InstallerBootContractTests(unittest.TestCase):
         self.assertIn("must not eject the mounted live medium", self.build)
 
     def test_identity_and_root_uuid_are_finalized_before_grub_install(self):
-        expected = "  - shellprocess@ming-identity\n  - shellprocess@ming-bootloader"
-        self.assertIn(expected, self.base)
+        expected = (
+            "  - shellprocess@ming-identity\n"
+            "  - shellprocess@ming-installed-desktop-gate\n"
+            "  - shellprocess@ming-bootloader"
+        )
+        self.assertIn(expected, self.desktop)
         self.assertGreaterEqual(self.desktop.count(expected), 2)
+        self.assertIn("installed desktop verification must pass before GRUB installation", self.build)
 
     def test_bios_grub_uses_target_environment_and_rejects_bad_config(self):
         start = self.base.index("install_bios_grub()")

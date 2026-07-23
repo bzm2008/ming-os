@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import configparser
 import datetime
+import errno
 import hashlib
 import importlib.util
 import json
@@ -10,6 +11,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import struct
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -17,6 +20,9 @@ from pathlib import Path
 
 def widget_state_path():
     return Path.home() / ".config" / "ming-os" / "status-widget.json"
+
+
+METRIC_MODES = ("memory", "cpu", "network")
 
 
 def load_widget_state(path=None):
@@ -31,15 +37,34 @@ def load_widget_state(path=None):
     return {"collapsed": data["collapsed"]}
 
 
-def save_widget_state(collapsed, path=None):
-    """Atomically persist the one status-widget setting without touching layouts."""
+def load_metric_mode(path=None):
+    target = Path(path) if path else widget_state_path()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        mode = data.get("metric_mode") if isinstance(data, dict) else None
+        return mode if mode in METRIC_MODES else METRIC_MODES[0]
+    except (OSError, ValueError, AttributeError):
+        return METRIC_MODES[0]
+
+
+def save_widget_state(collapsed, path=None, metric_mode=None):
+    """Atomically persist widget state while preserving older file shapes."""
     target = Path(path) if path else widget_state_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    state = {"collapsed": bool(collapsed)}
+    try:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if isinstance(existing, dict) and existing.get("metric_mode") in METRIC_MODES:
+            state["metric_mode"] = existing["metric_mode"]
+    except (OSError, ValueError):
+        pass
+    if metric_mode in METRIC_MODES:
+        state["metric_mode"] = metric_mode
     temporary = target.with_name(".%s.%s.tmp" % (target.name, os.getpid()))
     descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"collapsed": bool(collapsed)}, handle, ensure_ascii=False)
+            json.dump(state, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
@@ -75,6 +100,19 @@ def load_shell_common():
 
 COMMON = load_shell_common()
 
+
+def resolved_icon_image(icon, pixel_size):
+    resolved = COMMON.resolve_icon(icon)
+    if Path(resolved).is_absolute():
+        image = Gtk.Image()
+        pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), resolved, pixel_size)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
+    else:
+        image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
+    image.set_pixel_size(pixel_size)
+    return image
+
 HOME = Path.home()
 STATE_DIR = HOME / ".config" / "ming-os"
 LAYOUT_PATH = STATE_DIR / "desktop-layout.json"
@@ -83,26 +121,61 @@ DESKTOP_MANIFEST_PATH = STATE_DIR / "desktop-generated-manifest.json"
 DESKTOP_MANIFEST_VERSION = 1
 DESKTOP_MANAGED_MARKER = "X-Ming-Managed"
 DESKTOP_MANAGED_MARKER_LINE = "X-Ming-Managed=true"
+DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
+MING_LAUNCH_PATH = "/usr/local/bin/ming-launch"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
-APP_DIRS = [DESKTOP_DIR, Path("/usr/share/applications"), HOME / ".local/share/applications"]
-APP_CATALOG_FINGERPRINT_VERSION = 1
+SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
+APP_DIRS = [
+    DESKTOP_DIR,
+    SYSTEM_APPLICATION_DIR,
+    Path("/usr/local/share/applications"),
+    HOME / ".local/share/applications",
+]
+APP_CATALOG_FINGERPRINT_VERSION = 4
+APP_CATALOG_MAX_ROOTS = 8
+APP_CATALOG_MAX_DIRECTORY_ENTRIES = 4096
+APP_CATALOG_MAX_LAUNCHERS = 512
+APP_CATALOG_LAUNCHER_HASH_BYTES = 64 * 1024
+APP_CATALOG_TOTAL_HASH_BYTES = 2 * 1024 * 1024
+CATALOG_MONITOR_RETRY_DELAYS_MS = (500, 2_000, 10_000, 30_000)
+CATALOG_SYNC_RETRY_DELAYS_MS = (1_000, 5_000, 30_000)
+DESKTOP_DURABILITY_PENDING_MAX = 256
+_DESKTOP_DURABILITY_PENDING = set()
 CORE_NAMES = {
+    "Install Ming OS.desktop",
     "ming-settings.desktop",
     "ming-files.desktop",
+    "ming-trash.desktop",
     "ming-terminal.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
+    "papyrus.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
+    "Install Ming OS.desktop",
     "ming-settings.desktop",
     "ming-files.desktop",
+    "ming-trash.desktop",
     "ming-edge.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
+    "papyrus.desktop",
     "ming-terminal.desktop",
 ])}
+DESKTOP_WRAPPER_ALIASES = {
+    "ming-control-center.desktop": "ming-settings.desktop",
+    "ming-dock-ming-settings.desktop": "ming-settings.desktop",
+    "ming-dock-ming-files.desktop": "ming-files.desktop",
+    "ming-dock-ming-edge.desktop": "ming-edge.desktop",
+    "ming-dock-ming-terminal.desktop": "ming-terminal.desktop",
+    "ming-dock-spark-store.desktop": "spark-store.desktop",
+}
+CORE_LAYOUT_ALIASES = {
+    **DESKTOP_WRAPPER_ALIASES,
+    "microsoft-edge.desktop": "ming-edge.desktop",
+    "microsoft-edge-stable.desktop": "ming-edge.desktop",
+    "ming-install-spark-store.desktop": "spark-store.desktop",
+}
 CORE_FALLBACKS = {
     "ming-edge.desktop": ["microsoft-edge.desktop", "microsoft-edge-stable.desktop"],
     "spark-store.desktop": ["ming-install-spark-store.desktop"],
@@ -110,9 +183,9 @@ CORE_FALLBACKS = {
 CORE_GENERATED = {
     "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-control-center", "Settings;System;"),
     "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
+    "ming-trash.desktop": ("回收站", "ming-files trash:///", "user-trash", "System;FileManager;"),
     "ming-terminal.desktop": ("Ming 终端", "ming-terminal", "ming-terminal", "System;TerminalEmulator;"),
     "ming-edge.desktop": ("Microsoft Edge", "ming-edge", "microsoft-edge", "Network;WebBrowser;"),
-    "garlic-claw.desktop": ("Garlic Claw", "xfce4-terminal --hide-menubar --title=\"Garlic Claw\" -e garlic-claw", "utilities-terminal", "Utility;"),
 }
 LOG_PATH = HOME / ".cache" / "ming-os" / "ming-phone-desktop.log"
 ACTION_LOG_PATH = HOME / ".cache" / "ming-os" / "status-actions.log"
@@ -124,6 +197,10 @@ DEVICE_CONTROL_PATHS = [
     Path("/usr/local/lib/ming-os/ming-device-control.py"),
     Path("/usr/local/bin/ming-device-control"),
     Path(__file__).resolve().with_name("ming-device-control.py"),
+]
+PERFORMANCE_STATUS_PATHS = [
+    Path("/usr/local/lib/ming-os/ming-performance-status.py"),
+    Path(__file__).resolve().with_name("ming-performance-status.py"),
 ]
 NOTIFICATION_LOG_PATHS = [
     HOME / ".cache" / "xfce4" / "notifyd" / "log.sqlite",
@@ -146,160 +223,219 @@ ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
 CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
+STATUS_WIDGET_COMPACT_HEIGHT = 58
+STATUS_WIDGET_EXPANDED_HEIGHT = 248
+METRIC_PRIME_INTERVAL_MS = 250
 WALLPAPER_PATHS = [
-    Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
+    Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"),
+    Path("/usr/share/backgrounds/ming-os/default-3840x2160.png"),
+    Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default.svg"),
 ]
+DEFAULT_WALLPAPER_VARIANTS = (
+    (Path("/usr/share/backgrounds/ming-os/default-1366x768.png"), 1366, 768),
+    (Path("/usr/share/backgrounds/ming-os/default-1920x1080.png"), 1920, 1080),
+    (Path("/usr/share/backgrounds/ming-os/default-3840x2160.png"), 3840, 2160),
+)
+APPEARANCE_PATH = STATE_DIR / "appearance.json"
 
-CSS = b"""
-window.ming-desktop {
-  background-color: #EFF7F2;
-}
-.tile {
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.34);
-  border: 1px solid rgba(255, 255, 255, 0.54);
-  box-shadow: 0 8px 22px rgba(21, 68, 56, 0.08), inset 0 1px 0 rgba(255,255,255,0.58);
-  padding: 7px 6px 6px;
-  color: #1D2421;
-}
-.tile:hover, .tile.dragging {
-  background: rgba(255, 255, 255, 0.60);
-  border-color: rgba(47, 138, 125, 0.24);
-  box-shadow: 0 12px 28px rgba(21, 68, 56, 0.13), inset 0 1px 0 rgba(255,255,255,0.70);
-}
-.folder {
-  background: rgba(232, 248, 242, 0.64);
-  border-color: rgba(47, 138, 125, 0.24);
-}
-.label {
-  color: #1D2421;
-  font-size: 10.5px;
-  font-weight: 700;
-  text-shadow: 0 1px 0 rgba(255,255,255,0.82);
-}
-.folder-title {
-  color: #1D2421;
-  font-size: 18px;
-  font-weight: 700;
-}
-.folder-panel {
-  background: rgba(251, 253, 251, 0.98);
-  border: 1px solid rgba(31, 98, 84, 0.10);
-  border-radius: 12px;
-  padding: 18px;
-}
-.folder-action {
-  border-radius: 9px;
-  padding: 7px 10px;
-}
-.clock-widget {
-  border-radius: 14px;
-  padding: 9px 13px;
-  background: rgba(255, 255, 255, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.70);
-  box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.75);
-}
-.clock-time {
-  font-size: 26px;
-  font-weight: 800;
-  color: #17231F;
-}
-.clock-date {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: #2D695C;
-}
-.clock-subdate {
-  font-size: 10px;
-  font-weight: 700;
-  color: #6A7670;
-}
-.status-widget {
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
-}
-.status-widget-compact {
-  padding: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-.status-compact-pill {
-  min-height: 54px;
-  border-radius: 27px;
-  padding: 8px 14px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
-  color: #17231F;
-}
-.status-compact-pill:hover { background: rgba(255, 255, 255, 0.96); }
-.status-compact-time { font-size: 19px; font-weight: 800; color: #17231F; }
-.status-compact-date { font-size: 10.5px; font-weight: 700; color: #2D695C; }
-.status-compact-arrow { font-size: 15px; font-weight: 800; color: #2F8A7D; }
-.status-button {
-  border-radius: 9px;
-  padding: 4px 7px;
-  background: rgba(255, 255, 255, 0.54);
-  border: 1px solid rgba(47, 138, 125, 0.10);
-  color: #21302A;
-}
-.status-button:hover { background: rgba(255, 255, 255, 0.88); }
-.status-scale trough {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-  border: 0;
-}
-.status-scale highlight {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale fill,
-.status-scale progress {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale trough > highlight,
-.status-scale trough > fill,
-.status-scale trough > progress {
-  min-height: 7px;
-  border-radius: 4px;
-  background: transparent;
-}
-.status-scale slider {
-  min-width: 1px;
-  min-height: 1px;
-  margin: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-.status-scale:disabled trough { background: transparent; }
-.status-scale:disabled highlight,
-.status-scale:disabled fill,
-.status-scale:disabled progress { background: rgba(47, 138, 125, 0.34); }
-.status-scale:disabled slider { background: transparent; }
-.notification-panel { padding: 12px; background: #F9FCFA; }
-.notification-title { font-weight: 800; color: #17231F; }
-.notification-body { color: #596760; font-size: 10px; }
-.launch-feedback {
-  border-radius: 14px;
-  padding: 14px 18px;
-  background: rgba(252, 254, 252, 0.94);
-  border: 1px solid rgba(47, 138, 125, 0.16);
-  box-shadow: 0 14px 36px rgba(21, 68, 56, 0.16);
-}
-.launch-title { color: #17231F; font-size: 14px; font-weight: 800; }
-.launch-detail { color: #5B6963; font-size: 10.5px; }
-"""
+
+def load_appearance(path=None):
+    defaults = {"version": 2, "theme": "system", "font_family": "Noto Sans CJK SC", "font_size": 11,
+                "desktop_icon_scale": 1.0, "desktop_icon_size": 48, "dock_icon_size": 48,
+                "wallpaper": "default", "motion": "normal", "compositor_profile": "auto"}
+    try:
+        data = json.loads(Path(path or APPEARANCE_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return COMMON.apply_runtime_shell_profile(defaults)
+    if isinstance(data, dict):
+        defaults.update({key: data[key] for key in defaults if key in data})
+        profile = COMMON.shell_visual_profile(defaults)
+        defaults["motion"] = profile["motion"]
+        defaults["compositor_profile"] = profile["compositor_profile"]
+    return COMMON.apply_runtime_shell_profile(defaults)
+
+
+def choose_cached_wallpaper_variant(variants, width, height):
+    """Return the smallest existing cache that covers the requested display."""
+    try:
+        width, height = max(1, int(width)), max(1, int(height))
+    except (TypeError, ValueError):
+        width, height = 1920, 1080
+    available = []
+    for path, candidate_width, candidate_height in variants:
+        candidate = Path(path)
+        if candidate.is_file():
+            available.append((candidate, int(candidate_width), int(candidate_height)))
+    if not available:
+        return None
+    suitable = [item for item in available if item[1] >= width and item[2] >= height]
+    if suitable:
+        return min(suitable, key=lambda item: item[1] * item[2])[0]
+    return max(available, key=lambda item: item[1] * item[2])[0]
+
+
+def appearance_wallpaper_paths(appearance, fallbacks=None, screen_width=None, screen_height=None):
+    """Prefer a validated copied wallpaper and retain built-in fallbacks."""
+    fallbacks = list(fallbacks or WALLPAPER_PATHS)
+    wallpaper = str((appearance or {}).get("wallpaper", ""))
+    named = {
+        "light": Path("/usr/share/backgrounds/ming-os/default-light.png"),
+        "dark": Path("/usr/share/backgrounds/ming-os/default-dark.png"),
+    }
+    if wallpaper == "default":
+        chosen = choose_cached_wallpaper_variant(
+            DEFAULT_WALLPAPER_VARIANTS,
+            screen_width if screen_width is not None else 1920,
+            screen_height if screen_height is not None else 1080,
+        )
+        default_fallback = Path("/usr/share/backgrounds/ming-os/default.png")
+        preferred = [chosen] if chosen else [default_fallback]
+        return preferred + [path for path in fallbacks if path not in preferred]
+    if wallpaper in named:
+        return [named[wallpaper]] + [path for path in fallbacks if path != named[wallpaper]]
+    candidate = Path(wallpaper).expanduser()
+    try:
+        if candidate.is_absolute() and candidate.is_file() and 0 < candidate.stat().st_size <= 32 * 1024 * 1024:
+            if safe_wallpaper_dimensions(candidate):
+                return [candidate] + fallbacks
+    except OSError:
+        pass
+    return fallbacks
+
+
+def safe_wallpaper_dimensions(path):
+    path = Path(path)
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(24)
+        if path.suffix.lower() == ".png" and head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR":
+            width, height = struct.unpack(">II", head[16:24])
+            return 0 < width <= 8192 and 0 < height <= 8192 and width * height <= 16 * 1024 * 1024
+        if path.suffix.lower() in {".jpg", ".jpeg"} and head.startswith(b"\xff\xd8"):
+            # The control validates JPEG dimensions before copying; bounded
+            # scaled decoding below contains later file replacement risk.
+            return True
+    except (OSError, struct.error):
+        pass
+    return False
+
+
+def reflow_layout_for_icon_scale(layout, old_scale, new_scale, width, height,
+                                 old_appearance=None, new_appearance=None):
+    """Re-grid positions by normalized coordinates without changing item order/content."""
+    result = json.loads(json.dumps(layout))
+    old_scale = max(0.5, float(old_scale or 1.0))
+    new_scale = max(0.5, float(new_scale or 1.0))
+    pad_x, pad_y = 34, 92
+    old_tile_w, old_tile_h = scaled_tile_metrics(old_scale, old_appearance)
+    tile_w, tile_h = scaled_tile_metrics(new_scale, new_appearance)
+    old_w, old_h = old_tile_w + 10, old_tile_h + 12
+    new_w, new_h = tile_w + 10, tile_h + 12
+    max_x = max(pad_x, float(width) - tile_w - pad_x)
+    max_y = max(pad_y, float(height) - tile_h - pad_y)
+    for item in result.get("items", []):
+        column = max(0, round((float(item.get("x", pad_x)) - pad_x) / old_w))
+        row = max(0, round((float(item.get("y", pad_y)) - pad_y) / old_h))
+        item["x"] = int(min(max_x, pad_x + column * new_w))
+        item["y"] = int(min(max_y, pad_y + row * new_h))
+    result["desktop_icon_scale"] = new_scale
+    if isinstance(new_appearance, dict):
+        result["desktop_font_size"] = new_appearance.get("font_size", 11)
+        result["desktop_icon_size"] = new_appearance.get("desktop_icon_size", 34)
+    return result
+
+
+def scaled_tile_metrics(scale, appearance=None):
+    """Return one geometry for Cairo rendering, GTK hit targets and reflow.
+
+    The base scale controls grid density.  Larger UI fonts and icons may need
+    more room than that base tile; expand the tile instead of painting into a
+    neighbouring target.
+    """
+    scale = max(0.5, min(2.0, float(scale or 1.0)))
+    appearance = appearance if isinstance(appearance, dict) else {}
+    try:
+        font_size = max(9, min(18, int(appearance.get("font_size", 11))))
+    except (TypeError, ValueError):
+        font_size = 11
+    try:
+        icon_size = max(24, min(64, int(appearance.get("desktop_icon_size", 34))))
+    except (TypeError, ValueError):
+        icon_size = 34
+    label_width = max(68, int(round(font_size * 5.2)))
+    label_height = max(32, int(round(font_size * 2.8)))
+    width = max(int(round(82 * scale)), icon_size + 18, label_width + 14)
+    height = max(int(round(96 * scale)), icon_size + label_height + 20)
+    return width, height
+
+
+def appearance_icon_size(appearance):
+    try:
+        return max(24, min(64, int(appearance.get("desktop_icon_size", 34))))
+    except (AttributeError, TypeError, ValueError):
+        return 48
+
+def css_for_appearance(appearance):
+    """Render the fixed, low-cost Ming shell surface from one profile."""
+    profile = COMMON.shell_visual_profile(appearance)
+    light = profile["theme"] != "dark"
+    if light and profile["surface_alpha"] < 1:
+        raised = "rgba(255, 255, 255, %.2f)" % profile["surface_alpha"]
+        sunken = "rgba(238, 243, 240, %.2f)" % profile["surface_alpha"]
+    elif not light and profile["surface_alpha"] < 1:
+        raised = "rgba(41, 47, 43, %.2f)" % profile["surface_alpha"]
+        sunken = "rgba(24, 28, 26, %.2f)" % profile["surface_alpha"]
+    else:
+        raised = profile["surface_raised"]
+        sunken = profile["surface_sunken"]
+    # Desktop cards may retain optional glass, but feedback, status, and
+    # notification surfaces must remain legible on every wallpaper.
+    feedback_raised = profile["surface_raised"]
+    feedback_sunken = profile["surface_sunken"]
+    shadow = "0 10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
+    font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    font_metric = getattr(COMMON, "appearance_font_size", lambda _appearance: 11)
+    font_size = font_metric(appearance)
+    label_size = max(9, min(16, font_size))
+    title_size = max(14, min(24, font_size + 7))
+    return ("""
+window.ming-desktop { background-color: %(base)s; font-family: "%(font)s"; }
+.tile { border-radius: 8px; background: %(raised)s; border: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 7px 6px 6px; color: %(text)s; }
+.tile:hover, .tile.dragging { background: %(sunken)s; border-color: %(accent)s; }
+.folder { background: %(sunken)s; border-color: %(accent)s; }
+.label { color: %(text)s; font-size: %(label_size)dpx; font-weight: 700; }
+.folder-title { color: %(text)s; font-size: %(title_size)dpx; font-weight: 700; }
+.folder-panel { background: %(raised)s; border: 1px solid %(border)s; border-radius: 8px; padding: 18px; }
+.folder-action { border-radius: 6px; padding: 7px 10px; }
+.clock-widget, .status-widget, .launch-feedback { border-radius: 8px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; }
+.clock-widget { padding: 9px 13px; }
+.status-widget { padding: 12px 14px; }
+.status-widget-compact { padding: 0; background: transparent; border: 0; box-shadow: none; }
+.status-compact-pill { min-height: 38px; border-radius: 8px; padding: 7px 12px; background-color: %(feedback_raised)s; background-image: none; border: 1px solid %(border)s; box-shadow: %(shadow)s; color: %(text)s; }
+.status-compact-pill:hover, .status-button:hover { background-color: %(feedback_sunken)s; }
+.clock-time, .status-compact-time, .notification-title, .launch-title { color: %(text)s; font-weight: 800; }
+.clock-time { font-size: 26px; }
+.clock-date, .status-compact-date { color: %(accent)s; font-weight: 700; }
+.clock-subdate, .notification-body, .launch-detail { color: %(secondary)s; }
+.status-button { border-radius: 6px; padding: 4px 7px; background-color: %(feedback_raised)s; border: 1px solid %(border)s; color: %(text)s; }
+.status-scale trough { min-height: 7px; border-radius: 4px; background: %(border)s; border: 0; }
+.status-scale highlight, .status-scale fill, .status-scale progress, .status-scale trough > highlight, .status-scale trough > fill, .status-scale trough > progress { min-height: 7px; border-radius: 4px; background: %(accent)s; }
+.status-scale slider { min-width: 12px; min-height: 12px; margin: -3px; background-color: %(feedback_raised)s; border: 1px solid %(accent)s; border-radius: 6px; box-shadow: none; }
+.status-scale:disabled trough { background-color: %(feedback_sunken)s; }
+.status-scale:disabled highlight, .status-scale:disabled fill, .status-scale:disabled progress { background: %(border)s; }
+.status-scale:disabled slider { background-color: %(feedback_sunken)s; border-color: %(border)s; }
+popover.ming-notification-popover, popover.ming-notification-popover > contents, .notification-panel { padding: 12px; background-color: %(feedback_raised)s; background-image: none; }
+window.ming-launch-error-dialog, window.ming-launch-error-dialog .dialog-vbox, window.ming-launch-error-dialog .dialog-action-area { background-color: %(feedback_raised)s; background-image: none; color: %(text)s; opacity: 1; }
+window.ming-launch-error-dialog label { color: %(text)s; opacity: 1; }
+""" % {
+        "base": profile["surface_base"], "raised": raised, "sunken": sunken,
+        "feedback_raised": feedback_raised, "feedback_sunken": feedback_sunken,
+        "border": profile["border_soft"], "text": profile["text_primary"],
+        "secondary": profile["text_secondary"], "accent": profile["accent"], "shadow": shadow,
+        "font": font, "label_size": label_size, "title_size": title_size,
+    }).encode("utf-8")
 
 
 def log(msg):
@@ -337,6 +473,20 @@ def load_device_control():
             return module
         except Exception as exc:
             log(f"device control helper load failed: {exc}")
+    return None
+
+
+def load_performance_status():
+    for path in PERFORMANCE_STATUS_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("ming_performance_status_for_desktop", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            log(f"performance status helper load failed: {exc}")
     return None
 
 
@@ -397,15 +547,67 @@ def app_id(path):
     return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16]
 
 
+def canonicalize_core_layout_item(item, canonical_by_basename, seen):
+    """Move legacy core launcher paths to one current launcher without losing placement."""
+    if not isinstance(item, dict) or item.get("type") == "folder":
+        return dict(item) if isinstance(item, dict) else item
+    path = item.get("path")
+    if not isinstance(path, (str, os.PathLike)):
+        return dict(item)
+    basename = Path(path).name
+    canonical_basename = CORE_LAYOUT_ALIASES.get(basename, basename)
+    canonical = canonical_by_basename.get(canonical_basename)
+    if canonical_basename not in CORE_NAMES or not isinstance(canonical, dict):
+        return dict(item)
+    if canonical_basename in seen:
+        return None
+    seen.add(canonical_basename)
+    restored = dict(canonical)
+    restored["id"] = item.get("id") or restored.get("id") or app_id(restored.get("path", path))
+    restored["x"] = item.get("x", PAD_X)
+    restored["y"] = item.get("y", PAD_Y)
+    restored["pinned"] = bool(item.get("pinned", False))
+    return restored
+
+
+def launcher_content_stamp(path, max_bytes=None):
+    """Hash a bounded launcher prefix so metadata-preserving edits are visible."""
+    digest = hashlib.blake2b(digest_size=16)
+    try:
+        requested = APP_CATALOG_LAUNCHER_HASH_BYTES if max_bytes is None else int(max_bytes)
+    except (TypeError, ValueError):
+        requested = 0
+    remaining = min(APP_CATALOG_LAUNCHER_HASH_BYTES, max(0, requested))
+    if remaining == 0:
+        return "budget-exhausted"
+    try:
+        with Path(path).open("rb") as handle:
+            while remaining > 0:
+                chunk = handle.read(min(8192, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "unreadable"
+
+
 def app_catalog_fingerprint(paths=None):
     """Return a bounded, cheap stamp for application-directory changes.
 
     Directory metadata changes whenever dpkg or a store adds/removes a desktop
-    entry.  Deliberately do not recursively walk app directories from the GTK
-    timer; only the three trusted roots are inspected.
+    entry.  Deliberately do not recursively walk app directories; roots,
+    directory entries, launchers and content hashing share fixed budgets across
+    the complete snapshot.
     """
     entries = [("version", APP_CATALOG_FINGERPRINT_VERSION)]
-    for raw_path in tuple(paths or APP_DIRS)[:8]:
+    remaining_directory_entries = APP_CATALOG_MAX_DIRECTORY_ENTRIES
+    remaining_launchers = APP_CATALOG_MAX_LAUNCHERS
+    remaining_hash_bytes = APP_CATALOG_TOTAL_HASH_BYTES
+    directory_entry_limit_reached = False
+    launcher_limit_reached = False
+    for raw_path in tuple(paths or APP_DIRS)[:APP_CATALOG_MAX_ROOTS]:
         path = Path(raw_path)
         try:
             stat_result = path.stat()
@@ -424,15 +626,51 @@ def app_catalog_fingerprint(paths=None):
         try:
             with os.scandir(path) as directory:
                 for candidate in directory:
+                    if remaining_directory_entries <= 0:
+                        entries.append(("budget", "directory-entry-limit"))
+                        directory_entry_limit_reached = True
+                        break
+                    remaining_directory_entries -= 1
                     if not candidate.name.endswith(".desktop"):
                         continue
-                    if len(launchers) >= 512:
-                        entries.append((str(path), "launcher-limit"))
+                    if remaining_launchers <= 0:
+                        entries.append(("budget", "launcher-limit"))
+                        launcher_limit_reached = True
                         break
-                    launchers.append(candidate.name)
+                    remaining_launchers -= 1
+                    try:
+                        launcher_stat = candidate.stat(follow_symlinks=False)
+                        file_size = max(0, int(launcher_stat.st_size))
+                        hash_bytes = min(
+                            APP_CATALOG_LAUNCHER_HASH_BYTES,
+                            remaining_hash_bytes,
+                            file_size,
+                        )
+                        remaining_hash_bytes -= hash_bytes
+                        launchers.append((
+                            candidate.name,
+                            getattr(
+                                launcher_stat,
+                                "st_mtime_ns",
+                                int(launcher_stat.st_mtime * 1000000000),
+                            ),
+                            getattr(
+                                launcher_stat,
+                                "st_ctime_ns",
+                                int(launcher_stat.st_ctime * 1000000000),
+                            ),
+                            file_size,
+                            launcher_stat.st_mode,
+                            hash_bytes,
+                            launcher_content_stamp(candidate.path, hash_bytes),
+                        ))
+                    except OSError:
+                        launchers.append((candidate.name, "unreadable"))
         except OSError:
             continue
-        entries.extend((str(path), "launcher", name) for name in sorted(launchers))
+        entries.extend((str(path), "launcher", *metadata) for metadata in sorted(launchers))
+        if directory_entry_limit_reached or launcher_limit_reached:
+            break
     return tuple(entries)
 
 
@@ -440,9 +678,9 @@ def legacy_desktop_entry(path):
     """Parse a launcher safely when an older shared runtime is still loaded.
 
     This is deliberately a narrow compatibility path for an interrupted hot
-    deployment or an older recovery image.  It never invokes a shell: field
-    codes are removed, the executable is resolved first, and the returned
-    argv is passed directly to ``subprocess.Popen``.
+    deployment or an older recovery image.  It never invokes a shell; callers
+    may use the returned metadata for catalog display, but launch still goes
+    through the trusted broker.
     """
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
@@ -493,16 +731,19 @@ def legacy_desktop_entry(path):
 
 
 def read_app(path):
+    source_resolver = globals().get("managed_desktop_source_path")
+    source_path = source_resolver(path) if callable(source_resolver) else None
+    effective_path = source_path or Path(path)
     diagnose = getattr(COMMON, "diagnose_desktop_file", None)
     if not callable(diagnose):
-        legacy = legacy_desktop_entry(path)
+        legacy = legacy_desktop_entry(effective_path)
         if legacy is None:
             return None
         return {
-            "id": app_id(path),
+            "id": app_id(effective_path),
             "type": "app",
-            "path": str(path),
-            "basename": Path(path).name,
+            "path": str(effective_path),
+            "basename": effective_path.name,
             "name": legacy["name"],
             "icon": legacy["icon"],
             "categories": legacy["categories"],
@@ -510,17 +751,22 @@ def read_app(path):
             "diagnostic": legacy["diagnostic"],
         }
     try:
-        entry = diagnose(path)
+        system_catalog_dir = globals().get(
+            "SYSTEM_APPLICATION_DIR", Path("/usr/share/applications"))
+        if effective_path.parent == system_catalog_dir:
+            entry = diagnose(effective_path, respect_desktop_environment=True)
+        else:
+            entry = diagnose(effective_path)
     except (OSError, ValueError):
         return None
     if entry is None:
         return None
     return {
-        "id": app_id(path),
+        "id": app_id(effective_path),
         "type": "app",
-        "path": str(path),
-        "basename": Path(path).name,
-        "name": entry.name or Path(path).stem,
+        "path": str(effective_path),
+        "basename": effective_path.name,
+        "name": entry.name or effective_path.stem,
         "icon": entry.icon or "application-x-executable",
         "categories": ";".join(entry.categories),
         "diagnostic": entry.diagnostic,
@@ -537,40 +783,91 @@ def launch_item(item, source_rect=None):
         return False
     legacy_argv = item.get("legacy_argv")
     if legacy_argv:
-        log(f"shared launcher validation unavailable; using safe legacy argv for {path}")
-        try:
-            subprocess.Popen(list(legacy_argv), shell=False)
-            return True
-        except Exception as exc:
-            log(f"legacy exec fallback failed for {path}: {exc}")
-            return False
-    parser = getattr(COMMON, "parse_desktop_file", None)
-    validator = getattr(COMMON, "desktop_launch_diagnostic", None)
+        log(f"legacy launcher metadata present; routing through broker only for {path} source=desktop")
     sender = getattr(COMMON, "send_launch_request", None)
-    if not callable(parser) or not callable(validator) or not callable(sender):
+    fallback = getattr(COMMON, "broker_fallback_argv", None)
+    if not callable(sender) or not callable(fallback):
         log(f"launch validation unavailable for {path}")
         return False
-    try:
-        entry = parser(path)
-    except (OSError, ValueError) as exc:
-        log(f"launch validation failed for {path}: {exc}")
-        return False
-    if entry is None:
-        log(f"launch validation failed for {path}: hidden or unavailable entry")
-        return False
-    diagnostic = validator(entry.argv)
-    if diagnostic:
-        log(f"launch validation failed for {path}: {diagnostic}")
-        return False
-    if COMMON.send_launch_request(path, "desktop", source_rect):
+    broker_result = sender(path, "desktop", source_rect)
+    if broker_result and not getattr(broker_result, "rejected", False):
         return True
-    log(f"launch broker unavailable; using direct fallback for {path}")
+    if getattr(broker_result, "rejected", False):
+        log(f"launch broker rejected {path} source=desktop")
+        return False
+    log(f"launch broker unavailable; starting broker fallback for {path} source=desktop")
     try:
-        subprocess.Popen(list(entry.argv), shell=False)
-        return True
+        subprocess.Popen(fallback(path, "desktop"), shell=False)
+        # The fallback only starts the broker.  It is not a launch result.
+        retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+        if not callable(retry):
+            return False
+        broker_result = retry(path, "desktop", source_rect)
+        if broker_result and not getattr(broker_result, "rejected", False):
+            return True
+        if getattr(broker_result, "rejected", False):
+            log(f"launch broker rejected recovery request for {path} source=desktop")
     except Exception as exc:
-        log(f"exec fallback failed for {path}: {exc}")
+        log(f"broker fallback failed for {path} source=desktop: {exc}")
     return False
+
+
+def launch_item_async(item, source_rect=None, on_result=None):
+    """Send one launch request from a worker and report its final broker result."""
+    path = item.get("path")
+    if not path:
+        return False
+    diagnostic = str(item.get("diagnostic") or "")
+    if diagnostic:
+        log(f"async launch blocked for {path}: {diagnostic}")
+        return False
+    sender = getattr(COMMON, "send_launch_request_async", None)
+    fallback = getattr(COMMON, "broker_fallback_argv", None)
+    if not callable(sender) or not callable(fallback):
+        log(f"async launch validation unavailable for {path}")
+        return False
+
+    def complete(broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        unavailable = not rejected and (
+            bool(getattr(broker_result, "unavailable", False))
+            or not bool(broker_result)
+        )
+        started = bool(broker_result) and not rejected
+        if unavailable:
+            try:
+                subprocess.Popen(fallback(path, "desktop"), shell=False)
+                # This worker starts a broker only, then waits for one
+                # correlated reply before it reports a successful launch.
+                retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+                if callable(retry):
+                    broker_result = retry(path, "desktop", source_rect)
+                    started = bool(broker_result) and not bool(
+                        getattr(broker_result, "rejected", False))
+                else:
+                    started = False
+            except Exception as exc:
+                log(f"async broker fallback failed for {path} source=desktop: {exc}")
+                started = False
+        elif rejected:
+            log(f"async launch broker rejected {path} source=desktop")
+        if callable(on_result):
+            try:
+                on_result(started)
+            except Exception as exc:
+                log(f"async launch result handler failed for {path}: {exc}")
+
+    try:
+        return bool(sender(
+            path,
+            "desktop",
+            source_rect,
+            callback=complete,
+            timeout=getattr(COMMON, "ASYNC_LAUNCH_REQUEST_TIMEOUT", 12.0),
+        ))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        log(f"async launch request failed for {path}: {exc}")
+        return False
 
 
 def write_generated_core_launcher(basename):
@@ -603,6 +900,8 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
     if not item:
         return False
     basename = item["basename"]
+    if basename in DESKTOP_WRAPPER_ALIASES or basename.startswith("ming-dock-"):
+        return False
     if default_only and basename not in CORE_NAMES:
         return False
     if basename in apps_by_basename:
@@ -612,8 +911,12 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
 
 
 def add_core_app(apps_by_basename, basename):
-    candidates = [DESKTOP_DIR / basename, Path("/usr/share/applications") / basename]
-    candidates.extend(Path("/usr/share/applications") / alt for alt in CORE_FALLBACKS.get(basename, []))
+    # The Desktop directory contains user-visible copies seeded by the Live
+    # image. The launch broker deliberately does not trust those copies, so
+    # always choose the protected catalog entry as the canonical tile source.
+    candidates = [SYSTEM_APPLICATION_DIR / basename]
+    candidates.extend(SYSTEM_APPLICATION_DIR / alt for alt in CORE_FALLBACKS.get(basename, []))
+    candidates.append(DESKTOP_DIR / basename)
     for candidate in candidates:
         if add_app_from_path(apps_by_basename, candidate):
             return True
@@ -625,14 +928,82 @@ def add_core_app(apps_by_basename, basename):
 
 def load_apps(default_only=False):
     apps_by_basename = {}
-    if default_only:
-        for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
-            add_core_app(apps_by_basename, basename)
-    for directory in APP_DIRS:
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.glob("*.desktop")):
+    for basename in sorted(CORE_NAMES, key=lambda name: DESKTOP_ORDER.get(name, 999)):
+        add_core_app(apps_by_basename, basename)
+
+    roots = []
+    root_limit_reached = False
+    root_limit = max(0, int(APP_CATALOG_MAX_ROOTS))
+    for raw_directory in APP_DIRS:
+        if len(roots) >= root_limit:
+            root_limit_reached = True
+            break
+        roots.append(Path(raw_directory))
+
+    directory_entry_limit = max(0, int(APP_CATALOG_MAX_DIRECTORY_ENTRIES))
+    launcher_limit = max(0, int(APP_CATALOG_MAX_LAUNCHERS))
+    remaining_directory_entries = directory_entry_limit
+    remaining_launchers = launcher_limit
+    directory_entry_limit_reached = False
+    launcher_limit_reached = False
+    scan_states = []
+    try:
+        for directory in roots:
+            if not directory.is_dir():
+                continue
+            try:
+                scan = os.scandir(directory)
+            except OSError:
+                continue
+            scan_states.append([directory, scan, iter(scan), []])
+
+        active = list(scan_states)
+        if active and remaining_directory_entries == 0:
+            directory_entry_limit_reached = True
+        if active and remaining_launchers == 0:
+            launcher_limit_reached = True
+        # Advance roots in rounds so a noisy Desktop cannot consume the whole
+        # global budget before later application roots get sampled.
+        while active and remaining_directory_entries > 0 and remaining_launchers > 0:
+            next_active = []
+            for state in active:
+                if remaining_directory_entries <= 0 or remaining_launchers <= 0:
+                    break
+                try:
+                    candidate = next(state[2])
+                except (OSError, StopIteration):
+                    continue
+                remaining_directory_entries -= 1
+                if candidate.name.endswith(".desktop"):
+                    state[3].append(Path(candidate.path))
+                    remaining_launchers -= 1
+                next_active.append(state)
+            active = next_active
+            if active and remaining_directory_entries == 0:
+                directory_entry_limit_reached = True
+            if active and remaining_launchers == 0:
+                launcher_limit_reached = True
+    finally:
+        for _directory, scan, _iterator, _launchers in scan_states:
+            try:
+                scan.close()
+            except OSError:
+                pass
+
+    for _directory, _scan, _iterator, launchers in scan_states:
+        for path in sorted(launchers):
             add_app_from_path(apps_by_basename, path, default_only=default_only)
+
+    reached_limits = []
+    if root_limit_reached:
+        reached_limits.append("root-limit=%d" % root_limit)
+    if directory_entry_limit_reached:
+        reached_limits.append("directory-entry-limit=%d" % directory_entry_limit)
+    if launcher_limit_reached:
+        reached_limits.append("launcher-limit=%d" % launcher_limit)
+    if reached_limits:
+        log("application catalog enumeration budget reached: " + ", ".join(reached_limits))
+
     apps = list(apps_by_basename.values())
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item["basename"], 999), item["name"].lower()))
     return apps
@@ -828,7 +1199,7 @@ def clamp_grid_position(x, y, width=1366, height=768):
     return max(PAD_X, min(max_x, snapped_x)), max(PAD_Y, min(max_y, snapped_y))
 
 
-def sync_layout(width=1366):
+def sync_layout(width=1366, report_status=False):
     apps = load_apps(default_only=False)
     primary = read_layout(LAYOUT_PATH)
     try:
@@ -839,11 +1210,12 @@ def sync_layout(width=1366):
         # Do not let this older binary overwrite a future layout.  load_layout
         # will select the last-good snapshot when one is available.
         log("desktop layout was written by a newer Ming OS; leaving it untouched")
-        return load_layout()
+        layout = load_layout()
+        return (layout, True) if report_status else layout
     layout = load_layout()
     if not apps and layout_is_valid(layout, require_items=True):
         log("app discovery was transiently empty; keeping last known-good layout")
-        return layout
+        return (layout, True) if report_status else layout
     migrated = migrate_layout(layout)
     if migrated is not None:
         layout = migrated
@@ -855,6 +1227,10 @@ def sync_layout(width=1366):
         if isinstance(path, (str, os.PathLike))
     } if catalog_is_initialized else set()
     apps_by_path = {str(app["path"]): app for app in apps}
+    canonical_core_apps = {
+        app["basename"]: app for app in apps
+        if app.get("basename") in CORE_NAMES
+    }
     # First-run layouts should remain deliberately compact.  Subsequent
     # catalog changes append only newly installed applications, while all
     # existing app tiles keep their saved coordinates and folders.
@@ -865,6 +1241,7 @@ def sync_layout(width=1366):
     ]
     items = []
     known = set()
+    core_seen = set()
     for item in layout.get("items", []):
         if item.get("type") == "folder":
             if item.get("pinned"):
@@ -879,6 +1256,9 @@ def sync_layout(width=1366):
                 items.append(folder)
                 known.update(children)
         elif item.get("path"):
+            item = canonicalize_core_layout_item(item, canonical_core_apps, core_seen)
+            if item is None:
+                continue
             path = str(item["path"])
             basename = Path(path).name
             fresh = apps_by_path.get(path)
@@ -901,10 +1281,22 @@ def sync_layout(width=1366):
     layout["version"] = LAYOUT_VERSION
     layout["items"] = items
     layout["catalog_paths"] = sorted(catalog_paths)
+    sync_succeeded = True
     if items:
-        save_layout(layout)
-        sync_files(layout)
-    return layout
+        layout_saved = save_layout(layout)
+        if not layout_saved:
+            log("could not save reconciled desktop layout")
+            files_synced = False
+        else:
+            try:
+                files_synced = sync_files(layout)
+            except Exception as exc:
+                log(f"desktop file reconciliation failed: {exc}")
+                if not report_status:
+                    raise
+                files_synced = False
+        sync_succeeded = layout_saved and files_synced
+    return (layout, sync_succeeded) if report_status else layout
 
 
 def safe_name(name):
@@ -947,6 +1339,181 @@ def _mark_desktop_file(path):
         return True
     except OSError:
         return False
+
+
+def trusted_wrapper_source_path(path):
+    """Return a protected system source suitable for a Ming-managed proxy."""
+    checker = getattr(COMMON, "is_system_desktop_activation_candidate", None)
+    diagnose = getattr(COMMON, "diagnose_desktop_file", None)
+    if not callable(checker) or not callable(diagnose):
+        return None
+    try:
+        source = Path(path)
+        if not source.is_absolute() or not checker(source):
+            return None
+        source = source.resolve(strict=True)
+        entry = diagnose(source)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if entry is None or getattr(entry, "diagnostic", ""):
+        return None
+    return source
+
+
+def managed_desktop_source_path(path):
+    """Resolve only a Ming-generated Desktop proxy back to its package source."""
+    target = Path(path)
+    if not _desktop_has_marker(target):
+        return None
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    match = re.search(
+        r"(?im)^\s*{}\s*=\s*(.*?)\s*$".format(re.escape(DESKTOP_SOURCE_MARKER)), text)
+    value = match.group(1).strip() if match else ""
+    if not value or "\x00" in value or not os.path.isabs(value):
+        return None
+    return trusted_wrapper_source_path(value)
+
+
+def _confirm_file_durable(target, data_synced=False):
+    """Fsync an existing file and its parent before reporting convergence."""
+    target = Path(target)
+    key = str(target.absolute())
+    if key not in _DESKTOP_DURABILITY_PENDING:
+        return True
+    if not data_synced:
+        descriptor = os.open(str(target), os.O_RDWR)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    unsupported_errnos = {
+        errno.EINVAL,
+        errno.ENOSYS,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(str(target.parent), flags)
+    except OSError as exc:
+        unsupported_open = (
+            exc.errno in unsupported_errnos
+            or (os.name == "nt" and exc.errno in {errno.EACCES, errno.EPERM})
+        )
+        if unsupported_open:
+            logger = globals().get("log")
+            if callable(logger):
+                logger(f"directory fsync is unsupported for {target.parent}: {exc}")
+            _DESKTOP_DURABILITY_PENDING.discard(key)
+            return True
+        raise
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            if exc.errno not in unsupported_errnos:
+                raise
+            logger = globals().get("log")
+            if callable(logger):
+                logger(f"directory fsync is unsupported for {target.parent}: {exc}")
+            _DESKTOP_DURABILITY_PENDING.discard(key)
+            return True
+    finally:
+        os.close(directory_fd)
+    _DESKTOP_DURABILITY_PENDING.discard(key)
+    return True
+
+
+def _durable_replace(staged, target):
+    """Replace a file only after its data and destination directory are durable."""
+    staged = Path(staged)
+    target = Path(target)
+    key = str(target.absolute())
+    if (
+            key not in _DESKTOP_DURABILITY_PENDING
+            and len(_DESKTOP_DURABILITY_PENDING) >= DESKTOP_DURABILITY_PENDING_MAX):
+        for pending_key in tuple(_DESKTOP_DURABILITY_PENDING):
+            if not Path(pending_key).exists():
+                _DESKTOP_DURABILITY_PENDING.discard(pending_key)
+    if (
+            key not in _DESKTOP_DURABILITY_PENDING
+            and len(_DESKTOP_DURABILITY_PENDING) >= DESKTOP_DURABILITY_PENDING_MAX):
+        raise OSError("desktop durability queue is full")
+    descriptor = os.open(str(staged), os.O_RDWR)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(str(staged), str(target))
+    _DESKTOP_DURABILITY_PENDING.add(key)
+    _confirm_file_durable(target, data_synced=True)
+
+
+def write_managed_wrapper_proxy(target, source):
+    """Replace a copied shell wrapper with a broker-only Desktop proxy."""
+    target = Path(target)
+    temporary = None
+    try:
+        source = Path(source).resolve(strict=True)
+        original = target.read_bytes()
+        newline = "\r\n" if b"\r\n" in original else "\n"
+        text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        command = "Exec={} --desktop-file {} --source desktop".format(
+            MING_LAUNCH_PATH, shlex.quote(str(source)))
+        rewritten, count = re.subn(
+            r"(?m)^\s*Exec\s*=.*$", lambda _match: command, text, count=1)
+        if count != 1:
+            return False
+        source_pattern = r"(?im)^\s*{}\s*=\s*(.*?)\s*$".format(
+            re.escape(DESKTOP_SOURCE_MARKER))
+        source_values = re.findall(source_pattern, rewritten)
+        if len(source_values) != 1 or source_values[0].strip() != str(source):
+            rewritten = re.sub(
+                r"(?im)^\s*{}\s*=.*(?:\r?\n|$)".format(
+                    re.escape(DESKTOP_SOURCE_MARKER)),
+                "", rewritten)
+            header = re.search(r"(?im)^\s*\[Desktop Entry\]\s*$", rewritten)
+            if not header:
+                return False
+            insert_at = header.end()
+            if rewritten.startswith("\r\n", insert_at):
+                insert_at += 2
+            elif insert_at < len(rewritten) and rewritten[insert_at] == "\n":
+                insert_at += 1
+            else:
+                rewritten = rewritten[:insert_at] + "\n" + rewritten[insert_at:]
+                insert_at += 1
+            rewritten = (
+                rewritten[:insert_at]
+                + "{}={}\n".format(DESKTOP_SOURCE_MARKER, source)
+                + rewritten[insert_at:]
+            )
+        desired = rewritten.replace("\n", newline).encode("utf-8")
+        if desired == original:
+            _confirm_file_durable(target)
+            return True
+        with tempfile.NamedTemporaryFile(
+            prefix=".%s." % target.name,
+            suffix=".tmp",
+            dir=str(target.parent),
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(desired)
+        shutil.copymode(target, temporary)
+        _durable_replace(temporary, target)
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _manifest_relative(path):
@@ -1009,14 +1576,19 @@ def save_desktop_manifest(manifest, path=None):
 def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=False):
     src = Path(path)
     if not src.is_file():
+        log(f"desktop launcher source is unavailable: {src}")
         return None
+    wrapper_resolver = globals().get("trusted_wrapper_source_path")
+    wrapper_source = wrapper_resolver(src) if managed and callable(wrapper_resolver) else None
     target_dir.mkdir(parents=True, exist_ok=True)
     target_name = src.name if preserve_basename else f"{safe_name(name or src.stem)}.desktop"
     target = target_dir / target_name
     try:
         if src.resolve() == target.resolve():
             if managed and _desktop_has_marker(target):
-                target.chmod(0o755)
+                if target.stat().st_mode & 0o777 != 0o755:
+                    target.chmod(0o755)
+            _confirm_file_durable(target)
             return target
         if target.exists() and not _desktop_has_marker(target):
             # Never overwrite an unrelated launcher with the same display
@@ -1028,16 +1600,48 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
                 candidate = target.with_name(f"{stem}-ming{suffix if suffix > 1 else ''}.desktop")
                 suffix += 1
             target = candidate
-        shutil.copy2(src, target)
-        if managed:
-            _mark_desktop_file(target)
-        target.chmod(0o755)
-        return target
-    except Exception:
+        with tempfile.TemporaryDirectory(prefix="ming-desktop-stage-") as stage_dir:
+            staged = Path(stage_dir) / target.name
+            shutil.copy2(src, staged)
+            if wrapper_source and not write_managed_wrapper_proxy(staged, wrapper_source):
+                log(f"could not write managed desktop proxy: {src}")
+                return None
+            if managed and not _mark_desktop_file(staged):
+                log(f"could not mark managed desktop launcher: {src}")
+                return None
+            staged.chmod(0o755)
+            try:
+                unchanged = target.read_bytes() == staged.read_bytes()
+            except OSError:
+                unchanged = False
+            if unchanged:
+                if target.stat().st_mode & 0o777 != 0o755:
+                    target.chmod(0o755)
+                _confirm_file_durable(target)
+                return target
+            with tempfile.NamedTemporaryFile(
+                prefix=".%s." % target.name,
+                suffix=".tmp",
+                dir=str(target.parent),
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+            try:
+                shutil.copy2(staged, temporary)
+                _durable_replace(temporary, target)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            return target
+    except Exception as exc:
+        log(f"could not copy desktop launcher {src} to {target}: {exc}")
         return None
 
 
 def sync_files(layout):
+    succeeded = True
     DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
     previous_manifest = load_desktop_manifest()
     managed_before = set(previous_manifest.get("managed_files", []))
@@ -1058,24 +1662,11 @@ def sync_files(layout):
             for child in source_item.get("children", [])
             if isinstance(child, (str, os.PathLike))
         )
-    for relative in sorted(managed_before):
-        target = DESKTOP_DIR / Path(relative)
-        try:
-            target.relative_to(DESKTOP_DIR)
-        except ValueError:
-            continue
-        if target.is_file() and target.resolve() not in source_paths:
-            try:
-                target.unlink()
-            except OSError:
-                log(f"could not remove managed desktop launcher: {target}")
-    folders_seen = set()
     managed_files = set()
     managed_dirs = set()
     for item in layout.get("items", []):
         if item.get("type") == "folder":
             folder_dir = DESKTOP_DIR / safe_name(item.get("name", "folder"))
-            folders_seen.add(folder_dir)
             was_present = folder_dir.exists()
             folder_dir.mkdir(parents=True, exist_ok=True)
             relative_dir = _manifest_relative(folder_dir)
@@ -1085,6 +1676,8 @@ def sync_files(layout):
                 child = read_app(child_path)
                 if child:
                     copied = copy_desktop(child_path, folder_dir, child["name"], managed=True)
+                    if copied is None:
+                        succeeded = False
                     relative = _manifest_relative(copied) if copied else None
                     if relative and copied != Path(child_path).resolve():
                         managed_files.add(relative)
@@ -1097,10 +1690,33 @@ def sync_files(layout):
                 preserve_basename=is_core,
                 managed=True,
             )
-            if copied:
+            if copied is None:
+                succeeded = False
+            else:
                 relative = _manifest_relative(copied)
                 if relative and (copied != Path(item["path"]).resolve() or _desktop_has_marker(copied)):
                     managed_files.add(relative)
+    if not succeeded:
+        log("desktop file reconciliation incomplete; preserving previous manifest")
+        return False
+    for relative in sorted(managed_before - managed_files):
+        old = DESKTOP_DIR / Path(relative)
+        try:
+            old.relative_to(DESKTOP_DIR)
+        except ValueError:
+            continue
+        if not old.is_file() or not _desktop_has_marker(old):
+            continue
+        source_resolver = globals().get("managed_desktop_source_path")
+        old_source = source_resolver(old) if callable(source_resolver) else None
+        if old.resolve() in source_paths or old_source in source_paths:
+            continue
+        try:
+            old.unlink()
+            _DESKTOP_DURABILITY_PENDING.discard(str(old.absolute()))
+        except OSError as exc:
+            log(f"could not remove managed desktop launcher {old}: {exc}")
+            succeeded = False
     for relative in sorted(managed_dirs_before - managed_dirs):
         old = DESKTOP_DIR / Path(relative)
         try:
@@ -1110,9 +1726,19 @@ def sync_files(layout):
         if old.is_dir() and not any(old.iterdir()):
             try:
                 old.rmdir()
-            except Exception:
-                pass
-    save_desktop_manifest({"managed_files": sorted(managed_files), "managed_dirs": sorted(managed_dirs)})
+            except OSError as exc:
+                log(f"could not remove managed desktop folder {old}: {exc}")
+                succeeded = False
+    if not succeeded:
+        log("desktop cleanup incomplete; preserving previous manifest")
+        return False
+    if not save_desktop_manifest({
+            "managed_files": sorted(managed_files),
+            "managed_dirs": sorted(managed_dirs),
+    }):
+        log("could not save managed desktop manifest")
+        succeeded = False
+    return succeeded
 
 
 def command_add(path, folder=False):
@@ -1148,7 +1774,9 @@ class DesktopTile(Gtk.EventBox):
         self.dragging = False
         self.interaction = InteractionState()
         self.offset = (0, 0)
-        self.set_size_request(TILE_W, TILE_H)
+        tile_w, tile_h = scaled_tile_metrics(
+            desktop.appearance.get("desktop_icon_scale", 1.0), desktop.appearance)
+        self.set_size_request(tile_w, tile_h)
         self.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
@@ -1160,18 +1788,20 @@ class DesktopTile(Gtk.EventBox):
         self.connect("button-release-event", self.on_release)
         self.connect("touch-event", self.on_touch)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        box.set_size_request(78, 92)
+        box.set_size_request(max(1, tile_w - 4), max(1, tile_h - 4))
         box.get_style_context().add_class("tile")
         if item.get("type") == "folder":
             box.get_style_context().add_class("folder")
             image = Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
         else:
             image = Gtk.Image.new_from_icon_name(item.get("icon") or "application-x-executable", Gtk.IconSize.DIALOG)
-        image.set_pixel_size(ICON_SIZE)
+        icon_size = appearance_icon_size(desktop.appearance)
+        image.set_pixel_size(icon_size)
         label = Gtk.Label(label=item.get("name", "应用"))
         label.get_style_context().add_class("label")
         label.set_justify(Gtk.Justification.CENTER)
         label.set_size_request(LABEL_W, LABEL_H)
+        label.set_size_request(max(1, tile_w - 14), max(LABEL_H, tile_h - icon_size - 20))
         label.set_line_wrap(True)
         label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
         label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -1335,6 +1965,10 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         self.generation = 0
         self.probe_running = False
         self.probe_generation = 0
+        self.revealer = Gtk.Revealer()
+        self.revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.revealer.set_transition_duration(180)
+        self.revealer.set_reveal_child(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.get_style_context().add_class("launch-feedback")
         self.icon = Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.DIALOG)
@@ -1353,7 +1987,8 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         text_box.pack_start(self.detail, False, False, 0)
         box.pack_start(text_box, True, True, 0)
         box.pack_start(self.spinner, False, False, 0)
-        self.add(box)
+        self.revealer.add(box)
+        self.add(self.revealer)
         self.hide()
 
     def begin(self, item):
@@ -1367,6 +2002,7 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         self.detail.set_text("正在准备应用窗口…")
         self.spinner.start()
         self.show_all()
+        self.revealer.set_reveal_child(True)
         GLib.timeout_add(120, self.poll, generation)
 
     def poll(self, generation):
@@ -1405,7 +2041,13 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
             return False
         self.spinner.stop()
         self.item = None
-        self.hide()
+        self.revealer.set_reveal_child(False)
+        GLib.timeout_add(180, self.hide_after_transition, self.generation)
+        return False
+
+    def hide_after_transition(self, generation):
+        if generation == self.generation and not self.item:
+            self.hide()
         return False
 
 
@@ -1571,15 +2213,22 @@ class ControlRequestState:
         self.generation = 0
         self.pending = False
         self.optimistic_value = None
+        self.target = None
 
-    def begin(self, value):
+    def begin(self, value, target=None):
         self.generation += 1
         self.pending = True
         self.optimistic_value = value
+        self.target = dict(target) if isinstance(target, dict) else target
         return self.generation
 
     def accepts(self, generation):
         return generation == self.generation
+
+    def target_for(self, generation):
+        if not self.accepts(generation):
+            return None
+        return dict(self.target) if isinstance(self.target, dict) else self.target
 
     def settle(self, generation, value):
         if not self.accepts(generation):
@@ -1598,12 +2247,25 @@ class StatusWidget(Gtk.Box):
         # target.  Gtk.EventBox creates an input window around the whole card,
         # which prevents GtkRange's native drag handling from seeing motion.
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_valign(Gtk.Align.START)
+        self.set_vexpand(False)
+        self.get_style_context().add_class("status-widget")
         self.collapsed = load_widget_state()["collapsed"]
+        self.metric_mode = load_metric_mode()
         self.refreshing = False
         self.notifications = load_notifications_helper()
         device_module = load_device_control()
         self.device_controller = device_module.DeviceController() if device_module else None
+        self.performance_module = load_performance_status()
+        self.metric_previous = None
+        self.metric_result = None
+        self.metric_worker_active = False
+        self.metric_generation = 0
+        self.metric_prime_source = 0
+        self.metric_timer = None
         self.volume_timer = None
+        self.volume_sink_id = ""
+        self.volume_sink_name = ""
         self.brightness_timer = None
         self.updating_controls = False
         self.control_states = {
@@ -1614,31 +2276,18 @@ class StatusWidget(Gtk.Box):
         self.action_starts = {}
         self._height_animation = None
         self._height_animation_source = 0
-        self._display_height = 54 if self.collapsed else 286
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        box.get_style_context().add_class("status-widget")
+        self._display_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_valign(Gtk.Align.START)
+        box.set_vexpand(False)
         box.set_halign(Gtk.Align.FILL)
         box.set_hexpand(True)
         self.widget_box = box
 
-        self.compact_button = Gtk.Button()
-        self.compact_button.get_style_context().add_class("status-compact-pill")
-        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.compact_time_label = Gtk.Label()
-        self.compact_time_label.get_style_context().add_class("status-compact-time")
-        compact.pack_start(self.compact_time_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
-        self.compact_date_label = Gtk.Label()
-        self.compact_date_label.get_style_context().add_class("status-compact-date")
-        compact.pack_start(self.compact_date_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
-        self.compact_arrow_label = Gtk.Label(label="展开 ▾")
-        self.compact_arrow_label.get_style_context().add_class("status-compact-arrow")
-        compact.pack_start(self.compact_arrow_label, False, False, 0)
-        self.compact_button.add(compact)
-        self.compact_button.connect("clicked", lambda _button: self.set_collapsed(False))
-
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.header = header
         self.time_label = Gtk.Label()
         self.time_label.get_style_context().add_class("clock-time")
         self.time_label.set_halign(Gtk.Align.START)
@@ -1648,10 +2297,13 @@ class StatusWidget(Gtk.Box):
         self.date_label.get_style_context().add_class("clock-date")
         self.date_label.set_halign(Gtk.Align.END)
         header.pack_start(self.date_label, False, False, 0)
-        self.collapse_button = Gtk.Button(label="收起 ▴")
-        self.collapse_button.get_style_context().add_class("status-button")
-        self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
-        header.pack_start(self.collapse_button, False, False, 0)
+        self.status_toggle_button = Gtk.Button()
+        self.status_toggle_label = Gtk.Label(label="展开 ▾")
+        self.status_toggle_button.add(self.status_toggle_label)
+        self.status_toggle_button.get_style_context().add_class("status-button")
+        self.status_toggle_button.connect(
+            "clicked", lambda _button: self.set_collapsed(not self.collapsed))
+        header.pack_start(self.status_toggle_button, False, False, 0)
 
         actions = Gtk.Grid()
         actions.set_column_spacing(6)
@@ -1662,21 +2314,28 @@ class StatusWidget(Gtk.Box):
         self.action_commands[self.wifi_button] = ["ming-control-center", "--page", "network"]
         self.bluetooth_button = self.action_button("蓝牙 --", "ming-control-center")
         self.action_commands[self.bluetooth_button] = ["ming-control-center", "--page", "network"]
-        self.battery_button = self.action_button("电量 --", "xfce4-power-manager-settings")
+        # The resource button occupies the intentionally empty second-row-left
+        # slot on desktop/VM sessions.  Its persistent label cycles memory,
+        # CPU and network without replacing the Gtk.Button child.
+        self.metric_button = self.action_button("内存 --", callback=self.cycle_metric)
         self.notification_button = self.action_button("通知", callback=self.open_notifications)
         self.settings_button = self.action_button("设置", "ming-control-center")
         self.action_commands[self.settings_button] = ["ming-control-center", "--page", "advanced"]
         self.power_button = self.action_button("电源", callback=self.open_power_menu)
         self.wifi_label = self.wifi_button.ming_label
         self.bluetooth_label = self.bluetooth_button.ming_label
-        self.battery_label = self.battery_button.ming_label
+        self.metric_label = self.metric_button.ming_label
+        # Compatibility handle for older integrations.  Battery text now
+        # lives in the resource label and this private label is never added
+        # to the layout, so battery-less machines cannot create a blank tile.
+        self.battery_label = Gtk.Label()
+        self.battery_label.set_no_show_all(True)
         self.notification_label = self.notification_button.ming_label
         self.settings_label = self.settings_button.ming_label
         self.power_label = self.power_button.ming_label
-        self.battery_button.set_no_show_all(True)
         actions.attach(self.wifi_button, 0, 0, 1, 1)
         actions.attach(self.bluetooth_button, 1, 0, 1, 1)
-        actions.attach(self.battery_button, 0, 1, 1, 1)
+        actions.attach(self.metric_button, 0, 1, 1, 1)
         actions.attach(self.notification_button, 1, 1, 1, 1)
         actions.attach(self.settings_button, 0, 2, 1, 1)
         actions.attach(self.power_button, 1, 2, 1, 1)
@@ -1717,40 +2376,60 @@ class StatusWidget(Gtk.Box):
         controls.attach(self.brightness_scale, 0, 3, 3, 1)
 
         expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        expanded.pack_start(header, False, False, 0)
+        expanded.set_valign(Gtk.Align.START)
         expanded.pack_start(controls, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
         self.content_revealer = Gtk.Revealer()
         self.content_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.content_revealer.set_transition_duration(180)
         self.content_revealer.add(expanded)
-        box.pack_start(self.compact_button, False, False, 0)
+        box.pack_start(header, False, False, 0)
         box.pack_start(self.content_revealer, False, False, 0)
-        self.add(box)
+        self.pack_start(box, False, False, 0)
         self.apply_collapsed_state(animate=False)
         self.refresh()
-        GLib.timeout_add_seconds(15, self.refresh)
+        if not self.collapsed:
+            self.refresh_status_once()
+        self.metric_timer = GLib.timeout_add_seconds(5, self.refresh_metrics)
+        self.clock_timer = GLib.timeout_add_seconds(1, self.refresh)
 
     def preferred_height(self):
         return int(self._display_height)
 
     def set_collapsed(self, collapsed):
         self.collapsed = bool(collapsed)
+        if self.collapsed:
+            self.metric_generation += 1
+            if self.metric_prime_source:
+                GLib.source_remove(self.metric_prime_source)
+                self.metric_prime_source = 0
         try:
-            save_widget_state(self.collapsed)
+            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
         except OSError as exc:
             log("could not save status widget state: %s" % exc)
         self.apply_collapsed_state(animate=True)
+        if not self.collapsed:
+            self.refresh_status_once()
+            self.refresh_metrics()
 
     def apply_collapsed_state(self, animate=False):
-        style = self.widget_box.get_style_context()
+        timing = COMMON.shell_animation_timing(load_appearance())
+        widget_style = self.get_style_context()
+        header_style = self.header.get_style_context()
         if self.collapsed:
-            style.add_class("status-widget-compact")
+            widget_style.add_class("status-widget-compact")
+            header_style.add_class("status-compact-pill")
         else:
-            style.remove_class("status-widget-compact")
-        self.compact_button.set_visible(self.collapsed)
+            widget_style.remove_class("status-widget-compact")
+            header_style.remove_class("status-compact-pill")
+        self.status_toggle_label.set_text("展开 ▾" if self.collapsed else "收起 ▴")
+        self.status_toggle_button.set_tooltip_text(
+            "展开快捷组件" if self.collapsed else "收起快捷组件")
+        self.content_revealer.set_transition_duration(timing["duration_ms"])
         self.content_revealer.set_reveal_child(not self.collapsed)
-        target_height = 54 if self.collapsed else 286
+        target_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
         if animate:
             self.animate_collapsed_state(target_height)
         else:
@@ -1763,13 +2442,8 @@ class StatusWidget(Gtk.Box):
 
     def animate_collapsed_state(self, target_height):
         """Match the Revealer transition with a bounded outer-card resize."""
-        reduced_motion = False
-        try:
-            settings = Path.home() / ".config/ming-os/settings.json"
-            reduced_motion = bool(json.loads(settings.read_text(encoding="utf-8")).get("reduced_motion"))
-        except (OSError, ValueError, AttributeError):
-            pass
-        if reduced_motion:
+        timing = COMMON.shell_animation_timing(load_appearance())
+        if timing["duration_ms"] == 0:
             self._height_animation = None
             self._display_height = target_height
             self.set_size_request(-1, target_height)
@@ -1789,7 +2463,11 @@ class StatusWidget(Gtk.Box):
             if not animation:
                 self._height_animation_source = 0
                 return False
-            progress = min(1.0, (GLib.get_monotonic_time() - animation["started"]) / 180000.0)
+            progress = min(
+                1.0,
+                (GLib.get_monotonic_time() - animation["started"]) /
+                float(timing["duration_ms"] * 1000),
+            )
             eased = COMMON.ease_out_cubic(progress)
             self._display_height = animation["start"] + (
                 animation["target"] - animation["start"]) * eased
@@ -1804,7 +2482,7 @@ class StatusWidget(Gtk.Box):
             self._height_animation_source = 0
             return False
 
-        self._height_animation_source = GLib.timeout_add(16, step)
+        self._height_animation_source = GLib.timeout_add(timing["interval_ms"], step)
 
     def action_button(self, label, command=None, callback=None):
         button = Gtk.Button()
@@ -1823,6 +2501,100 @@ class StatusWidget(Gtk.Box):
                 lambda clicked: self.open_command(
                     self.action_commands.get(clicked, command)))
         return button
+
+    def cycle_metric(self, _button):
+        current = METRIC_MODES.index(self.metric_mode) if self.metric_mode in METRIC_MODES else 0
+        # memory -> cpu -> network -> memory
+        self.metric_mode = METRIC_MODES[(current + 1) % len(METRIC_MODES)]
+        try:
+            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
+        except OSError as exc:
+            log("could not save metric mode: %s" % exc)
+        self.update_metric_label()
+        if not self.collapsed:
+            self.refresh_metrics()
+
+    @staticmethod
+    def format_metric_value(result):
+        if not isinstance(result, dict) or not result.get("available"):
+            reason = str((result or {}).get("reason") or "")
+            if "等待下一次" in reason:
+                return "采样中"
+            if reason:
+                return reason[:18]
+            return "不可用"
+        value = result.get("value")
+        mode = result.get("mode")
+        if mode == "network":
+            try:
+                value = float(value)
+                if value >= 1024 * 1024:
+                    return "%.1f MB/s" % (value / (1024 * 1024))
+                if value >= 1024:
+                    return "%.1f KB/s" % (value / 1024)
+                return "%.0f B/s" % value
+            except (TypeError, ValueError):
+                return "不可用"
+        try:
+            return "%.0f%%" % float(value)
+        except (TypeError, ValueError):
+            return "不可用"
+
+    def update_metric_label(self):
+        labels = {"memory": "内存", "cpu": "CPU", "network": "网速"}
+        result = self.metric_result.get(self.metric_mode, {}) if isinstance(self.metric_result, dict) else {}
+        text = "%s %s" % (labels.get(self.metric_mode, "内存"), self.format_metric_value(result))
+        battery = getattr(self, "battery_summary", "")
+        self.metric_label.set_text("%s · %s" % (text, battery) if battery else text)
+
+    def refresh_metrics(self, interval_seconds=None):
+        if self.collapsed or self.metric_worker_active or not self.performance_module:
+            return True
+        self.metric_worker_active = True
+        self.metric_generation += 1
+        generation = self.metric_generation
+        previous = self.metric_result
+        interval = 5.0 if interval_seconds is None else max(0.1, float(interval_seconds))
+
+        def worker():
+            try:
+                service = self.performance_module.PerformanceStatus()
+                result = service.metrics_snapshot(previous=previous, interval_seconds=interval)
+            except Exception as exc:
+                result = {"memory": {}, "cpu": {}, "network": {}, "error": str(exc)}
+            GLib.idle_add(self.apply_metric_result, generation, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def prime_metric_sample(self):
+        self.metric_prime_source = 0
+        if self.collapsed:
+            return False
+        self.refresh_metrics(interval_seconds=METRIC_PRIME_INTERVAL_MS / 1000.0)
+        return False
+
+    @staticmethod
+    def metric_needs_prime(result):
+        for mode in ("cpu", "network"):
+            entry = result.get(mode, {}) if isinstance(result, dict) else {}
+            if not entry.get("available") and "等待下一次" in str(entry.get("reason") or ""):
+                return True
+        return False
+
+    def apply_metric_result(self, generation, result):
+        if generation != self.metric_generation or self.collapsed:
+            self.metric_worker_active = False
+            return False
+        self.metric_worker_active = False
+        if isinstance(result, dict):
+            self.metric_result = result
+            self.metric_previous = result.get("sample")
+        self.update_metric_label()
+        if self.metric_needs_prime(result) and not self.metric_prime_source:
+            self.metric_prime_source = GLib.timeout_add(
+                METRIC_PRIME_INTERVAL_MS, self.prime_metric_sample)
+        return False
 
     def open_command(self, command):
         argv = list(command) if isinstance(command, (list, tuple)) else [command]
@@ -1882,7 +2654,9 @@ class StatusWidget(Gtk.Box):
             pass
         return False
 
-    def schedule_control(self, kind, value, generation):
+    def schedule_control(self, kind, value, generation, target_snapshot=None):
+        target_snapshot = (dict(target_snapshot)
+                           if isinstance(target_snapshot, dict) else target_snapshot)
         attr = "%s_timer" % kind
         timer = getattr(self, attr)
         if timer:
@@ -1895,7 +2669,7 @@ class StatusWidget(Gtk.Box):
                 return False
             threading.Thread(
                 target=self.set_control_value,
-                args=(kind, value, generation),
+                args=(kind, value, generation, target_snapshot),
                 daemon=True,
             ).start()
             return False
@@ -1905,9 +2679,16 @@ class StatusWidget(Gtk.Box):
     def on_volume_changed(self, control):
         if not self.updating_controls:
             value = max(0, min(100, int(round(control.get_value()))))
-            generation = self.control_states["volume"].begin(value)
-            self.volume_label.set_text("音量 %d%%" % value)
-            self.schedule_control("volume", value, generation)
+            target_snapshot = {
+                "sink_id": self.volume_sink_id,
+                "sink_name": self.volume_sink_name or "音量",
+            }
+            generation = self.control_states["volume"].begin(
+                value, target=target_snapshot)
+            self.volume_label.set_text("%s %d%%" % (
+                target_snapshot["sink_name"], value))
+            self.schedule_control(
+                "volume", value, generation, target_snapshot=target_snapshot)
             self.volume_scale.queue_draw()
 
     def on_brightness_changed(self, control):
@@ -1918,36 +2699,43 @@ class StatusWidget(Gtk.Box):
             self.schedule_control("brightness", value, generation)
             self.brightness_scale.queue_draw()
 
-    def set_control_value(self, kind, value, generation):
+    def set_control_value(self, kind, value, generation, target_snapshot=None):
+        target_snapshot = target_snapshot or {}
         try:
             if not self.device_controller:
                 result = {"ok": False, "error": "设备控制服务不可用", "value": None}
             elif kind == "volume":
-                result = self.device_controller.set_volume(value)
+                sink_id = target_snapshot.get("sink_id")
+                result = (self.device_controller.set_volume(value, sink_id=sink_id)
+                          if sink_id else self.device_controller.set_volume(value))
             else:
                 result = self.device_controller.set_brightness(value)
-            GLib.idle_add(self.apply_control_result, kind, generation, result)
+            GLib.idle_add(
+                self.apply_control_result, kind, generation, target_snapshot, result)
         except Exception as exc:
             log(f"{kind} control failed: {exc}")
             GLib.idle_add(
                 self.apply_control_result,
                 kind,
                 generation,
+                target_snapshot,
                 {"ok": False, "error": str(exc), "value": None},
             )
 
-    def apply_control_result(self, kind, generation, result):
+    def apply_control_result(self, kind, generation, target_snapshot, result):
         state = self.control_states[kind]
         if not state.accepts(generation):
             log("ignored stale %s control response generation=%s" % (kind, generation))
             return False
+        target_snapshot = target_snapshot or {}
         self.updating_controls = True
         value = result.get("value")
         if result.get("ok") and value is not None:
             state.settle(generation, value)
             if kind == "volume":
                 self.volume_scale.set_value(value)
-                self.volume_label.set_text("音量 %d%%" % value)
+                self.volume_label.set_text("%s %d%%" % (
+                    target_snapshot.get("sink_name") or "音量", value))
                 self.volume_scale.queue_draw()
             else:
                 self.brightness_scale.set_value(value)
@@ -1958,7 +2746,8 @@ class StatusWidget(Gtk.Box):
             message = result.get("error") or "控制失败"
             log("%s control rejected: %s" % (kind, message))
             if kind == "volume":
-                self.volume_label.set_text("音量设置失败，点击重试")
+                self.volume_label.set_text("%s 设置失败，点击重试" % (
+                    target_snapshot.get("sink_name") or "音量"))
             else:
                 self.brightness_label.set_text("亮度设置失败，点击重试")
         self.updating_controls = False
@@ -1979,6 +2768,7 @@ class StatusWidget(Gtk.Box):
 
     def open_notifications(self, button):
         popover = Gtk.Popover.new(button)
+        popover.get_style_context().add_class("ming-notification-popover")
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         panel.set_size_request(320, 330)
         panel.get_style_context().add_class("notification-panel")
@@ -2081,73 +2871,7 @@ class StatusWidget(Gtk.Box):
         self.updating_dnd = False
         return False
 
-    def background_update_available(self):
-        """Trust only the root-owned result written by an automatic check."""
-        try:
-            result = subprocess.run(
-                ["ming-update", "status", "--json"],
-                capture_output=True, text=True, timeout=3,
-            )
-            status = json.loads(result.stdout) if result.returncode == 0 else {}
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            log("power menu update status failed: %s" % exc)
-            return False
-        return bool(isinstance(status, dict) and status.get("background_available"))
-
-    def open_update_and_shutdown_dialog(self, _item=None):
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(), flags=0,
-            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-            text="确认更新并关机？",
-        )
-        dialog.format_secondary_text(
-            "系统会自动完成已确认更新，完成后关机。没有可用更新时不会关机。")
-        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        dialog.add_button("更新并关机", Gtk.ResponseType.OK)
-
-        def respond(current, response):
-            current.destroy()
-            if response != Gtk.ResponseType.OK:
-                return
-            try:
-                subprocess.Popen(
-                    ["pkexec", "ming-update", "auto-shutdown"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except OSError as exc:
-                log("update and shutdown launch failed: %s" % exc)
-
-        dialog.connect("response", respond)
-        dialog.show_all()
-
-    def show_confirmed_update_power_menu(self, button):
-        """Keep the usual session actions while adding the gated update action."""
-        menu = Gtk.Menu()
-
-        def add_item(label, callback):
-            item = Gtk.MenuItem(label=label)
-            item.connect("activate", callback)
-            menu.append(item)
-
-        def launch(command):
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:
-                log("power action failed %s: %s" % (command[0], exc))
-
-        add_item("锁定屏幕", lambda _item: launch(["ming-lock"]))
-        add_item("更新并关机", self.open_update_and_shutdown_dialog)
-        menu.append(Gtk.SeparatorMenuItem())
-        add_item("注销", lambda _item: launch(["xfce4-session-logout", "--logout"]))
-        add_item("重新启动", lambda _item: launch(["xfce4-session-logout", "--reboot"]))
-        add_item("关机", lambda _item: launch(["xfce4-session-logout", "--halt"]))
-        menu.show_all()
-        menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
-
     def open_power_menu(self, _button):
-        if self.background_update_available():
-            self.show_confirmed_update_power_menu(_button)
-            return
         commands = [
             ["xfce4-session-logout"],
             ["gnome-session-quit", "--logout"],
@@ -2180,16 +2904,24 @@ class StatusWidget(Gtk.Box):
         date_text = "%s %s" % (weekdays[now.weekday()], now.strftime("%m/%d"))
         self.time_label.set_text(time_text)
         self.date_label.set_text(date_text)
-        self.compact_time_label.set_text(time_text)
-        self.compact_date_label.set_text(date_text)
+        return True
+
+    def refresh_status_once(self):
+        """Read device state once after expansion without a periodic probe."""
+        if self.collapsed or self.refreshing:
+            return False
         if not self.refreshing:
             self.refreshing = True
             threading.Thread(target=self.collect_status, daemon=True).start()
-        return True
+        return False
 
     def collect_status(self):
         try:
-            status = self.device_controller.status() if self.device_controller else {}
+            status = (
+                self.device_controller.widget_status()
+                if self.device_controller and hasattr(self.device_controller, "widget_status")
+                else self.device_controller.status() if self.device_controller else {}
+            )
         except Exception as exc:
             log(f"device status collection failed: {exc}")
             status = {}
@@ -2211,22 +2943,32 @@ class StatusWidget(Gtk.Box):
         brightness = status.get("brightness", {})
         self.wifi_label.set_text("Wi-Fi %s" % wifi_text)
         self.bluetooth_label.set_text("蓝牙 %s" % bluetooth.get("text", "不可用"))
-        self.battery_label.set_text("电量 %s" % battery.get("text", "--"))
-        self.battery_button.set_visible(bool(battery.get("available")))
+        self.battery_summary = "电量 %s" % battery.get("text", "--") if battery.get("available") else ""
+        self.battery_label.set_text(self.battery_summary)
+        self.update_metric_label()
         self.notification_label.set_text(
             "通知 %d" % notification_count if notification_count else "通知")
         self.updating_controls = True
         audio_available = bool(audio.get("available"))
+        default_sink = str(audio.get("default_sink") or "")
+        selected_output = next((item for item in audio.get("playback_devices", [])
+                                if item.get("id") == default_sink), {})
+        self.volume_sink_id = default_sink
+        self.volume_sink_name = str(selected_output.get("display_name") or "当前输出")
         volume = audio.get("value") if audio_available else 0
         self.volume_scale.set_sensitive(audio_available)
         volume_state = self.control_states["volume"]
         if not volume_state.should_hold_status():
             self.volume_scale.set_value(max(0, min(100, volume or 0)))
             self.volume_label.set_text(
-                "音量 %d%%" % volume if audio_available else "未检测到输出设备")
+                "%s %d%%" % (self.volume_sink_name, volume)
+                if audio_available else "未检测到输出设备")
         elif volume_state.optimistic_value is not None:
             self.volume_scale.set_value(volume_state.optimistic_value)
-            self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)
+            pending_target = volume_state.target_for(volume_state.generation) or {}
+            self.volume_label.set_text("%s %d%%" % (
+                pending_target.get("sink_name") or "音量",
+                volume_state.optimistic_value))
         brightness_available = bool(brightness.get("available"))
         brightness_value = brightness.get("value") if brightness_available else 1
         self.brightness_scale.set_sensitive(brightness_available)
@@ -2251,37 +2993,69 @@ class StatusWidget(Gtk.Box):
 class WallpaperCanvas(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
-        self.pixbuf = self.load_wallpaper()
+        self.pixbuf = None
+        self._render_cache = None
+        self._render_key = None
+        self.reload()
+        self.connect("size-allocate", self.on_size_allocate)
         self.connect("draw", self.on_draw)
 
     def load_wallpaper(self):
-        for path in WALLPAPER_PATHS:
+        screen = Gdk.Screen.get_default()
+        width = max(320, screen.get_width() if screen else 1920)
+        height = max(240, screen.get_height() if screen else 1080)
+        for path in appearance_wallpaper_paths(
+                load_appearance(), screen_width=width, screen_height=height):
             if path.exists():
                 try:
-                    return GdkPixbuf.Pixbuf.new_from_file(str(path))
+                    return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
                 except Exception:
                     pass
         return None
 
+    def reload(self):
+        self.pixbuf = self.load_wallpaper()
+        self._render_cache = None
+        self._render_key = None
+        allocation = self.get_allocation()
+        self.ensure_render_cache(allocation.width, allocation.height)
+
+    def on_size_allocate(self, _widget, allocation):
+        self.ensure_render_cache(allocation.width, allocation.height)
+
+    def ensure_render_cache(self, width, height):
+        width = max(1, int(width))
+        height = max(1, int(height))
+        if not self.pixbuf:
+            self._render_cache = None
+            self._render_key = (width, height, None)
+            return
+        key = (width, height, self.pixbuf.get_width(), self.pixbuf.get_height())
+        if self._render_key == key and self._render_cache is not None:
+            return
+        src_w = self.pixbuf.get_width()
+        src_h = self.pixbuf.get_height()
+        scale = max(width / src_w, height / src_h)
+        draw_w = max(width, int(round(src_w * scale)))
+        draw_h = max(height, int(round(src_h * scale)))
+        scaled = self.pixbuf.scale_simple(draw_w, draw_h, GdkPixbuf.InterpType.BILINEAR)
+        crop_x = max(0, int((draw_w - width) / 2))
+        crop_y = max(0, int((draw_h - height) / 2))
+        self._render_cache = GdkPixbuf.Pixbuf.new_subpixbuf(scaled, crop_x, crop_y, width, height)
+        self._render_key = key
+
     def on_draw(self, widget, cr):
         width = max(1, widget.get_allocated_width())
         height = max(1, widget.get_allocated_height())
-        if not self.pixbuf:
+        self.ensure_render_cache(width, height)
+        if not self._render_cache:
             cr.set_source_rgb(0.937, 0.969, 0.949)
             cr.rectangle(0, 0, width, height)
             cr.fill()
             return False
-        src_w = self.pixbuf.get_width()
-        src_h = self.pixbuf.get_height()
-        scale = max(width / src_w, height / src_h)
-        draw_w = int(src_w * scale)
-        draw_h = int(src_h * scale)
-        scaled = self.pixbuf.scale_simple(draw_w, draw_h, GdkPixbuf.InterpType.BILINEAR)
-        x = int((width - draw_w) / 2)
-        y = int((height - draw_h) / 2)
-        Gdk.cairo_set_source_pixbuf(cr, scaled, x, y)
+        Gdk.cairo_set_source_pixbuf(cr, self._render_cache, 0, 0)
         cr.paint()
-        cr.set_source_rgba(1, 1, 1, 0.10)
+        cr.set_source_rgba(1, 1, 1, 0.04)
         cr.rectangle(0, 0, width, height)
         cr.fill()
         return False
@@ -2328,9 +3102,10 @@ class PhoneDesktop(Gtk.Window):
         self.connect("button-release-event", self.on_window_button_release)
         self.connect("touch-event", self.on_window_touch)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
+        self.appearance = load_appearance()
+        self.css_provider = Gtk.CssProvider()
+        self.apply_shell_css()
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css_provider, 700)
 
         self.wallpaper = WallpaperCanvas()
         self.fixed = Gtk.Fixed()
@@ -2354,6 +3129,7 @@ class PhoneDesktop(Gtk.Window):
         self.touch_sequences = set()
         self.touch_blocked = False
         self.activation_consumed = {}
+        self._pending_launch_paths = set()
         self.fixed_press_item = None
         self.fixed_press_origin = None
         self.fixed_press_offset = (0, 0)
@@ -2369,11 +3145,36 @@ class PhoneDesktop(Gtk.Window):
         self.connect("map-event", lambda *_args: self.enforce_desktop_layer())
         self.connect("size-allocate", lambda *_args: self.place_overlays())
         self.layout = sync_layout(screen_w)
+        old_scale = self.layout.get("desktop_icon_scale", self.appearance["desktop_icon_scale"])
+        old_appearance = {
+            "font_size": self.layout.get("desktop_font_size", self.appearance.get("font_size", 11)),
+            "desktop_icon_size": self.layout.get(
+                "desktop_icon_size", self.appearance.get("desktop_icon_size", 34)),
+        }
+        initial_geometry_changed = (
+            old_scale != self.appearance["desktop_icon_scale"]
+            or old_appearance["font_size"] != self.appearance.get("font_size", 11)
+            or old_appearance["desktop_icon_size"] != self.appearance.get("desktop_icon_size", 34)
+        )
+        if initial_geometry_changed:
+            self.layout = reflow_layout_for_icon_scale(
+                self.layout, old_scale, self.appearance["desktop_icon_scale"], screen_w, screen_h,
+                old_appearance, self.appearance)
+            save_layout(self.layout)
         self.layout_stamp = self.current_layout_stamp()
+        self.appearance_stamp = self.current_appearance_stamp()
         self.catalog_stamp = app_catalog_fingerprint()
+        self._catalog_monitors = []
+        self._catalog_monitor_paths = set()
+        self._catalog_debounce_source = 0
+        self._catalog_retry_source = 0
+        self._catalog_retry_attempt = 0
+        self._catalog_sync_retry_source = 0
+        self._catalog_sync_retry_attempt = 0
+        self._catalog_dirty = False
+        self.start_catalog_monitor()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
-        GLib.timeout_add_seconds(3, self.refresh_if_apps_changed)
 
     @property
     def window_origin(self):
@@ -2386,6 +3187,126 @@ class PhoneDesktop(Gtk.Window):
             except Exception:
                 pass
         return 0, 0
+
+    def apply_shell_css(self):
+        self.css_provider.load_from_data(css_for_appearance(self.appearance))
+
+    def start_catalog_monitor(self):
+        """Watch launcher and Ming state directories without GTK polling."""
+        for directory in (HOME / ".local/share/applications", STATE_DIR):
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log("could not prepare watched directory %s: %s" % (directory, exc))
+        missing = False
+        for directory in set(APP_DIRS) | {STATE_DIR}:
+            if not self._ensure_catalog_monitor(directory):
+                missing = True
+        if missing:
+            self._schedule_catalog_monitor_retry()
+        else:
+            self._catalog_retry_attempt = 0
+            if self._catalog_retry_source:
+                try:
+                    GLib.source_remove(self._catalog_retry_source)
+                except (TypeError, ValueError):
+                    pass
+                self._catalog_retry_source = 0
+
+    def _ensure_catalog_monitor(self, directory):
+        path = str(Path(directory))
+        if path in self._catalog_monitor_paths:
+            return True
+        try:
+            monitor = Gio.File.new_for_path(path).monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES,
+                None)
+            monitor.connect(
+                "changed",
+                self.on_catalog_file_changed,
+                path != str(STATE_DIR),
+            )
+            self._catalog_monitors.append(monitor)
+            self._catalog_monitor_paths.add(path)
+            return True
+        except (GLib.Error, OSError, TypeError, ValueError) as exc:
+            log("file monitor unavailable for %s: %s" % (directory, exc))
+            return False
+
+    def _schedule_catalog_monitor_retry(self):
+        if self._catalog_retry_source:
+            return
+        if not CATALOG_MONITOR_RETRY_DELAYS_MS:
+            return
+        index = min(
+            self._catalog_retry_attempt,
+            len(CATALOG_MONITOR_RETRY_DELAYS_MS) - 1,
+        )
+        delay = CATALOG_MONITOR_RETRY_DELAYS_MS[index]
+        self._catalog_retry_attempt = min(
+            index + 1,
+            len(CATALOG_MONITOR_RETRY_DELAYS_MS) - 1,
+        )
+        try:
+            self._catalog_retry_source = GLib.timeout_add(
+                delay, self._run_catalog_monitor_retry)
+        except (AttributeError, TypeError, ValueError):
+            self._catalog_retry_source = 0
+
+    def _run_catalog_monitor_retry(self):
+        self._catalog_retry_source = 0
+        self.start_catalog_monitor()
+        return False
+
+    def _schedule_catalog_sync_retry(self):
+        if self._catalog_sync_retry_source or not CATALOG_SYNC_RETRY_DELAYS_MS:
+            return
+        index = min(
+            self._catalog_sync_retry_attempt,
+            len(CATALOG_SYNC_RETRY_DELAYS_MS) - 1,
+        )
+        delay = CATALOG_SYNC_RETRY_DELAYS_MS[index]
+        self._catalog_sync_retry_attempt = min(
+            index + 1,
+            len(CATALOG_SYNC_RETRY_DELAYS_MS) - 1,
+        )
+        try:
+            self._catalog_sync_retry_source = GLib.timeout_add(
+                delay, self._run_catalog_sync_retry)
+        except (AttributeError, TypeError, ValueError):
+            self._catalog_sync_retry_source = 0
+
+    def _run_catalog_sync_retry(self):
+        self._catalog_sync_retry_source = 0
+        self.refresh_if_apps_changed()
+        return False
+
+    def _clear_catalog_sync_retry(self):
+        self._catalog_sync_retry_attempt = 0
+        if not self._catalog_sync_retry_source:
+            return
+        try:
+            GLib.source_remove(self._catalog_sync_retry_source)
+        except (TypeError, ValueError):
+            pass
+        self._catalog_sync_retry_source = 0
+
+    def on_catalog_file_changed(self, *_args):
+        """Debounce package/appearance bursts and refresh on the GTK main loop."""
+        catalog_event = not _args or not isinstance(_args[-1], bool) or _args[-1]
+        if catalog_event:
+            self._catalog_dirty = True
+        if self._catalog_debounce_source:
+            try:
+                GLib.source_remove(self._catalog_debounce_source)
+            except (TypeError, ValueError):
+                pass
+        self._catalog_debounce_source = GLib.timeout_add(500, self._run_catalog_refresh)
+
+    def _run_catalog_refresh(self):
+        self._catalog_debounce_source = 0
+        self.refresh_if_apps_changed()
+        return False
 
     def mark_ready(self):
         try:
@@ -2492,39 +3413,59 @@ class PhoneDesktop(Gtk.Window):
             if not is_folder and item.get("type") != "app":
                 continue
             x, y = self.item_position(item)
-            self.rounded_rect(cr, x, y, TILE_W - 4, TILE_H - 4, 12)
+            tile_w, tile_h = scaled_tile_metrics(
+                self.appearance.get("desktop_icon_scale", 1.0), self.appearance)
+            profile = COMMON.shell_visual_profile(self.appearance)
+            self.rounded_rect(cr, x, y, tile_w - 4, tile_h - 4, 8)
             if is_folder:
-                cr.set_source_rgba(0.91, 0.97, 0.95, 0.68)
+                cr.set_source_rgba(0.91, 0.97, 0.95, profile["surface_alpha"])
+            elif profile["theme"] == "dark":
+                cr.set_source_rgba(0.16, 0.18, 0.17, profile["surface_alpha"])
             else:
-                cr.set_source_rgba(1, 1, 1, 0.48)
+                cr.set_source_rgba(1, 1, 1, profile["surface_alpha"])
             cr.fill_preserve()
-            cr.set_source_rgba(0.18, 0.54, 0.49, 0.26 if is_folder else 0.18)
+            cr.set_source_rgba(0.14, 0.53, 0.45, 0.70)
             cr.set_line_width(1)
             cr.stroke()
             icon_name = "folder" if is_folder else (item.get("icon") or "application-x-executable")
             try:
-                pixbuf = icon_theme.load_icon(icon_name, ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+                icon_size = appearance_icon_size(self.appearance)
+                pixbuf = COMMON.load_icon_pixbuf(icon_theme, icon_name, icon_size)
             except Exception:
                 pixbuf = None
             if pixbuf:
-                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((TILE_W - ICON_SIZE) / 2), y + 7)
+                Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((tile_w - icon_size) / 2), y + 7)
                 cr.paint()
             layout = PangoCairo.create_layout(cr)
             layout.set_text(item.get("name", "应用"), -1)
-            layout.set_width(LABEL_W * Pango.SCALE)
+            label_width = max(1, tile_w - 14)
+            label_y = y + icon_size + 12
+            label_height = max(1, tile_h - icon_size - 20)
+            layout.set_width(label_width * Pango.SCALE)
             layout.set_height(-2)
             layout.set_alignment(Pango.Alignment.CENTER)
             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
             layout.set_ellipsize(Pango.EllipsizeMode.END)
-            layout.set_font_description(Pango.FontDescription("Sans Bold 10"))
-            cr.set_source_rgba(0.11, 0.15, 0.13, 0.96)
-            cr.move_to(x + int((TILE_W - LABEL_W) / 2), y + 49)
+            font_name = str(self.appearance.get("font_family", "Noto Sans CJK SC")).replace('"', "")
+            font_size = max(9, min(16, COMMON.appearance_font_size(self.appearance) - 1))
+            layout.set_font_description(Pango.FontDescription("%s Bold %d" % (font_name, font_size)))
+            if profile["theme"] == "dark":
+                cr.set_source_rgba(0.95, 0.97, 0.96, 1.0)
+            else:
+                cr.set_source_rgba(0.09, 0.13, 0.11, 1.0)
+            cr.save()
+            cr.rectangle(x + 4, label_y, tile_w - 12, label_height)
+            cr.clip()
+            cr.move_to(x + int((tile_w - label_width) / 2), label_y)
             PangoCairo.show_layout(cr, layout)
+            cr.restore()
 
     def item_at(self, x, y):
+        tile_w, tile_h = scaled_tile_metrics(
+            self.appearance.get("desktop_icon_scale", 1.0), self.appearance)
         for item in reversed(self.layout.get("items", [])):
             ix, iy = self.item_position(item)
-            if ix <= x <= ix + TILE_W and iy <= y <= iy + TILE_H:
+            if ix <= x <= ix + tile_w and iy <= y <= iy + tile_h:
                 return item
         return None
 
@@ -2809,15 +3750,59 @@ class PhoneDesktop(Gtk.Window):
         except OSError:
             return 0
 
+    @staticmethod
+    def current_appearance_stamp():
+        stamps = []
+        for path in (APPEARANCE_PATH, COMMON.shell_runtime_profile_path()):
+            try:
+                stamps.append(path.stat().st_mtime_ns)
+            except OSError:
+                stamps.append(0)
+        return tuple(stamps)
+
     def refresh_if_apps_changed(self):
         stamp = self.current_layout_stamp()
         catalog_stamp = app_catalog_fingerprint()
+        appearance_stamp = self.current_appearance_stamp()
+        appearance_changed = appearance_stamp != self.appearance_stamp
         layout_changed = stamp != self.layout_stamp
-        catalog_changed = catalog_stamp != self.catalog_stamp
-        if not layout_changed and not catalog_changed:
-            return True
+        catalog_changed = self._catalog_dirty or catalog_stamp != self.catalog_stamp
+        if not layout_changed and not catalog_changed and not appearance_changed:
+            return False
+        if appearance_changed:
+            updated_appearance = load_appearance()
+            old_scale = self.appearance.get("desktop_icon_scale", 1.0)
+            new_scale = updated_appearance.get("desktop_icon_scale", 1.0)
+            geometry_changed = any(
+                self.appearance.get(key) != updated_appearance.get(key)
+                for key in ("desktop_icon_scale", "desktop_icon_size", "font_size")
+            )
+            if geometry_changed:
+                screen = self.get_screen()
+                self.layout = reflow_layout_for_icon_scale(
+                    self.layout, old_scale, new_scale, screen.get_width(), screen.get_height(),
+                    self.appearance, updated_appearance)
+                save_layout(self.layout)
+            self.appearance = updated_appearance
+            self.appearance_stamp = appearance_stamp
+            self.apply_shell_css()
+            self.wallpaper.reload()
+            self.wallpaper.queue_draw()
+            self.render()
         if catalog_changed:
-            updated = sync_layout(self.get_screen().get_width())
+            try:
+                updated, catalog_synced = sync_layout(
+                    self.get_screen().get_width(), report_status=True)
+            except Exception as exc:
+                log(f"desktop catalog refresh failed: {exc}")
+                updated = load_layout()
+                catalog_synced = False
+            if catalog_synced:
+                self._catalog_dirty = False
+                self._clear_catalog_sync_retry()
+            else:
+                self._catalog_dirty = True
+                self._schedule_catalog_sync_retry()
         else:
             updated = load_layout()
         self.layout_stamp = self.current_layout_stamp()
@@ -2826,7 +3811,7 @@ class PhoneDesktop(Gtk.Window):
                 and updated.get("version") == LAYOUT_VERSION and updated != self.layout):
             self.layout = updated
             self.render()
-        return True
+        return False
 
     def find_drop_target(self, source, x, y):
         best = None
@@ -2882,28 +3867,66 @@ class PhoneDesktop(Gtk.Window):
         if item.get("type") == "folder":
             self.show_folder(item)
             return
+        pending = getattr(self, "_pending_launch_paths", None)
+        if not isinstance(pending, set):
+            pending = set()
+            self._pending_launch_paths = pending
+        path_key = str(item.get("path") or "")
+        if path_key in pending:
+            log(f"desktop launch already pending for {path_key}")
+            return
+        pending.add(path_key)
         self.launch_feedback.begin(item)
         origin_x, origin_y = self.window_origin
+        try:
+            source_width, source_height = scaled_tile_metrics(
+                self.appearance.get("desktop_icon_scale", 1.0), self.appearance)
+        except TypeError:
+            # Partial hot deployments may still expose the legacy helper.
+            source_width, source_height = scaled_tile_metrics(
+                self.appearance.get("desktop_icon_scale", 1.0))
         source_rect = {
             "x": origin_x + int(item.get("x", PAD_X)),
             "y": origin_y + int(item.get("y", PAD_Y)),
-            "width": TILE_W,
-            "height": TILE_H,
+            "width": source_width,
+            "height": source_height,
         }
-        if not launch_item(item, source_rect):
-            self.launch_feedback.finish()
-            log(f"no launch method worked for {item.get('path')}")
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                flags=0,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.CLOSE,
-                text="无法打开此应用",
-            )
-            detail = str(item.get("diagnostic") or "启动失败，详细信息已写入桌面日志。")
-            dialog.format_secondary_text(detail)
-            dialog.run()
-            dialog.destroy()
+
+        def completed(started):
+            def deliver():
+                try:
+                    if started:
+                        return False
+                    self.launch_feedback.finish()
+                    log(f"no launch method worked for {item.get('path')}")
+                    dialog = Gtk.MessageDialog(
+                        transient_for=self,
+                        flags=0,
+                        message_type=Gtk.MessageType.ERROR,
+                        buttons=Gtk.ButtonsType.CLOSE,
+                        text="无法打开此应用",
+                    )
+                    dialog.get_style_context().add_class("ming-launch-error-dialog")
+                    detail = str(item.get("diagnostic") or "启动失败，详细信息已写入桌面日志。")
+                    dialog.format_secondary_text(detail)
+                    dialog.run()
+                    dialog.destroy()
+                except Exception as exc:
+                    log(f"desktop launch result delivery failed for {path_key}: {exc}")
+                finally:
+                    pending.discard(path_key)
+                return False
+
+            try:
+                if GLib.idle_add(deliver):
+                    return
+                log(f"desktop launch result queue rejected for {path_key}")
+            except Exception as exc:
+                log(f"desktop launch result queue failed for {path_key}: {exc}")
+            pending.discard(path_key)
+
+        if not launch_item_async(item, source_rect, on_result=completed):
+            completed(False)
 
     def show_folder(self, folder):
         dialog = Gtk.Dialog(title=folder.get("name", "文件夹"), transient_for=self, flags=0)
@@ -2936,8 +3959,7 @@ class PhoneDesktop(Gtk.Window):
             button = Gtk.Button()
             button.set_size_request(104, 94)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            child_image = Gtk.Image.new_from_icon_name(child.get("icon"), Gtk.IconSize.DIALOG)
-            child_image.set_pixel_size(ICON_SIZE)
+            child_image = resolved_icon_image(child.get("icon"), appearance_icon_size(self.appearance))
             box.pack_start(child_image, True, True, 0)
             label = Gtk.Label(label=child.get("name"))
             label.set_line_wrap(True)

@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/bin/python3 /usr/bin
+copy_exec /usr/bin/timeout /usr/bin
+mkdir -p "${DESTDIR}/usr/lib/ming-update" "${DESTDIR}/scripts/local-bottom"
+cp -a /usr/lib/python3* "${DESTDIR}/usr/lib/"
+cp -a /usr/local/lib/ming-update/ming-transaction-boot.py "${DESTDIR}/usr/lib/ming-update/"
+cp -a /usr/local/lib/ming-update/ming-transaction-state.py "${DESTDIR}/usr/lib/ming-update/"
+cp -a /usr/local/lib/ming-update/ming-transaction-slot.py "${DESTDIR}/usr/lib/ming-update/"
+cp -a /usr/local/lib/ming-update/ming-transaction-local-premount "${DESTDIR}/scripts/local-bottom/ming-transaction"
+chmod 0755 "${DESTDIR}/scripts/local-bottom/ming-transaction"

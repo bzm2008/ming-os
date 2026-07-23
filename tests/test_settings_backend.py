@@ -35,6 +35,9 @@ class FakeRunner:
 
     def __call__(self, argv, timeout=8):
         self.calls.append(list(argv))
+        if argv[:2] == ["/usr/local/bin/ming-appearance-control", "apply"]:
+            size = int(argv[argv.index("--dock-icon-size") + 1])
+            return 0, json.dumps({"dock_icon_size": size}), ""
         if argv[0] == "xfconf-query":
             channel = argv[argv.index("-c") + 1]
             prop = argv[argv.index("-p") + 1]
@@ -125,14 +128,18 @@ class SettingsBackendTests(unittest.TestCase):
         self.assertEqual("bool", write[write.index("-t") + 1])
         self.assertEqual("true", write[write.index("-s") + 1])
 
-    def test_plank_setting_uses_structured_keyfile_update(self):
-        settings = pathlib.Path(self.tempdir.name) / ".config/plank/dock1/settings"
-        settings.parent.mkdir(parents=True)
-        settings.write_text("[PlankDockPreferences]\nIconSize=48\nZoomPercent=126\n", encoding="utf-8")
+    def test_dock_icon_size_uses_the_authoritative_appearance_control(self):
         result = self.backend.set_value("dock_icon_size", 64)
         self.assertTrue(result["ok"])
         self.assertEqual(64, result["value"])
-        self.assertIn("IconSize=64", settings.read_text(encoding="utf-8"))
+        appearance_path = pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json"
+        self.assertTrue(appearance_path.is_file())
+        appearance = json.loads(appearance_path.read_text(encoding="utf-8"))
+        self.assertEqual(64, appearance["dock_icon_size"])
+        self.assertIn(
+            ["/usr/local/bin/ming-appearance-control", "apply", "--dock-icon-size", "64", "--json"],
+            self.runner.calls,
+        )
 
     def test_protected_autostart_entry_cannot_be_disabled(self):
         result = self.backend.set_autostart("ming-phone-desktop.desktop", False)
@@ -153,16 +160,28 @@ class SettingsBackendTests(unittest.TestCase):
         result = self.backend.set_value("reduced_motion", True)
         self.assertTrue(result["ok"])
         self.assertIs(True, self.backend.get_value("reduced_motion")["value"])
+        appearance = json.loads((pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual("reduced", appearance["motion"])
 
-    def test_software_compositor_profile_restarts_picom_and_persists_autostart(self):
-        result = self.backend.set_value("compositor_profile", "software")
+    def test_compat_compositor_profile_restarts_picom_and_persists_every_state_file(self):
+        result = self.backend.set_value("compositor_profile", "compat")
         self.assertTrue(result["ok"])
         self.assertIn("picom --config /etc/xdg/picom/picom-fallback.conf", self.runner.picom_command)
         autostart = pathlib.Path(self.tempdir.name) / ".config/autostart/picom.desktop"
         content = autostart.read_text(encoding="utf-8")
         self.assertIn("Exec=picom --config /etc/xdg/picom/picom-fallback.conf", content)
         self.assertIn("X-GNOME-Autostart-enabled=true", content)
-        self.assertEqual("software", self.backend.get_value("compositor_profile")["value"])
+        self.assertEqual("compat", self.backend.get_value("compositor_profile")["value"])
+        appearance = json.loads((pathlib.Path(self.tempdir.name) / ".config/ming-os/appearance.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual("compat", appearance["compositor_profile"])
+
+    def test_legacy_software_compositor_profile_reads_as_compat(self):
+        self.backend.local_path.parent.mkdir(parents=True)
+        self.backend.local_path.write_text('{"compositor_profile":"software"}', encoding="utf-8")
+        self.runner.picom_command = "picom --config /etc/xdg/picom/picom-fallback.conf --log-level=warn"
+        self.assertEqual("compat", self.backend.get_value("compositor_profile")["value"])
 
     def test_disabled_compositor_stops_picom_and_disables_autostart(self):
         self.backend.set_value("compositor_profile", "auto")
@@ -413,9 +432,9 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
     def test_hardware_page_build_and_refresh_never_run_probes_on_gtk_thread(self):
         self.assertIn("    def refresh_hardware_status", self.source)
         build = self.source[self.source.index("    def build_hardware"):
-                            self.source.index("    def read_broadcom_status")]
+                            self.source.index("    def on_wifi_repair")]
         refresh = self.source[self.source.index("    def refresh_hardware_status"):
-                              self.source.index("    def read_broadcom_status")]
+                              self.source.index("    def export_hardware_diagnostics")]
         self.assertNotIn("run([", build)
         self.assertNotIn("pci_driver_summary(", build)
         self.assertIn("refresh_hardware_status", build)
@@ -428,7 +447,7 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
         self.assertIn("def hardware_probe_snapshot", self.source)
         probe = self.source[self.source.index("def hardware_probe_snapshot"):
                             self.source.index("PAGE_ALIASES")]
-        for marker in ["lscpu", "uname", "pci_driver_summary", "read_broadcom_status_snapshot"]:
+        for marker in ["lscpu", "uname", "pci_driver_summary", "read_compatibility_help_snapshot"]:
             self.assertIn(marker, probe)
 
     def test_compositor_failure_parses_backend_error_and_reconciles_combo(self):
@@ -455,13 +474,15 @@ class AdvancedSettingsSourceTests(unittest.TestCase):
         )
         self.assertIn("set_selected", combo)
 
-    def test_broadcom_completion_checks_operation_generation_and_page_root(self):
-        action = self.source[self.source.index("    def on_broadcom_action"):
+    def test_compatibility_help_completion_checks_operation_generation_and_page_root(self):
+        action = self.source[self.source.index("    def on_compatibility_help"):
                              self.source.index("    def button_row")]
-        self.assertIn("operation_generation", action)
-        accept = action.index("self.hardware_probe_state.accept(operation_generation)")
+        self.assertIn("run_task_async(read_compatibility_help_snapshot, done)", action)
+        self.assertNotIn("pkexec", action)
+        self.assertNotIn("ming-broadcom-driver", action)
+        accept = action.index("self.compatibility_probe_state.accept(generation)")
         root = action.index("self.hardware_page.get_root()")
-        refresh = action.index("self.refresh_broadcom_status()")
+        refresh = action.index("self.apply_compatibility_help(status)")
         toast = action.index("self.toast(")
         self.assertLess(accept, refresh)
         self.assertLess(root, refresh)

@@ -177,6 +177,28 @@ class ShellCommonTests(unittest.TestCase):
             )
             self.assertIsNone(self.common.parse_desktop_file(desktop))
 
+    def test_theme_icon_is_scaled_to_requested_size(self):
+        class FakePixbuf:
+            def __init__(self, width, height):
+                self.width = width
+                self.height = height
+
+            def get_width(self):
+                return self.width
+
+            def get_height(self):
+                return self.height
+
+            def scale_simple(self, width, height, _interpolation):
+                return FakePixbuf(width, height)
+
+        class FakeTheme:
+            def load_icon(self, _name, _size, _flags):
+                return FakePixbuf(128, 128)
+
+        pixbuf = self.common.load_icon_pixbuf(FakeTheme(), "papyrus", 48)
+        self.assertEqual((48, 48), (pixbuf.get_width(), pixbuf.get_height()))
+
 
 if __name__ == "__main__":
     unittest.main()

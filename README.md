@@ -1,37 +1,51 @@
-# Ming OS 26.3.2 Home Edition
+# Ming OS 26.4.0 正式版
 
-Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current candidate release is `26.3.2`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a small but polished desktop experience.
+Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current release target is `26.4.0`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a stable Ming desktop experience.
 
 ## Current Release
 
 | Item | Value |
 | --- | --- |
-| Version | 26.3.2 Home Edition |
+| Version | 26.4.0 正式版（事务版本 26.4.0.1） |
 | Base | Debian 13 / Trixie |
 | Kernel | Debian 6.12 LTS family in the current ISO |
 | Desktop | Xfce + Plank Dock + Ming desktop tools |
-| ISO | `ming-os-26.3.2-home-amd64.iso` |
-| Size | Build output TBD |
-| SHA256 | Build output TBD |
+| ISO | `ming-os-26.4.0-home-amd64-formal.iso` |
+| Size | `2063597568` bytes |
+| SHA256 | `13ba69a727f28563a812f824f503ce0815cbd205523e9f488d4536e2d5d47a6` |
+| Release state | 26.4.0 formal ISO published; transactional OTA remains fail-closed until signed metadata is available |
 | CPU target | Debian amd64 baseline; old 64-bit CPUs without AVX2 remain in scope |
 | 32-bit status | Deferred; no i386 ISO in this release |
 
-Official download:
+Official download path:
 
 ```text
-https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download
+https://ming.sca-hub.cn/iso/ming-os-26.4.0-home-amd64-formal.download
 ```
 
 OTA endpoint:
 
 ```text
-https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable
+https://ming.sca-hub.cn/api/onion-update/check?version=26.3.2&channel=stable
 ```
+
+### OTA discovery domain failover
+
+The primary discovery endpoint is `ming.sca-hub.cn`. The transport fallback is:
+
+```text
+https://sca-hub.cn/api/onion-update/check
+```
+
+The client uses the fallback only after a primary transport failure. It does
+not fall back for malformed discovery data or signature/protocol failures.
+Both endpoints remain subject to the same manifest, payload, content-index,
+version, architecture, and offline signature checks.
 
 GitHub release:
 
 ```text
-https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
+https://github.com/bzm2008/ming-os/releases/tag/v26.4.0.1
 ```
 
 ## What Ming OS Is
@@ -42,19 +56,19 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
 - A branded installer and installed system, so users do not feel they installed plain Debian.
 - A system line that prioritizes bootability, installation success, and easy support diagnostics.
 
-## 26.3.2 Highlights
+## 26.4.0 Highlights
 
 - Repaired the ISO boot chain and requires BIOS, UEFI, Rufus, Ventoy, and desktop checks before release.
 - Keeps BIOS/Legacy and UEFI El Torito boot entries in the ISO.
 - Removes problematic GRUB `splash` / `install` kernel parameters while keeping the Ming installer session marker.
-- Uses a stable ISO volume label: `MING_OS_2632`.
+- Uses a stable ISO volume label: `MING_OS_2640`.
 - Points Calamares `unpackfs.conf` at `/run/ming-installer/filesystem.squashfs`.
 - Defaults installer locale/timezone to Chinese usage, including Asia/Shanghai behavior.
 - Uses Microsoft Edge as the default browser through a stable Ming launcher.
 - Enables Fcitx5 pinyin input by default for GTK, Qt, and X11 applications.
 - Hardens Wi-Fi and Bluetooth support with NetworkManager, wpa_supplicant, ModemManager, BlueZ, Blueman, RF kill unblocking, and broad firmware coverage.
 - Keeps the desktop installer branded as Ming OS instead of Debian.
-- Publishes OTA metadata only after the final ISO size and SHA256 are known.
+- Publishes transactional OTA metadata only after signed manifest, content index, payload and bootstrap are available; the current discovery endpoint fails closed with `delivery:none`.
 - Keeps older 64-bit CPUs such as first/second/third-generation i3/i5 and E3 V1/V2 class machines in the support target.
 
 ## Core Experience
@@ -64,7 +78,7 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
 - App library and desktop entries designed for users who prefer visible buttons.
 - Microsoft Edge is the default browser entry on the desktop and Dock.
 - Android-like desktop folders for grouping applications.
-- All Disks entry to reduce anxiety around separate C/D-style partitions.
+- Ming Files is the single file and disk entry; duplicate disk tools are retired.
 - Network, driver, printer, and diagnostic tools grouped in Settings rather than scattered on the desktop.
 - Low-memory strategy with zram, lighter effects, cleanup helpers, and optional WeChat/WPS installers instead of preinstalling them.
 - OTA update flow with readable status, checksum, size, and error messages.
@@ -82,66 +96,97 @@ Supported test paths:
 - Direct disk write with `dd`
 
 ```bash
-sudo dd if=ming-os-26.3.2-home-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=ming-os-26.4.0-home-amd64-formal.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 Live/installer mode should enter the Ming OS installer without stopping at a Debian-branded desktop or a username/password prompt. If an old machine fails, record whether it stops before GRUB, at GRUB, while loading the kernel, or inside Calamares.
 
 ## OTA
 
-Normal users should click the desktop update button. Advanced users can still use:
+Normal users should use the System Update page in Ming Settings. Advanced users can still use:
 
 ```bash
-onion-update check
-onion-update download
-sudo onion-update install
+ming-update check
+sudo ming-update apply
 ```
 
-Expected public OTA response:
+Legacy website download response (transactional discovery remains separate):
 
 ```json
 {
-  "version": "26.3.2",
-  "ready": true,
-  "status": "ready",
-  "download_url": "https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download",
-  "checksum": "09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c",
+  "has_update": false,
+  "version": "26.4.0.1",
+  "ready": false,
+  "status": "signed-metadata-pending",
+  "update_type": "major",
+  "download_url": null,
+  "checksum": null,
   "checksum_type": "sha256",
-  "size": 1984790528
+  "size": null,
+  "transactional_available": false,
+  "ota_status": "signed-metadata-pending"
 }
 ```
+
+### 26.3.2 Transition
+
+The 26.3.2 client must first install the official signed bootstrap. The
+transactional path remains unavailable until the release owner publishes and
+verifies a manifest with `from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]`,
+target `version: "26.4.0.1"`, and a matching content index,
+payload and detached signatures. Until then the discovery endpoint returns
+`delivery:none`; no manual GRUB step or recovery-ISO shortcut is offered. Recovery
+ISO updates retain their independent-backup-media safety gate.
 
 ## GitHub Assets
 
 If the ISO is split for GitHub Release assets, merge the parts before writing to USB.
 
 ```bash
-cat ming-os-26.3.2-home-amd64.iso.part* > ming-os-26.3.2-home-amd64.iso
-sha256sum -c ming-os-26.3.2-home-amd64.iso.sha256
+cat ming-os-26.4.0-home-amd64-formal.iso.part* > ming-os-26.4.0-home-amd64-formal.iso
+sha256sum -c ming-os-26.4.0-home-amd64-formal.iso.sha256
 ```
 
 Windows PowerShell:
 
 ```powershell
-cmd /c copy /b ming-os-26.3.2-home-amd64.iso.part01+ming-os-26.3.2-home-amd64.iso.part02 ming-os-26.3.2-home-amd64.iso
-Get-FileHash ming-os-26.3.2-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.4.0-home-amd64-formal.iso.part01+ming-os-26.4.0-home-amd64-formal.iso.part02 ming-os-26.4.0-home-amd64-formal.iso
+Get-FileHash ming-os-26.4.0-home-amd64-formal.iso -Algorithm SHA256
 ```
 
-The merged file must match the SHA256 generated after the final build.
-
-```text
-09f8f8493a539b37ad1973e5cbcb74db138c33eb3c01fd77f0ee6ad1b61f220c
-```
+The merged file must match the SHA256 generated after the final build and
+published alongside the release asset.
 
 ## Verification Status
 
-Required validation for the 26.3.2 ISO:
+The formal ISO was built with a complete module replay and verified for the
+`MING_OS_2640` volume label, BIOS/isolinux and UEFI/GRUB El Torito entries,
+and the embedded Live payload. The published checksum is the checksum of that
+immutable formal artifact.
+
+## Release Trust Operations
+
+Release operators must read [`docs/releases/ming-release-vault-operations.md`](docs/releases/ming-release-vault-operations.md)
+before building or publishing 26.4.0. The release gate is read-only and
+requires the reviewed public keyring, policy, receipt, local encrypted bundle,
+sidecar and fixed NAS verification. Encrypted recovery bundles and all private
+credentials stay outside GitHub, the website and the ISO build context.
+
+```bash
+python3 tools/ming-release-vault.py preflight --mode release --config /path/to/release-preflight.json
+```
+
+Only a JSON result with `status=ok` permits a release build. A missing official
+trust root or a failed NAS check must freeze publication; do not create a
+replacement signing key.
+
+Required validation for the 26.4.0 ISO:
 
 - `xorriso -report_el_torito` shows BIOS and UEFI boot images.
 - `/live/vmlinuz` is a valid Linux kernel, not zeroed data.
-- BIOS isolinux and UEFI GRUB menus show Ming OS 26.3.2.
-- VirtualBox BIOS smoke test reaches the Ming OS 26.3.2 installer, installs, and reboots into the hard disk.
-- VirtualBox UEFI smoke test reaches the Ming OS 26.3.2 installer, installs, and reboots into the hard disk.
+- BIOS isolinux and UEFI GRUB menus show Ming OS 26.4.0.
+- VirtualBox BIOS smoke test reaches the Ming OS 26.4.0 installer, installs, and reboots into the hard disk.
+- VirtualBox UEFI smoke test reaches the Ming OS 26.4.0 installer, installs, and reboots into the hard disk.
 
 Recommended remaining field tests:
 
@@ -155,4 +200,6 @@ Recommended remaining field tests:
 - Ming OS can run on low-memory machines, but optional WeChat/WPS installs may become the largest memory consumers.
 - The normal user path should be buttons, Settings, update UI, app folders, and graphical repair tools.
 - Command-line usage is for advanced support, not daily operation.
-- Current official release is Ming OS 26.3.2. Do not recommend older 26.2.x or failed 26.3.0-r builds to new users.
+- Ming OS 26.4.0 ISO and checksum are published. Transactional OTA remains
+  `delivery:none` until the release owner supplies and verifies the signed
+  manifest, content index, payload, detached signatures, and 26.3.2 bootstrap.

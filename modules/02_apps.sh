@@ -31,10 +31,14 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     gir1.2-gtk-4.0
     gir1.2-adw-1
     libadwaita-1-0
+    # Papyrus uses the Debian WebKitGTK 4.1 ABI.  Keep this in the required
+    # runtime set so a visible launcher cannot ship without its ELF runtime.
+    libwebkit2gtk-4.1-0
     gvfs
     gvfs-backends
     brightnessctl
     xdotool
+    xinput
     wmctrl
     rfkill
     pulseaudio
@@ -53,6 +57,12 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     desktop-file-utils
     im-config
     blueman
+    bamfdaemon
+    # Debian 13/Trixie renamed the BAMF library for the 64-bit time_t ABI.
+    # Keep the concrete package in the required list so dpkg-query cannot
+    # silently accept a missing Dock window-mapping backend.
+    libbamf3-2t64
+    ffmpeg
 )
 
 run_required_step() {
@@ -82,14 +92,12 @@ install_xfce_desktop() {
         xserver-xorg-video-ati \
         xserver-xorg-video-nouveau \
         xserver-xorg-input-libinput \
-        xfce4 \
-        xfce4-panel \
+        xfwm4 \
+        xfconf \
         xfce4-session \
         xfce4-settings \
+        xfdesktop4 \
         xfce4-terminal \
-        xfce4-appfinder \
-        xfce4-whiskermenu-plugin \
-        xfce4-taskmanager \
         xfce4-notifyd \
         python3-gi \
         gir1.2-gtk-3.0 \
@@ -102,9 +110,7 @@ install_xfce_desktop() {
         ristretto \
         xdg-user-dirs \
         xdg-utils \
-        desktop-base \
-        xfce4-power-manager \
-        xfce4-power-manager-plugins || return 1
+        desktop-base || return 1
 
     apt install -y --no-install-recommends \
         picom \
@@ -113,186 +119,7 @@ install_xfce_desktop() {
         librsvg2-common \
         imagemagick || return 1
 
-    mkdir -p /etc/xdg/picom
-    cat > /etc/xdg/picom/picom.conf << PICOMDEFAULT
-backend = "glx";
-vsync = false;
-unredir-if-possible = false;
-
-shadow = true;
-shadow-radius = 8;
-shadow-opacity = 0.24;
-shadow-offset-x = -8;
-shadow-offset-y = -8;
-shadow-exclude = [
-    "name = 'Notification'",
-    "class_g = 'Conky'",
-    "class_g ?= 'Notify-osd'",
-    "class_g = 'Cairo-clock'",
-    "_GTK_FRAME_EXTENTS@:c",
-    "name = 'xfce4-notifyd'",
-    "window_type = 'dock'",
-    "window_type = 'desktop'"
-];
-
-fading = true;
-fade-in-step = 3.0e-2;
-fade-out-step = 3.0e-2;
-fade-delta = 4;
-
-active-opacity = 1.0;
-inactive-opacity = 1.0;
-frame-opacity = 1.0;
-inactive-opacity-override = false;
-
-blur-background = false;
-blur-background-frame = false;
-blur-background-fixed = false;
-blur-background-exclude = [
-    "window_type = 'dock'",
-    "window_type = 'desktop'",
-    "_GTK_FRAME_EXTENTS@:c"
-];
-wintypes:
-{
-    tooltip = { fade = true; shadow = true; opacity = 0.9; focus = true; };
-    dock = { shadow = false; opacity = 0.92; };
-    dnd = { shadow = false; };
-    popup_menu = { opacity = 1.0; };
-    dropdown_menu = { opacity = 1.0; };
-    notification = { shadow = true; opacity = 0.94; };
-};
-
-detect-client-leader = true;
-detect-transient = true;
-use-damage = true;
-log-level = "warn";
-xrender-sync-fence = true;
-PICOMDEFAULT
-
-    # 老旧GPU回退配置（当 GLX 不可用时自动降级到 xrender）
-    mkdir -p /etc/xdg/picom-backup
-    cat > /etc/xdg/picom/picom-fallback.conf << PICOMFALLBACK
-backend = "xrender";
-vsync = false;
-unredir-if-possible = false;
-shadow = false;
-blur-background = false;
-fading = true;
-fade-in-step = 5.0e-2;
-fade-out-step = 5.0e-2;
-fade-delta = 4;
-active-opacity = 1.0;
-inactive-opacity = 1.0;
-frame-opacity = 1.0;
-inactive-opacity-override = false;
-use-damage = true;
-log-level = "warn";
-detect-client-leader = true;
-detect-transient = true;
-wintypes:
-{
-    dock = { shadow = false; opacity = 0.92; };
-    notification = { shadow = false; opacity = 0.94; };
-};
-PICOMFALLBACK
-
-    # Picom 启动包装器（自动探测 GLX 可用性，低内存/老显卡回退）
-    cat > /usr/local/bin/ming-picom << 'PICOMWRAP'
-#!/usr/bin/env bash
-set -u
-
-CONF="${HOME}/.config/picom/picom.conf"
-LOWMEM="/etc/xdg/picom/picom-lowmem.conf"
-FALLBACK="/etc/xdg/picom/picom-fallback.conf"
-PICOM_BIN=$(command -v picom 2>/dev/null || echo "picom")
-MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
-LOG="/tmp/ming-picom.log"
-CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
-RENDERER=""
-DIRECT_RENDERING=""
-
-log() {
-    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${LOG}" 2>/dev/null || true
-}
-
-choose_config() {
-    local config="$1"
-    if [ -f "${config}" ]; then
-        printf '%s' "${config}"
-    elif [ -f "${FALLBACK}" ]; then
-        printf '%s' "${FALLBACK}"
-    else
-        printf '%s' "${CONF}"
-    fi
-}
-
-run_picom() {
-    local config
-    local reason="$2"
-    config="$(choose_config "$1")"
-    shift 2
-    local backend
-    backend="$(awk -F'"' '/^[[:space:]]*backend[[:space:]]*=/{print $2; exit}' "${config}" 2>/dev/null || true)"
-    log "selected config=${config} backend=${backend:-unknown} reason=${reason} mem_mb=${MEM_MB} renderer=${RENDERER:-unknown} direct=${DIRECT_RENDERING:-unknown}"
-    exec "${PICOM_BIN}" --config "${config}" -b "$@"
-}
-
-if command -v glxinfo >/dev/null 2>&1; then
-    GLXINFO="$(glxinfo -B 2>/dev/null || glxinfo 2>/dev/null || true)"
-    RENDERER="$(printf '%s\n' "${GLXINFO}" | awk -F: '/OpenGL renderer string/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
-    DIRECT_RENDERING="$(printf '%s\n' "${GLXINFO}" | awk -F: '/direct rendering/ {sub(/^[ \t]+/, "", $2); print $2; exit}')"
-fi
-
-if printf '%s\n' "${CMDLINE}" | grep -qwE 'nomodeset|i915.modeset=0|radeon.modeset=0|amdgpu.modeset=0|nouveau.modeset=0'; then
-    run_picom "${FALLBACK}" "kernel-modeset-disabled" "$@"
-fi
-
-case "$(printf '%s' "${RENDERER}" | tr '[:upper:]' '[:lower:]')" in
-    *llvmpipe*|*softpipe*|*software*rasterizer*|*swrast*)
-        run_picom "${FALLBACK}" "software-renderer" "$@"
-        ;;
-esac
-
-HAS_DRI=0
-IS_OLD_INTEL=0
-for dri in /dev/dri/renderD* /dev/dri/card*; do
-    if [ -e "${dri}" ]; then
-        HAS_DRI=1
-        break
-    fi
-done
-
-# These Intel generations often expose DRI but remain unstable with GLX blur.
-for dev in /sys/class/drm/card*/device; do
-    [ -e "${dev}" ] || continue
-    vendor_id=$(cat "${dev}/vendor" 2>/dev/null || true)
-    device_id=$(cat "${dev}/device" 2>/dev/null || true)
-    if [ "${vendor_id}" = "0x8086" ]; then
-        case "${device_id}" in
-            0x0042|0x0046|0x0102|0x0106|0x010a|0x0112|0x0116|0x0122|0x0126|0x0152|0x0156|0x015a|0x0162|0x0166|0x016a|0x0402|0x0412|0x0416|0x0a16|0x0a26|0x0a2e|0x0d16|0x0d22|0x0d26|0x29*|0x2a*|0x2e*)
-                IS_OLD_INTEL=1
-                ;;
-        esac
-    fi
-done
-
-if [ "${HAS_DRI}" -eq 0 ]; then
-    run_picom "${FALLBACK}" "no-dri-device" "$@"
-fi
-if [ "${MEM_MB}" -le 2600 ]; then
-    run_picom "${FALLBACK}" "very-low-memory" "$@"
-fi
-if [ "${IS_OLD_INTEL}" -eq 1 ]; then
-    run_picom "${FALLBACK}" "old-intel-glx-risk" "$@"
-fi
-if [ "${MEM_MB}" -le 4200 ]; then
-    run_picom "${LOWMEM}" "low-memory" "$@"
-fi
-
-run_picom "${CONF}" "modern-gpu" "$@"
-PICOMWRAP
-    chmod +x /usr/local/bin/ming-picom
+    # Picom configuration and wrapper are generated only by 03_desktop.sh.
 
     echo "lightdm lightdm/default-display-manager select lightdm" | debconf-set-selections
     apt install -y --no-install-recommends \
@@ -370,7 +197,7 @@ PLYMOUTHSCRIPT
 LIVE_USERNAME="${MING_USER}"
 LIVE_USER_FULLNAME="Ming OS User"
 LIVE_HOSTNAME="ming-os"
-LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video render plugdev netdev powerdev scanner bluetooth sudo adm lpadmin nopasswdlogin autologin"
+LIVE_USER_DEFAULT_GROUPS="audio cdrom dip floppy video render plugdev netdev powerdev scanner bluetooth adm lpadmin nopasswdlogin autologin"
 LIVECONFIG
 
     mkdir -p /etc/lightdm/lightdm.conf.d
@@ -429,6 +256,7 @@ for grp in nopasswdlogin autologin; do
     getent group "${grp}" >/dev/null 2>&1 || groupadd -r "${grp}" 2>/dev/null || true
     usermod -aG "${grp}" "${target_user}" 2>/dev/null || true
 done
+gpasswd -d "${target_user}" sudo >/dev/null 2>&1 || true
 
 # installer boot 用专用 kiosk session，普通 boot 用 xfce
 session="xfce"
@@ -641,7 +469,85 @@ MINGFONTS
 
 # ======================== Microsoft Edge ========================
 
+generate_edge_video_samples() {
+    local sample_dir="${MING_EDGE_SAMPLE_DIR:-/usr/share/ming-os/media-tests}"
+    mkdir -p "${sample_dir}" || return 1
+    ffmpeg -hide_banner -loglevel error -y -f lavfi \
+        -i 'testsrc2=size=64x64:rate=12' -t 0.5 -pix_fmt yuv420p \
+        -c:v libx264 -movflags +faststart "${sample_dir}/h264.mp4" || return 1
+    ffmpeg -hide_banner -loglevel error -y -f lavfi \
+        -i 'testsrc2=size=64x64:rate=12' -t 0.5 -pix_fmt yuv420p \
+        -c:v libvpx-vp9 -deadline good -cpu-used 8 "${sample_dir}/vp9.webm" || return 1
+    test -s "${sample_dir}/h264.mp4" && test -s "${sample_dir}/vp9.webm" || return 1
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+        -of default=nw=1:nk=1 "${sample_dir}/h264.mp4" | grep -qx h264 || return 1
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+        -of default=nw=1:nk=1 "${sample_dir}/vp9.webm" | grep -qx vp9 || return 1
+}
+
+install_edge_graphics_helper() {
+    cat > /usr/local/bin/ming-edge-graphics << 'MINGEDGEGRAPHICS'
+#!/usr/bin/env bash
+set -uo pipefail
+
+state_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/ming-os"
+mode_file="${state_dir}/edge-graphics-mode"
+samples=/usr/share/ming-os/media-tests
+
+active_render_node() {
+    local node card boot candidate
+    for boot in /sys/class/drm/card*/device/boot_vga; do
+        [[ "$(cat "${boot}" 2>/dev/null || true)" == 1 ]] || continue
+        card="${boot%/device/boot_vga}"
+        for candidate in "${card}"/device/drm/renderD*; do
+            [[ -e "${candidate}" ]] || continue
+            node="/dev/dri/${candidate##*/}"
+            [[ -r "${node}" && -w "${node}" ]] && { printf '%s\n' "${node}"; return; }
+        done
+    done
+    for node in /dev/dri/renderD*; do
+        [[ -r "${node}" && -w "${node}" ]] && { printf '%s\n' "${node}"; return; }
+    done
+    return 1
+}
+
+decode_samples() {
+    local node="$1" sample successful_codecs=0
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    for sample in "${samples}/h264.mp4" "${samples}/vp9.webm"; do
+        [[ -s "${sample}" ]] || continue
+        if timeout 12 ffmpeg -v error -hwaccel vaapi -hwaccel_device "${node}" \
+            -hwaccel_output_format vaapi -i "${sample}" -frames:v 12 -f null - \
+            >/dev/null 2>&1; then
+            successful_codecs=$((successful_codecs + 1))
+        fi
+    done
+    (( successful_codecs >= 1 ))
+}
+
+mode="$(cat "${mode_file}" 2>/dev/null || printf auto)"
+node="$(active_render_node || true)"
+video=false
+[[ "${mode}" != compat && -n "${node}" ]] && decode_samples "${node}" && video=true
+
+case "${1:-status}" in
+    status)
+        printf '{"mode":"%s","render_node":"%s","video_decode":%s}\n' \
+            "${mode}" "${node}" "${video}"
+        ;;
+    test-video) ${video} ;;
+    set-mode)
+        [[ "${2:-}" == auto || "${2:-}" == compat ]] || exit 2
+        mkdir -p "${state_dir}" && printf '%s\n' "$2" >"${mode_file}"
+        ;;
+    *) printf 'Usage: %s status|test-video|set-mode auto|compat\n' "$0" >&2; exit 2 ;;
+esac
+MINGEDGEGRAPHICS
+    chmod 0755 /usr/local/bin/ming-edge-graphics
+}
+
 install_edge() {
+    install_edge_graphics_helper
     apt install -y --no-install-recommends \
         apt-transport-https \
         ca-certificates \
@@ -665,12 +571,12 @@ EDGEREPO
 #!/usr/bin/env bash
 set -e
 homepage=/usr/share/ming-os/homepage/index.html
-edge_args=()
+edge_args=(--ozone-platform=x11)
 edge_graphics_mode=software
 
 edge_gpu_mode() {
     local probe_cache probe_tmp probe_json
-    if [[ ! -e /dev/dri/renderD128 ]] \
+    if [[ -z "$(ming-edge-graphics status 2>/dev/null | sed -n 's/.*\"render_node\":\"\([^\"]*\)\".*/\1/p')" ]] \
         || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet) \
         || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|(i915|amdgpu|radeon|nouveau)\.modeset=0' /proc/cmdline 2>/dev/null; then
         printf '%s\n' software
@@ -691,7 +597,7 @@ edge_gpu_mode() {
     if ! grep -Fq '"desktop_rendering": true' <<< "${probe_json}" \
         || ! grep -Fq '"render_access": true' <<< "${probe_json}"; then
         printf '%s\n' software
-    elif grep -Fq '"edge_hardware_video": true' <<< "${probe_json}"; then
+    elif ming-edge-graphics test-video >/dev/null 2>&1; then
         printf '%s\n' video
     else
         # The compositor can still use the native GPU when VA-API has no
@@ -705,18 +611,17 @@ edge_graphics_mode="$(edge_gpu_mode)"
 if [[ "${edge_graphics_mode}" == software ]]; then
     # VirtualBox, no render node, safe-graphics mode, or failed VA-API all
     # use a deterministic software path to avoid black borders and hangs.
-    edge_args+=(--ozone-platform=x11 --disable-gpu --disable-gpu-compositing)
+    edge_args+=(--disable-gpu --disable-gpu-compositing)
 elif [[ "${edge_graphics_mode}" == video ]]; then
     # Only enable Chromium's VA-API path after ming-hardware-status has
     # confirmed a real KMS/Mesa path, render access and at least one supported
     # browser codec on a non-virtual host.
     edge_args+=(
         --enable-accelerated-video-decode
-        --enable-features=VaapiVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo
-        --use-gl=egl
+        --enable-features=VaapiVideoDecodeLinuxGL
     )
 else
-    edge_args+=(--ozone-platform=x11 --disable-accelerated-video-decode)
+    edge_args+=(--disable-accelerated-video-decode)
 fi
 # Keep browser playback independent from a stale PulseAudio user session.  This
 # is intentionally bounded and only repairs a missing/broken default output;
@@ -1816,59 +1721,436 @@ MINGINPUTCONTROL
 
 # ======================== 应用商店 (星火应用商店) ========================
 
+deploy_spark_build_mode_resolver() {
+    local target="/usr/local/libexec/ming-spark-build-mode"
+    install -d -m 0755 "$(dirname "${target}")" || return 1
+    cat > "${target}" << 'MINGSPARKMODE'
+#!/usr/bin/env bash
+set -uo pipefail
+
+spark_release_field() {
+    local key="$1"
+    awk -F= -v key="${key}" \
+        '$1 == key {value=substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", value); print value; exit}' \
+        /etc/os-release 2>/dev/null
+}
+
+resolve_spark_build_mode() {
+    local requested="${MING_RELEASE_MODE:-}"
+    local release_stage version_id identity_mode
+    release_stage="$(spark_release_field MING_RELEASE_STAGE)" || return 1
+    version_id="$(spark_release_field VERSION_ID)" || return 1
+    case "${release_stage}:${version_id}" in
+        stable:26.4.0.1)
+            identity_mode="release"
+            ;;
+        development:26.4.0.1-development)
+            identity_mode="development"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [[ -z "${requested}" ]]; then
+        [[ "${identity_mode}" == "release" ]] || return 1
+        printf '%s\n' release
+        return 0
+    fi
+    case "${requested}" in
+        release|development)
+            [[ "${requested}" == "${identity_mode}" ]] || return 1
+            printf '%s\n' "${requested}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+resolve_spark_build_mode
+MINGSPARKMODE
+    chmod 0755 "${target}" || return 1
+}
+
+deploy_package_installer_runtime() {
+    local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
+    local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_guard="/tmp/ming-build/assets/ming-package-runtime-root-guard.sh"
+    local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
+    local current_link="/usr/local/lib/ming-os/package-installer-current"
+    local stage contract required_common_sha actual_common_sha actual_installer_sha target
+    local target_dir_meta target_installer_meta target_common_meta
+    local target_installer_sha target_common_sha
+    if [[ ! -s "${installer_source}" || ! -s "${common_source}" \
+        || ! -s "${runtime_guard}" ]]; then
+        echo "[ERROR] full build is missing the controlled package installer runtime assets" >&2
+        return 1
+    fi
+    contract="$(python3 - "${installer_source}" <<'PY'
+import ast
+import pathlib
+import sys
+
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+values = {
+    node.targets[0].id: ast.literal_eval(node.value)
+    for node in tree.body
+    if isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+    and node.targets[0].id in {"PACKAGE_INSTALLER_CONTRACT", "REQUIRED_COMMON_SHA256"}
+}
+print(values.get("PACKAGE_INSTALLER_CONTRACT", ""))
+print(values.get("REQUIRED_COMMON_SHA256", ""))
+PY
+)" || return 1
+    required_common_sha="$(printf '%s\n' "${contract}" | sed -n '2p')"
+    contract="$(printf '%s\n' "${contract}" | sed -n '1p')"
+    if [[ ! "${contract}" =~ ^[a-z0-9.-]+$ \
+        || ! "${required_common_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "[ERROR] full build package installer contract is invalid" >&2
+        return 1
+    fi
+    actual_common_sha="$(sha256sum "${common_source}" | awk '{print $1}')" || return 1
+    if [[ "${actual_common_sha}" != "${required_common_sha}" ]]; then
+        echo "[ERROR] full build rejected an unmatched ming-shell-common runtime" >&2
+        return 1
+    fi
+    actual_installer_sha="$(sha256sum "${installer_source}" | awk '{print $1}')" || return 1
+    if [[ ! "${actual_installer_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "[ERROR] full build cannot verify ming-package-installer" >&2
+        return 1
+    fi
+
+    install -d -m 0755 /usr/local/sbin || return 1
+    if ! bash "${runtime_guard}" "${runtime_root}"; then
+        echo "[ERROR] full build package installer runtime root is unsafe" >&2
+        return 1
+    fi
+    stage="$(mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
+    if ! install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
+        || ! install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
+        || ! chmod 0755 "${stage}" \
+        || ! python3 -m py_compile "${stage}/ming-package-installer" \
+        || ! python3 "${stage}/ming-package-installer" --help >/dev/null; then
+        rm -rf "${stage}" || true
+        echo "[ERROR] full build package installer runtime validation failed" >&2
+        return 1
+    fi
+
+    target="${runtime_root}/${contract}"
+    if [[ -e "${target}" || -L "${target}" ]]; then
+        target_dir_meta="$(stat -c '%a:%u:%g' "${target}" 2>/dev/null || true)"
+        target_installer_meta="$(stat -c '%a:%u:%g' \
+            "${target}/ming-package-installer" 2>/dev/null || true)"
+        target_common_meta="$(stat -c '%a:%u:%g' \
+            "${target}/ming-shell-common.py" 2>/dev/null || true)"
+        target_installer_sha="$(sha256sum "${target}/ming-package-installer" \
+            2>/dev/null | awk '{print $1}' || true)"
+        target_common_sha="$(sha256sum "${target}/ming-shell-common.py" \
+            2>/dev/null | awk '{print $1}' || true)"
+        if [[ -L "${target}" || ! -d "${target}" \
+            || -L "${target}/ming-package-installer" \
+            || ! -f "${target}/ming-package-installer" \
+            || -L "${target}/ming-shell-common.py" \
+            || ! -f "${target}/ming-shell-common.py" \
+            || "${target_dir_meta}" != "755:0:0" \
+            || "${target_installer_meta}" != "755:0:0" \
+            || "${target_common_meta}" != "644:0:0" \
+            || "${target_installer_sha}" != "${actual_installer_sha}" \
+            || "${target_common_sha}" != "${required_common_sha}" ]]; then
+            rm -rf "${stage}" || true
+            echo "[ERROR] full build refused an unsafe installer runtime: ${target}" >&2
+            return 1
+        fi
+        rm -rf "${stage}"
+    else
+        mv -T "${stage}" "${target}" || return 1
+    fi
+
+    ln -sfn "${target}" "${current_link}.new" || return 1
+    mv -Tf "${current_link}.new" "${current_link}" || return 1
+    ln -sfn \
+        "${current_link}/ming-package-installer" \
+        /usr/local/sbin/.ming-package-installer.new || return 1
+    mv -Tf \
+        /usr/local/sbin/.ming-package-installer.new \
+        /usr/local/sbin/ming-package-installer || return 1
+    ln -sfn \
+        "${current_link}/ming-shell-common.py" \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new || return 1
+    mv -Tf \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new \
+        /usr/local/lib/ming-os/ming-shell-common.py || return 1
+    python3 -m py_compile /usr/local/sbin/ming-package-installer || return 1
+}
+
+deploy_spark_security_boundary() {
+    local asset_dir="/tmp/ming-build/assets"
+    local asset
+    for asset in ming-package-installer.py ming-shell-common.py ming-package-runtime-root-guard.sh ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "[ERROR] missing Spark security asset: ${asset}" >&2
+            return 1
+        fi
+    done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if [[ ! -s "${asset_dir}/polkit/${asset}" ]]; then
+            echo "[ERROR] missing Spark security policy: ${asset}" >&2
+            return 1
+        fi
+    done
+    deploy_package_installer_runtime || return 1
+    install -d -m 0755 /usr/share/polkit-1/actions || return 1
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper || return 1
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge || return 1
+    install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    install -m 0644 "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    install -m 0644 "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
+    python3 -m py_compile \
+        /usr/local/sbin/ming-package-installer \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
+}
+
 install_app_store() {
-    apt install -y --no-install-recommends \
+    local app_store_mode
+    deploy_spark_security_boundary || return 1
+    deploy_spark_build_mode_resolver || return 1
+    if ! app_store_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
+        echo "[ERROR] Spark Store build identity is invalid" >&2
+        return 1
+    fi
+    /usr/local/sbin/apt-build install --no-install-recommends \
         curl \
-        jq \
         wget \
         apt-transport-https \
+        gnupg \
         xdg-utils \
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \
-        libnotify-bin
+        libnotify-bin || return 1
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash
 set -euo pipefail
 
-api="https://gitee.com/api/v5/repos/spark-store-project/spark-store/releases/latest"
-fallback="https://gitee.com/spark-store-project/spark-store/releases/download/5.1.1/spark-store_5.1.1_amd64.deb"
-deb="/tmp/spark-store.deb"
+readonly version="5.2.1.0"
+readonly deb_name="spark-store_5.2.1.0_amd64.deb"
+readonly expected_sha256="88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
+readonly url="https://gitee.com/spark-store-project/spark-store/releases/download/5.2.1.0/${deb_name}"
+readonly deb="/tmp/${deb_name}"
 log="/var/log/ming-spark-store-install.log"
 
 cleanup() {
-    rm -f "${deb}"
+    rm -f "${deb}" "${apt_output:-}" "${result_file:-}"
 }
 trap cleanup EXIT
 
-echo "Resolving latest Spark Store release..."
-url="$(curl -fsSL "${api}" 2>/dev/null | jq -r '.assets[]? | select(.name | test("_amd64\\.deb$")) | .browser_download_url' | head -n1 || true)"
-if [[ -z "${url}" || "${url}" == "null" ]]; then
-    url="${fallback}"
-fi
-
-echo "Downloading Spark Store: ${url}"
-wget -c --show-progress -O "${deb}" "${url}"
-mkdir -p /root/.config "${HOME:-/root}/.config"
-touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     echo "Administrator privileges are required to install Spark Store." >&2
     exit 1
 fi
+
+verify_spark_asset() {
+    local candidate="$1"
+    local actual_sha256
+    [[ -f "${candidate}" && ! -L "${candidate}" ]] || return 1
+    actual_sha256="$(sha256sum -- "${candidate}" | awk '{print toupper($1)}')" \
+        || return 1
+    [[ "${actual_sha256}" == "${expected_sha256}" ]]
+}
+
+if ! build_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
+asset=""
+candidates=()
+if [[ "${build_mode}" == "release" ]]; then
+    candidates+=("/var/cache/ming-os/${deb_name}")
+else
+    if [[ -n "${MING_SPARK_STORE_ASSET:-}" ]]; then
+        candidates+=("${MING_SPARK_STORE_ASSET}")
+    fi
+    candidates+=(
+        "/tmp/ming-build/assets/${deb_name}"
+        "/var/cache/ming-os/${deb_name}"
+    )
+fi
+for candidate in "${candidates[@]}"; do
+    [[ -e "${candidate}" || -L "${candidate}" ]] || continue
+    if verify_spark_asset "${candidate}"; then
+        asset="${candidate}"
+        break
+    fi
+    if [[ "${build_mode}" == "release" ]]; then
+        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+        exit 1
+    fi
+done
+
+if [[ -n "${asset}" ]]; then
+    if [[ "${asset}" != "${deb}" ]]; then
+        install -m 0600 "${asset}" "${deb}"
+    else
+        chmod 0600 "${deb}"
+    fi
+elif [[ "${build_mode}" == "release" ]]; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+else
+    echo "Downloading pinned Spark Store ${version}..."
+    if ! timeout --foreground 300s wget \
+        --quiet \
+        --https-only \
+        --connect-timeout=10 \
+        --read-timeout=60 \
+        --tries=2 \
+        --output-document="${deb}" \
+        "${url}"; then
+        printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+        exit 1
+    fi
+fi
+if ! verify_spark_asset "${deb}"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
+# Register diversions and install the fixed source/key before dpkg runs the
+# vendor maintainer scripts. This closes the postinst policy window.
+if ! /usr/local/sbin/ming-spark-security-converge prepare --deb "${deb}"; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
+verify_installed_spark_package() {
+    local installed
+    installed="$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' spark-store 2>/dev/null)" \
+        || return 1
+    [[ "${installed}" == $'ii \t5.2.1.0' ]]
+}
+
+mkdir -p /root/.config "${HOME:-/root}/.config"
+touch /root/.config/mimeapps.list "${HOME:-/root}/.config/mimeapps.list" 2>/dev/null || true
 
 # At runtime the shared local-package installer validates architecture and
 # metadata, performs one controlled dependency repair, verifies dpkg state and
 # refreshes desktop/icon caches.  During the early image build 03_desktop has
 # not deployed it yet, so retain a strictly verified bootstrap fallback.
 if [[ -x /usr/local/sbin/ming-package-installer ]]; then
-    /usr/local/sbin/ming-package-installer install "${deb}" | tee -a "${log}"
+    result_file="$(mktemp /tmp/ming-spark-install-result.XXXXXX)"
+    if ! /usr/local/sbin/ming-package-installer install "${deb}" --resolver spark --json >"${result_file}"; then
+        cat "${result_file}" | tee -a "${log}" >&2
+        rm -f "${result_file}"
+        exit 1
+    fi
+    cat "${result_file}" >>"${log}"
+    if ! python3 - "${result_file}" <<'SPARKRESULTPY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as stream:
+        result = json.load(stream)
+except (OSError, TypeError, ValueError):
+    result = None
+# A dependency diagnosis is trustworthy only when the installer returned a
+# structured error code. Malformed output is a generic package failure so it
+# cannot be misreported as a resolver failure.
+if not isinstance(result, dict):
+    print("E_PACKAGE_FAILED", file=sys.stderr)
+    raise SystemExit(1)
+if (result.get("ok") is not True
+        or result.get("installed") is not True
+        or result.get("resolver") != "spark"):
+    print(str(result.get("error_code") or "E_PACKAGE_FAILED"), file=sys.stderr)
+    raise SystemExit(1)
+if result.get("launch_ready") is True:
+    raise SystemExit(0)
+print(str(result.get("error_code") or "E_LAUNCH_NOT_READY"), file=sys.stderr)
+raise SystemExit(1)
+SPARKRESULTPY
+    then
+        cat "${result_file}" >&2
+        rm -f "${result_file}"
+        exit 1
+    fi
+    cat "${result_file}"
+    rm -f "${result_file}"
 else
-    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1 \
-        || { apt-get -y -o Dpkg::Use-Pty=0 -f install >>"${log}" 2>&1 && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" >>"${log}" 2>&1; }
-    dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -q '^ii' \
-        || { echo "Spark Store package verification failed." >&2; exit 1; }
+    apt_output="$(mktemp /tmp/ming-spark-apt.XXXXXX)"
+
+    run_locked_apt() {
+        flock --exclusive --timeout 30 --conflict-exit-code 75 \
+            /run/lock/ming-package-manager.lock \
+            apt-get -y -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=60 "$@"
+    }
+
+    apt_failure_code() {
+        local returncode="$1"
+        if [[ "${returncode}" -eq 75 ]] || grep -Eqi \
+            'Could not (get|open) lock (file )?/var/lib/dpkg/|Unable to acquire the dpkg frontend lock|Unable to lock the administration directory' \
+            "${apt_output}"; then
+            printf '%s\n' E_PACKAGE_BUSY
+        elif grep -Eqi \
+            'unmet dependencies|held broken packages|unable to correct problems|pkgProblemResolver|dependency problems|dependency error' \
+            "${apt_output}"; then
+            printf '%s\n' E_RESOLVER_FAILED
+        else
+            printf '%s\n' E_PACKAGE_FAILED
+        fi
+    }
+
+    install_rc=0
+    install_code=""
+    if run_locked_apt install "${deb}" >"${apt_output}" 2>&1; then
+        :
+    else
+        install_rc=$?
+        install_code="$(apt_failure_code "${install_rc}")"
+        if [[ "${install_code}" == "E_RESOLVER_FAILED" ]]; then
+            if run_locked_apt -f install >"${apt_output}" 2>&1; then
+                if run_locked_apt install "${deb}" >"${apt_output}" 2>&1; then
+                    install_rc=0
+                    install_code=""
+                else
+                    install_rc=$?
+                    install_code="$(apt_failure_code "${install_rc}")"
+                fi
+            else
+                install_rc=$?
+                install_code="$(apt_failure_code "${install_rc}")"
+            fi
+        fi
+    fi
+    if [[ "${install_rc}" -ne 0 ]]; then
+        printf '[%s] Spark Store package transaction failed: %s\n' \
+            "$(date '+%F %T')" "${install_code}" >>"${log}"
+        printf '%s\n' "${install_code}" >&2
+        exit 1
+    fi
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+if ! /usr/local/sbin/ming-spark-security-converge enforce; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+
+if ! verify_installed_spark_package; then
+    printf '%s\n' E_PACKAGE_FAILED | tee -a "${log}" >&2
+    exit 1
+fi
+if [[ ! -x /usr/local/bin/spark-store ]]; then
+    printf '%s\n' E_LAUNCH_NOT_READY | tee -a "${log}" >&2
+    exit 1
 fi
 
 # A graphical user may already be logged in while a package is installed.
@@ -1887,6 +2169,10 @@ SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
 
     if ! /usr/local/bin/ming-install-spark-store; then
+        if [[ "${app_store_mode}" == "release" ]]; then
+            echo "[ERROR] 星火应用商店安装失败，正式构建已中止。" >&2
+            return 1
+        fi
         echo "[WARN] 星火应用商店安装失败，保留 ming-install-spark-store 供用户联网后重试。"
     fi
 
@@ -1897,19 +2183,13 @@ set -u
 MING_SPARK_LOG="${HOME}/.cache/ming-os/spark-store.log"
 mkdir -p "$(dirname "${MING_SPARK_LOG}")" 2>/dev/null || MING_SPARK_LOG="/tmp/ming-spark-store.log"
 
-spark_bin=""
-for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do
-    if [[ -x "${candidate}" ]]; then
-        spark_bin="${candidate}"
-        break
-    fi
-done
+spark_bin="/usr/local/bin/spark-store"
 
-if [[ -z "${spark_bin}" ]]; then
+if [[ ! -x "${spark_bin}" ]]; then
     notify-send -i dialog-error "星火应用商店" "应用商店尚未安装，请从应用库运行“修复星火应用商店”。" 2>/dev/null || true
     printf '[%s] Spark Store binary is missing\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
-    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/bin/ming-install-spark-store ]]; then
-        exec pkexec /usr/local/bin/ming-install-spark-store "$@"
+    if command -v pkexec >/dev/null 2>&1 && [[ -x /usr/local/sbin/ming-spark-store-repair-helper ]]; then
+        exec pkexec /usr/local/sbin/ming-spark-store-repair-helper
     fi
     exit 127
 fi
@@ -2027,7 +2307,7 @@ SPARKSYSDESKTOP
 Name=修复星火应用商店
 Name[zh_CN]=修复星火应用商店
 Comment=Download and install Spark Store if it was not bundled during image build
-Exec=pkexec /usr/local/bin/ming-install-spark-store
+Exec=pkexec /usr/local/sbin/ming-spark-store-repair-helper
 Icon=ming-app-store
 Terminal=true
 Type=Application
@@ -2050,37 +2330,6 @@ X-GNOME-Autostart-Delay=15
 APPRECAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-app-recommend.desktop"
 
-    cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'
-[Unit]
-Description=Ming OS App Store Readiness (delayed, non-blocking)
-After=graphical.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'command -v spark-store >/dev/null 2>&1 || /usr/local/bin/ming-install-spark-store || true'
-TimeoutStartSec=90
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVCUNIT
-
-    cat > /etc/systemd/system/ming-appstore-ready.timer << 'SPARKTIMER'
-[Unit]
-Description=Ming OS delayed Spark Store readiness
-After=graphical.target
-
-[Timer]
-OnBootSec=90s
-AccuracySec=30s
-Unit=ming-appstore-ready.service
-
-[Install]
-WantedBy=timers.target
-SPARKTIMER
-
-    systemctl disable --now ming-appstore-ready.service 2>/dev/null || true
-    systemctl enable ming-appstore-ready.timer 2>/dev/null || true
 }
 
 # ======================== 附加实用工具 ========================
@@ -2124,7 +2373,6 @@ install_utilities() {
         network-manager-openvpn-gnome \
         mobile-broadband-provider-info \
         modemmanager \
-        volumeicon-alsa \
         gnome-calculator \
         gnome-screenshot \
         evince \
@@ -2193,9 +2441,17 @@ EOF
 main() {
     echo "=====> [02_apps] 开始安装应用软件 <====="
 
+    local app_store_mode
+    deploy_spark_build_mode_resolver || return 1
+    if ! app_store_mode="$(/usr/local/libexec/ming-spark-build-mode)"; then
+        echo "[ERROR] [02_apps] Spark Store build identity is invalid" >&2
+        return 1
+    fi
+
     run_required_step install_xfce_desktop || return 1
     run_required_step install_fonts || return 1
     run_required_step install_required_desktop_runtime || return 1
+    run_required_step generate_edge_video_samples || return 1
     run_required_step enable_bluetooth_after_runtime || return 1
     run_required_step install_fcitx5 || return 1
     run_required_step deploy_eyecare || return 1
@@ -2203,7 +2459,11 @@ main() {
     run_optional_step install_edge
     run_optional_step install_wps_office
     run_optional_step install_wechat
-    run_optional_step install_app_store
+    if [[ "${app_store_mode}" == "release" ]]; then
+        run_required_step install_app_store || return 1
+    else
+        run_optional_step install_app_store
+    fi
     run_optional_step install_utilities
 
     echo "=====> [02_apps] 应用软件安装完成 <====="

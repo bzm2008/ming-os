@@ -1,0 +1,29 @@
+[Unit]
+Description=Ming OS read-only release vault integrity check
+ConditionPathExists=/etc/ming-os/release-vault.json
+After=network.target
+
+[Service]
+Type=oneshot
+User=ming-release-vault
+Group=ming-release-vault
+ExecStart=/usr/bin/timeout --signal=TERM 30s /usr/bin/python3 /usr/local/lib/ming-os/ming-release-vault.py verify-nas --config /etc/ming-os/release-vault.json
+Environment=MING_RELEASE_VAULT=/var/lib/ming-os/release-vault
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadOnlyPaths=/etc/ming-os/release-vault.json /var/lib/ming-os/release-vault
+ReadWritePaths=/var/log/ming-os
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+TimeoutStartSec=30s
+StandardOutput=append:/var/log/ming-os/release-vault-check.jsonl
+StandardError=append:/var/log/ming-os/release-vault-check.jsonl

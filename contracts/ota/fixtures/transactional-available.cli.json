@@ -1,0 +1,23 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": true,
+  "command": "check",
+  "exit_code": 0,
+  "error_code": null,
+  "state": "available",
+  "transaction": null,
+  "update": {
+    "current_version": "26.3.2",
+    "available_version": "26.3.3",
+    "release_id": "ming-os-26.3.3-amd64-20260715.1",
+    "delivery": "transactional-slot-v1",
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "action": "apply",
+  "progress": { "phase": "idle", "percent": 100 },
+  "requires_reboot": false,
+  "message_key": "update.available",
+  "message_args": {},
+  "log_path": null,
+  "timestamp": "2026-07-15T12:00:00Z"
+}

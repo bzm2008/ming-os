@@ -1,3 +1,4 @@
+import os
 import pathlib
 import re
 import subprocess
@@ -6,6 +7,12 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
+APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+BASH = (
+    r"C:\Program Files\Git\bin\bash.exe"
+    if os.name == "nt" and pathlib.Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
+    else "bash"
+)
 
 
 class DockLifecycleContracts(unittest.TestCase):
@@ -38,8 +45,14 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_plank_never_auto_hides(self):
         self.assertIn("HideMode=0", self.plank_settings)
+        self.assertIn("PinOnly=false", self.plank_settings)
+        self.assertIn("CurrentWorkspaceOnly=false", self.plank_settings)
         self.assertIn('ensure_plank_settings', self.watchdog)
         self.assertIn('^HideMode=', self.watchdog)
+
+    def test_dock_runtime_dependencies_are_required(self):
+        self.assertIn("bamfdaemon", APPS)
+        self.assertIn("libbamf3-2t64", APPS)
 
     def test_watchdog_validates_window_type_stacking_and_geometry(self):
         for marker in (
@@ -184,7 +197,7 @@ class DockLifecycleContracts(unittest.TestCase):
     def test_generated_runtime_scripts_are_valid_bash(self):
         for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):
             result = subprocess.run(
-                ["bash", "-n"], input=script.replace("\r", "").encode("utf-8")
+                [BASH, "-n"], input=script.replace("\r", "").encode("utf-8")
             )
             self.assertEqual(0, result.returncode)
 
@@ -194,16 +207,20 @@ class DockLifecycleContracts(unittest.TestCase):
             "PLANK_STARTUP_DEADLINE=8",
             "PICOM_STARTUP_DEADLINE=5",
             "PROBE_TIMEOUT=2",
-            "SUPERVISOR_INTERVAL=10",
+            "SUPERVISOR_INTERVAL=30",
             "flock -n",
             "ming-session-healthcheck.pid",
             "ming-phone-desktop-watchdog",
             "ming-plank-watchdog",
             "ming-picom",
             "while true; do",
-            "sleep 10",
+            'sleep "${SUPERVISOR_INTERVAL}"',
         ):
             self.assertIn(marker, self.session_healthcheck)
+
+        self.assertIn("monotonic_seconds()", self.session_healthcheck)
+        self.assertIn("/proc/uptime", self.session_healthcheck)
+        self.assertIn("now >= last_attempt", self.session_healthcheck)
 
         self.assertIn(
             "Exec=/usr/local/bin/ming-session-healthcheck --session",
@@ -213,6 +230,7 @@ class DockLifecycleContracts(unittest.TestCase):
             "Exec=/usr/local/bin/ming-phone-desktop-watchdog --session",
             "Exec=/usr/local/bin/ming-plank-watchdog --session",
             "Exec=/usr/local/bin/ming-picom",
+            "Exec=/usr/local/bin/ming-window-manager-watchdog --session",
         ):
             self.assertNotIn(direct, self.autostart)
 
@@ -231,6 +249,64 @@ class DockLifecycleContracts(unittest.TestCase):
             '"picom"',
         ):
             self.assertIn(marker, self.session_healthcheck)
+
+    def test_compositor_profile_controls_wrapper_and_crash_recovery(self):
+        self.assertIn("compositor_profile", self.session_healthcheck)
+        self.assertIn("appearance.json", self.session_healthcheck)
+        self.assertIn("auto|compat|off", self.session_healthcheck)
+        self.assertIn("picom-fallback.conf", self.session_healthcheck)
+        self.assertIn("compositor_profile", self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("MINGPICOM", 1)[0])
+
+    def test_picom_wrapper_executes_persisted_software_config(self):
+        wrapper = self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
+        harness = r'''work="$(mktemp -d)"
+printf '{"compositor_profile":"compat"}' >"${work}/settings.json"
+for name in main fallback lowmem; do printf 'backend = "xrender";\n' >"${work}/${name}.conf"; done
+cat >"${work}/fake-picom" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*"
+EOF
+chmod +x "${work}/fake-picom"
+export MING_COMPOSITOR_SETTINGS="${work}/settings.json"
+export MING_PICOM_MAIN_CONF="${work}/main.conf"
+export MING_PICOM_FALLBACK_CONF="${work}/fallback.conf"
+export MING_PICOM_LOWMEM_CONF="${work}/lowmem.conf"
+export MING_PICOM_BIN="${work}/fake-picom"
+'''
+        result = subprocess.run([BASH], input=(harness + wrapper).encode(), capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        output = result.stdout.decode(errors="replace")
+        self.assertIn("--config ", output)
+        self.assertIn("fallback.conf", output)
+
+    def test_compat_picom_config_keeps_shell_surfaces_fully_opaque(self):
+        fallback = self.source.split(
+            "cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'", 1
+        )[1].split("PICOMFALLBACK", 1)[0]
+        self.assertIn("dock = { shadow = false; opacity = 1.0; };", fallback)
+        self.assertIn("notification = { shadow = false; opacity = 1.0; };", fallback)
+        self.assertIn("detect-client-opacity = false;", fallback)
+
+    def test_picom_wrapper_does_not_start_when_persisted_off(self):
+        wrapper = self.source.split(
+            "cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split("\nMINGPICOM", 1)[0]
+        harness = r'''work="$(mktemp -d)"
+printf '{"compositor_profile":"off"}' >"${work}/settings.json"
+printf '{}' >"${work}/appearance.json"
+cat >"${work}/fake-picom" <<'EOF'
+#!/usr/bin/env bash
+printf 'unexpected-start\n'
+EOF
+chmod +x "${work}/fake-picom"
+export MING_COMPOSITOR_SETTINGS="${work}/settings.json"
+export MING_APPEARANCE_SETTINGS="${work}/appearance.json"
+export MING_PICOM_BIN="${work}/fake-picom"
+'''
+        result = subprocess.run([BASH], input=(harness + wrapper).encode(), capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        self.assertNotIn("unexpected-start", result.stdout.decode(errors="replace"))
 
     def test_session_metrics_include_recovery_and_duplicate_counters(self):
         for marker in (

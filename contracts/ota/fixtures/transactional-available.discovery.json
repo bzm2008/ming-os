@@ -1,0 +1,14 @@
+{
+  "schema": "ming.update.discovery.v1",
+  "available": true,
+  "current_version": "26.3.2",
+  "architecture": "amd64",
+  "capability": "transactional-slot-v1",
+  "delivery": "transactional-slot-v1",
+  "release_id": "ming-os-26.3.3-amd64-20260715.1",
+  "version": "26.3.3",
+  "minimum_bootstrap": "1.0.0",
+  "manifest_url": "https://downloads.example.invalid/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest_signature_url": "https://downloads.example.invalid/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sig",
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

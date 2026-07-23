@@ -1,0 +1,14 @@
+{
+  "schema": "ming.update.discovery.v1",
+  "available": true,
+  "current_version": "26.3.2",
+  "architecture": "amd64",
+  "capability": null,
+  "delivery": "bootstrap",
+  "bootstrap": {
+    "url": "https://downloads.example.invalid/objects/ming-ota-bootstrap_1.0.0_amd64.deb",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "signature_url": "https://downloads.example.invalid/objects/ming-ota-bootstrap_1.0.0_amd64.deb.sig",
+    "fingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

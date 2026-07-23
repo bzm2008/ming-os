@@ -17,7 +17,7 @@ https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.download
 Current OTA endpoint:
 
 ```text
-https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable
+https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable
 ```
 
 Current GitHub release:

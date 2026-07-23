@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+state_root=/var/lib/ming-update
+marker="${state_root}/capability.json"
+runtime=/usr/local/lib/ming-update
+
+fail() {
+    rm -f "${marker}"
+    echo "ming-ota-bootstrap: $*" >&2
+    exit 1
+}
+
+rm -f "${marker}"
+for path in \
+    /usr/local/bin/ming-update \
+    "${runtime}/ming-update-cli.py" \
+    "${runtime}/ming-transaction-verify.py" \
+    "${runtime}/ming-transaction-state.py" \
+    "${runtime}/ming-transaction-slot.py" \
+    "${runtime}/ming-transaction-apply.py" \
+    "${runtime}/ming-transaction-rollback.py" \
+    "${runtime}/ming-transaction-boot.py" \
+    "${runtime}/ming-transaction-health.py" \
+    "${runtime}/ming-transaction-engine.py" \
+    "${runtime}/ming-transaction-diagnostics.py" \
+    "${runtime}/ming-transaction-allowlist.txt" \
+    "${runtime}/ming-transaction-local-premount" \
+    "${runtime}/ming-ota-bootstrap-capability.py" \
+    /usr/local/sbin/ming-transaction-health \
+    /usr/share/ming-update/trust/release-keyring.gpg \
+    /usr/share/ming-update/trust/key-policy.json \
+    /usr/share/polkit-1/actions/org.mingos.update.policy \
+    /etc/initramfs-tools/hooks/ming-transaction \
+    /etc/grub.d/40_ming_transaction \
+    /etc/systemd/system/ming-transaction-health.service \
+    /etc/systemd/system/ming-transaction-reconcile.service \
+    /etc/systemd/system/ming-ota-capability-refresh.service \
+    /etc/systemd/system/ming-transaction-rollback-reboot.service \
+    /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf; do
+    test -s "${path}" || fail "missing required runtime: ${path}"
+done
+
+mkdir -p "${state_root}"
+printf '%s\n' 'transactional-slot-v1' > "${state_root}/protocol-version"
+chmod 0644 "${state_root}/protocol-version"
+
+mkdir -p /etc/default/grub.d /boot/grub
+cat > /etc/default/grub.d/40-ming-transaction.cfg <<'GRUBTRANSACTION'
+GRUB_DEFAULT=saved
+GRUB_SAVEDEFAULT=false
+GRUBTRANSACTION
+grub-editenv /boot/grub/grubenv create || fail "GRUB environment creation failed"
+grub-editenv /boot/grub/grubenv set saved_entry=ming-legacy || fail "GRUB default entry setup failed"
+grub-editenv /boot/grub/grubenv list | grep -Fxq 'saved_entry=ming-legacy' || fail "GRUB default entry readback failed"
+
+systemctl daemon-reload || fail "systemd reload failed"
+systemctl enable ming-transaction-health.service ming-transaction-reconcile.service ming-ota-capability-refresh.service || fail "transaction services could not be enabled"
+systemctl is-enabled ming-transaction-health.service >/dev/null || fail "health confirmation service is not enabled"
+systemctl is-enabled ming-transaction-reconcile.service >/dev/null || fail "rollback reconciliation service is not enabled"
+systemctl is-enabled ming-ota-capability-refresh.service >/dev/null || fail "capability refresh service is not enabled"
+grep -Fxq 'OnFailure=ming-transaction-rollback-reboot.service' /etc/systemd/system/ming-transaction-health.service || fail "health rollback reboot guard is missing"
+grep -Fxq 'Requires=ming-transaction-health.service' /etc/systemd/system/display-manager.service.d/20-ming-transaction-health.conf || fail "display manager health guard is missing"
+
+update-initramfs -u -k all || fail "initramfs generation failed"
+latest_initrd="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -n 1 || true)"
+test -n "${latest_initrd}" || fail "no initramfs was generated"
+lsinitramfs "${latest_initrd}" | grep -qx 'scripts/local-bottom/ming-transaction' || fail "transaction selector is absent from initramfs"
+
+update-grub || fail "GRUB configuration generation failed"
+grub-editenv /boot/grub/grubenv list | grep -Eq '^saved_entry=ming-(legacy|slot-a|slot-b)$' || fail "GRUB environment readback failed"
+grep -Fq -- "--id 'ming-legacy'" /boot/grub/grub.cfg || fail "legacy GRUB entry readback failed"
+grep -Fq -- "--id 'ming-slot-a'" /boot/grub/grub.cfg || fail "slot A GRUB entry readback failed"
+grep -Fq -- "--id 'ming-slot-b'" /boot/grub/grub.cfg || fail "slot B GRUB entry readback failed"
+grep -Fq -- "--id 'ming-recovery-manual'" /boot/grub/grub.cfg || fail "recovery GRUB entry readback failed"
+
+"${runtime}/ming-ota-bootstrap-capability.py" --write-marker || fail "capability readback failed"

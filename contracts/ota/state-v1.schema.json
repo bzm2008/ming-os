@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ming.scallion.uno/contracts/ota/state-v1.schema.json",
+  "title": "Ming OS transaction state v1",
+  "x-ming-schema-name": "ming.transaction-state.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ming.transaction-state.v1" },
+    "transaction_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{3,128}$" },
+    "release_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$" },
+    "previous_slot": { "enum": ["legacy", "A", "B"] },
+    "candidate_slot": { "enum": ["A", "B"] },
+    "state": {
+      "enum": [
+        "new", "verified", "staging", "staged", "armed", "booting",
+        "pending_health", "committing", "committed", "aborting", "aborted",
+        "rollback_armed", "rolling_back", "rolled_back"
+      ]
+    },
+    "generation": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "evidence": { "type": "object" }
+  },
+  "required": [
+    "schema", "transaction_id", "release_id", "previous_slot", "candidate_slot",
+    "state", "generation", "created_at", "updated_at", "evidence"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "previous_slot": { "const": "A" } } },
+      "then": { "properties": { "candidate_slot": { "const": "B" } } }
+    },
+    {
+      "if": { "properties": { "previous_slot": { "const": "B" } } },
+      "then": { "properties": { "candidate_slot": { "const": "A" } } }
+    }
+  ]
+}

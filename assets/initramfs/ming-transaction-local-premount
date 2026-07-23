@@ -1,0 +1,87 @@
+#!/bin/sh
+set -u
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+rootmnt="${rootmnt:-/root}"
+candidate_bound=0
+transaction_id=""
+
+rollback_candidate_root() {
+    if [ "${candidate_bound}" = "1" ]; then
+        umount "${rootmnt}/var/lib/ming-update" 2>/dev/null || true
+        umount "${rootmnt}/boot" 2>/dev/null || true
+        umount "${rootmnt}/home" 2>/dev/null || true
+        umount "${rootmnt}" || return 1
+        candidate_bound=0
+    fi
+    if [ -n "${transaction_id}" ]; then
+        timeout 10 /usr/bin/python3 /usr/lib/ming-update/ming-transaction-boot.py rollback \
+            --state-root "${state_root}" --transaction "${transaction_id}" >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
+requested=""
+manual_recovery=0
+for argument in $(cat /proc/cmdline); do
+    case "${argument}" in
+        ming.slot=legacy) requested="legacy" ;;
+        ming.slot=A) requested="A" ;;
+        ming.slot=B) requested="B" ;;
+        ming.recovery=manual) manual_recovery=1 ;;
+    esac
+done
+[ -n "${requested}" ] || exit 0
+
+runtime=/run/ming-update
+physical="${runtime}/physical-root"
+mkdir -p "${physical}"
+mount -o remount,rw "${rootmnt}" || exit 0
+if ! mount --bind "${rootmnt}" "${physical}"; then
+    exit 0
+fi
+
+state_root="${physical}/var/lib/ming-update"
+if [ "${manual_recovery}" = "1" ]; then
+    result="$(timeout 15 /usr/bin/python3 /usr/lib/ming-update/ming-transaction-boot.py select \
+        --state-root "${state_root}" --physical-root "${physical}" --requested-slot "${requested}" \
+        --manual-recovery 2>/dev/null || true)"
+else
+    result="$(timeout 15 /usr/bin/python3 /usr/lib/ming-update/ming-transaction-boot.py select \
+        --state-root "${state_root}" --physical-root "${physical}" --requested-slot "${requested}" 2>/dev/null || true)"
+fi
+selected="$(printf '%s' "${result}" | /usr/bin/python3 -c 'import json,sys; value=json.load(sys.stdin); print(value["selected_root"] if value.get("ok") else "")' 2>/dev/null || true)"
+transaction_id="$(printf '%s' "${result}" | /usr/bin/python3 -c 'import json,sys; value=json.load(sys.stdin); print(value.get("transaction_id") or "")' 2>/dev/null || true)"
+[ -n "${selected}" ] || exit 0
+[ -d "${selected}" ] || exit 0
+
+if [ "${selected}" != "${physical}" ]; then
+    mount --bind "${selected}" "${rootmnt}" || { rollback_candidate_root || exit 1; exit 0; }
+    candidate_bound=1
+fi
+if ! mkdir -p "${rootmnt}/home" "${rootmnt}/boot" "${rootmnt}/var/lib/ming-update"; then
+    rollback_candidate_root || exit 1
+    exit 0
+fi
+if ! mount --bind "${physical}/home" "${rootmnt}/home"; then
+    rollback_candidate_root || exit 1
+    exit 0
+fi
+if ! mount --bind "${physical}/boot" "${rootmnt}/boot"; then
+    rollback_candidate_root || exit 1
+    exit 0
+fi
+if ! mount --bind "${state_root}" "${rootmnt}/var/lib/ming-update"; then
+    rollback_candidate_root || exit 1
+    exit 0
+fi
+if [ "${candidate_bound}" = "1" ]; then
+    timeout 10 /usr/bin/python3 /usr/lib/ming-update/ming-transaction-boot.py record-mounted \
+        --state-root "${state_root}" --transaction "${transaction_id}" --slot "${requested}" >/dev/null 2>&1 \
+        || { rollback_candidate_root || exit 1; exit 0; }
+fi

@@ -210,10 +210,111 @@ install_garlic_claw_gui() {
     cat > /usr/local/bin/garlic-claw-app << 'GARLICAPP'
 #!/usr/bin/env python3
 """Garlic Claw - Ming OS AI 电脑助手（面向数码难民）"""
+import json
+import re
+import subprocess
+import sys
+
+
+DEVICE_CONTROL = "/usr/local/bin/ming-device-control"
+ETHERNET_REPAIR_ACTION = "ethernet-repair"
+IFNAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}\Z")
+
+
+def repair_error(reason_code, reason_text, error=""):
+    print(json.dumps({
+        "ok": False,
+        "state": "refused",
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "retryable": False,
+        "error": error or reason_text,
+    }, ensure_ascii=False, sort_keys=True))
+    return 2
+
+
+def repair_ethernet(run=subprocess.run):
+    status_command = [DEVICE_CONTROL, "ethernet-status", "--json"]
+    try:
+        result = run(status_command, capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return repair_error("status_timeout", "读取有线网络状态超时。")
+    except OSError as exc:
+        return repair_error("device_control_unavailable", "设备控制服务不可用。", str(exc))
+    if result.returncode != 0:
+        return repair_error(
+            "status_unavailable", "无法读取有线网络状态。",
+            (result.stderr or "").strip())
+    try:
+        status = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return repair_error("invalid_status", "有线网络状态不是有效 JSON。")
+    if (not isinstance(status, dict) or
+            not isinstance(status.get("ok"), bool) or
+            not isinstance(status.get("devices"), list)):
+        return repair_error("invalid_status", "有线网络状态结构无效。")
+    if status["ok"] is not True:
+        reason_text = status.get("reason_text")
+        error = status.get("error")
+        return repair_error(
+            "status_not_ok",
+            reason_text if isinstance(reason_text, str) and reason_text else "有线网络状态不可用。",
+            error if isinstance(error, str) else "")
+
+    targets = []
+    blocked = []
+    for device in status["devices"]:
+        if not isinstance(device, dict):
+            return repair_error("invalid_status", "有线网络设备记录结构无效。")
+        ifname = device.get("device")
+        if not isinstance(ifname, str) or not IFNAME_PATTERN.fullmatch(ifname):
+            return repair_error("invalid_interface", "有线网络接口名称无效。")
+        if not isinstance(device.get("state"), str):
+            return repair_error("invalid_status", "有线网络设备状态无效。")
+        if device["state"] == "disconnected":
+            targets.append(ifname)
+        elif device["state"] != "connected":
+            blocked.append("%s=%s" % (ifname, device["state"]))
+
+    if blocked:
+        return repair_error(
+            "interface_not_repairable", "有线网络接口状态不可安全修复。",
+            ", ".join(blocked))
+    if not targets:
+        if status["devices"]:
+            return repair_error("already_connected", "有线网络已经连接，无需修复。")
+        return repair_error("interface_missing", "没有明确的待修复有线网络接口。")
+    if len(targets) != 1:
+        return repair_error("ambiguous_interface", "检测到多个待修复接口，已拒绝自动选择。")
+
+    repair_command = [
+        DEVICE_CONTROL, "ethernet-repair", "--ifname", targets[0], "--json"]
+    try:
+        result = run(repair_command, capture_output=True, text=True, timeout=35)
+    except subprocess.TimeoutExpired:
+        return repair_error("repair_timeout", "有线网络接口修复超时。")
+    except OSError as exc:
+        return repair_error("device_control_unavailable", "设备控制服务不可用。", str(exc))
+    try:
+        repair_result = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return repair_error(
+            "invalid_repair_result", "有线网络修复结果不是有效 JSON。",
+            (result.stderr or "").strip())
+    if not isinstance(repair_result, dict) or not isinstance(repair_result.get("ok"), bool):
+        return repair_error("invalid_repair_result", "有线网络修复结果结构无效。")
+    print(json.dumps(repair_result, ensure_ascii=False, sort_keys=True))
+    return 0 if result.returncode == 0 and repair_result["ok"] is True else (result.returncode or 2)
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--repair-ethernet"]:
+    raise SystemExit(repair_ethernet())
+
+
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib, Pango
-import subprocess, threading, shutil, os
+import threading, shutil, os
 
 APP_COLOR  = "#00453E"
 MINT       = "#31C476"
@@ -221,8 +322,7 @@ MINT       = "#31C476"
 SYSTEM_CMDS = [
     ("🧹 清理磁盘缓存",  "sudo apt clean; journalctl --vacuum-time=7d; read -p '按回车关闭'"),
     ("💾 查看内存使用",   "free -h; echo; vmstat -s | head -12; read -p '按回车关闭'"),
-    ("🌐 修复网络连接",   "nmcli dev status; echo; nmcli networking off; sleep 1; nmcli networking on; read -p '按回车关闭'"),
-    ("🔄 检查系统更新",   "/usr/local/bin/ming-update-gui"),
+    ("🌐 修复网络连接",   ETHERNET_REPAIR_ACTION),
     ("📊 进程管理",       "htop"),
     ("ℹ️  系统信息",      "neofetch 2>/dev/null || lsb_release -a; uname -r; read -p '按回车关闭'"),
 ]
@@ -235,7 +335,14 @@ OFFICE_CMDS = [
 ]
 
 def run_cmd(cmd):
-    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad","/usr/local/bin/ming-update-gui"]):
+    if cmd == ETHERNET_REPAIR_ACTION:
+        subprocess.Popen([
+            "xterm", "-fa", "Monospace", "-fs", "11", "-bg", "#0d1117", "-fg", "#c9d1d9",
+            "-title", "Garlic Claw", "-e", "bash", "-c",
+            "/usr/local/bin/garlic-claw-app --repair-ethernet; read -r -p '按回车关闭'",
+        ])
+        return
+    if any(cmd.startswith(x) for x in ["htop","thunar","xfce4","wps","libreoffice","mousepad"]):
         subprocess.Popen(cmd.split(None, 1) if ' ' not in cmd else ["sh","-c",cmd])
     else:
         subprocess.Popen(["xterm", "-fa", "Monospace", "-fs", "11", "-bg", "#0d1117", "-fg", "#c9d1d9",
@@ -475,7 +582,7 @@ sleep 5
 # 欢迎界面
 zenity --info \\
     --title="欢迎使用 Ming OS" \\
-        --text="欢迎使用 Ming OS ${MING_OS_VERSION} Home Edition！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
+        --text="欢迎使用 Ming OS ${MING_OS_VERSION} 正式版！\\n\\n接下来将引导您配置 Garlic Claw AI 助手。\\n如果您暂时不需要 AI 助手，可以跳过此步骤。" \\
     --width=450 \\
     --ok-label="开始配置" \\
     --extra-button="跳过" \\

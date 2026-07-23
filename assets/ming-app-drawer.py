@@ -14,8 +14,10 @@ import threading
 
 
 ANIMATION_DURATION_MS = 200
+SYSTEM_APPLICATION_DIR = pathlib.Path("/usr/share/applications")
 DRAWER_HEIGHT_RATIO = 0.72
 IPC_VERSION = 1
+_GTK_LOADED = False
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
 _CATEGORY_RULES = (
     ("网络", {"Network", "WebBrowser", "Email", "Chat"}),
@@ -44,6 +46,41 @@ CANONICAL_PREFERENCE = {
     "edge": "ming-edge.desktop",
 }
 
+# Compatibility backends remain installed, but Ming Settings owns their user
+# surface.  Match exact launcher IDs only so third-party and user launchers are
+# never hidden merely because they use Xfce libraries or categories.
+LEGACY_XFCE_LAUNCHERS = frozenset({
+    "xfce4-about.desktop",
+    "xfce4-accessibility-settings.desktop",
+    "xfce4-appearance-settings.desktop",
+    "xfce4-display-settings.desktop",
+    "xfce4-keyboard-settings.desktop",
+    "xfce4-mime-settings.desktop",
+    "xfce4-mouse-settings.desktop",
+    "xfce4-notifyd-config.desktop",
+    "xfce4-panel.desktop",
+    "xfce4-power-manager-settings.desktop",
+    "xfce4-screensaver-preferences.desktop",
+    "xfce4-session-logout.desktop",
+    "xfce4-session-settings.desktop",
+    "xfce4-settings-editor.desktop",
+    "xfce4-settings-manager.desktop",
+    "xfce4-taskmanager.desktop",
+    "xfce4-workspaces-settings.desktop",
+    "xfce-settings-manager.desktop",
+    "xfdesktop-settings.desktop",
+})
+
+
+def should_hide_legacy_launcher(path):
+    candidate = pathlib.Path(path)
+    if candidate.name not in LEGACY_XFCE_LAUNCHERS:
+        return False
+    return candidate.parent in {
+        SYSTEM_APPLICATION_DIR,
+        pathlib.Path("/usr/local/share/applications"),
+    }
+
 
 def _load_common():
     path = pathlib.Path(__file__).with_name("ming-shell-common.py")
@@ -56,8 +93,21 @@ def _load_common():
 COMMON = _load_common()
 
 
+def resolved_icon_image(Gtk, icon, pixel_size):
+    resolved = COMMON.resolve_icon(icon)
+    if pathlib.Path(resolved).is_absolute():
+        image = Gtk.Image()
+        pixbuf = COMMON.load_icon_pixbuf(Gtk.IconTheme.get_default(), resolved, pixel_size)
+        if pixbuf is not None:
+            image.set_from_pixbuf(pixbuf)
+    else:
+        image = Gtk.Image.new_from_icon_name(resolved, Gtk.IconSize.DIALOG)
+    image.set_pixel_size(pixel_size)
+    return image
+
+
 def gtk_loaded():
-    return "gi" in sys.modules
+    return _GTK_LOADED
 
 
 def category_for(app):
@@ -94,7 +144,7 @@ def deduplicate_apps(apps):
     selected = {}
     for app in apps:
         basename = pathlib.Path(app.path).name
-        if basename == "ming-update.desktop":
+        if basename == "ming-update.desktop" or should_hide_legacy_launcher(app.path):
             continue
         identity = canonical_identity(app)
         preferred = CANONICAL_PREFERENCE.get(identity)
@@ -110,20 +160,65 @@ def drawer_geometry(workarea):
     return COMMON.Rect(workarea.x, workarea.y + workarea.height - height, workarea.width, height)
 
 
-def reduced_motion_enabled(path=None):
-    path = pathlib.Path(path or pathlib.Path.home() / ".config/ming-os/settings.json")
+def load_shell_appearance(path=None):
+    appearance_path = pathlib.Path(path or pathlib.Path.home() / ".config/ming-os/appearance.json")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(appearance_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(data.get("reduced_motion", False)) if isinstance(data, dict) else False
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if not data and path is None:
+        legacy = pathlib.Path.home() / ".config/ming-os/settings.json"
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    return COMMON.apply_runtime_shell_profile(data if isinstance(data, dict) else {})
+
+
+def reduced_motion_enabled(path=None):
+    return COMMON.shell_visual_profile(load_shell_appearance(path))["motion"] == "reduced"
 
 
 def drawer_transition(reduced_motion):
+    timing = COMMON.shell_animation_timing(load_shell_appearance())
     return {
-        "duration_ms": 0 if reduced_motion else ANIMATION_DURATION_MS,
+        "duration_ms": 0 if reduced_motion else timing["duration_ms"],
+        "interval_ms": 0 if reduced_motion else timing["interval_ms"],
         "start_opacity": 1.0,
     }
+
+
+def drawer_css(appearance):
+    profile = COMMON.shell_visual_profile(appearance)
+    light = profile["theme"] != "dark"
+    if profile["surface_alpha"] < 1:
+        raised = "rgba(255, 255, 255, 0.96)" if light else "rgba(41, 47, 43, 0.96)"
+    else:
+        raised = profile["surface_raised"]
+    shadow = "0 -10px 18px rgba(23, 32, 28, 0.14)" if profile["surface_alpha"] < 1 else "none"
+    font = str((appearance or {}).get("font_family", "Noto Sans CJK SC")).replace('"', "")
+    font_size = COMMON.appearance_font_size(appearance)
+    label_size = max(9, min(16, font_size))
+    diagnostic_size = max(8, min(14, font_size - 2))
+    return ("""
+window#ming-app-drawer { background: %(base)s; font-family: "%(font)s"; }
+.drawer-root { background: %(raised)s; border-top: 1px solid %(border)s; box-shadow: %(shadow)s; padding: 20px; }
+.drawer-header { padding-bottom: 2px; }
+.drawer-close { border-radius: 6px; padding: 7px 14px; }
+.drawer-category { border-radius: 6px; padding: 6px 12px; }
+.drawer-category:checked { background: %(accent)s; color: #ffffff; }
+.drawer-tile { border-radius: 8px; padding: 10px 8px; background: transparent; border: 1px solid transparent; }
+.drawer-tile:hover { background: %(sunken)s; border-color: %(accent)s; }
+.drawer-label { color: %(text)s; font-weight: 700; font-size: %(label_size)dpx; }
+.drawer-diagnostic { color: #B63E3E; font-size: %(diagnostic_size)dpx; font-weight: 700; }
+""" % {
+        "base": profile["surface_base"], "raised": raised, "sunken": profile["surface_sunken"],
+        "border": profile["border_soft"], "accent": profile["accent"],
+        "text": profile["text_primary"], "shadow": shadow, "font": font,
+        "label_size": label_size, "diagnostic_size": diagnostic_size,
+    }).encode("utf-8")
 
 
 class DrawerAnimation:
@@ -199,12 +294,13 @@ class RecentStore:
                 os.unlink(temporary)
 
 
-def discover_apps(paths=None):
+def discover_apps(paths=None, system_catalog_dir=None):
     paths = paths or (
         pathlib.Path.home() / ".local/share/applications",
         pathlib.Path("/usr/local/share/applications"),
         pathlib.Path("/usr/share/applications"),
     )
+    system_catalog_dir = pathlib.Path(system_catalog_dir or SYSTEM_APPLICATION_DIR)
     found = {}
     seen = set()
     for directory in paths:
@@ -217,7 +313,11 @@ def discover_apps(paths=None):
                 continue
             seen.add(path.name)
             try:
-                entry = COMMON.diagnose_desktop_file(path)
+                if path.parent == system_catalog_dir:
+                    entry = COMMON.diagnose_desktop_file(
+                        path, respect_desktop_environment=True)
+                else:
+                    entry = COMMON.diagnose_desktop_file(path)
             except (OSError, ValueError):
                 continue
             if entry is not None:
@@ -247,10 +347,12 @@ def send_toggle(rect=None):
 
 
 def _load_gtk():
+    global _GTK_LOADED
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, GLib, Gtk
+    _GTK_LOADED = True
     return Gdk, GLib, Gtk
 
 
@@ -265,6 +367,8 @@ class DrawerController:
         self._animation = DrawerAnimation()
         self._animation_source = 0
         self._animation_geometry = None
+        self._animation_interval = 16
+        self._pending_launches = set()
 
     def _workarea(self):
         display = self.Gdk.Display.get_default()
@@ -282,30 +386,11 @@ class DrawerController:
         window.set_type_hint(self.Gdk.WindowTypeHint.DIALOG)
         window.set_accept_focus(True)
         window.set_focus_on_map(True)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(b"""
-        window#ming-app-drawer { background: #F8FBF9; }
-        .drawer-root {
-          background: #F8FBF9;
-          border-top: 1px solid rgba(47, 138, 125, 0.16);
-          padding: 20px;
-        }
-        .drawer-header { padding-bottom: 2px; }
-        .drawer-close { border-radius: 9px; padding: 7px 14px; }
-        .drawer-category { border-radius: 8px; padding: 6px 12px; }
-        .drawer-category:checked { background: #2F8A7D; color: #ffffff; }
-        .drawer-tile {
-          border-radius: 10px;
-          padding: 10px 8px;
-          background: transparent;
-          border: 1px solid transparent;
-        }
-        .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
-        .drawer-label { color: #1D2924; font-weight: 700; font-size: 11px; }
-        .drawer-diagnostic { color: #A33A32; font-size: 9px; font-weight: 700; }
-        """)
+        self.css_provider = Gtk.CssProvider()
+        self.appearance = load_shell_appearance()
+        self.css_provider.load_from_data(drawer_css(self.appearance))
         Gtk.StyleContext.add_provider_for_screen(
-            self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            self.Gdk.Screen.get_default(), self.css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
         window.set_name("ming-app-drawer")
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -368,8 +453,7 @@ class DrawerController:
             button.set_size_request(116, 100)
             button.get_style_context().add_class("drawer-tile")
             content = self.Gtk.Box(orientation=self.Gtk.Orientation.VERTICAL, spacing=7)
-            image = self.Gtk.Image.new_from_icon_name(app.icon or "application-x-executable", self.Gtk.IconSize.DIALOG)
-            image.set_pixel_size(42)
+            image = resolved_icon_image(self.Gtk, app.icon, 42)
             label = self.Gtk.Label(label=app.name)
             label.set_justify(self.Gtk.Justification.CENTER)
             label.set_line_wrap(True)
@@ -412,6 +496,73 @@ class DrawerController:
         menu.popup_at_pointer(event)
         return True
 
+    def _show_launch_failure(self):
+        dialog = self.Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=self.Gtk.MessageType.ERROR,
+            buttons=self.Gtk.ButtonsType.CLOSE,
+            text="无法打开此应用",
+        )
+        dialog.format_secondary_text("启动命令不可用，请查看桌面启动日志。")
+        dialog.run()
+        dialog.destroy()
+        return False
+
+    @staticmethod
+    def _broker_unavailable(broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        return not rejected and (
+            bool(getattr(broker_result, "unavailable", False))
+            or not bool(broker_result)
+        )
+
+    def _recover_broker_result(self, app, rect, broker_result):
+        if not DrawerController._broker_unavailable(broker_result):
+            return broker_result
+        fallback = COMMON.broker_fallback_argv
+        retry = getattr(COMMON, "retry_launch_request_after_broker_start", None)
+        if not callable(fallback) or not callable(retry):
+            return broker_result
+        try:
+            subprocess.Popen(fallback(str(app.path), "drawer"), shell=False)
+            # An unavailable result means the initial request was never sent.
+            # The recovery process only owns the socket; this retry owns launch.
+            return retry(str(app.path), "drawer", rect)
+        except (AttributeError, OSError, TypeError, ValueError, subprocess.SubprocessError):
+            return broker_result
+
+    def _complete_launch_result(self, app, broker_result):
+        rejected = bool(getattr(broker_result, "rejected", False))
+        started = bool(broker_result) and not rejected
+        if not started:
+            return DrawerController._show_launch_failure(self)
+        self.recent.touch(app.path)
+        self.hide()
+        return True
+
+    def _queue_launch_result(self, app, broker_result):
+        def deliver():
+            try:
+                DrawerController._complete_launch_result(self, app, broker_result)
+            finally:
+                pending = getattr(self, "_pending_launches", None)
+                if hasattr(pending, "discard"):
+                    pending.discard(str(app.path))
+            return False
+
+        idle_add = getattr(getattr(self, "GLib", None), "idle_add", None)
+        if callable(idle_add):
+            try:
+                if idle_add(deliver):
+                    return True
+            except Exception:
+                pass
+        pending = getattr(self, "_pending_launches", None)
+        if hasattr(pending, "discard"):
+            pending.discard(str(app.path))
+        return False
+
     def launch(self, app, widget):
         diagnostic = getattr(app, "diagnostic", "")
         if diagnostic:
@@ -431,28 +582,34 @@ class DrawerController:
             origin = widget.get_window().get_origin()
             allocation = widget.get_allocation()
             rect = widget_source_rect(origin, allocation)
-        started = COMMON.send_launch_request(str(app.path), "drawer", rect)
-        if not started:
+        async_sender = getattr(COMMON, "send_launch_request_async", None)
+        if callable(async_sender) and getattr(self, "GLib", None) is not None:
+            pending = getattr(self, "_pending_launches", None)
+            if not isinstance(pending, set):
+                pending = set()
+                self._pending_launches = pending
+            path_key = str(app.path)
+            if path_key in pending:
+                return True
+            pending.add(path_key)
             try:
-                subprocess.Popen(list(app.argv), shell=False)
-                started = True
-            except (OSError, ValueError, subprocess.SubprocessError):
-                started = False
-        if not started:
-            dialog = self.Gtk.MessageDialog(
-                transient_for=self.window,
-                flags=0,
-                message_type=self.Gtk.MessageType.ERROR,
-                buttons=self.Gtk.ButtonsType.CLOSE,
-                text="无法打开此应用",
-            )
-            dialog.format_secondary_text("启动命令不可用，请查看桌面启动日志。")
-            dialog.run()
-            dialog.destroy()
-            return False
-        self.recent.touch(app.path)
-        self.hide()
-        return True
+                queued = async_sender(
+                    str(app.path),
+                    "drawer",
+                    rect,
+                    callback=lambda result: self._queue_launch_result(
+                        app, self._recover_broker_result(app, rect, result)),
+                    timeout=getattr(COMMON, "ASYNC_LAUNCH_REQUEST_TIMEOUT", 12.0),
+                )
+            except (AttributeError, OSError, TypeError, ValueError, RuntimeError):
+                queued = False
+            if queued:
+                return True
+            pending.discard(path_key)
+            return DrawerController._show_launch_failure(self)
+        broker_result = COMMON.send_launch_request(str(app.path), "drawer", rect)
+        broker_result = DrawerController._recover_broker_result(self, app, rect, broker_result)
+        return DrawerController._complete_launch_result(self, app, broker_result)
 
     def show(self):
         # Always rebuild the catalog before presentation.  This is intentionally
@@ -460,8 +617,12 @@ class DrawerController:
         # animations are disabled.
         self.apps = discover_apps()
         self.refresh()
+        self.appearance = load_shell_appearance()
+        self.css_provider.load_from_data(drawer_css(self.appearance))
         geometry = drawer_geometry(self._workarea())
         transition = drawer_transition(reduced_motion_enabled())
+        self._animation.duration_ms = max(1, transition["duration_ms"] or ANIMATION_DURATION_MS)
+        self._animation_interval = transition["interval_ms"] or 16
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:
             self.window.move(int(geometry.x), int(geometry.y))
@@ -508,7 +669,7 @@ class DrawerController:
                 self.window.hide()
             return False
 
-        self._animation_source = self.GLib.timeout_add(16, step)
+        self._animation_source = self.GLib.timeout_add(self._animation_interval, step)
 
     def toggle(self):
         if self.window.get_visible() and self._animation.target > 0.0:

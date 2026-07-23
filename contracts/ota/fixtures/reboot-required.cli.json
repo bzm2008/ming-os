@@ -1,0 +1,29 @@
+{
+  "schema": "ming.update.cli.v1",
+  "ok": true,
+  "command": "apply",
+  "exit_code": 0,
+  "error_code": null,
+  "state": "armed",
+  "transaction": {
+    "id": "tx-20260715-0001",
+    "release_id": "ming-os-26.3.3-amd64-20260715.1",
+    "previous_slot": "legacy",
+    "candidate_slot": "B",
+    "generation": 5
+  },
+  "update": {
+    "current_version": "26.3.2",
+    "available_version": "26.3.3",
+    "release_id": "ming-os-26.3.3-amd64-20260715.1",
+    "delivery": "transactional-slot-v1",
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "action": "reboot",
+  "progress": { "phase": "armed", "percent": 100 },
+  "requires_reboot": true,
+  "message_key": "update.status.armed",
+  "message_args": {},
+  "log_path": "/var/log/ming-update/transactions/tx-20260715-0001/engine.log",
+  "timestamp": "2026-07-15T12:04:00Z"
+}

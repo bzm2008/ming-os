@@ -22,6 +22,153 @@ echo "[INFO] ISO_VOLUME_ID=${ISO_VOLUME_ID}"
 echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
+seed_resume_package_installer() {
+    local installer_source="/tmp/ming-build/assets/ming-package-installer.py"
+    local common_source="/tmp/ming-build/assets/ming-shell-common.py"
+    local runtime_guard="/tmp/ming-build/assets/ming-package-runtime-root-guard.sh"
+    local runtime_root="/usr/local/lib/ming-os/package-installer-runtimes"
+    local current_link="/usr/local/lib/ming-os/package-installer-current"
+    local stage contract required_common_sha actual_common_sha actual_installer_sha target
+    local target_dir_meta target_installer_meta target_common_meta
+    local target_installer_sha target_common_sha
+    if ! chroot_exec test -s "${installer_source}" \
+        || ! chroot_exec test -s "${common_source}" \
+        || ! chroot_exec test -s "${runtime_guard}"; then
+        log_error "resume 构建缺少受控的 ming-package-installer/ming-shell-common 资产"
+        return 1
+    fi
+    contract="$(chroot_exec python3 -c '
+import ast
+import pathlib
+import sys
+
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+values = {
+    node.targets[0].id: ast.literal_eval(node.value)
+    for node in tree.body
+    if isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+    and node.targets[0].id in {"PACKAGE_INSTALLER_CONTRACT", "REQUIRED_COMMON_SHA256"}
+}
+print(values.get("PACKAGE_INSTALLER_CONTRACT", ""))
+print(values.get("REQUIRED_COMMON_SHA256", ""))
+' "${installer_source}")" || return 1
+    required_common_sha="$(printf '%s\n' "${contract}" | sed -n '2p')"
+    contract="$(printf '%s\n' "${contract}" | sed -n '1p')"
+    if [[ ! "${contract}" =~ ^[a-z0-9.-]+$ \
+        || ! "${required_common_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        log_error "resume 构建的安装器版本契约无效"
+        return 1
+    fi
+    actual_common_sha="$(chroot_exec sha256sum "${common_source}" | awk '{print $1}')"
+    if [[ "${actual_common_sha}" != "${required_common_sha}" ]]; then
+        log_error "resume 构建拒绝旧版或不匹配的 ming-shell-common"
+        return 1
+    fi
+    actual_installer_sha="$(chroot_exec sha256sum "${installer_source}" | awk '{print $1}')"
+    if [[ ! "${actual_installer_sha}" =~ ^[a-f0-9]{64}$ ]]; then
+        log_error "resume 构建无法校验 ming-package-installer 资产"
+        return 1
+    fi
+
+    chroot_exec install -d -m 0755 /usr/local/sbin || return 1
+    if ! chroot_exec bash "${runtime_guard}" "${runtime_root}"; then
+        log_error "resume 构建的安装器运行时根目录不安全"
+        return 1
+    fi
+    stage="$(chroot_exec mktemp -d "${runtime_root}/.stage.XXXXXX")" || return 1
+    if ! chroot_exec install -m 0755 "${installer_source}" "${stage}/ming-package-installer" \
+        || ! chroot_exec install -m 0644 "${common_source}" "${stage}/ming-shell-common.py" \
+        || ! chroot_exec chmod 0755 "${stage}" \
+        || ! chroot_exec python3 -m py_compile "${stage}/ming-package-installer" \
+        || ! chroot_exec python3 "${stage}/ming-package-installer" --help >/dev/null; then
+        chroot_exec rm -rf "${stage}" || true
+        log_error "resume 构建的安装器运行时校验失败"
+        return 1
+    fi
+
+    target="${runtime_root}/${contract}"
+    if chroot_exec test -e "${target}" || chroot_exec test -L "${target}"; then
+        target_dir_meta="$(chroot_exec stat -c '%a:%u:%g' "${target}" 2>/dev/null || true)"
+        target_installer_meta="$(chroot_exec stat -c '%a:%u:%g' \
+            "${target}/ming-package-installer" 2>/dev/null || true)"
+        target_common_meta="$(chroot_exec stat -c '%a:%u:%g' \
+            "${target}/ming-shell-common.py" 2>/dev/null || true)"
+        target_installer_sha="$(chroot_exec sha256sum "${target}/ming-package-installer" \
+            2>/dev/null | awk '{print $1}' || true)"
+        target_common_sha="$(chroot_exec sha256sum "${target}/ming-shell-common.py" \
+            2>/dev/null | awk '{print $1}' || true)"
+        if ! chroot_exec test ! -L "${target}" \
+            || ! chroot_exec test -d "${target}" \
+            || ! chroot_exec test ! -L "${target}/ming-package-installer" \
+            || ! chroot_exec test -f "${target}/ming-package-installer" \
+            || ! chroot_exec test ! -L "${target}/ming-shell-common.py" \
+            || ! chroot_exec test -f "${target}/ming-shell-common.py" \
+            || [[ "${target_dir_meta}" != "755:0:0" ]] \
+            || [[ "${target_installer_meta}" != "755:0:0" ]] \
+            || [[ "${target_common_meta}" != "644:0:0" ]] \
+            || [[ "${target_installer_sha}" != "${actual_installer_sha}" ]] \
+            || [[ "${target_common_sha}" != "${required_common_sha}" ]]; then
+            chroot_exec rm -rf "${stage}" || true
+            log_error "resume 构建拒绝复用损坏的安装器运行时: ${target}"
+            return 1
+        fi
+        chroot_exec rm -rf "${stage}"
+    else
+        chroot_exec mv -T "${stage}" "${target}"
+    fi
+    chroot_exec ln -sfn "${target}" "${current_link}.new"
+    chroot_exec mv -Tf "${current_link}.new" "${current_link}"
+    chroot_exec ln -sfn \
+        "${current_link}/ming-package-installer" \
+        /usr/local/sbin/.ming-package-installer.new
+    chroot_exec mv -Tf \
+        /usr/local/sbin/.ming-package-installer.new \
+        /usr/local/sbin/ming-package-installer
+    chroot_exec ln -sfn \
+        "${current_link}/ming-shell-common.py" \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new
+    chroot_exec mv -Tf \
+        /usr/local/lib/ming-os/.ming-shell-common.py.new \
+        /usr/local/lib/ming-os/ming-shell-common.py
+    chroot_exec python3 -m py_compile /usr/local/sbin/ming-package-installer
+}
+
+seed_resume_spark_security() {
+    local asset_dir="/tmp/ming-build/assets"
+    local asset
+    for asset in ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py; do
+        if ! chroot_exec test -s "${asset_dir}/${asset}"; then
+            log_error "resume 构建缺少 Spark security asset: ${asset}"
+            return 1
+        fi
+    done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if ! chroot_exec test -s "${asset_dir}/polkit/${asset}"; then
+            log_error "resume 构建缺少 Spark security policy: ${asset}"
+            return 1
+        fi
+    done
+    chroot_exec install -d -m 0755 /usr/share/polkit-1/actions || return 1
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-package-helper.py" \
+        /usr/local/sbin/ming-spark-package-helper || return 1
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-security-converge.py" \
+        /usr/local/sbin/ming-spark-security-converge || return 1
+    chroot_exec install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    chroot_exec install -m 0644 \
+        "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    chroot_exec install -m 0644 \
+        "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
+    chroot_exec python3 -m py_compile \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper
+}
+
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
     # Interrupted b43 installer postinst scripts download from GitHub and can
@@ -37,13 +184,9 @@ ensure_resume_runtime_packages() {
     if ! chroot_exec /usr/local/sbin/apt-build install \
         xserver-xorg \
         xserver-xorg-input-libinput \
-        xfce4 \
-        xfce4-panel \
         xfce4-session \
         xfce4-settings \
         xfce4-terminal \
-        xfce4-appfinder \
-        xfce4-whiskermenu-plugin \
         xfce4-notifyd \
         xfdesktop4 \
         thunar \
@@ -57,6 +200,7 @@ ensure_resume_runtime_packages() {
         fonts-wqy-zenhei \
         xfce4-screensaver \
         python3-gi \
+        gir1.2-wnck-3.0 \
         gir1.2-gtk-4.0 \
         gir1.2-adw-1 \
         libadwaita-1-0 \
@@ -82,6 +226,7 @@ ensure_resume_runtime_packages() {
         im-config \
         blueman \
         network-manager \
+        gir1.2-nm-1.0 \
         wpasupplicant \
         iw \
         rfkill; then
@@ -90,9 +235,16 @@ ensure_resume_runtime_packages() {
     fi
     settle_chroot_dpkg "resume runtime packages"
 
+    # The resume helper used to install the full xfce4 meta-package, which
+    # pulled the retired panel/appfinder/Whisker shell back into the image.
+    # Remove those packages before the desktop gate scans the final rootfs.
+    chroot_exec apt-get purge -y --no-install-recommends \
+        xfce4 xfce4-panel xfce4-appfinder xfce4-whiskermenu-plugin \
+        xfce4-pulseaudio-plugin >/dev/null 2>&1 || true
+
     local package
     for package in \
-        python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        python3-gi gir1.2-nm-1.0 gir1.2-wnck-3.0 gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
@@ -105,7 +257,7 @@ ensure_resume_runtime_packages() {
 
     chroot_exec systemctl enable lightdm.service >/dev/null 2>&1 || true
 
-    for bin in lightdm startxfce4 xfce4-session xfce4-panel xfdesktop xfce4-screensaver xfce4-screensaver-command wmctrl mkfs.ext4; do
+    for bin in lightdm startxfce4 xfce4-session xfdesktop xfce4-screensaver xfce4-screensaver-command wmctrl mkfs.ext4; do
         if ! chroot_exec /bin/sh -c "command -v '${bin}'" >/dev/null 2>&1; then
             log_error "resume 构建缺少必要命令: ${bin}"
             exit 1
@@ -121,15 +273,102 @@ ensure_resume_runtime_packages() {
     fi
 }
 
+verify_resume_release_identity() {
+    local os_release="${CHROOT_DIR}/etc/os-release"
+    local ming_release="${CHROOT_DIR}/etc/ming-release"
+    local lsb_release="${CHROOT_DIR}/etc/lsb-release"
+    local update_version_file="${CHROOT_DIR}/etc/ming-version"
+    local display_version_file="${CHROOT_DIR}/etc/ming-display-version"
+    local issue_file="${CHROOT_DIR}/etc/issue"
+    local issue_net_file="${CHROOT_DIR}/etc/issue.net"
+    local file
+    for file in "${os_release}" "${ming_release}" "${lsb_release}" \
+        "${update_version_file}" "${display_version_file}" \
+        "${issue_file}" "${issue_net_file}"; do
+        if [[ ! -f "${file}" || -L "${file}" ]]; then
+            log_error "resume rootfs release identity is missing or unsafe: ${file}"
+            return 1
+        fi
+    done
+    if ! python3 - "${os_release}" "${ming_release}" "${lsb_release}" \
+        "${update_version_file}" "${display_version_file}" \
+        "${issue_file}" "${issue_net_file}" "${MING_OS_VERSION}" \
+        "${MING_OS_UPDATE_VERSION}" "${MING_OS_RELEASE_STAGE}" \
+        "${MING_OS_RELEASE_LABEL}" <<'PY'
+import pathlib
+import sys
+
+
+def parse_unique(path):
+    values = {}
+    for raw in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+        if not raw or raw.startswith("#"):
+            continue
+        key, separator, value = raw.partition("=")
+        if not separator or key in values:
+            raise ValueError("duplicate or malformed release key")
+        values[key] = value.strip().strip('"')
+    return values
+
+
+os_path, ming_path, lsb_path, update_path, display_path, issue_path, issue_net_path = sys.argv[1:8]
+display_version, update_version, stage, label = sys.argv[8:12]
+expected = {
+    "VERSION_ID": update_version,
+    "MING_DISPLAY_VERSION": display_version,
+    "MING_RELEASE_STAGE": stage,
+    "PRETTY_NAME": f"Ming OS {display_version} {label}",
+}
+for path in (os_path, ming_path):
+    values = parse_unique(path)
+    if any(values.get(key) != value for key, value in expected.items()):
+        raise SystemExit(1)
+lsb = parse_unique(lsb_path)
+if lsb.get("DISTRIB_RELEASE") != display_version:
+    raise SystemExit(1)
+if pathlib.Path(update_path).read_text(encoding="utf-8").strip() != update_version:
+    raise SystemExit(1)
+if pathlib.Path(display_path).read_text(encoding="utf-8").strip() != display_version:
+    raise SystemExit(1)
+expected_issue = f"Ming OS {display_version} {label}"
+for path in (issue_path, issue_net_path):
+    if expected_issue not in pathlib.Path(path).read_text(encoding="utf-8"):
+        raise SystemExit(1)
+PY
+    then
+            log_error "resume rootfs release identity does not match this formal build"
+            return 1
+    fi
+}
+
 resume_main() {
     [[ "${EUID}" -ne 0 ]] && { echo "[ERROR] 需要 root 权限"; exit 1; }
 
     echo "[INFO] 从 03_desktop.sh 恢复构建..."
+
+    # An interrupted run may already have completed the rootfs and initramfs
+    # but failed in a release validator. Reuse that verified chroot without
+    # replaying every package module; this is intentionally opt-in so normal
+    # recovery remains a full deterministic replay.
+    if [[ "${MING_RESUME_SKIP_MODULES:-0}" == "1" ]]; then
+        if [[ "${MING_RELEASE_MODE}" != "development" ]]; then
+            log_error "正式发布禁止跳过模块重放"
+            return 1
+        fi
+        log_step "复用现有 chroot，跳过模块重放"
+        verify_resume_release_identity
+        run_release_preflight
+        build_iso
+        return 0
+    fi
+
     mount_chroot
     trap 'umount_chroot' EXIT
 
     # 同步最新的 assets（含壁纸、图标、settings.py）
     prepare_chroot_scripts
+    seed_resume_package_installer
+    seed_resume_spark_security
     ensure_resume_runtime_packages
 
     # 执行剩余模块（03 及之后）
@@ -137,7 +376,7 @@ resume_main() {
         "01_base.sh"
         "02_apps.sh"
         "03_desktop.sh"
-        "04_garlic_claw.sh"
+        "04_papyrus.sh"
         "05_security_tools.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"
@@ -145,6 +384,7 @@ resume_main() {
     )
     for mod in "${modules[@]}"; do
         local mod_path="/tmp/ming-build/modules/${mod}"
+        ensure_chroot_build_link
         log_step "执行模块: ${mod}"
         chroot_exec bash "${mod_path}"
         settle_chroot_dpkg "${mod}"
@@ -171,13 +411,20 @@ resume_main() {
     trap - EXIT
 
     # 调用主脚本里完整的 build_iso（含 build_iso_manual → grub-mkimage + El Torito + EFI）
+    run_release_preflight
     build_iso
 
     # 复制到 Windows 目录
     if [[ "${SCRIPT_DIR}" == /mnt/* ]]; then
         local win_output="${SCRIPT_DIR}/output"
         mkdir -p "${win_output}"
-        local iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
+        local suffix="${MING_OS_BUILD_SUFFIX}"
+        local iso_name
+        if [[ -n "${suffix}" ]]; then
+            iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${suffix}.iso"
+        else
+            iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
+        fi
         if [[ -f "${OUTPUT_DIR}/${iso_name}" ]]; then
             cp "${OUTPUT_DIR}/${iso_name}" "${win_output}/${iso_name}"
             log_info "ISO 已复制到 Windows: ${win_output}/${iso_name}"

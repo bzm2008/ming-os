@@ -12,6 +12,28 @@ APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 
 
+def wsl_path(path):
+    windows_path = str(path).replace("\\", "/")
+    if len(windows_path) < 4 or windows_path[1:3] != ":/":
+        raise ValueError("expected an absolute Windows path")
+    return "/mnt/%s/%s" % (windows_path[0].lower(), windows_path[3:])
+
+
+def wsl_can_access(path):
+    """A present wsl.exe is not enough when its Windows mounts are unavailable."""
+    # Windows hosts opt into WSL subprocess coverage explicitly. This keeps a
+    # broken WSL mount from terminating the whole native Python test process.
+    if (os.name != "nt" or os.environ.get("MING_TEST_WSL") != "1"
+            or not shutil.which("wsl.exe")):
+        return False
+    probe = subprocess.run(
+        ["wsl.exe", "-d", "Ubuntu", "--cd", "/", "--", "test", "-r", wsl_path(path)],
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
 def install_fcitx5_source():
     return APPS.split("seed_ming_input_file() {", 1)[1].split(
         "# ======================== 应用商店", 1
@@ -176,13 +198,8 @@ class MingInputMethodContractTests(unittest.TestCase):
                 "MING_RIME_FAIL": "1" if rime_fails else "0",
             }
             if os.name == "nt":
-                if not shutil.which("wsl.exe"):
-                    self.skipTest("Bash runtime is unavailable on this Windows host")
-
-                def wsl_path(path):
-                    windows_path = str(path).replace("\\", "/")
-                    self.assertRegex(windows_path, r"^[A-Za-z]:/")
-                    return "/mnt/%s/%s" % (windows_path[0].lower(), windows_path[3:])
+                if not wsl_can_access(script):
+                    self.skipTest("WSL cannot access the temporary input-method test script")
 
                 wsl_env = {
                     key: wsl_path(value)
@@ -204,6 +221,8 @@ class MingInputMethodContractTests(unittest.TestCase):
                         "wsl.exe",
                         "-d",
                         "Ubuntu",
+                        "--cd",
+                        "/",
                         "--",
                         "env",
                         *[f"{key}={value}" for key, value in wsl_env.items()],

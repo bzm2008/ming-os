@@ -1,0 +1,10 @@
+[Unit]
+Description=Ming OS transactional update rollback reboot
+ConditionPathExists=/var/lib/ming-update/active-transaction.json
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block reboot
+TimeoutStartSec=15

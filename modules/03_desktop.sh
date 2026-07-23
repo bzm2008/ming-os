@@ -70,7 +70,7 @@ install_ming_settings() {
     local lib_dir="/usr/local/lib/ming-os"
     mkdir -p "${lib_dir}" /usr/local/bin
 
-    for asset in ming-settings.py ming-settings-backend.py ming-display-control.py; do
+    for asset in ming-settings.py ming-settings-backend.py ming-display-control.py ming-storage-status.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming Settings asset: ${asset}" >&2
             return 1
@@ -80,6 +80,7 @@ install_ming_settings() {
     install -m 0755 "${asset_dir}/ming-settings.py" /usr/local/bin/ming-settings
     install -m 0755 "${asset_dir}/ming-settings-backend.py" "${lib_dir}/ming-settings-backend"
     install -m 0755 "${asset_dir}/ming-display-control.py" /usr/local/bin/ming-display-control
+    install -m 0755 "${asset_dir}/ming-storage-status.py" /usr/local/bin/ming-storage-status
     cat > /usr/local/bin/ming-control-center << 'MINGCONTROLWRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -113,19 +114,40 @@ exec /usr/local/bin/ming-settings "$@"
 MINGCONTROLWRAPPER
     chmod 0755 /usr/local/bin/ming-control-center
 
-    # The Xfce backend remains installed, but its obsolete visible control
-    # center must not compete with Ming Settings in launchers or search.
-    local desktop_file
-    for desktop_file in \
-        /usr/share/applications/xfce-settings-manager.desktop \
-        /usr/share/applications/xfce4-settings-manager.desktop \
-        /usr/share/applications/xfce4-display-settings.desktop; do
-        [[ -f "${desktop_file}" ]] || continue
-        if grep -q '^NoDisplay=' "${desktop_file}"; then
-            sed -i 's/^NoDisplay=.*/NoDisplay=true/' "${desktop_file}"
-        else
-            sed -i '/^\[Desktop Entry\]/a NoDisplay=true' "${desktop_file}"
-        fi
+    # Keep dpkg-owned launchers intact.  XDG gives /usr/local precedence, so
+    # same-name Ming overrides can hide the compatibility control surface and
+    # be re-applied after package upgrades without touching user launchers.
+    local desktop_name
+    install -d -m 0755 /usr/local/share/applications
+    for desktop_name in \
+        xfce4-about.desktop \
+        xfce4-accessibility-settings.desktop \
+        xfce4-appearance-settings.desktop \
+        xfce4-display-settings.desktop \
+        xfce4-keyboard-settings.desktop \
+        xfce4-mime-settings.desktop \
+        xfce4-mouse-settings.desktop \
+        xfce4-notifyd-config.desktop \
+        xfce4-panel.desktop \
+        xfce4-power-manager-settings.desktop \
+        xfce4-screensaver-preferences.desktop \
+        xfce4-session-logout.desktop \
+        xfce4-session-settings.desktop \
+        xfce4-settings-editor.desktop \
+        xfce4-settings-manager.desktop \
+        xfce4-taskmanager.desktop \
+        xfce4-workspaces-settings.desktop \
+        xfce-settings-manager.desktop \
+        xfdesktop-settings.desktop; do
+        cat > "/usr/local/share/applications/${desktop_name}" << EOF
+[Desktop Entry]
+Type=Application
+Name=Ming OS compatibility control override
+Hidden=true
+NoDisplay=true
+X-Ming-Managed=true
+EOF
+        chmod 0644 "/usr/local/share/applications/${desktop_name}"
     done
 
     # Some applications invoke the old executable directly instead of its
@@ -219,27 +241,71 @@ MINGMIGRATEAUTO
 install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
+    local installer_contract="ming-package-installer-26.4.0-v4"
+    local installer_target="/usr/local/lib/ming-os/package-installer-runtimes/${installer_contract}/ming-package-installer"
+    local installer_asset="${asset_dir}/ming-package-installer.py"
+    local installer_resolved installer_meta installer_expected_sha installer_actual_sha
     local asset
-    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
+    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin \
+        /usr/local/share/applications "/home/${MING_USER}/.local/share/applications"
+    for asset in ming-shell-common.py ming-appearance-control.py ming-notifications.py ming-connection-notify.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-spark-package-helper.py ming-spark-security-converge.py ming-spark-store-repair-helper.py ming-thunar-menu-sync.py ming-window-resource-monitor.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
         fi
     done
+    for asset in store.spark-app.spark-store.policy org.ming.spark-store.repair.policy; do
+        if [[ ! -s "${asset_dir}/polkit/${asset}" ]]; then
+            echo "ERROR: missing Spark security policy: ${asset}" >&2
+            return 1
+        fi
+    done
+
+    if [[ ! -s "${installer_asset}" || -L "${installer_asset}" ]]; then
+        echo "ERROR: missing controlled Ming package installer asset" >&2
+        return 1
+    fi
+    if [[ ! -L /usr/local/sbin/ming-package-installer ]]; then
+        echo "ERROR: Ming package installer versioned symlink is missing" >&2
+        return 1
+    fi
+    installer_resolved="$(readlink -f -- /usr/local/sbin/ming-package-installer 2>/dev/null || true)"
+    installer_meta="$(stat -c '%a:%u:%g' -- "${installer_target}" 2>/dev/null || true)"
+    installer_expected_sha="$(sha256sum -- "${installer_asset}" 2>/dev/null | awk '{print $1}')"
+    installer_actual_sha="$(sha256sum -- "${installer_target}" 2>/dev/null | awk '{print $1}')"
+    if [[ "${installer_resolved}" != "${installer_target}" \
+        || ! -f "${installer_target}" || -L "${installer_target}" \
+        || "${installer_meta}" != "755:0:0" \
+        || ! "${installer_expected_sha}" =~ ^[a-f0-9]{64}$ \
+        || "${installer_actual_sha}" != "${installer_expected_sha}" ]]; then
+        echo "ERROR: Ming package installer versioned runtime is unsafe" >&2
+        return 1
+    fi
 
     install -m 0644 "${asset_dir}/ming-shell-common.py" "${lib_dir}/ming-shell-common.py"
     install -m 0644 "${asset_dir}/ming-notifications.py" "${lib_dir}/ming-notifications.py"
+    install -m 0644 "${asset_dir}/ming-connection-notify.py" "${lib_dir}/ming-connection-notify.py"
     install -m 0644 "${asset_dir}/ming-device-control.py" "${lib_dir}/ming-device-control.py"
     # Drawer and broker load the common module beside their executable.
     install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
     install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
+    install -m 0755 "${asset_dir}/ming-connection-notify.py" /usr/local/bin/ming-connection-notify
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
-    install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
+    install -m 0755 "${asset_dir}/ming-spark-package-helper.py" /usr/local/sbin/ming-spark-package-helper || return 1
+    install -m 0755 "${asset_dir}/ming-spark-security-converge.py" /usr/local/sbin/ming-spark-security-converge || return 1
+    install -m 0755 "${asset_dir}/ming-spark-store-repair-helper.py" /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    install -d -m 0755 /usr/share/polkit-1/actions || return 1
+    install -m 0644 "${asset_dir}/polkit/store.spark-app.spark-store.policy" \
+        /usr/share/polkit-1/actions/store.spark-app.spark-store.policy || return 1
+    install -m 0644 "${asset_dir}/polkit/org.ming.spark-store.repair.policy" \
+        /usr/share/polkit-1/actions/org.ming.spark-store.repair.policy || return 1
+    install -m 0755 "${asset_dir}/ming-thunar-menu-sync.py" /usr/local/bin/ming-thunar-menu-sync
+    install -m 0755 "${asset_dir}/ming-window-resource-monitor.py" /usr/local/bin/ming-window-resource-monitor
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
@@ -275,6 +341,7 @@ fi
 if python3 - "${result_file}" "${installer_rc}" << 'MINGPACKAGEUIPY'
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -285,29 +352,85 @@ try:
     result = json.loads(raw)
 except (TypeError, ValueError):
     result = {}
-ok = bool(result.get("ok")) and return_code == 0
+if not isinstance(result, dict):
+    result = {}
+ok = result.get("ok") is True and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
-log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
+log_path = str(result.get("log_path") or "/var/log/ming-os/package-installer.jsonl")
+if "launch_ready" in result:
+    launch_ready = result.get("launch_ready") is True
+else:
+    launch_ready = ok
 launcher_warnings = result.get("launcher_warnings")
 launcher_warnings = launcher_warnings if isinstance(launcher_warnings, list) else []
+
+
+def warning_lines(items):
+    values = [str(item.get("error") or "启动器不可用")
+              for item in items if isinstance(item, dict)]
+    return values[:3] or ["未找到可用的图形启动器。"]
+
+
+def repair_package(package_name):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package_name):
+        return False, "软件包名称无效，无法执行自动修复。"
+    try:
+        completed = subprocess.run(
+            ["pkexec", "/usr/local/sbin/ming-package-installer", "repair", package_name],
+            capture_output=True, check=False, text=True, timeout=210,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "修复超时，请查看安装日志后重试。"
+    except OSError as exc:
+        return False, "无法启动修复程序：%s" % exc
+    try:
+        repaired = json.loads(completed.stdout.strip())
+    except (TypeError, ValueError):
+        repaired = {}
+    if not isinstance(repaired, dict):
+        repaired = {}
+    repair_ok = repaired.get("ok") is True and completed.returncode == 0
+    if "launch_ready" in repaired:
+        repair_ready = repaired.get("launch_ready") is True
+    else:
+        repair_ready = repair_ok
+    if repair_ok and repair_ready:
+        return True, "已重新安装并验证启动器。"
+    return False, str(repaired.get("error") or "修复没有恢复可用启动器。")
+
+
 if ok:
     title = "软件安装完成"
     detail = "已安装：%s%s\n应用抽屉和桌面将自动刷新。\n日志：%s" % (
         package, (" " + version) if version else "", log_path)
-    if launcher_warnings:
-        title = "软件已安装，但启动器需要修复"
-        warnings = [str(item.get("error") or "启动器不可用")
-                    for item in launcher_warnings if isinstance(item, dict)]
-        detail += "\n\n注意：" + "；".join(warnings[:3])
+    if not launch_ready:
+        title = "软件已安装，但暂时无法启动"
+        detail += "\n\n原因：" + "；".join(warning_lines(launcher_warnings))
+        detail += "\n可选择“尝试修复”重新安装软件包。"
 else:
     title = "软件安装失败"
     reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
     detail = "%s\n日志：%s" % (reason[:1200], log_path)
 if shutil.which("zenity"):
-    subprocess.run(
-        ["zenity", "--info" if ok else "--error", "--title=" + title,
-         "--text=" + detail, "--width=520"], check=False)
+    if ok and not launch_ready:
+        choice = subprocess.run(
+            ["zenity", "--question", "--title=" + title, "--text=" + detail,
+             "--ok-label=尝试修复", "--cancel-label=稍后处理", "--width=560"],
+            check=False,
+        )
+        if choice.returncode == 0:
+            repaired, repair_detail = repair_package(package)
+            repair_title = "软件修复完成" if repaired else "软件仍无法启动"
+            subprocess.run(
+                ["zenity", "--info" if repaired else "--error", "--title=" + repair_title,
+                 "--text=" + repair_detail + "\n日志：" + log_path, "--width=560"],
+                check=False,
+            )
+    else:
+        subprocess.run(
+            ["zenity", "--info" if ok else "--error", "--title=" + title,
+             "--text=" + detail, "--width=520"], check=False)
 elif shutil.which("notify-send"):
     subprocess.run(
         ["notify-send", "-u", "normal" if ok else "critical", title, detail], check=False)
@@ -317,7 +440,7 @@ raise SystemExit(0 if ok else 1)
 MINGPACKAGEUIPY
 then
     if command -v ming-phone-desktop >/dev/null 2>&1; then
-        ming-phone-desktop --sync >/dev/null 2>&1 || true
+        timeout --foreground 8s ming-phone-desktop --sync >/dev/null 2>&1 || true
     fi
     exit 0
 fi
@@ -378,6 +501,14 @@ NoDisplay=true
 MINGDRAWERDESKTOP
     cp /usr/share/applications/ming-app-library.desktop "/home/${MING_USER}/.local/share/applications/"
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications/ming-app-library.desktop"
+    python3 -m py_compile \
+        /usr/local/sbin/ming-package-installer \
+        /usr/local/sbin/ming-spark-package-helper \
+        /usr/local/sbin/ming-spark-security-converge \
+        /usr/local/sbin/ming-spark-store-repair-helper || return 1
+    if dpkg-query -W -f='${db:Status-Abbrev}' spark-store 2>/dev/null | grep -qx 'ii '; then
+        /usr/local/sbin/ming-spark-security-converge enforce || return 1
+    fi
 }
 
 install_ming_files() {
@@ -422,7 +553,21 @@ Categories=System;FileManager;
 MimeType=inode/directory;application/x-gnome-saved-search;
 StartupNotify=true
 MINGFILESDESKTOP
+    cat > /usr/share/applications/ming-trash.desktop << 'MINGTRASHDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=回收站
+Name[zh_CN]=回收站
+Comment=查看和还原已删除的文件
+Comment[zh_CN]=查看和还原已删除的文件
+Exec=/usr/local/bin/ming-files trash:///
+Icon=user-trash
+Terminal=false
+Categories=System;FileManager;
+StartupNotify=true
+MINGTRASHDESKTOP
     cp /usr/share/applications/ming-files.desktop "/home/${MING_USER}/.local/share/applications/"
+    cp /usr/share/applications/ming-trash.desktop "/home/${MING_USER}/.local/share/applications/"
     python3 - "/home/${MING_USER}/.config/mimeapps.list" << 'MINGMIMEAPPS'
 import configparser
 from pathlib import Path
@@ -447,12 +592,13 @@ with path.open("w", encoding="utf-8") as handle:
 MINGMIMEAPPS
     chown -R "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.local/share/applications/ming-files.desktop" \
+        "/home/${MING_USER}/.local/share/applications/ming-trash.desktop" \
         "/home/${MING_USER}/.config/mimeapps.list"
 }
 
 # ======================== HiDPI 自动缩放 ========================
 
-configure_hidpi_autoscale() {
+configure_legacy_hidpi_scaler_reference() {
     cat > /usr/local/bin/ming-scale << 'MINGSCALE'
 #!/usr/bin/env bash
 # Ming OS 自动缩放 - 覆盖所有屏幕比例与分辨率
@@ -584,19 +730,35 @@ MINGSCALE
 
     chmod +x /usr/local/bin/ming-scale
 
-    # 创建自启动项
+    # Do not auto-run this legacy scaler.  26.4.0 stores user-selected font,
+    # desktop icon and Dock sizes in appearance.json; automatic Xfce/Plank
+    # writes would overwrite those choices after every login.
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-scale.desktop" << SCALEAUTOSTART
 [Desktop Entry]
 Type=Application
-Name=Ming Display Scale
-Comment=Auto-configure display scaling
-Exec=/usr/local/bin/ming-scale
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
+Name=Ming Legacy Display Scale Migration
+Comment=Disabled: appearance.json owns user display preferences
+Exec=/usr/bin/true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-appearance-control
 SCALEAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-scale.desktop"
+}
+
+# 26.4.0 retires the old resolution-driven scaler.  Retain a harmless command
+# at the historic path so an upgrade hook or user shortcut cannot overwrite
+# appearance.json preferences, while directing users to the supported controls.
+configure_hidpi_autoscale() {
+    cat > /usr/local/bin/ming-scale << 'MINGSCALECOMPAT'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' '显示缩放由 Ming 设置的“外观与桌面”页面管理；未更改现有外观设置。' >&2
+exit 0
+MINGSCALECOMPAT
+    chmod 0755 /usr/local/bin/ming-scale
 }
 
 # ======================== Ming OS 品牌图标生成 (SVG) ========================
@@ -987,7 +1149,6 @@ APPLIBICON
             [store]="ming-app-store spark-store"
             [app-library]="ming-app-library"
             [wechat-mgr]="ming-wechat-manager wechat"
-            [garlic-claw]="garlic-claw"
         )
         for src_name in "${!png_map[@]}"; do
             local src_file="${assets}/${src_name}.png"
@@ -1091,7 +1252,8 @@ install_themes() {
         arc-theme \
         numix-gtk-theme \
         papirus-icon-theme \
-        numix-icon-theme-circle
+        numix-icon-theme-circle \
+        gir1.2-wnck-3.0
 
     # 生成 Ming 品牌化 GTK3 CSS 覆盖（26.3.0 深绿强调色）
     mkdir -p /usr/share/themes/Arc-Darker/gtk-3.0
@@ -1111,24 +1273,26 @@ label selection,
 }
 
 button.suggested-action {
-    background-image: linear-gradient(to bottom, #31C476, #147D74);
+    background-image: none;
+    background-color: #238673;
     border-color: #00453E;
     color: #ffffff;
 }
 button.suggested-action:hover {
-    background-image: linear-gradient(to bottom, #3DD486, #1A9088);
+    background-image: none;
+    background-color: #1D705F;
 }
 
 /* macOS 风格圆角窗口边框 */
 window decoration {
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
 }
 headerbar {
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
 }
 MINGGTKCSS
 
-    mkdir -p "/home/${MING_USER}/.config/gtk-3.0"
+    mkdir -p "/home/${MING_USER}/.config/gtk-3.0" "/home/${MING_USER}/.config/gtk-4.0"
     cat > "/home/${MING_USER}/.config/gtk-3.0/settings.ini" << 'GTKSETTINGS'
 [Settings]
 gtk-theme-name=Ming-Glass
@@ -1146,6 +1310,9 @@ gtk-application-prefer-dark-theme=0
 gtk-decoration-layout=close,minimize,maximize:
 GTKSETTINGS
 
+    cp "/home/${MING_USER}/.config/gtk-3.0/settings.ini" \
+        "/home/${MING_USER}/.config/gtk-4.0/settings.ini"
+
     cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
 gtk-theme-name="Ming-Glass"
 gtk-icon-theme-name="Papirus"
@@ -1158,17 +1325,20 @@ gtk-menu-images=0
 gtk-enable-event-sounds=0
 gtk-enable-input-feedback-sounds=0
 GTK2SETTINGS
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/gtk-3.0/settings.ini" "/home/${MING_USER}/.gtkrc-2.0"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/gtk-3.0/settings.ini" \
+        "/home/${MING_USER}/.config/gtk-4.0/settings.ini" \
+        "/home/${MING_USER}/.gtkrc-2.0"
 
     # Ming-Glass GTK3 轻量纸感主题：参考 Lingmo/deepin/macOS 的统一浅色层级，
     # 但避免高成本模糊和重发光，优先照顾老电脑。
     mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0
     cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'
 @define-color theme_bg_color #F7F9F6;
-@define-color theme_fg_color #1D2421;
-@define-color theme_selected_bg_color #2FAE8F;
+@define-color theme_fg_color #17201C;
+@define-color theme_selected_bg_color #238673;
 @define-color theme_selected_fg_color #ffffff;
-@define-color borders rgba(31, 98, 84, 0.12);
+@define-color borders #D8E2DD;
 @define-color theme_base_color #FFFFFF;
 @define-color theme_text_color #1D2421;
 @define-color insensitive_bg_color #EEF3F0;
@@ -1183,30 +1353,28 @@ GTK2SETTINGS
 window {
   background-color: @theme_bg_color;
   color: @theme_fg_color;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 window decoration {
-  border-radius: 12px;
-  box-shadow: 0 12px 28px rgba(26, 67, 56, 0.09);
+  border-radius: 8px;
+  box-shadow: 0 12px 18px rgba(23, 32, 28, 0.12);
   margin: 0;
 }
 
 button {
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 7px 15px;
   border: 1px solid @borders;
   background-image: none;
-  background-color: rgba(255, 255, 255, 0.90);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
-  transition: background-color 160ms ease-out, border-color 160ms ease-out, box-shadow 180ms ease-out;
   min-height: 30px;
 }
 
 button:hover {
   background-color: #FFFFFF;
-  border-color: rgba(47, 138, 125, 0.24);
-  box-shadow: 0 4px 12px rgba(30, 70, 58, 0.06);
+  border-color: #9FC8BC;
 }
 
 button:active {
@@ -1221,7 +1389,7 @@ button:disabled {
 button.suggested-action {
   background-image: none;
   background-color: #2F8A7D;
-  border-color: rgba(24, 103, 89, 0.24);
+  border-color: #186759;
   color: #FFFFFF;
 }
 
@@ -1232,33 +1400,32 @@ button.suggested-action:hover {
 
 button.destructive-action {
   color: #A64653;
-  border-color: rgba(166, 70, 83, 0.20);
-  background-color: rgba(255, 249, 249, 0.94);
+  border-color: #E4B7BE;
+  background-color: #FFF9F9;
 }
 
 entry {
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 7px 12px;
   border: 1px solid @borders;
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   min-height: 30px;
 }
 
 entry:focus {
   border-color: #2F8A7D;
-  box-shadow: 0 0 0 2px rgba(47, 138, 125, 0.10);
 }
 
 notebook header {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   border: none;
 }
 
 notebook tab {
-  border-radius: 10px 10px 0 0;
+  border-radius: 6px 6px 0 0;
   padding: 7px 16px;
-  background-color: rgba(238, 243, 240, 0.92);
+  background-color: #EEF3F0;
   color: @unfocused_fg_color;
   border: 1px solid transparent;
   border-bottom: none;
@@ -1273,29 +1440,29 @@ notebook tab:checked {
 
 scrollbar slider {
   border-radius: 6px;
-  background-color: rgba(71, 111, 98, 0.28);
+  background-color: #B7C7C0;
   min-width: 8px;
   min-height: 24px;
 }
 
 scrollbar slider:hover {
-  background-color: rgba(47, 138, 125, 0.34);
+  background-color: #8EB8AA;
 }
 
 tooltip {
-  border-radius: 10px;
-  background-color: rgba(28, 39, 35, 0.94);
+  border-radius: 6px;
+  background-color: #202522;
   color: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid #47514C;
   padding: 7px 11px;
 }
 
 menu, .menu {
-  background-color: rgba(255, 255, 255, 0.96);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 4px;
-  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.07);
+  box-shadow: 0 10px 18px rgba(23, 32, 28, 0.12);
 }
 
 menuitem {
@@ -1306,29 +1473,29 @@ menuitem {
 }
 
 menuitem:hover {
-  background-color: rgba(47, 138, 125, 0.08);
+  background-color: #E8F2EE;
 }
 
 headerbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
-  border-bottom: 1px solid rgba(47, 138, 125, 0.08);
-  border-radius: 12px 12px 0 0;
+  border-bottom: 1px solid #D8E2DD;
+  border-radius: 8px 8px 0 0;
   padding: 5px 10px;
   min-height: 38px;
 }
 
 toolbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
 }
 
 .separator {
-  color: rgba(47, 138, 125, 0.10);
+  color: #E1E9E5;
 }
 
 switch {
-  border-radius: 17px;
+  border-radius: 8px;
   background-color: #DEE7E4;
   border: 1px solid @borders;
 }
@@ -1348,13 +1515,13 @@ scale slider {
 
 scale trough {
   border-radius: 4px;
-  background-color: rgba(47, 138, 125, 0.08);
+  background-color: #E5EEEA;
   min-height: 6px;
 }
 
 progressbar trough {
   border-radius: 6px;
-  background-color: rgba(47, 138, 125, 0.07);
+  background-color: #E5EEEA;
   min-height: 8px;
 }
 
@@ -1365,7 +1532,7 @@ progressbar progress {
 
 checkbutton check, radiobutton radio {
   border-radius: 5px;
-  background-color: rgba(255, 255, 255, 0.94);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
   min-width: 18px;
   min-height: 18px;
@@ -1377,18 +1544,18 @@ checkbutton check:checked, radiobutton radio:checked {
 }
 
 .view, iconview {
-  background-color: rgba(255, 255, 255, 0.80);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .view:selected, iconview:selected {
-  background-color: rgba(47, 138, 125, 0.12);
+  background-color: #E1F0EA;
   color: @theme_selected_fg_color;
 }
 
 treeview header button {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   color: @theme_fg_color;
   border: none;
   border-bottom: 1px solid @borders;
@@ -1400,14 +1567,14 @@ placessidebar,
 .sidebar,
 paned > box,
 stacksidebar {
-  background-color: rgba(238, 243, 240, 0.92);
-  border-right: 1px solid rgba(47, 138, 125, 0.10);
+  background-color: #EEF3F0;
+  border-right: 1px solid #D8E2DD;
 }
 
 placessidebar row,
 .sidebar row,
 stacksidebar row {
-  border-radius: 10px;
+  border-radius: 6px;
   margin: 2px 6px;
   padding: 6px 9px;
 }
@@ -1415,20 +1582,20 @@ stacksidebar row {
 placessidebar row:selected,
 .sidebar row:selected,
 stacksidebar row:selected {
-  background-color: rgba(47, 138, 125, 0.12);
+  background-color: #E1F0EA;
   color: #1D2421;
 }
 
 .titlebar,
 decoration {
-  border-radius: 12px 12px 0 0;
+  border-radius: 8px 8px 0 0;
 }
 
 .whiskermenu-window,
 #whiskermenu-window {
-  background-color: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(31, 98, 84, 0.14);
-  border-radius: 14px;
+  background-color: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
 }
 
 spinbutton entry {
@@ -1441,11 +1608,11 @@ spinbutton button {
 }
 
 .xfce4-panel {
-  background-color: rgba(255, 255, 255, 0.74);
-  border: 1px solid rgba(31, 98, 84, 0.10);
-  border-radius: 14px;
+  background-color: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   margin: 6px 8px 4px 8px;
-  box-shadow: 0 8px 22px rgba(30, 70, 58, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.60);
+  box-shadow: 0 10px 18px rgba(30, 70, 58, 0.10), inset 0 1px 0 #FFFFFF;
   padding: 2px 6px;
 }
 
@@ -1461,13 +1628,13 @@ spinbutton button {
 }
 
 .xfce4-panel button:hover {
-  background-color: rgba(47, 138, 125, 0.11);
-  border-color: rgba(47, 138, 125, 0.24);
+  background-color: #E8F2EE;
+  border-color: #9FC8BC;
 }
 
 .xfce4-panel button:checked {
-  background-color: rgba(47, 138, 125, 0.17);
-  border-color: rgba(47, 138, 125, 0.32);
+  background-color: #D8ECE4;
+  border-color: #7DAE9F;
 }
 MINGGLASSCSS
 
@@ -1510,16 +1677,47 @@ setup_wallpaper() {
     local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
     local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
     local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
+    local asset_2640="/tmp/ming-build/assets/wallpaper-ming-2640-abstract.png"
     local asset_png="/tmp/ming-build/assets/wallpaper-default.png"
+
+    # The release wallpaper is a versioned product asset, not an optional
+    # decoration.  Failing here prevents a build from silently falling back to
+    # an older image when the generated bitmap was forgotten at commit time.
+    if [[ ! -s "${asset_2640}" ]]; then
+        echo "[03_desktop][ERROR] missing required 26.4.0 default wallpaper: ${asset_2640}" >&2
+        return 1
+    fi
+
+    render_wallpaper_variant() {
+        local source="$1" destination="$2" dimensions="$3"
+        if command -v convert &>/dev/null; then
+            convert "${source}" \
+                -resize "${dimensions}^" \
+                -gravity center \
+                -extent "${dimensions}" \
+                "${destination}" 2>/dev/null || cp "${source}" "${destination}"
+        else
+            cp "${source}" "${destination}"
+        fi
+    }
 
     # 浅色壁纸
     [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 默认壁纸：优先 Ming 浅色纸感壁纸，风景壁纸保留为可选资产。
+    # 26.4.0's generated abstract asset takes precedence once staged.  Keep a
+    # default-2633 alias so an in-place upgrade never loses a saved wallpaper
+    # path from the preview build.
     local primary=""
-    if [[ -f "${asset_light}" ]]; then
+    if [[ -f "${asset_2640}" ]]; then
+        primary="${asset_2640}"
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2640.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2633.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default.png
+        [[ -f "${asset_light}" ]] && cp "${asset_light}" /usr/share/backgrounds/ming-os/default-light.png
+        [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
+    elif [[ -f "${asset_light}" ]]; then
         primary="${asset_light}"
         cp "${asset_light}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
@@ -1538,16 +1736,14 @@ setup_wallpaper() {
 
     if [[ -n "${primary}" ]]; then
         cp "${primary}" /usr/share/backgrounds/ming-os/default.png
-        if command -v convert &>/dev/null; then
-            convert /usr/share/backgrounds/ming-os/default.png \
-                -resize 1366x768^ \
-                -gravity center \
-                -extent 1366x768 \
-                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || \
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        else
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        fi
+        # Keep the generated 4K source untouched and derive smaller files once
+        # during staging.  The desktop chooses one cache instead of scaling the
+        # original asset on every low-resolution session.
+        cp "${primary}" /usr/share/backgrounds/ming-os/default-3840x2160.png
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1920x1080.png 1920x1080
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1366x768.png 1366x768
     fi
 
     cat > /usr/share/backgrounds/ming-os/default.svg << 'WALLPAPERSVG'
@@ -1576,8 +1772,6 @@ setup_wallpaper() {
   <path d="M0 846 C338 720 548 856 842 744 C1088 650 1304 726 1548 590 C1708 500 1810 520 1920 466 L1920 1080 L0 1080Z" fill="#FFFFFF" opacity="0.34"/>
   <circle cx="450" cy="320" r="210" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
   <circle cx="450" cy="320" r="138" fill="none" stroke="#1E7F70" stroke-width="2" opacity="0.08"/>
-  <text x="124" y="172" font-family="sans-serif" font-size="54" font-weight="700" fill="#1D2421">Ming OS</text>
-  <text x="128" y="218" font-family="sans-serif" font-size="22" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG
 
@@ -1595,8 +1789,6 @@ WALLPAPERSVG
   <path d="M0 520 C190 448 286 548 456 472 C626 394 750 432 906 370 C1080 302 1196 350 1366 286 L1366 768 L0 768Z" fill="#2FAE8F" opacity="0.17"/>
   <path d="M0 612 C238 512 392 618 596 536 C784 462 936 522 1112 424 C1226 362 1286 378 1366 336 L1366 768 L0 768Z" fill="#FFFFFF" opacity="0.34"/>
   <circle cx="320" cy="228" r="148" fill="none" stroke="#2FAE8F" stroke-width="2" opacity="0.10"/>
-  <text x="86" y="126" font-family="sans-serif" font-size="42" font-weight="700" fill="#1D2421">Ming OS</text>
-  <text x="88" y="164" font-family="sans-serif" font-size="18" fill="#4F625A">小而美的桌面系统</text>
 </svg>
 WALLPAPERSVG1366
 
@@ -1621,7 +1813,16 @@ WALLPAPERSVG1366
     fi
 
     [[ -f /usr/share/backgrounds/ming-os/default.png ]] || cp /usr/share/backgrounds/ming-os/default.svg /usr/share/backgrounds/ming-os/default.png
-    [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
+    [[ -f /usr/share/backgrounds/ming-os/default-3840x2160.png ]] || \
+        cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-3840x2160.png
+    [[ -f /usr/share/backgrounds/ming-os/default-1920x1080.png ]] || \
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1920x1080.png 1920x1080
+    [[ -f /usr/share/backgrounds/ming-os/default-1366x768.png ]] || \
+        render_wallpaper_variant /usr/share/backgrounds/ming-os/default-3840x2160.png \
+            /usr/share/backgrounds/ming-os/default-1366x768.png 1366x768
+    [[ -s /usr/share/backgrounds/ming-os/default-light.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-light.png
+    [[ -s /usr/share/backgrounds/ming-os/default-dark.png ]] || cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-dark.png
 
     mkdir -p /usr/share/plymouth/themes/ming-os
     cp /usr/share/backgrounds/ming-os/default.png /usr/share/plymouth/themes/ming-os/wallpaper.png 2>/dev/null || true
@@ -1641,90 +1842,8 @@ configure_xfce_panel() {
     rm -rf "${old_panel_dir}"
     mkdir -p "${old_panel_dir}"
 
-    cat > "${xfconf_dir}/xfce4-panel.xml" << 'PANELXML'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-panel" version="1.0">
-  <property name="configver" type="int" value="2"/>
-  <property name="panels" type="array">
-    <value type="int" value="0"/>
-    <property name="panel-0" type="empty">
-      <property name="position" type="string" value="p=6;x=0;y=0"/>
-      <property name="position-locked" type="bool" value="true"/>
-      <property name="autohide-behavior" type="uint" value="0"/>
-      <property name="length" type="uint" value="100"/>
-      <property name="length-adjust" type="bool" value="true"/>
-      <property name="size" type="uint" value="30"/>
-      <property name="icon-size" type="uint" value="18"/>
-      <property name="nrows" type="uint" value="1"/>
-      <property name="mode" type="uint" value="0"/>
-      <property name="background-style" type="uint" value="2"/>
-      <property name="background-rgba" type="array">
-        <value type="double" value="0.101961"/>
-        <value type="double" value="0.039216"/>
-        <value type="double" value="0.180392"/>
-        <value type="double" value="0.680000"/>
-      </property>
-      <property name="enter-opacity" type="uint" value="100"/>
-      <property name="leave-opacity" type="uint" value="88"/>
-      <property name="disable-struts" type="bool" value="false"/>
-      <property name="plugin-ids" type="array">
-        <value type="int" value="1"/>
-        <value type="int" value="2"/>
-        <value type="int" value="3"/>
-        <value type="int" value="4"/>
-        <value type="int" value="6"/>
-      </property>
-    </property>
-  </property>
-  <property name="plugins" type="empty">
-    <!-- plugin-1: Whisker Menu (Ming 品牌开始菜单) -->
-    <property name="plugin-1" type="string" value="whiskermenu">
-      <property name="button-icon" type="string" value="ming-os-menu"/>
-      <property name="button-title" type="string" value="Ming OS"/>
-      <property name="show-button-title" type="bool" value="true"/>
-      <property name="menu-width" type="uint" value="440"/>
-      <property name="menu-height" type="uint" value="520"/>
-      <property name="menu-opacity" type="uint" value="92"/>
-      <property name="position-categories-alternate" type="bool" value="false"/>
-      <property name="view-mode" type="uint" value="1"/>
-      <property name="show-generic-names" type="bool" value="true"/>
-      <property name="show-tooltips" type="bool" value="true"/>
-      <property name="launcher-show-description" type="bool" value="true"/>
-    </property>
-
-    <!-- plugin-2: 弹性分隔符（把右侧内容推到最右） -->
-    <property name="plugin-2" type="string" value="separator">
-      <property name="style" type="uint" value="0"/>
-      <property name="expand" type="bool" value="true"/>
-    </property>
-
-    <!-- plugin-3: 电源管理插件 (电池/亮度) -->
-    <property name="plugin-3" type="string" value="power-manager-plugin"/>
-
-    <!-- plugin-4: 状态托盘 (网络/音量/通知; Xfce 4.18 systray 已内置 SNI 支持) -->
-    <property name="plugin-4" type="string" value="systray">
-      <property name="square-icons" type="bool" value="true"/>
-      <property name="icon-size" type="uint" value="16"/>
-      <property name="known-legacy-items" type="array">
-        <value type="string" value="networkmanager applet"/>
-        <value type="string" value="pulseaudio plugin"/>
-      </property>
-    </property>
-
-    <!-- plugin-6: 时钟 -->
-    <property name="plugin-6" type="string" value="clock">
-      <property name="digital-layout" type="uint" value="3"/>
-      <property name="digital-time-format" type="string" value="%H:%M"/>
-      <property name="digital-date-format" type="string" value="%m月%d日"/>
-      <property name="tooltip-format" type="string" value="%Y年%m月%d日 %A"/>
-      <property name="mode" type="uint" value="2"/>
-    </property>
-  </property>
-</channel>
-PANELXML
-
-    # Dock-only mode: keep xfce4-panel installed for compatibility, but do not
-    # show the top taskbar. All user-facing entry points live in Plank Dock.
+    # Minimal compatibility state: if a distribution session tries to start
+    # xfce4-panel, it has no panels or plugins to expose alongside Ming shell.
     cat > "${xfconf_dir}/xfce4-panel.xml" << 'PANELXML_DOCK_ONLY'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
@@ -1762,12 +1881,12 @@ configure_plank_dock() {
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
-#图标大小（ming-scale 会按分辨率覆盖）
+#图标大小（由 appearance.json 保持用户选择）
 IconSize=40
 #悬停放大开关
 ZoomEnabled=true
@@ -1775,6 +1894,8 @@ ZoomEnabled=true
 ZoomPercent=148
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
+PinOnly=false
+CurrentWorkspaceOnly=false
 #自动隐藏延迟
 UnhideDelay=0
 HideDelay=0
@@ -1806,9 +1927,11 @@ if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
     exit 1
 fi
 
-plank_dir="${user_home}/.config/plank/dock1"
-mkdir -p "${plank_dir}/launchers"
-missing=0
+    plank_dir="${user_home}/.config/plank/dock1"
+    mkdir -p "${plank_dir}/launchers"
+    rm -f -- "${plank_dir}/launchers/ming-update.dockitem" \
+        /usr/share/applications/ming-dock-ming-update.desktop
+    missing=0
 
 _plank_launcher() {
         local name="$1" target="$2"
@@ -1836,9 +1959,15 @@ _plank_launcher() {
             ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
             ming-edge) wm_class="${wm_class:-microsoft-edge}" ;;
             ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
-            ming-update) wm_class="${wm_class:-Zenity}" ;;
         esac
-        exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
+        # The running-window helper deliberately has NoDisplay=true so it
+        # stays out of the application drawer.  ming-launch correctly rejects
+        # hidden entries, therefore its Dock proxy must invoke the helper
+        # directly while ordinary application proxies stay brokered.
+        case "${name}" in
+            ming-running-apps) exec_line="/usr/local/bin/ming-running-apps menu" ;;
+            *) exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock" ;;
+        esac
         cat > "${proxy_path}" << DOCKPROXY
 [Desktop Entry]
 Type=Application
@@ -1861,15 +1990,20 @@ cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
 Launcher=file:///usr/share/applications/ming-app-library.desktop
 DRAWERDOCKITEM
 for launcher in \
+    "ming-running-apps:ming-running-apps.desktop" \
     "ming-edge:ming-edge.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
-    "garlic-claw:garlic-claw.desktop" \
-    "ming-update:ming-update.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
+if [[ -f /usr/share/applications/papyrus.desktop ]]; then
+    _plank_launcher "papyrus" "papyrus.desktop" || missing=1
+    if ! grep -Fq 'papyrus.dockitem' "${plank_dir}/settings"; then
+        sed -i 's#DockItems=#DockItems=papyrus.dockitem;;#' "${plank_dir}/settings"
+    fi
+fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
@@ -1877,6 +2011,36 @@ fi
 exit "${missing}"
 MINGREFRESHDOCK
     chmod 0755 /usr/local/sbin/ming-refresh-dock-launchers
+
+    # Optional third-party applications frequently publish incomplete or
+    # changing desktop metadata.  Keep a system-owned class-to-launcher map
+    # for the running-window entry instead of rewriting package or user
+    # desktop files.  StartupWMClass still wins when a package provides it.
+    mkdir -p /usr/share/ming-os
+    cat > /usr/share/ming-os/ming-running-apps-known-launchers.conf << 'RUNNINGAPPSMAP'
+# wm_class fragment|candidate desktop file names (first installed candidate wins)
+wps|wps-office-wps.desktop,wps-office.desktop,wps.desktop
+wechat|wechat.desktop,wechat-universal.desktop,com.tencent.wechat.desktop
+weixin|weixin.desktop,wechat.desktop,com.tencent.wechat.desktop
+wine|wine.desktop,winecfg.desktop
+electron|electron.desktop
+RUNNINGAPPSMAP
+
+    cat > /usr/share/applications/ming-running-apps.desktop << 'RUNNINGAPPSDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=正在运行
+Name[zh_CN]=正在运行
+Comment=Show and manage currently running X11 applications
+Comment[zh_CN]=显示并管理正在运行的 X11 应用窗口
+Exec=/usr/local/bin/ming-running-apps menu
+Icon=window-list
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=ming-running-apps
+RUNNINGAPPSDESKTOP
+
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
@@ -1935,8 +2099,6 @@ APPS = [
     ('ming-files.desktop', 'files-icon', '文件'),
     ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
-    ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
-    ('ming-update.desktop', 'ming-update-icon', '系统更新'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -1945,14 +2107,14 @@ window#ming-dock-window {
   background: transparent;
 }
 .dock {
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 18px 42px rgba(21, 68, 56, 0.18), inset 0 1px 0 rgba(255,255,255,0.82);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #FFFFFF;
+  box-shadow: 0 10px 18px rgba(21, 68, 56, 0.14), inset 0 1px 0 #FFFFFF;
 }
 .dock-button {
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 5px;
   background: rgba(255, 255, 255, 0.22);
   border: 1px solid transparent;
@@ -2289,14 +2451,23 @@ x11_id_is_valid() {
     [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
 }
 
+window_is_manageable() {
+    local properties="$1"
+    ! grep -Eq '_NET_WM_WINDOW_TYPE_(DESKTOP|DOCK|NOTIFICATION|TOOLTIP|MENU|DROPDOWN_MENU|POPUP_MENU|SPLASH|DND)' <<< "${properties}"
+}
+
 require_window() {
-    local window_id="$1"
+    local window_id="$1" properties=""
     x11_id_is_valid "${window_id}" || {
         printf '窗口 ID 必须是十六进制 X11 ID（例如 0x01200007）。\n' >&2
         return 22
     }
-    x11_call xprop -id "${window_id}" >/dev/null 2>&1 || {
+    properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || {
         printf '未找到指定窗口：%s\n' "${window_id}" >&2
+        return 3
+    }
+    window_is_manageable "${properties}" || {
+        printf '指定窗口不是可管理的应用窗口：%s\n' "${window_id}" >&2
         return 3
     }
 }
@@ -2407,6 +2578,375 @@ esac
 MINGWINDOWCONTROL
     chmod 0755 /usr/local/bin/ming-window-control
 
+cat > /usr/local/bin/ming-running-apps << 'MINGRUNNINGAPPS'
+#!/usr/bin/env bash
+# Safe fallback for windows that Plank/BAMF cannot associate with a launcher.
+# It only sends EWMH requests through ming-window-control; it never kills a
+# process, clears a window, or touches application data.
+set -u
+
+window_control_bin="${MING_WINDOW_CONTROL_BIN:-/usr/local/bin/ming-window-control}"
+desktop_dirs_value="${MING_RUNNING_APPS_DESKTOP_DIRS:-/usr/share/applications:/usr/local/share/applications}"
+known_launcher_map="${MING_RUNNING_APPS_MAPPING_FILE:-/usr/share/ming-os/ming-running-apps-known-launchers.conf}"
+desktop_entry_path="${MING_RUNNING_APPS_DESKTOP_FILE:-/usr/share/applications/ming-running-apps.desktop}"
+plank_settings_path="${MING_PLANK_SETTINGS_FILE:-${HOME}/.config/plank/dock1/settings}"
+plank_launchers_dir="${MING_PLANK_LAUNCHERS_DIR:-${HOME}/.config/plank/dock1/launchers}"
+running_apps_dock_proxy_path="${MING_RUNNING_APPS_DOCK_PROXY_FILE:-/usr/share/applications/ming-dock-ming-running-apps.desktop}"
+IFS=':' read -r -a desktop_dirs <<< "${desktop_dirs_value}"
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+x11_id_is_valid() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+window_control_available() {
+    [[ -x "${window_control_bin}" ]] || command -v "${window_control_bin}" >/dev/null 2>&1
+}
+
+desktop_field() {
+    local desktop_file="$1" field="$2"
+    awk -v key="${field}" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' \
+        "${desktop_file}" 2>/dev/null
+}
+
+class_matches() {
+    local observed="${1,,}" expected="${2,,}"
+    observed="${observed//./,}"
+    expected="${expected//./,}"
+    [[ -n "${expected}" ]] || return 1
+    [[ ",${observed}," == *",${expected},"* ]]
+}
+
+launcher_for_startup_wm_class() {
+    local wm_class="$1" desktop_file startup_class
+    for desktop_dir in "${desktop_dirs[@]}"; do
+        [[ -d "${desktop_dir}" ]] || continue
+        for desktop_file in "${desktop_dir}"/*.desktop; do
+            [[ -f "${desktop_file}" ]] || continue
+            startup_class="$(desktop_field "${desktop_file}" StartupWMClass)"
+            if class_matches "${wm_class}" "${startup_class}"; then
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+first_installed_launcher() {
+    local candidates="$1" candidate desktop_dir desktop_file
+    local -a names=()
+    IFS=',' read -r -a names <<< "${candidates}"
+    for candidate in "${names[@]}"; do
+        for desktop_dir in "${desktop_dirs[@]}"; do
+            desktop_file="${desktop_dir}/${candidate}"
+            if [[ -f "${desktop_file}" ]]; then
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+known_launcher_for_class() {
+    local wm_class="${1,,}" fragment candidates desktop_file
+    if [[ -r "${known_launcher_map}" ]]; then
+        while IFS='|' read -r fragment candidates; do
+            [[ -n "${fragment}" && "${fragment:0:1}" != "#" ]] || continue
+            if [[ "${wm_class}" == *"${fragment,,}"* ]]; then
+                desktop_file="$(first_installed_launcher "${candidates}")" || continue
+                printf '%s\n' "${desktop_file}"
+                return 0
+            fi
+        done < "${known_launcher_map}"
+    fi
+
+    # The built-in fallback keeps the entry useful on upgrades where the
+    # system-owned mapping file has not been deployed yet.
+    case "${wm_class}" in
+        *wps*) candidates="wps-office-wps.desktop,wps-office.desktop,wps.desktop" ;;
+        *wechat*|*weixin*) candidates="wechat.desktop,weixin.desktop,com.tencent.wechat.desktop" ;;
+        *wine*) candidates="wine.desktop,winecfg.desktop" ;;
+        *electron*) candidates="electron.desktop" ;;
+        *) return 1 ;;
+    esac
+    first_installed_launcher "${candidates}"
+}
+
+declare -A mapping_cache=()
+mapping_kind="unmapped"
+mapping_file=""
+mapping_source="unmapped"
+
+resolve_launcher_mapping() {
+    local wm_class="$1" key="" cached="" desktop_file=""
+    key="$(LC_ALL=C tr -cd '[:alnum:].,_-' <<< "${1,,}")"
+    key="${key:-unknown}"
+    if [[ -n "${mapping_cache["${key}"]+present}" ]]; then
+        cached="${mapping_cache["${key}"]}"
+        IFS='|' read -r mapping_kind mapping_file mapping_source <<< "${cached}"
+        return 0
+    fi
+
+    mapping_kind="unmapped"
+    mapping_file=""
+    mapping_source="unmapped"
+    desktop_file="$(launcher_for_startup_wm_class "${wm_class}" 2>/dev/null || true)"
+    if [[ -n "${desktop_file}" ]]; then
+        mapping_kind="launcher"
+        mapping_file="${desktop_file}"
+        mapping_source="startup-wm-class"
+    else
+        desktop_file="$(known_launcher_for_class "${wm_class}" 2>/dev/null || true)"
+        if [[ -n "${desktop_file}" ]]; then
+            # A filename/class heuristic helps the running-window menu, but
+            # it is not evidence that Plank/BAMF owns this client window.
+            mapping_kind="candidate"
+            mapping_file="${desktop_file}"
+            mapping_source="known-class"
+        fi
+    fi
+    mapping_cache["${key}"]="${mapping_kind}|${mapping_file}|${mapping_source}"
+}
+
+window_wm_class() {
+    local properties="$1" fallback="$2" value
+    value="$(sed -n 's/^WM_CLASS([^)]*) = //p' <<< "${properties}" | head -n1)"
+    value="${value//\"/}"
+    value="${value//, /,}"
+    value="${value//$'\r'/}"
+    printf '%s\n' "${value:-${fallback}}"
+}
+
+window_is_manageable() {
+    local properties="$1"
+    ! grep -Eq '_NET_WM_WINDOW_TYPE_(DESKTOP|DOCK|NOTIFICATION|TOOLTIP|MENU|DROPDOWN_MENU|POPUP_MENU|SPLASH|DND)' <<< "${properties}"
+}
+
+require_manageable_window() {
+    local window_id="$1" properties=""
+    x11_id_is_valid "${window_id}" || {
+        printf 'window ID must be a hexadecimal X11 ID.\n' >&2
+        return 22
+    }
+    properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || {
+        printf 'window ID is not an existing X11 window: %s\n' "${window_id}" >&2
+        return 3
+    }
+    window_is_manageable "${properties}" || {
+        printf 'window ID is not a manageable application window: %s\n' "${window_id}" >&2
+        return 3
+    }
+    window_control_available || {
+        printf 'ming-window-control is unavailable.\n' >&2
+        return 127
+    }
+}
+
+collect_windows() {
+    local listing="" window_line="" window_id workspace host wmctrl_class title
+    local properties="" wm_class="" minimized skip_taskbar actionable
+    declare -A seen_window_ids=()
+
+    listing="$(x11_call wmctrl -lx 2>/dev/null || true)"
+    while IFS= read -r window_line; do
+        [[ -n "${window_line}" ]] || continue
+        read -r window_id workspace host wmctrl_class title <<< "${window_line}"
+        x11_id_is_valid "${window_id}" || continue
+        [[ -z "${seen_window_ids[${window_id}]+present}" ]] || continue
+        seen_window_ids[${window_id}]=true
+        properties="$(x11_call xprop -id "${window_id}" 2>/dev/null)" || continue
+        window_is_manageable "${properties}" || continue
+
+        wm_class="$(window_wm_class "${properties}" "${wmctrl_class}")"
+        minimized=false
+        skip_taskbar=false
+        grep -q '_NET_WM_STATE_HIDDEN' <<< "${properties}" && minimized=true
+        grep -q '_NET_WM_STATE_SKIP_TASKBAR' <<< "${properties}" && skip_taskbar=true
+        actionable=false
+        window_control_available && actionable=true
+        resolve_launcher_mapping "${wm_class}"
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
+            "${window_id}" "${title:-${wm_class}}" "${wm_class}" "${minimized}" \
+            "${skip_taskbar}" "${mapping_kind}" "${mapping_file}" "${mapping_source}" "${actionable}"
+    done <<< "${listing}"
+}
+
+dock_settings_include_running_apps_item() {
+    local dock_items=""
+    [[ -r "${plank_settings_path}" ]] || return 1
+    dock_items="$(awk 'index($0, "DockItems=") == 1 { print substr($0, 11); exit }' "${plank_settings_path}" 2>/dev/null)"
+    [[ -n "${dock_items}" ]] || return 1
+    [[ ";;${dock_items};;" == *";;ming-running-apps.dockitem;;"* ]]
+}
+
+running_apps_dock_item_present() {
+    local dock_item="${plank_launchers_dir}/ming-running-apps.dockitem"
+    dock_settings_include_running_apps_item || return 1
+    [[ -s "${dock_item}" && -s "${running_apps_dock_proxy_path}" ]] || return 1
+    grep -qxF "Launcher=file://${running_apps_dock_proxy_path}" "${dock_item}" && \
+        grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${running_apps_dock_proxy_path}"
+}
+
+running_apps_entry_available() {
+    window_control_available || return 1
+    command -v zenity >/dev/null 2>&1 || return 1
+    [[ -s "${desktop_entry_path}" ]] || return 1
+    grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${desktop_entry_path}"
+}
+
+list_json() {
+    local records_file entry_available=false dock_item=false rc=0
+    records_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-running-apps.XXXXXX" 2>/dev/null)" \
+        || records_file="$(mktemp /tmp/ming-running-apps.XXXXXX)" \
+        || return 1
+    collect_windows > "${records_file}"
+    running_apps_entry_available && entry_available=true
+    running_apps_dock_item_present && dock_item=true
+    MING_RUNNING_ENTRY_AVAILABLE="${entry_available}" MING_RUNNING_DOCK_ITEM="${dock_item}" \
+    MING_RUNNING_DESKTOP_FILE="${desktop_entry_path}" python3 - "${records_file}" <<'PY'
+import json
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+if fields and not fields[-1]:
+    fields.pop()
+windows = []
+for start in range(0, len(fields), 9):
+    record = fields[start:start + 9]
+    if len(record) != 9:
+        continue
+    value = [part.decode("utf-8", "replace") for part in record]
+    window = {
+        "id": value[0],
+        "title": value[1],
+        "wm_class": value[2],
+        "minimized": value[3] == "true",
+        "skip_taskbar": value[4] == "true",
+        "mapping": {
+            "kind": value[5],
+            "desktop_file": value[6] or None,
+            "source": value[7],
+        },
+        "actionable": value[8] == "true",
+    }
+    windows.append(window)
+
+unmapped_minimized = [
+    window for window in windows
+    if window["minimized"] and window["mapping"]["kind"] != "launcher"
+]
+print(json.dumps({
+    "windows": windows,
+    "unmapped_minimized": unmapped_minimized,
+    "entry": {
+        "available": os.environ.get("MING_RUNNING_ENTRY_AVAILABLE") == "true",
+        "dock_item": os.environ.get("MING_RUNNING_DOCK_ITEM") == "true",
+        "desktop_file": os.environ["MING_RUNNING_DESKTOP_FILE"],
+    },
+}, ensure_ascii=False))
+PY
+    rc=$?
+    rm -f "${records_file}"
+    return "${rc}"
+}
+
+run_action() {
+    local action="$1" window_id="$2"
+    require_manageable_window "${window_id}" || return $?
+    "${window_control_bin}" "${action}" --window-id "${window_id}"
+}
+
+show_menu() {
+    local payload="" rows="" selected="" action="" window_id title state
+    local -a dialog=()
+    command -v zenity >/dev/null 2>&1 || {
+        printf 'ming-running-apps list --json\n' >&2
+        return 1
+    }
+    payload="$(list_json)" || return $?
+    rows="$(MING_RUNNING_APPS_JSON="${payload}" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ["MING_RUNNING_APPS_JSON"])
+except (KeyError, json.JSONDecodeError):
+    payload = {"windows": []}
+for window in payload.get("windows", []):
+    state = []
+    if window.get("minimized"):
+        state.append("已最小化")
+    if window.get("skip_taskbar"):
+        state.append("跳过任务栏")
+    if window.get("mapping", {}).get("kind") == "unmapped":
+        state.append("运行中入口")
+    elif window.get("mapping", {}).get("kind") == "candidate":
+        state.append("候选启动器")
+    print("%s\t%s\t%s" % (
+        window.get("id", ""),
+        str(window.get("title", "")).replace("\t", " ").replace("\n", " "),
+        "，".join(state) or "可管理",
+    ))
+PY
+    )"
+    [[ -n "${rows}" ]] || {
+        # A clean Live desktop only has shell/Dock surfaces, which are
+        # deliberately filtered above.  An empty list is normal, not an X11
+        # application failure, so leave this Dock action as a quiet no-op.
+        return 0
+    }
+    dialog=(--list --title="正在运行" --text="选择要恢复、聚焦或关闭的窗口。" \
+        --column="窗口 ID" --column="应用" --column="状态" --hide-column=1 --print-column=1)
+    while IFS=$'\t' read -r window_id title state; do
+        [[ -n "${window_id}" ]] || continue
+        dialog+=("${window_id}" "${title}" "${state}")
+    done <<< "${rows}"
+    selected="$(zenity "${dialog[@]}" 2>/dev/null)" || return 0
+    [[ -n "${selected}" ]] || return 0
+    action="$(zenity --list --radiolist --title="正在运行" --text="选择对该窗口执行的操作。" \
+        --column="" --column="操作" true "恢复并聚焦" false "仅聚焦" false "关闭窗口" 2>/dev/null)" || return 0
+    case "${action}" in
+        恢复并聚焦) run_action restore "${selected}" ;;
+        仅聚焦) run_action focus "${selected}" ;;
+        关闭窗口) run_action close "${selected}" ;;
+        *) return 0 ;;
+    esac
+}
+
+case "${1:-menu}" in
+    list)
+        [[ "${2:-}" == "--json" && "$#" -eq 2 ]] || {
+            printf 'Usage: %s list --json\n' "$0" >&2
+            exit 2
+        }
+        list_json
+        ;;
+    restore|focus|close)
+        [[ "${2:-}" == "--window-id" && -n "${3:-}" && "$#" -eq 3 ]] || {
+            printf 'Usage: %s %s --window-id 0x01200007\n' "$0" "$1" >&2
+            exit 2
+        }
+        run_action "$1" "$3"
+        ;;
+    menu)
+        [[ "$#" -eq 1 ]] || { printf 'Usage: %s menu\n' "$0" >&2; exit 2; }
+        show_menu
+        ;;
+    *)
+        printf 'Usage: %s {menu|list --json|restore|focus|close --window-id HEX}\n' "$0" >&2
+        exit 2
+        ;;
+esac
+MINGRUNNINGAPPS
+    chmod 0755 /usr/local/bin/ming-running-apps
+
 cat > /usr/local/bin/ming-desktop-healthcheck << 'MINGDESKHEALTH'
 #!/usr/bin/env bash
 set -u
@@ -2435,6 +2975,70 @@ x11_call() {
     timeout --foreground 2s "$@"
 }
 
+window_control_bin="${MING_WINDOW_CONTROL_BIN:-/usr/local/bin/ming-window-control}"
+running_apps_bin="${MING_RUNNING_APPS_BIN:-/usr/local/bin/ming-running-apps}"
+
+plank_mapping_snapshot() {
+    dock_pin_only=false
+    dock_pin_only_valid=false
+    dock_settings="${MING_PLANK_SETTINGS_FILE:-${HOME}/.config/plank/dock1/settings}"
+    if [[ ! -r "${dock_settings}" ]]; then
+        dock_settings="/etc/skel/.config/plank/dock1/settings"
+    fi
+    if grep -qx 'PinOnly=true' "${dock_settings}" 2>/dev/null; then
+        dock_pin_only=true
+        dock_pin_only_valid=true
+    elif grep -qx 'PinOnly=false' "${dock_settings}" 2>/dev/null; then
+        dock_pin_only=false
+        dock_pin_only_valid=true
+    fi
+
+    bamfdaemon_available=false
+    bamfdaemon_running=false
+    command -v bamfdaemon >/dev/null 2>&1 && bamfdaemon_available=true
+    pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && bamfdaemon_running=true
+}
+
+running_apps_snapshot() {
+    running_apps_available=false
+    running_apps_entry_available=false
+    running_apps_dock_item=false
+    running_apps_mapped_count=0
+    unmapped_minimized_count=0
+    running_apps_json='{"windows":[],"unmapped_minimized":[],"entry":{"available":false,"dock_item":false}}'
+    if [[ -x "${running_apps_bin}" ]]; then
+        running_apps_available=true
+        running_apps_json="$("${running_apps_bin}" list --json 2>>"${log_file}" || true)"
+    fi
+    local summary=""
+    summary="$(MING_RUNNING_APPS_JSON="${running_apps_json}" python3 - <<'PY'
+import json
+import os
+
+try:
+    value = json.loads(os.environ.get("MING_RUNNING_APPS_JSON", "{}"))
+except json.JSONDecodeError:
+    value = {}
+windows = value.get("windows") if isinstance(value.get("windows"), list) else []
+unmapped = value.get("unmapped_minimized")
+if not isinstance(unmapped, list):
+    unmapped = []
+entry = value.get("entry") if isinstance(value.get("entry"), dict) else {}
+mapped = sum(1 for window in windows if isinstance(window, dict)
+             and isinstance(window.get("mapping"), dict)
+             and window["mapping"].get("kind") == "launcher")
+print("%s %s %s %s" % (
+    str(bool(entry.get("available"))).lower(),
+    str(bool(entry.get("dock_item"))).lower(),
+    mapped,
+    len(unmapped),
+))
+PY
+)"
+    read -r running_apps_entry_available running_apps_dock_item \
+        running_apps_mapped_count unmapped_minimized_count <<< "${summary}"
+}
+
 window_manager_snapshot() {
     window_manager_running=false
     window_manager_ewmh=false
@@ -2444,22 +3048,39 @@ window_manager_snapshot() {
     window_manager_geometry="n/a"
     window_manager_log="${HOME}/.cache/ming-os/window-manager.log"
     local status=""
-    if [[ ! -x /usr/local/bin/ming-window-control ]]; then
+    if [[ ! -x "${window_control_bin}" ]]; then
         log "window manager helper is missing"
         return 0
     fi
-    status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
-    if grep -Fq '"xfwm":{"running":true' <<<"${status}"; then
+    status="$("${window_control_bin}" status --json 2>>"${log_file}" || true)"
+    local flags=""
+    flags="$(MING_WINDOW_MANAGER_STATUS="${status}" python3 - <<'PY'
+import json
+import os
+
+try:
+    value = json.loads(os.environ.get("MING_WINDOW_MANAGER_STATUS", "{}"))
+except json.JSONDecodeError:
+    value = {}
+xfwm = value.get("xfwm") if isinstance(value.get("xfwm"), dict) else {}
+print("%s %s %s" % (
+    str(bool(xfwm.get("running"))).lower(),
+    str(bool(value.get("ewmh"))).lower(),
+    str(bool(value.get("healthy"))).lower(),
+))
+PY
+)"
+    local parsed_running=false parsed_ewmh=false parsed_healthy=false
+    read -r parsed_running parsed_ewmh parsed_healthy <<< "${flags}"
+    if ${parsed_running}; then
         window_manager_running=true
         window_manager_visible=true
     fi
-    if grep -Fq '"ewmh":true' <<<"${status}"; then
+    if ${parsed_ewmh}; then
         window_manager_ewmh=true
         window_manager_stacking="ewmh"
     fi
-    if grep -Fq '"healthy":true' <<<"${status}"; then
-        window_manager_healthy=true
-    fi
+    ${parsed_healthy} && window_manager_healthy=true
 }
 
 x11_id_is_valid() {
@@ -2567,8 +3188,8 @@ window_stacking() {
 
 repair_components() {
     log "repair requested"
-    if command -v ming-window-control >/dev/null 2>&1; then
-        /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+    if [[ -x "${window_control_bin}" ]]; then
+        "${window_control_bin}" repair >>"${log_file}" 2>&1 \
             || log "window-manager repair did not recover Xfwm/EWMH"
     fi
     if command -v ming-phone-desktop-watchdog >/dev/null 2>&1; then
@@ -2633,6 +3254,31 @@ fi
 broker_running=false
 has_proc 'ming-launch[[:space:]]+--server' && broker_running=true
 
+plank_mapping_snapshot
+running_apps_snapshot
+
+# A missing launcher association is observable degradation, not a reason to
+# restart a healthy Dock.  The running-window entry remains usable for every
+# validated X11 client, including minimized SKIP_TASKBAR clients.
+dock_degraded=false
+dock_degradation="none"
+if ! ${dock_pin_only_valid}; then
+    dock_degraded=true
+    dock_degradation="pin-only-enabled"
+elif ! ${bamfdaemon_running}; then
+    dock_degraded=true
+    dock_degradation="bamfdaemon-not-running"
+elif ! ${running_apps_entry_available}; then
+    dock_degraded=true
+    dock_degradation="running-apps-entry-unavailable"
+elif ! ${running_apps_dock_item}; then
+    dock_degraded=true
+    dock_degradation="running-apps-dock-item-unavailable"
+elif (( unmapped_minimized_count > 0 )); then
+    dock_degraded=true
+    dock_degradation="unmapped-minimized"
+fi
+
 if ${json}; then
     MING_DESKTOP_RUNNING="${desktop_running}" MING_DESKTOP_VISIBLE="${desktop_visible}" \
     MING_DESKTOP_STACKING="${desktop_stacking}" MING_DESKTOP_GEOMETRY="${desktop_geometry}" \
@@ -2641,7 +3287,16 @@ if ${json}; then
     MING_BROKER_RUNNING="${broker_running}" MING_WM_RUNNING="${window_manager_running}" \
     MING_WM_VISIBLE="${window_manager_visible}" MING_WM_STACKING="${window_manager_stacking}" \
     MING_WM_GEOMETRY="${window_manager_geometry}" MING_WM_EWMH="${window_manager_ewmh}" \
-    MING_WM_HEALTHY="${window_manager_healthy}" MING_WM_LOG="${window_manager_log}" python3 - <<'PY'
+    MING_WM_HEALTHY="${window_manager_healthy}" MING_WM_LOG="${window_manager_log}" \
+    MING_DOCK_PIN_ONLY="${dock_pin_only}" MING_DOCK_PIN_ONLY_VALID="${dock_pin_only_valid}" \
+    MING_BAMF_AVAILABLE="${bamfdaemon_available}" MING_BAMF_RUNNING="${bamfdaemon_running}" \
+    MING_DOCK_DEGRADED="${dock_degraded}" MING_DOCK_DEGRADATION="${dock_degradation}" \
+    MING_RUNNING_APPS_AVAILABLE="${running_apps_available}" \
+    MING_RUNNING_APPS_ENTRY_AVAILABLE="${running_apps_entry_available}" \
+    MING_RUNNING_APPS_DOCK_ITEM="${running_apps_dock_item}" \
+    MING_RUNNING_APPS_MAPPED_COUNT="${running_apps_mapped_count}" \
+    MING_UNMAPPED_MINIMIZED_COUNT="${unmapped_minimized_count}" \
+    MING_RUNNING_APPS_JSON="${running_apps_json}" python3 - <<'PY'
 import json
 import os
 
@@ -2650,9 +3305,26 @@ component = lambda prefix: {"running": boolean(prefix + "_RUNNING"),
                             "visible": boolean(prefix + "_VISIBLE"),
                             "stacking": os.environ[prefix + "_STACKING"],
                             "geometry": os.environ[prefix + "_GEOMETRY"]}
+try:
+    running_apps_payload = json.loads(os.environ.get("MING_RUNNING_APPS_JSON", "{}"))
+except json.JSONDecodeError:
+    running_apps_payload = {}
+windows = running_apps_payload.get("windows")
+if not isinstance(windows, list):
+    windows = []
+unmapped_minimized = running_apps_payload.get("unmapped_minimized")
+if not isinstance(unmapped_minimized, list):
+    unmapped_minimized = []
 payload = {
     "desktop": component("MING_DESKTOP"),
-    "dock": component("MING_DOCK"),
+    "dock": {**component("MING_DOCK"),
+             "pin_only": boolean("MING_DOCK_PIN_ONLY"),
+             "pin_only_valid": boolean("MING_DOCK_PIN_ONLY_VALID"),
+             "bamfdaemon": {"available": boolean("MING_BAMF_AVAILABLE"),
+                            "running": boolean("MING_BAMF_RUNNING")},
+             "mapped_windows": int(os.environ["MING_RUNNING_APPS_MAPPED_COUNT"]),
+             "degraded": boolean("MING_DOCK_DEGRADED"),
+             "degradation": os.environ["MING_DOCK_DEGRADATION"]},
     "launch_broker": {"running": boolean("MING_BROKER_RUNNING"), "visible": False,
                       "stacking": "n/a", "geometry": "n/a"},
     "window_manager": {"running": boolean("MING_WM_RUNNING"),
@@ -2662,15 +3334,27 @@ payload = {
                        "ewmh": boolean("MING_WM_EWMH"),
                        "healthy": boolean("MING_WM_HEALTHY"),
                        "log": os.environ["MING_WM_LOG"]},
+    "windows": windows,
+    "unmapped_minimized": unmapped_minimized,
+    "running_apps": {"available": boolean("MING_RUNNING_APPS_AVAILABLE"),
+                     "entry_available": boolean("MING_RUNNING_APPS_ENTRY_AVAILABLE"),
+                     "dock_item": boolean("MING_RUNNING_APPS_DOCK_ITEM"),
+                     "mapped_windows": int(os.environ["MING_RUNNING_APPS_MAPPED_COUNT"]),
+                     "unmapped_minimized": int(os.environ["MING_UNMAPPED_MINIMIZED_COUNT"])},
 }
 print(json.dumps(payload, ensure_ascii=False))
 PY
 else
     printf 'desktop: running=%s visible=%s stacking=%s geometry=%s\n' "${desktop_running}" "${desktop_visible}" "${desktop_stacking}" "${desktop_geometry}"
-    printf 'dock: running=%s visible=%s stacking=%s geometry=%s\n' "${dock_running}" "${dock_visible}" "${dock_stacking}" "${dock_geometry}"
+    printf 'dock: running=%s visible=%s stacking=%s geometry=%s pin_only=%s bamfdaemon=%s degraded=%s degradation=%s\n' \
+        "${dock_running}" "${dock_visible}" "${dock_stacking}" "${dock_geometry}" \
+        "${dock_pin_only}" "${bamfdaemon_running}" "${dock_degraded}" "${dock_degradation}"
     printf 'launch_broker: running=%s visible=false stacking=n/a geometry=n/a\n' "${broker_running}"
     printf 'window_manager: running=%s ewmh=%s healthy=%s log=%s\n' \
         "${window_manager_running}" "${window_manager_ewmh}" "${window_manager_healthy}" "${window_manager_log}"
+    printf 'running_apps: available=%s entry=%s mapped=%s unmapped_minimized=%s\n' \
+        "${running_apps_available}" "${running_apps_entry_available}" \
+        "${running_apps_mapped_count}" "${unmapped_minimized_count}"
 fi
 
 ${desktop_running} && ${desktop_visible} && ${dock_running} && ${dock_healthy} && ${broker_running} && ${window_manager_healthy}
@@ -2694,36 +3378,15 @@ window_manager_healthy() {
     grep -Fq '"healthy":true' <<<"${status}"
 }
 
-run_session() {
-    local lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-window-manager-watchdog.lock"
-    exec 9>"${lock_file}" || exit 1
-    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
-        exit 0
-    fi
-
-    local failure_count=0 last_repair=0 now
-    sleep 3
-    while true; do
-        if window_manager_healthy; then
-            failure_count=0
-        else
-            failure_count=$((failure_count + 1))
-            log "health failure ${failure_count}/3"
-            now="$(date +%s)"
-            if (( failure_count >= 3 )) && (( now - last_repair >= 60 )); then
-                log 'three consecutive failures; requesting conservative Xfwm/EWMH repair'
-                /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
-                    || log 'repair attempt did not report recovery'
-                last_repair="${now}"
-                failure_count=0
-            fi
-        fi
-        sleep 10
-    done
+repair_if_needed() {
+    window_manager_healthy && return 0
+    log 'window-manager-changed event reported an unhealthy Xfwm/EWMH state'
+    /usr/local/bin/ming-window-control repair >>"${log_file}" 2>&1 \
+        || { log 'event-triggered repair did not report recovery'; return 1; }
 }
 
 case "${1:-start}" in
-    --session) run_session ;;
+    --session|--repair-if-needed) repair_if_needed ;;
     --check) window_manager_healthy ;;
     *)
         /usr/local/bin/ming-window-control status --json
@@ -2778,7 +3441,7 @@ phone_desktop_ready() {
 wait_phone_desktop_ready() {
     local log_file="$1"
     local attempt
-    # The session coordinator owns the fixed eight-second desktop startup
+    # The session coordinator owns the fixed 8-second desktop startup
     # budget.  Keep this one-shot helper bounded to the same deadline so a
     # repair cannot outlive the supervisor's startup window.
     for attempt in $(seq 1 16); do
@@ -2855,6 +3518,8 @@ log_dir="${HOME}/.cache/ming-os"
 mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 log_file="${log_dir}/plank.log"
 stacking_promotion_attempted_for=""
+PLANK_STARTUP_TIMEOUT=8
+PLANK_PROBE_TIMEOUT=2
 
 log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
@@ -2868,13 +3533,15 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-running-apps.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=40
 ZoomEnabled=true
 ZoomPercent=148
 HideMode=0
+PinOnly=false
+CurrentWorkspaceOnly=false
 UnhideDelay=0
 HideDelay=0
 Theme=Ming
@@ -2887,11 +3554,31 @@ FadeOpacity=1.0
 PLANKRUNTIMESETTINGS
 }
 
+plank_settings_include_running_apps_item() {
+    local settings="$1" dock_items=""
+    [[ -r "${settings}" ]] || return 1
+    dock_items="$(awk 'index($0, "DockItems=") == 1 { print substr($0, 11); exit }' "${settings}" 2>/dev/null)"
+    [[ -n "${dock_items}" ]] || return 1
+    [[ ";;${dock_items};;" == *";;ming-running-apps.dockitem;;"* ]]
+}
+
+running_apps_dock_item_healthy() {
+    local settings="$1" launchers_dir="$2"
+    local dock_item="${launchers_dir}/ming-running-apps.dockitem"
+    local proxy_path="${MING_RUNNING_APPS_DOCK_PROXY_FILE:-/usr/share/applications/ming-dock-ming-running-apps.desktop}"
+    plank_settings_include_running_apps_item "${settings}" || return 1
+    [[ -s "${dock_item}" && -s "${proxy_path}" ]] || return 1
+    grep -qxF "Launcher=file://${proxy_path}" "${dock_item}" && \
+        grep -qxF 'Exec=/usr/local/bin/ming-running-apps menu' "${proxy_path}"
+}
+
 ensure_plank_settings() {
-    local settings="${HOME}/.config/plank/dock1/settings"
+    local plank_dir="${HOME}/.config/plank/dock1"
+    local settings="${MING_PLANK_SETTINGS_FILE:-${plank_dir}/settings}"
+    local launchers_dir="${MING_PLANK_LAUNCHERS_DIR:-${plank_dir}/launchers}"
     local skel_settings="/etc/skel/.config/plank/dock1/settings"
-    local restored=false
-    mkdir -p "$(dirname "${settings}")" 2>/dev/null || true
+    local restored=false running_item_added=false running_item_repaired=false
+    mkdir -p "$(dirname "${settings}")" "${launchers_dir}" 2>/dev/null || true
     if [[ ! -f "${settings}" ]]; then
         if [[ -s "${skel_settings}" ]]; then
             cp "${skel_settings}" "${settings}" 2>/dev/null || write_default_plank_settings "${settings}"
@@ -2906,10 +3593,42 @@ ensure_plank_settings() {
     else
         printf 'HideMode=0\n' >>"${settings}"
     fi
-    if ${restored} && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+    if grep -q '^PinOnly=' "${settings}"; then
+        sed -i 's/^PinOnly=.*/PinOnly=false/' "${settings}" 2>/dev/null || true
+    else
+        printf 'PinOnly=false\n' >>"${settings}"
+    fi
+    if plank_settings_include_running_apps_item "${settings}"; then
+        :
+    elif grep -q '^DockItems=' "${settings}"; then
+        sed -i 's|^DockItems=.*|&;;ming-running-apps.dockitem|' "${settings}" 2>/dev/null || true
+        running_item_added=true
+    else
+        printf 'DockItems=ming-running-apps.dockitem\n' >>"${settings}"
+        running_item_added=true
+    fi
+    if ! running_apps_dock_item_healthy "${settings}" "${launchers_dir}"; then
+        running_item_repaired=true
+    fi
+    if { ${restored} || ${running_item_added} || ${running_item_repaired}; } && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
         /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >>"${log_file}" 2>&1 || \
             log "Dock launcher refresh after settings restore failed"
     fi
+}
+
+ensure_bamfdaemon() {
+    pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && return 0
+    command -v bamfdaemon >/dev/null 2>&1 || {
+        log "bamfdaemon is unavailable; running-window fallback remains available"
+        return 1
+    }
+    (nohup bamfdaemon >>"${log_file}" 2>&1 &) || return 1
+    for _bamf_try in $(seq 1 8); do
+        pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1 && return 0
+        sleep 0.25
+    done
+    log "bamfdaemon did not become ready; retaining Plank and running-window fallback"
+    return 1
 }
 
 x11_call() {
@@ -2923,7 +3642,7 @@ valid_window_id() {
 
 plank_window_id() {
     command -v wmctrl >/dev/null 2>&1 || return 1
-    local fallback_id="" candidate_id candidate_geometry screen=""
+    local fallback_id="" candidate_id candidate_geometry screen="" candidate_count=0
     local xprop_available=false
     command -v xprop >/dev/null 2>&1 && xprop_available=true
     ${xprop_available} || screen="$(screen_geometry)"
@@ -2931,6 +3650,8 @@ plank_window_id() {
     dock_candidates="$(x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ { print $1 }' || true)"
     while read -r candidate_id; do
         [[ "${candidate_id}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
+        candidate_count=$((candidate_count + 1))
+        (( candidate_count <= 3 )) || break
         [[ -n "${fallback_id}" ]] || fallback_id="${candidate_id}"
         if ${xprop_available} && x11_call xprop -id "${candidate_id}" 2>/dev/null | grep -q '_NET_WM_WINDOW_TYPE_DOCK'; then
             printf '%s\n' "${candidate_id}"
@@ -3002,6 +3723,24 @@ plank_health_reason() {
     printf 'healthy\n'
 }
 
+plank_health_reason_bounded() {
+    local budget="${1:-${PLANK_PROBE_TIMEOUT}}"
+    [[ "${budget}" =~ ^[1-9][0-9]*$ ]] || budget="${PLANK_PROBE_TIMEOUT}"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${budget}s" "$0" --reason 2>/dev/null || true
+    else
+        plank_health_reason
+    fi
+}
+
+start_plank_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${PLANK_STARTUP_TIMEOUT}s" "$0" --start-internal
+    else
+        start_plank
+    fi
+}
+
 plank_window_visible() {
     [[ "$(plank_health_reason)" == "healthy" ]]
 }
@@ -3038,8 +3777,10 @@ start_plank() {
     command -v plank >/dev/null 2>&1 || return 1
     stop_legacy_dock
     ensure_plank_settings
+    ensure_bamfdaemon || true
     local reason
-    reason="$(plank_health_reason)"
+    reason="$(plank_health_reason_bounded)"
+    reason="${reason:-probe-timeout}"
     if [[ "${reason}" == "healthy" ]]; then
         diagnose_and_promote_stacking
         return 0
@@ -3054,10 +3795,11 @@ start_plank() {
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
     log "starting Plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
     (nohup plank >>"${log_file}" 2>&1 &) || return 1
-    # Keep the one-shot repair within the coordinator's fixed eight-second
-    # Plank startup budget (32 x 250ms).
+    # Each health probe is separately capped; start_plank_bounded wraps this
+    # complete recovery path in the coordinator's fixed eight-second budget.
     for _ready_try in $(seq 1 32); do
-        reason="$(plank_health_reason)"
+        reason="$(plank_health_reason_bounded)"
+        reason="${reason:-probe-timeout}"
         if [[ "${reason}" == "healthy" ]]; then
             diagnose_and_promote_stacking
             log "Plank recovery succeeded"
@@ -3065,7 +3807,7 @@ start_plank() {
         fi
         sleep 0.25
     done
-    log "Plank recovery failed: $(plank_health_reason)"
+    log "Plank recovery failed: $(plank_health_reason_bounded)"
     stop_plank
     return 1
 }
@@ -3077,10 +3819,19 @@ run_one_shot() {
         log "Plank one-shot repair already owns ${lock_file}"
         exit 0
     fi
-    start_plank
+    start_plank_bounded
 }
 
 case "${1:-start}" in
+    --check)
+        [[ "$(plank_health_reason)" == "healthy" ]]
+        ;;
+    --reason)
+        plank_health_reason
+        ;;
+    --start-internal)
+        start_plank
+        ;;
     --session)
         lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
         exec 9>"${lock_file}" || exit 1
@@ -3089,7 +3840,7 @@ case "${1:-start}" in
         fi
         sleep 3
         while true; do
-            start_plank || log "Plank recovery attempt failed"
+            start_plank_bounded || log "Plank recovery attempt failed"
             sleep 5
         done
         ;;
@@ -3120,21 +3871,10 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-session-healthcheck
 MINGDOCKAUTO
 
-    cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
-[Desktop Entry]
-Type=Application
-Name=Ming Window Manager Health
-Comment=检测并保守恢复 Xfwm 窗口控制
-Exec=/usr/local/bin/ming-window-manager-watchdog --session
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-MINGWINDOWMANAGERAUTO
+    rm -f "${autostart_dir}/ming-window-manager.desktop"
 
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
-        "${autostart_dir}/ming-dock.desktop" \
-        "${autostart_dir}/ming-window-manager.desktop"
+        "${autostart_dir}/ming-dock.desktop"
 }
 
 # ======================== 统一会话启动/健康协调器 ========================
@@ -3152,7 +3892,8 @@ readonly PLANK_STARTUP_DEADLINE=8
 readonly PICOM_STARTUP_DEADLINE=5
 # Startup watchdogs are bounded as timeout --foreground 8s / 8s / 5s.
 readonly PROBE_TIMEOUT=2
-readonly SUPERVISOR_INTERVAL=10
+readonly SUPERVISOR_INTERVAL=30
+readonly RESOURCE_MONITOR_RETRY_SECONDS=60
 readonly AUDIO_CHECK_INTERVAL=30
 
 log_dir="${HOME}/.cache/ming-os"
@@ -3160,6 +3901,7 @@ mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 mkdir -p "${log_dir}" 2>/dev/null || true
 health_log="${log_dir}/session-health.log"
 metrics_file="${log_dir}/session-startup.json"
+resource_monitor_attempt_file="${log_dir}/resource-monitor-attempt"
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
 touch "${health_log}" 2>/dev/null || true
@@ -3193,6 +3935,16 @@ now_ms() {
     local value
     value="$(date +%s%3N 2>/dev/null || true)"
     [[ "${value}" =~ ^[0-9]+$ ]] && printf '%s\n' "${value}" || printf '%s\n' "$(( $(date +%s) * 1000 ))"
+}
+
+monotonic_seconds() {
+    local uptime="0" ignored=""
+    if [[ -r /proc/uptime ]]; then
+        read -r uptime ignored </proc/uptime || uptime="0"
+    fi
+    uptime="${uptime%%.*}"
+    [[ "${uptime}" =~ ^[0-9]+$ ]] || uptime=0
+    printf '%s\n' "${uptime}"
 }
 
 process_count() {
@@ -3248,7 +4000,7 @@ ensure_audio_session() {
     # user-scoped session coordinator at a low cadence.  The helper is bounded
     # and preserves a valid user-selected HDMI, Bluetooth or USB output.
     local now
-    now="$(date +%s 2>/dev/null || printf '0')"
+    now="$(monotonic_seconds)"
     [[ "${now}" =~ ^[0-9]+$ ]] || now=0
     if (( last_audio_check > 0 && now > 0 && now - last_audio_check < AUDIO_CHECK_INTERVAL )); then
         return 0
@@ -3258,6 +4010,41 @@ ensure_audio_session() {
     log 'checking audio session after login, resume or device change'
     (run_bounded 6 /usr/local/bin/ming-audio-session ensure --json \
         >>"${health_log}" 2>&1 &) || true
+}
+
+ensure_window_manager_once() {
+    command -v ming-window-manager-watchdog >/dev/null 2>&1 || return 0
+    (run_bounded 8 /usr/local/bin/ming-window-manager-watchdog --repair-if-needed \
+        >>"${health_log}" 2>&1 &) || true
+}
+
+resource_monitor_running() {
+    probe_timeout pgrep -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-window-resource-monitor([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-window-resource-monitor([[:space:]]|$)' \
+        >/dev/null 2>&1
+}
+
+start_resource_monitor() {
+    local now last_attempt=0
+    resource_monitor_running && return 0
+    [[ -x /usr/local/bin/ming-window-resource-monitor ]] || {
+        log 'event-driven resource monitor is unavailable'
+        return 0
+    }
+    now="$(monotonic_seconds)"
+    if [[ -s "${resource_monitor_attempt_file}" ]]; then
+        read -r last_attempt <"${resource_monitor_attempt_file}" || last_attempt=0
+    fi
+    [[ "${now}" =~ ^[0-9]+$ ]] || now=0
+    [[ "${last_attempt}" =~ ^[0-9]+$ ]] || last_attempt=0
+    if (( now > 0 && last_attempt > 0 && now >= last_attempt
+          && now - last_attempt < RESOURCE_MONITOR_RETRY_SECONDS )); then
+        return 0
+    fi
+    printf '%s\n' "${now}" >"${resource_monitor_attempt_file}" 2>/dev/null || true
+    log 'starting event-driven Wnck resource monitor'
+    (nohup /usr/local/bin/ming-window-resource-monitor >>"${health_log}" 2>&1 &) || true
+    return 0
 }
 
 phone_desktop_running() {
@@ -3298,11 +4085,38 @@ plank_running() {
 plank_window_visible() {
     plank_running || return 1
     command -v wmctrl >/dev/null 2>&1 || return 0
-    x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ {found=1} END {exit !found}'
+    command -v ming-plank-watchdog >/dev/null 2>&1 || return 1
+    run_bounded "${PROBE_TIMEOUT}" /usr/local/bin/ming-plank-watchdog --check >/dev/null 2>&1
 }
 
 picom_running() {
     probe_timeout pgrep -u "$(id -u)" -x picom >/dev/null 2>&1
+}
+
+compositor_profile() {
+    local appearance="${HOME}/.config/ming-os/appearance.json"
+    local settings="${HOME}/.config/ming-os/settings.json"
+    local profile="" settings_profile=""
+    profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${appearance}" 2>/dev/null | head -n1)"
+    settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" 2>/dev/null | head -n1)"
+    # An existing 26.3.2 software preference wins over a newly created
+    # appearance file that still contains only the default auto profile.
+    if [[ "${profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software || "${settings_profile}" == off ) ]]; then
+        profile="${settings_profile}"
+    fi
+    [[ -n "${profile}" ]] || profile="${settings_profile}"
+    [[ "${profile}" == software ]] && profile=compat
+    case "${profile}" in auto|compat|off) printf '%s\n' "${profile}" ;; *) printf 'auto\n' ;; esac
+}
+
+compositor_enabled() {
+    [[ "$(compositor_profile)" != off ]]
+}
+
+runtime_profile_request() {
+    local runtime_profile="${log_dir}/shell-visual.json"
+    sed -n 's/.*"requested_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "${runtime_profile}" 2>/dev/null | head -n1
 }
 
 wait_for_process() {
@@ -3412,10 +4226,26 @@ start_xrender_picom() {
 }
 
 start_picom() {
-    local started_at finished_at deadline_at
-    if picom_running; then
+    if ! compositor_enabled; then
+        pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
         picom_recovered=true
         return 0
+    fi
+    local started_at finished_at deadline_at
+    if picom_running; then
+        local requested runtime_requested
+        requested="$(compositor_profile)"
+        runtime_requested="$(runtime_profile_request)"
+        if [[ "${runtime_requested}" == "${requested}" ]]; then
+            picom_recovered=true
+            return 0
+        fi
+        log "restarting Picom after compositor profile change ${runtime_requested:-unknown}->${requested}"
+        pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
+        for _wait in $(seq 1 10); do
+            picom_running || break
+            sleep 0.1
+        done
     fi
     picom_restarts=$((picom_restarts + 1))
     started_at="$(now_ms)"
@@ -3477,7 +4307,7 @@ write_metrics() {
     MING_PHONE_RUNNING="${phone_running}" MING_PHONE_READY="${phone_ready}" \
     MING_PHONE_FALLBACK="${phone_fallback}" MING_XFDESKTOP="${xfdesktop}" \
     MING_DOCK_RUNNING="${dock}" MING_DOCK_VISIBLE="${dock_visible}" \
-    MING_PICOM_RUNNING="${compositor}" MING_PICOM_BACKEND="${compositor_backend}" \
+    MING_PICOM_RUNNING="${compositor}" MING_PICOM_ENABLED="$(compositor_enabled && printf true || printf false)" MING_PICOM_BACKEND="${compositor_backend}" \
     MING_PHONE_PID_COUNT="${phone_pid_count}" MING_PLANK_PID_COUNT="${plank_pid_count}" \
     MING_PICOM_PID_COUNT="${picom_pid_count}" MING_PHONE_DUPLICATES="${phone_duplicates}" \
     MING_PLANK_DUPLICATES="${plank_duplicates}" MING_PICOM_DUPLICATES="${picom_duplicates}" \
@@ -3496,6 +4326,10 @@ boolean = lambda name: os.environ.get(name) == "true"
 integer = lambda name: int(os.environ.get(name, "0") or 0)
 payload = {
     "timestamp": datetime.now(timezone.utc).isoformat(),
+    "boot_id": (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        if Path("/proc/sys/kernel/random/boot_id").is_file() else ""
+    ),
     "phase": os.environ.get("MING_PHASE", "unknown"),
     "phone_desktop": {
         "enabled": boolean("MING_PHONE_ENABLED"),
@@ -3519,6 +4353,7 @@ payload = {
         "duplicates": integer("MING_PLANK_DUPLICATES"),
     },
     "picom": {
+        "enabled": boolean("MING_PICOM_ENABLED"),
         "running": boolean("MING_PICOM_RUNNING"),
         "backend": os.environ.get("MING_PICOM_BACKEND", "none"),
         "pid_count": integer("MING_PICOM_PID_COUNT"),
@@ -3530,7 +4365,7 @@ payload = {
     "deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
     "startup_deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
     "probe_timeout": 2,
-    "supervisor_interval": 10,
+    "supervisor_interval": 30,
     "health_log": os.environ.get("MING_HEALTH_LOG", ""),
     "duplicates": {
         "phone_desktop": integer("MING_PHONE_DUPLICATES"),
@@ -3542,7 +4377,7 @@ payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
     and payload["plank"]["visible"]
-    and payload["picom"]["running"]
+    and (not payload["picom"]["enabled"] or payload["picom"]["running"])
 )
 path = Path(os.environ["MING_METRICS_FILE"])
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3555,9 +4390,12 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    start_resource_monitor
+    ensure_window_manager_once
+    # Establish the effective renderer before Ming Shell draws its first frame.
+    start_picom || log 'Picom is not healthy after startup deadline'
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
-    start_picom || log 'Picom is not healthy after startup deadline'
     ensure_audio_session
     write_metrics startup "${phone_fallback}"
     log 'session startup check complete'
@@ -3566,11 +4404,12 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    start_resource_monitor
+    start_picom || log 'Picom repair did not recover a compositor'
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
     start_plank_dock || log 'Plank Dock repair did not recover a visible window'
-    start_picom || log 'Picom repair did not recover a compositor'
     ensure_audio_session
     write_metrics supervisor "${phone_fallback}"
     log 'session supervisor check complete'
@@ -3596,12 +4435,39 @@ acquire_coordinator_lock() {
     return 0
 }
 
+reload_dock() {
+    # dconf updates a healthy Plank live.  Only recover when the instance is
+    # missing/unhealthy or duplicated, so a size change cannot create a second
+    # Dock while the session coordinator owns its long-running lifecycle.
+    local reload_lock="${XDG_RUNTIME_DIR:-/tmp}/ming-dock-reload.lock"
+    local count
+    exec 8>"${reload_lock}" || return 1
+    if command -v flock >/dev/null 2>&1 && ! flock -n 8; then
+        log 'Dock reload already in progress'
+        return 0
+    fi
+    count="$(process_count plank)"
+    if [[ "${count}" =~ ^[0-9]+$ ]] && (( count > 1 )); then
+        log "Dock reload found ${count} Plank processes; recovering one instance"
+        stop_plank
+        sleep 0.2
+    fi
+    if ! plank_window_visible; then
+        start_plank_dock || {
+            write_metrics reload-dock false
+            return 1
+        }
+    fi
+    write_metrics reload-dock false
+    return 0
+}
+
 case "${1:---once}" in
     --session)
         acquire_coordinator_lock || exit 0
         startup_once
         while true; do
-            sleep "${SUPERVISOR_INTERVAL}" # fixed supervisor cadence: sleep 10
+            sleep "${SUPERVISOR_INTERVAL}" # fixed low-overhead supervisor cadence
             supervise_once
         done
         ;;
@@ -3612,8 +4478,11 @@ case "${1:---once}" in
     --check)
         [[ -s "${metrics_file}" ]] && cat "${metrics_file}" || write_metrics check
         ;;
+    --reload-dock)
+        reload_dock
+        ;;
     *)
-        printf 'Usage: %s --session|--once|--check\n' "$0" >&2
+        printf 'Usage: %s --session|--once|--check|--reload-dock\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -3637,6 +4506,14 @@ MINGTERM
     cat > /usr/local/bin/ming-lock << 'MINGLOCK'
 #!/usr/bin/env bash
 set -uo pipefail
+
+account_status="$(/usr/local/sbin/ming-account-control status --json --user "$(id -un)" 2>/dev/null || true)"
+if grep -Fq '"password_set": false' <<< "${account_status}"; then
+    # A passwordless account has nothing to authenticate. Activate the saver
+    # without locking so pointer/key input resumes the current session directly.
+    xfce4-screensaver-command --activate >/tmp/ming-lock.log 2>&1 || true
+    exit 0
+fi
 
 if command -v xfce4-screensaver-command >/dev/null 2>&1; then
     xfce4-screensaver-command --lock >/tmp/ming-lock.log 2>&1 && exit 0
@@ -3672,7 +4549,7 @@ import sys
 CSS = b'''
 window { background: #F7F9F6; }
 .root {
-  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 58%, #E5EFE9);
+  background: #F7FAF8;
   color: #1C2320;
 }
 .title { font-size: 24px; font-weight: 800; color: #1C2320; }
@@ -3680,29 +4557,23 @@ window { background: #F7F9F6; }
 .time { font-size: 34px; font-weight: 800; color: #1C2320; }
 .date { font-size: 12px; color: #5C6963; }
 .tile {
-  background: rgba(255,255,255,0.78);
-  border: 1px solid rgba(31,98,84,0.09);
-  border-radius: 12px;
+  background: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   padding: 12px;
   color: #1C2320;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,138,125,0.22);
+  background: #FFFFFF;
+  border-color: #9FC8BC;
   box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .tile label { color: #1C2320; font-weight: 700; }
 .danger {
-  background: rgba(255,247,247,0.90);
-  border-color: rgba(178,59,72,0.28);
+  background: #FFF7F7;
+  border-color: #E4B7BE;
 }
 '''
-
-def run(command):
-    try:
-        subprocess.Popen(command, shell=True)
-    except Exception:
-        pass
 
 def text(command, fallback='--'):
     try:
@@ -3764,14 +4635,14 @@ class StatusCenter(Gtk.ApplicationWindow):
         root.pack_start(grid, True, True, 0)
 
         actions = [
-            ('连接网络', 'network-wireless', 'nm-connection-editor'),
-            ('声音', 'multimedia-volume-control', 'pavucontrol'),
-            ('电源', 'battery', 'xfce4-power-manager-settings'),
-            ('显示', 'video-display', 'ming-control-center --page display'),
-            ('设置', 'ming-control-center', 'ming-control-center'),
-            ('应用库', 'ming-app-library', 'ming-app-library'),
-            ('锁屏', 'system-lock-screen', 'ming-lock'),
-            ('退出/关机', 'system-shutdown', 'xfce4-session-logout'),
+            ('连接网络', 'network-wireless', ['ming-control-center', '--page', 'network']),
+            ('声音', 'multimedia-volume-control', ['pavucontrol']),
+            ('电源', 'battery', ['ming-control-center', '--page', 'advanced']),
+            ('显示', 'video-display', ['ming-control-center', '--page', 'display']),
+            ('设置', 'ming-control-center', ['ming-control-center']),
+            ('应用库', 'ming-app-library', ['ming-app-library']),
+            ('锁屏', 'system-lock-screen', ['ming-lock']),
+            ('退出/关机', 'system-shutdown', ['xfce4-session-logout']),
         ]
         for index, (label, icon, command) in enumerate(actions):
             button = self.tile(label, icon, command, danger=(label == '退出/关机'))
@@ -3786,7 +4657,7 @@ class StatusCenter(Gtk.ApplicationWindow):
         button.get_style_context().add_class('tile')
         if danger:
             button.get_style_context().add_class('danger')
-        button.connect('clicked', lambda _button: run(command))
+        button.connect('clicked', lambda _button: self.launch_action(label, command))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_valign(Gtk.Align.CENTER)
         image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
@@ -3797,6 +4668,12 @@ class StatusCenter(Gtk.ApplicationWindow):
         box.pack_start(text_label, False, False, 0)
         button.add(box)
         return button
+
+    def launch_action(self, label, command):
+        try:
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError):
+            self.summary.set_text('无法打开%s。请从 Ming 设置中重试。' % label)
 
     def refresh(self):
         now = datetime.datetime.now()
@@ -3818,236 +4695,6 @@ if __name__ == '__main__':
     app.run(sys.argv)
 STATUSCENTER
     chmod +x /usr/local/bin/ming-status-center
-
-    cat > /usr/local/bin/ming-app-library << 'APPLIB'
-#!/usr/bin/env python3
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, Gio
-import configparser
-import os
-import subprocess
-import sys
-
-APP_DIRS = ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]
-
-CSS = b'''
-window { background: #F7F9F6; }
-.root {
-  background: linear-gradient(135deg, #F9FBF8, #EFF5F1 52%, #E5EFE9);
-  color: #1C2320;
-}
-.title { font-size: 26px; font-weight: 800; color: #1C2320; }
-.subtitle { font-size: 12px; color: #5C6963; }
-.search {
-  min-height: 42px;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.82);
-  color: #1C2320;
-  border: 1px solid rgba(31,98,84,0.09);
-  padding: 0 12px;
-}
-.app-tile {
-  background: rgba(255,255,255,0.78);
-  border: 1px solid rgba(31,98,84,0.09);
-  border-radius: 12px;
-  padding: 10px;
-  color: #1C2320;
-}
-.app-tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,138,125,0.22);
-  box-shadow: 0 8px 20px rgba(30,70,58,0.07);
-}
-.app-name { font-size: 11px; font-weight: 700; color: #1C2320; }
-.quick-button {
-  border-radius: 12px;
-  padding: 9px 12px;
-  background: rgba(255,255,255,0.78);
-  color: #1C2320;
-}
-.quick-button:hover { background: rgba(47,138,125,0.10); }
-'''
-
-def read_desktop_file(path):
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.optionxform = str
-    try:
-        parser.read(path, encoding='utf-8')
-    except Exception:
-        return None
-    if not parser.has_section('Desktop Entry'):
-        return None
-    entry = parser['Desktop Entry']
-    if entry.get('Type', 'Application') != 'Application':
-        return None
-    if entry.get('NoDisplay', '').lower() == 'true' or entry.get('Hidden', '').lower() == 'true':
-        return None
-    name = entry.get('Name[zh_CN]') or entry.get('Name') or os.path.basename(path)
-    exec_cmd = entry.get('Exec', '')
-    if not exec_cmd:
-        return None
-    return {
-        'name': name,
-        'comment': entry.get('Comment[zh_CN]') or entry.get('Comment') or '',
-        'icon': entry.get('Icon') or 'application-x-executable',
-        'exec': exec_cmd,
-        'path': path,
-        'categories': entry.get('Categories', '')
-    }
-
-def load_apps():
-    seen = set()
-    apps = []
-    for directory in APP_DIRS:
-        if not os.path.isdir(directory):
-            continue
-        for filename in sorted(os.listdir(directory)):
-            if not filename.endswith('.desktop'):
-                continue
-            path = os.path.join(directory, filename)
-            app = read_desktop_file(path)
-            if app and app['name'] not in seen:
-                seen.add(app['name'])
-                apps.append(app)
-    return sorted(apps, key=lambda item: item['name'].lower())
-
-def responsive_window_size(preferred_width=760, preferred_height=520):
-    screen = Gdk.Screen.get_default()
-    if not screen:
-        return preferred_width, preferred_height
-    return (
-        max(520, min(preferred_width, screen.get_width() - 64)),
-        max(420, min(preferred_height, screen.get_height() - 80)),
-    )
-
-class AppLibrary(Gtk.ApplicationWindow):
-    def __init__(self, app):
-        super().__init__(application=app, title='Ming 应用库')
-        window_width, window_height = responsive_window_size()
-        self.set_default_size(window_width, window_height)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_name('ming-app-library')
-        self.apps = load_apps()
-        self.filtered = self.apps
-
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 600)
-
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        root.get_style_context().add_class('root')
-        root.set_border_width(18)
-        self.add(root)
-
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        title = Gtk.Label(label='Ming 应用库')
-        title.set_halign(Gtk.Align.START)
-        title.get_style_context().add_class('title')
-        subtitle = Gtk.Label(label='搜索、打开、整理新安装应用')
-        subtitle.set_halign(Gtk.Align.START)
-        subtitle.get_style_context().add_class('subtitle')
-        title_box.pack_start(title, False, False, 0)
-        title_box.pack_start(subtitle, False, False, 0)
-        header.pack_start(title_box, True, True, 0)
-
-        for label, cmd in [('整理桌面', 'ming-helper organize-desktop'), ('Ming 文件', 'ming-files'), ('系统设置', 'ming-control-center')]:
-            btn = Gtk.Button(label=label)
-            btn.get_style_context().add_class('quick-button')
-            btn.connect('clicked', lambda _b, c=cmd: subprocess.Popen(c, shell=True))
-            header.pack_start(btn, False, False, 0)
-        root.pack_start(header, False, False, 0)
-
-        self.search = Gtk.SearchEntry()
-        self.search.get_style_context().add_class('search')
-        self.search.set_placeholder_text('输入应用名称，比如 微信、浏览器、文档')
-        self.search.connect('search-changed', self.on_search)
-        root.pack_start(self.search, False, False, 0)
-
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_shadow_type(Gtk.ShadowType.NONE)
-        self.flow = Gtk.FlowBox()
-        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.flow.set_max_children_per_line(5)
-        self.flow.set_min_children_per_line(1)
-        self.flow.set_row_spacing(12)
-        self.flow.set_column_spacing(12)
-        scroller.add(self.flow)
-        root.pack_start(scroller, True, True, 0)
-        self.render()
-
-    def on_search(self, entry):
-        q = entry.get_text().strip().lower()
-        if not q:
-            self.filtered = self.apps
-        else:
-            self.filtered = [a for a in self.apps if q in (a['name'] + ' ' + a['comment'] + ' ' + a['categories']).lower()]
-        self.render()
-
-    def render(self):
-        for child in self.flow.get_children():
-            self.flow.remove(child)
-        for app in self.filtered:
-            self.flow.add(self.make_tile(app))
-        self.show_all()
-
-    def make_tile(self, app):
-        btn = Gtk.Button()
-        btn.get_style_context().add_class('app-tile')
-        btn.set_size_request(112, 102)
-        btn.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        btn.connect('clicked', lambda _b: self.launch(app))
-        btn.connect('button-press-event', lambda widget, event: self.show_app_menu(widget, event, app))
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        box.set_valign(Gtk.Align.CENTER)
-        image = Gtk.Image.new_from_icon_name(app['icon'], Gtk.IconSize.DIALOG)
-        label = Gtk.Label(label=app['name'])
-        label.get_style_context().add_class('app-name')
-        label.set_justify(Gtk.Justification.CENTER)
-        label.set_line_wrap(True)
-        label.set_max_width_chars(12)
-        box.pack_start(image, False, False, 0)
-        box.pack_start(label, False, False, 0)
-        btn.add(box)
-        return btn
-
-    def show_app_menu(self, widget, event, app):
-        if getattr(event, 'button', 0) != 3:
-            return False
-        menu = Gtk.Menu()
-        open_item = Gtk.MenuItem(label='打开')
-        open_item.connect('activate', lambda _item: self.launch(app))
-        desktop_item = Gtk.MenuItem(label='添加到桌面')
-        desktop_item.connect('activate', lambda _item: subprocess.Popen(['ming-phone-desktop', '--add', app['path']]))
-        folder_item = Gtk.MenuItem(label='添加到桌面文件夹')
-        folder_item.connect('activate', lambda _item: subprocess.Popen(['ming-phone-desktop', '--add-to-folder', app['path']]))
-        for item in (open_item, desktop_item, folder_item):
-            menu.append(item)
-        menu.show_all()
-        menu.popup_at_pointer(event)
-        return True
-
-    def launch(self, app):
-        try:
-            info = Gio.DesktopAppInfo.new_from_filename(app['path'])
-            if info:
-                info.launch([], None)
-                return
-        except Exception:
-            pass
-        command = app['exec'].replace('%U', '').replace('%u', '').replace('%F', '').replace('%f', '').strip()
-        subprocess.Popen(command, shell=True)
-
-class MingApp(Gtk.Application):
-    def do_activate(self):
-        AppLibrary(self).show_all()
-
-if __name__ == '__main__':
-    MingApp().run(sys.argv)
-APPLIB
-    chmod +x /usr/local/bin/ming-app-library
 
     cat > /usr/local/bin/ming-desktop-organizer << 'DESKORG'
 #!/usr/bin/env bash
@@ -4159,27 +4806,6 @@ for item in "${desktop}/Ming 设置.desktop"; do
     ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
 done
 
-if [[ "${1:-}" == "--watch" ]]; then
-    while true; do
-        if command -v inotifywait >/dev/null 2>&1; then
-            inotifywait -q -e close_write,create,move,delete /usr/share/applications "${HOME}/.local/share/applications" >/dev/null 2>&1 || sleep 5
-        else
-            sleep 20
-        fi
-        if command -v ming-phone-desktop >/dev/null 2>&1; then
-            ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
-        else
-            sync_apps
-        fi
-        # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
-        for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
-            if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
-                gtk-update-icon-cache -q -t -f "${icon_dir}" 2>/dev/null || true
-            fi
-        done
-        xdg-desktop-menu forceupdate 2>/dev/null || true
-    done
-fi
 DESKORG
     chmod +x /usr/local/bin/ming-desktop-organizer
 
@@ -4240,9 +4866,6 @@ run_progress() {
 }
 
 case "${1:-}" in
-    update)
-        exec /usr/local/bin/ming-update-gui check
-        ;;
     install-wechat)
         if confirm "将下载安装腾讯官方 Linux 版微信。这个过程需要联网，可能需要几分钟。" "安装微信"; then
             if pkexec /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1 || sudo /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1; then
@@ -4266,14 +4889,13 @@ case "${1:-}" in
         fi
         ;;
     repair-display)
-        rm -f "${HOME}/.config/ming-os/scale-done" 2>/dev/null || true
-        /usr/local/bin/ming-scale >/tmp/ming-scale.log 2>&1 || true
         /usr/local/bin/ming-apply-appearance >/tmp/ming-appearance.log 2>&1 || true
+        /usr/local/bin/ming-session-healthcheck --once >/tmp/ming-session-repair.log 2>&1 || true
         info "界面显示已重新整理：壁纸、主题、Dock 和缩放会在几秒内刷新。"
         ;;
     repair-store)
         if confirm "将修复或重新安装星火应用商店。这个过程需要联网。" "修复商店"; then
-            if pkexec /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1 || sudo /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1; then
+            if pkexec /usr/local/sbin/ming-spark-store-repair-helper >/tmp/ming-spark.log 2>&1; then
                 info "星火应用商店已就绪。"
             else
                 warn "商店修复没有完成。请先连接网络，再点一次“修复应用商店”。"
@@ -4293,7 +4915,7 @@ case "${1:-}" in
         info "本机内存约 ${mem_mb}MB。\n\nMing OS 会自动启用 zram、低内存桌面策略和微信省内存模式。\n\n${profile}"
         ;;
     install-os)
-        exec /usr/local/bin/ming-live-installer.sh
+        exec env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh
         ;;
     *)
         info "请选择 Ming 设置中的按钮来完成操作。"
@@ -4324,7 +4946,9 @@ ColorPalette=#1D2421;#D75D66;#58B88F;#D7B95A;#5A8CCF;#7B72B9;#4DB9B1;#D4F7F1;#51
 TERMINALRC
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4/terminal"
 
-    cat > /usr/local/bin/ming-control-center << 'MINGCONTROL'
+    # Retired GTK3 control center retained only as inert migration source.  It
+    # must not overwrite the GTK4 Ming Settings wrapper installed above.
+    : << 'MINGCONTROL'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
@@ -4333,9 +4957,8 @@ import subprocess
 import sys
 
 TASKS = [
-    ('检查系统更新', 'ming-update-icon', '下载并安装新版本 Ming OS', 'ming-helper update'),
     ('修复界面显示', 'ming-display', '重新整理壁纸、缩放和 Dock', 'ming-helper repair-display'),
-    ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'nm-connection-editor'),
+    ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'ming-control-center --page network'),
     ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'ming-helper install-wechat'),
     ('微信省内存启动', 'wechat', '适合 2GB 内存和群组较多账号', 'ming-helper wechat-light'),
     ('清理微信缓存', 'edit-clear', '释放微信缓存占用的磁盘和内存压力', 'ming-helper clean-wechat'),
@@ -4346,10 +4969,9 @@ TASKS = [
     ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'ming-helper organize-desktop'),
     ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'ming-helper memory'),
     ('声音和音量', 'multimedia-volume-control', '调节扬声器、麦克风和输出设备', 'pavucontrol'),
-    ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
-    ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
+    ('电源和电池', 'battery', '调节亮度、合盖和省电', 'ming-settings --page advanced'),
+    ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'ming-settings --page appearance'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -4358,7 +4980,7 @@ window {
   background: #F6F8F6;
 }
 .root {
-  background: linear-gradient(135deg, #F8FAF8, #EEF6F2 55%, #DDEFE8);
+  background: #F7FAF8;
   color: #1D2421;
 }
 .title {
@@ -4371,18 +4993,18 @@ window {
   color: #4F625A;
 }
 .tile {
-  background: rgba(255,255,255,0.76);
-  border: 1px solid rgba(31,98,84,0.13);
-  border-radius: 10px;
+  background: #FFFFFF;
+  border: 1px solid #D8E2DD;
+  border-radius: 8px;
   padding: 12px;
   color: #1D2421;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
-  border-color: rgba(47,174,143,0.36);
+  background: #FFFFFF;
+  border-color: #8FC3B4;
 }
 .tile:active {
-  background: rgba(47,174,143,0.14);
+  background: #E1F0EA;
 }
 .tile label {
   color: #1D2421;
@@ -4441,7 +5063,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Ming OS 26.3.2 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.4.0 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -4539,26 +5161,10 @@ Categories=Settings;System;Utility;
 StartupNotify=true
 STATUSAPP
 
-    cat > /usr/share/applications/ming-app-library.desktop << 'APPLIBAPP'
-[Desktop Entry]
-Name=Ming 应用库
-Name[zh_CN]=Ming 应用库
-Comment=Search, open, and organize installed apps
-Comment[zh_CN]=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/ming-app-library
-Icon=ming-app-library
-Terminal=false
-Type=Application
-Categories=Utility;System;
-StartupNotify=true
-NoDisplay=true
-APPLIBAPP
-
     cp /usr/share/applications/ming-control-center.desktop "/home/${MING_USER}/.local/share/applications/"
     cp /usr/share/applications/ming-files.desktop "/home/${MING_USER}/.local/share/applications/"
     cp /usr/share/applications/ming-terminal.desktop "/home/${MING_USER}/.local/share/applications/"
     cp /usr/share/applications/ming-status-center.desktop "/home/${MING_USER}/.local/share/applications/"
-    cp /usr/share/applications/ming-app-library.desktop "/home/${MING_USER}/.local/share/applications/"
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications"
 }
 
@@ -4577,8 +5183,8 @@ ensure_wps_office() {
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.2 Picom 配置 - 老显卡/虚拟机稳定路径
-# 普通应用窗口保持不透明；透明度只留给 Dock 与通知等独立界面。
+# Ming OS 26.4.0 Picom configuration: fixed shell surfaces only.
+# Normal applications stay completely opaque; no background sampling or blur.
 backend = "glx";
 vsync = false;
 unredir-if-possible = false;
@@ -4617,7 +5223,7 @@ shadow-exclude = [
 ];
 
 # ---- 圆角窗口 ----
-corner-radius = 12;
+corner-radius = 8;
 rounded-corners-exclude = [
   "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
@@ -4632,30 +5238,27 @@ frame-opacity = 1.0;
 inactive-opacity-override = false;
 
 # ---- 渐入渐出 ----
-fading = true;
-fade-in-step = 0.04;
-fade-out-step = 0.04;
-fade-delta = 5;
+fading = false;
 
 # ---- wintypes ----
 wintypes:
 {
-  tooltip = { fade = true; shadow = true; opacity = 0.90; focus = true; };
-  dock = { shadow = false; opacity = 0.92; };
+  tooltip = { fade = false; shadow = true; opacity = 1.0; focus = true; };
+  dock = { shadow = false; opacity = 0.95; };
   dnd = { shadow = false; };
   dropdown_menu = { shadow = true; opacity = 1.0; };
   popup_menu = { shadow = true; opacity = 1.0; };
   utility = { shadow = true; opacity = 1.0; };
-  notification = { shadow = true; opacity = 0.94; };
+  notification = { shadow = true; opacity = 1.0; };
 };
 
 detect-rounded-corners = true;
-detect-client-opacity = true;
+detect-client-opacity = false;
 detect-transient = true;
 detect-client-leader = true;
 PICOMCFG
 
-    # Fallback 配置 (老显卡 xrender, 无 blur, 无动画)
+# Compat configuration (old GPUs/VMs): no shell transparency or fading.
     mkdir -p /etc/xdg/picom
     cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'
 backend = "xrender";
@@ -4672,62 +5275,40 @@ shadow-exclude = [
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
-fading = true;
-fade-in-step = 0.06;
-fade-out-step = 0.06;
+fading = false;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
 wintypes:
 {
-  dock = { shadow = false; opacity = 0.92; };
-  notification = { shadow = false; opacity = 0.94; };
+  dock = { shadow = false; opacity = 1.0; };
+  notification = { shadow = false; opacity = 1.0; };
 };
+detect-client-opacity = false;
 PICOMFALLBACK
 
-    # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
+    # Retained only as a compatibility alias for older preferences.  Low-memory
+    # sessions use the same fully opaque Xrender path as every other compat mode.
     cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'
-backend = "glx";
+backend = "xrender";
 vsync = true;
 unredir-if-possible = false;
-glx-no-stencil = true;
-glx-no-rebind-pixmap = true;
 use-damage = true;
-
-# 不启用 blur（blur 是 GPU/内存消耗大户）
-blur-background = false;
-
-# 轻阴影
-shadow = true;
-shadow-radius = 8;
-shadow-opacity = 0.20;
-shadow-offset-x = -6;
-shadow-offset-y = -6;
+shadow = false;
+shadow-radius = 0;
+shadow-opacity = 0;
+shadow-offset-x = -4;
+shadow-offset-y = -4;
 shadow-exclude = [
+  "class_g = 'Microsoft-edge'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
-
-# 圆角保留（纯 CPU 开销极低）
-corner-radius = 10;
-rounded-corners-exclude = [
-  "window_type = 'dock'",
-  "window_type = 'desktop'",
-];
-
-# 渐入渐出（transform/opacity 动画，不触发 layout）
-fading = true;
-fade-in-step = 0.05;
-fade-out-step = 0.05;
-fade-delta = 5;
-
+fading = false;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
-
-detect-rounded-corners = true;
-detect-client-opacity = true;
-detect-transient = true;
+detect-client-opacity = false;
 PICOMLOWMEM
 
     cat > /usr/local/bin/ming-picom << 'MINGPICOM'
@@ -4735,11 +5316,43 @@ PICOMLOWMEM
 set -u
 
 log="/tmp/ming-picom.log"
-main_conf="${HOME}/.config/picom/picom.conf"
-fallback_conf="/etc/xdg/picom/picom-fallback.conf"
-lowmem_conf="/etc/xdg/picom/picom-lowmem.conf"
+picom_bin="${MING_PICOM_BIN:-picom}"
+settings_file="${MING_COMPOSITOR_SETTINGS:-${HOME}/.config/ming-os/settings.json}"
+appearance_file="${MING_APPEARANCE_SETTINGS:-${HOME}/.config/ming-os/appearance.json}"
+main_conf="${MING_PICOM_MAIN_CONF:-${HOME}/.config/picom/picom.conf}"
+fallback_conf="${MING_PICOM_FALLBACK_CONF:-/etc/xdg/picom/picom-fallback.conf}"
+lowmem_conf="${MING_PICOM_LOWMEM_CONF:-/etc/xdg/picom/picom-lowmem.conf}"
+runtime_profile_file="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/shell-visual.json"
 config="${main_conf}"
 reason="modern-gpu"
+
+write_runtime_profile() {
+    local requested="$1" effective="$2" profile_reason="$3"
+    local runtime_dir temporary
+    runtime_dir="$(dirname "${runtime_profile_file}")"
+    mkdir -p "${runtime_dir}" 2>/dev/null || return 0
+    temporary="${runtime_profile_file}.tmp.$$"
+    umask 077
+    printf '{"version":1,"requested_profile":"%s","effective_profile":"%s","reason":"%s"}\n' \
+        "${requested}" "${effective}" "${profile_reason}" >"${temporary}" 2>/dev/null || return 0
+    mv -f "${temporary}" "${runtime_profile_file}" 2>/dev/null || rm -f "${temporary}" 2>/dev/null || true
+}
+appearance_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${appearance_file}" 2>/dev/null | head -n1)"
+settings_profile="$(sed -n 's/.*"compositor_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings_file}" 2>/dev/null | head -n1)"
+compositor_profile="${appearance_profile:-${settings_profile:-auto}}"
+if [[ "${appearance_profile}" == auto && ( "${settings_profile}" == compat || "${settings_profile}" == software || "${settings_profile}" == off ) ]]; then
+    compositor_profile="${settings_profile}"
+fi
+[[ "${compositor_profile}" == software ]] && compositor_profile=compat
+case "${compositor_profile}" in auto|compat|off) ;; *) compositor_profile=auto ;; esac
+
+if [[ "${compositor_profile}" == off ]]; then
+    write_runtime_profile "${compositor_profile}" off "disabled-by-user"
+    exit 0
+elif [[ "${compositor_profile}" == compat ]]; then
+    config="${fallback_conf}"
+    reason="persisted-software-profile"
+fi
 
 mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
@@ -4748,26 +5361,39 @@ renderer=""
 if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
 fi
+render_node=""
+for candidate in /dev/dri/renderD*; do
+    if [[ -r "${candidate}" && -w "${candidate}" ]]; then
+        render_node="${candidate}"
+        break
+    fi
+done
 
-if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
+if [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
     config="${fallback_conf}"
     reason="low-memory-${mem_mb}mb"
-elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ]]; then
+elif [[ "${compositor_profile}" == auto && ( "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ) ]]; then
     config="${fallback_conf}"
     reason="safe-graphics-cmdline"
-elif [[ ! -d /dev/dri ]]; then
+elif [[ "${compositor_profile}" == auto && ! -d /dev/dri ]]; then
     config="${fallback_conf}"
     reason="no-dri"
-elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
+elif [[ "${compositor_profile}" == auto && -z "${render_node}" ]]; then
+    config="${fallback_conf}"
+    reason="no-render-node"
+elif [[ "${compositor_profile}" == auto && -z "${renderer}" ]]; then
+    config="${fallback_conf}"
+    reason="renderer-unverified"
+elif [[ "${compositor_profile}" == auto && ( "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ) ]]; then
     config="${fallback_conf}"
     reason="software-renderer"
-elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; then
+elif [[ "${compositor_profile}" == auto && "${renderer}" == *svga3d* ]] || { [[ "${compositor_profile}" == auto ]] && echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; }; then
     config="${fallback_conf}"
     reason="virtual-machine-gpu"
-elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
-    config="${lowmem_conf}"
-    reason="balanced-low-memory-${mem_mb}mb"
-elif echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
+elif [[ "${compositor_profile}" == auto && "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
+    config="${fallback_conf}"
+    reason="low-memory-${mem_mb}mb"
+elif [[ "${compositor_profile}" == auto ]] && echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
     config="${fallback_conf}"
     reason="old-intel-gpu"
 fi
@@ -4777,18 +5403,26 @@ if [[ ! -f "${config}" ]]; then
     reason="${reason}-missing-main"
 fi
 
+effective_profile=auto
+if [[ "${config}" == "${fallback_conf}" || "${config}" == "${lowmem_conf}" ]]; then
+    effective_profile=compat
+fi
+write_runtime_profile "${compositor_profile}" "${effective_profile}" "${reason}"
+
 {
-    printf '[%s] backend config=%s reason=%s mem_mb=%s renderer=%s gpu=%s\n' \
-        "$(date '+%F %T')" "${config}" "${reason}" "${mem_mb}" "${renderer:-unknown}" "${gpu:-unknown}"
+    printf '[%s] backend config=%s effective=%s reason=%s mem_mb=%s render_node=%s renderer=%s gpu=%s\n' \
+        "$(date '+%F %T')" "${config}" "${effective_profile}" "${reason}" "${mem_mb}" \
+        "${render_node:-none}" "${renderer:-unknown}" "${gpu:-unknown}"
 } >> "${log}" 2>/dev/null || true
 
-if ! command -v picom >/dev/null 2>&1; then
+if ! command -v "${picom_bin}" >/dev/null 2>&1; then
+    write_runtime_profile "${compositor_profile}" off "${reason}-picom-missing"
     printf '[%s] picom command missing\n' "$(date '+%F %T')" >> "${log}" 2>/dev/null || true
     exit 0
 fi
 
 pgrep -u "$(id -u)" -x picom >/dev/null 2>&1 && exit 0
-exec picom --config "${config}" --log-level=warn
+exec "${picom_bin}" --config "${config}" --log-level=warn
 MINGPICOM
     chmod 0755 /usr/local/bin/ming-picom
 
@@ -4804,7 +5438,7 @@ configure_notification_filter() {
 <channel name="xfce4-notifyd" version="1.0">
   <property name="notify-location" type="uint" value="3"/>
   <property name="theme" type="string" value="Smoke"/>
-  <property name="initial-opacity" type="double" value="0.85"/>
+  <property name="initial-opacity" type="double" value="1.0"/>
   <property name="expire-timeout" type="int" value="3"/>
   <property name="do-fadeout" type="bool" value="true"/>
   <property name="do-slideout" type="bool" value="true"/>
@@ -4812,10 +5446,7 @@ configure_notification_filter() {
   <property name="log-max-size" type="int" value="50"/>
   <property name="known-applications" type="array">
     <value type="string" value="network-manager-applet"/>
-    <value type="string" value="xfce4-power-manager"/>
     <value type="string" value="pulseaudio"/>
-    <value type="string" value="garlic-claw"/>
-    <value type="string" value="xfce4-power-manager-settings"/>
   </property>
 </channel>
 NOTIFYCFG
@@ -4857,10 +5488,10 @@ configure_thunar_uca() {
 </action>
 <action>
     <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
+    <name>打开文件</name>
     <unique-id>4</unique-id>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析此文件</description>
+    <command>thunar "%f"</command>
+    <description>使用文件管理器打开此文件</description>
     <patterns>*</patterns>
     <text-files/>
     <other-files/>
@@ -4915,19 +5546,6 @@ Categories=Utility;System;
 StartupNotify=true
 APPLIBDESKTOP
 
-    cat > "${desktop_dir}/garlic-claw.desktop" << GCDESKTOP
-[Desktop Entry]
-Name=AI 助手
-Name[zh_CN]=Garlic Claw
-Comment=Ming OS AI 助手
-Exec=xfce4-terminal --title="Garlic Claw" -e "garlic-claw"
-Icon=utilities-terminal
-Terminal=false
-Type=Application
-Categories=System;AI;
-StartupNotify=true
-GCDESKTOP
-
     chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
     chmod +x "${desktop_dir}"/*.desktop
 }
@@ -4938,8 +5556,10 @@ deploy_release_readme() {
     local doc_dir="/usr/share/doc/ming-os"
     mkdir -p "${doc_dir}"
 
-    cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Ming OS 26.3.2 Release And Website Handoff
+    # Preserve the old handoff as historical migration context; the current
+    # release document is emitted below as MING_OS_26.4_RELEASE_README.md.
+    cat > "${doc_dir}/MING_OS_26.3.2_RELEASE_README.md" << 'RELEASEREADME'
+# Ming OS 26.3.2 Historical Release And Website Handoff
 
 This document is the current website and AI handoff source for Ming OS. Use `26.3.2` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
 
@@ -4962,7 +5582,8 @@ This is the version to use when producing:
 - ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA discovery fallback after transport failure: `https://sca-hub.cn/api/onion-update/check`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 
@@ -5037,7 +5658,8 @@ Required links:
 - ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA discovery fallback after transport failure: `https://sca-hub.cn/api/onion-update/check`
 
 Page goals:
 
@@ -5081,6 +5703,66 @@ Design direction:
 - keep the system branded as Ming OS after installation;
 - protect low-memory machines from heavy optional apps.
 RELEASEREADME
+
+    # Give installed users a local, version-specific handoff for the only
+    # supported 26.3.2 -> 26.4.0 path.  It intentionally points at the signed
+    # bootstrap and the existing JSON update entry point instead of teaching
+    # users to bypass the transaction and recovery safety gates.
+    local upgrade_doc="/home/${MING_USER}/Desktop/Ming OS 26.3.2 到 26.4.0 升级说明.md"
+    cat > "${upgrade_doc}" << 'UPGRADEDOC'
+# Ming OS 26.3.2 -> 26.4.0 升级说明
+
+## 推荐路径
+
+1. 在 Ming 设置的“系统更新”页点击“检查更新”。
+2. 如果页面提示缺少 bootstrap，只从 Ming OS 官方发布页下载一次性签名 bootstrap，并同时核对 SHA256、detached signature 和公钥指纹。
+3. 安装 bootstrap 后重新点击“检查更新”。26.3.2 会直接发现 26.4.0 的事务型 OTA，不需要先安装 26.3.3。
+4. 点击唯一的“立即更新”按钮。系统会按事务状态自动下载、校验、备份用户数据、暂存、设置一次性启动项并在启动健康检查后完成或自动回滚。
+
+## 安全边界
+
+- 不要关闭签名、版本、架构、路径、空间或 /home 保留检查。
+- 单分区系统可以使用事务型 OTA，不需要外接硬盘；系统会在根分区内建立受保护的事务备份并拒绝空间不足的操作。
+- recovery ISO 仍然要求独立备份介质，不能用 recovery ISO 绕过该限制。
+- 未安装官方 bootstrap 时，系统只显示“需要官方签名 bootstrap”，不会进入危险的同盘 recovery 更新。
+
+## 失败与恢复
+
+更新页显示的“暂存”“待重启”“健康检查”“已完成”或“已回滚”来自事务状态机，不代表仅下载完成。断电、校验失败、空间不足或健康检查失败时，系统保留 /home 和机器配置，并从上一次可启动系统恢复。
+
+## 检查结果
+
+升级完成后确认：
+
+- 设置 > 系统更新显示当前版本 `26.4.0`；
+- 桌面、无线网络、已安装软件和用户文件均可用；
+- `ming-update status --json` 的状态为 `committed` 或 `idle`；
+- `/var/log/ming-update/` 与 `~/.cache/ming-os/` 中没有未处理的错误。
+
+遇到问题时，在设置的诊断入口导出日志，并保留错误代码；不要删除 `/var/lib/ming-update` 事务目录。
+UPGRADEDOC
+    chown "${MING_USER}:${MING_USER}" "${upgrade_doc}"
+
+    cat > "${doc_dir}/MING_OS_26.4_RELEASE_README.md" << 'CURRENTRELEASEREADME'
+# Ming OS 26.4.0 Release Handoff
+
+Ming OS 26.4.0 skips the 26.3.3 preview. It is based on Debian 13/Trixie and
+retains the signed 26.3.2 bootstrap bridge. The ISO and public download
+metadata remain pending the final installation and hardware regression pass.
+
+## Supported 26.3.2 upgrade
+
+Install the official signed bootstrap once, verify its SHA256, detached
+signature and public-key fingerprint, then use Ming Settings to check and
+apply the signed 26.4.0.1 manifest. The manifest must declare
+`from_versions: ["26.3.2", "26.3.3", "26.4.0", "26.4.0.1-development"]` and `version: "26.4.0.1"`. The transaction engine
+preserves `/home`, uses a one-time `grub-reboot` entry, and automatically
+confirms or rolls back after health checks. It does not call Calamares,
+partition tools, mkfs or resize operations.
+
+Recovery ISO updates keep their separate-backup-media gate. Never disable
+signature, space, path, `/home` or rollback checks.
+CURRENTRELEASEREADME
 }
 
 # ======================== Xfce 会话自启动 ========================
@@ -5088,6 +5770,34 @@ RELEASEREADME
 configure_autostart() {
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
+
+    # Merge the DEB installer action into a preserved user's Thunar menu
+    # without replacing custom actions from an older release.
+    cat > "${autostart_dir}/ming-thunar-menu-sync.desktop" << 'THUNARMENUSYNC'
+[Desktop Entry]
+Type=Application
+Name=Ming Thunar menu compatibility
+Exec=/usr/local/bin/ming-thunar-menu-sync --json
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+THUNARMENUSYNC
+
+    # Override the 26.3.2 scaler on both fresh installs and in-place updates.
+    # It used to rewrite fonts, panel and Dock settings after login; 26.4.0
+    # keeps those preferences in appearance.json instead.
+    cat > "${autostart_dir}/ming-scale.desktop" << 'SCALEMIGRATION'
+[Desktop Entry]
+Type=Application
+Name=Ming Legacy Display Scale Migration
+Comment=Disabled: Ming appearance preferences are persistent
+Exec=/usr/bin/true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-appearance-control
+SCALEMIGRATION
 
     # Picom is owned by ming-session-healthcheck.  Keep a disabled compatibility
     # entry for the Settings backend, but never launch Picom directly at login.
@@ -5103,41 +5813,21 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-session-healthcheck
 PICOMAUTOSTART
 
-    # NetworkManager 小程序
-    cat > "${autostart_dir}/nm-applet.desktop" << NMAUTOSTART
+    # Ming 状态小组件直接读取 NetworkManager/PulseAudio/UPower。清除旧镜像
+    # 遗留入口，避免恢复默认值时产生第二套托盘。
+    rm -f "${autostart_dir}/nm-applet.desktop" "${autostart_dir}/volumeicon.desktop"
+
+    # UPower, brightnessctl and systemd-logind back Ming's battery, brightness
+    # and lid controls.  Override the system entry rather than merely removing
+    # a user file, otherwise /etc/xdg/autostart would relaunch it at login.
+    cat > "${autostart_dir}/xfce4-power-manager.desktop" << 'POWERHIDDEN'
 [Desktop Entry]
 Type=Application
-Name=Network Manager
-Comment=网络管理
-Exec=nm-applet
+Name=Xfce Power Manager compatibility override
 Hidden=true
 NoDisplay=true
 X-GNOME-Autostart-enabled=false
-NMAUTOSTART
-
-    # 音量控制
-    cat > "${autostart_dir}/volumeicon.desktop" << VOLAUTOSTART
-[Desktop Entry]
-Type=Application
-Name=Volume Control
-Comment=音量控制
-Exec=volumeicon
-Hidden=true
-NoDisplay=true
-X-GNOME-Autostart-enabled=false
-VOLAUTOSTART
-
-    # 电源管理器（笔记本电池图标）
-    cat > "${autostart_dir}/xfce4-power-manager.desktop" << POWERAUTOSTART
-[Desktop Entry]
-Type=Application
-Name=Power Manager
-Comment=电源管理
-Exec=xfce4-power-manager
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-POWERAUTOSTART
+POWERHIDDEN
 
     cat > "${autostart_dir}/xfce4-screensaver.desktop" << SCREENSAVERAUTO
 [Desktop Entry]
@@ -5162,6 +5852,18 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 POLKITAUTO
 
+    cat > "${autostart_dir}/ming-connection-notify.desktop" << 'CONNECTIONNOTIFYAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Connection Notifications
+Comment=Network and Bluetooth connection notifications
+Exec=/usr/local/bin/ming-connection-notify
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+CONNECTIONNOTIFYAUTO
+
     # 首次启动配置向导
     cat > "${autostart_dir}/ming-first-run.desktop" << FIRSTRUN
 [Desktop Entry]
@@ -5174,7 +5876,8 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 FIRSTRUN
 
-    # Calamares Live 安装器
+    # Keep a disabled compatibility entry so upgrades cannot leave an old
+    # autostarted installer behind. Live mode exposes a desktop tile instead.
     cat > "${autostart_dir}/calamares-live.desktop" << CALAMARES
 [Desktop Entry]
 Type=Application
@@ -5182,9 +5885,9 @@ Name=Install Ming OS
 Name[zh_CN]=安装 Ming OS
 Comment=系统安装程序
 Exec=/usr/local/bin/ming-live-installer.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
 CALAMARES
 
     rm -f \
@@ -5197,18 +5900,9 @@ CALAMARES
         "/etc/skel/Desktop/Install Debian.desktop" \
         "/etc/skel/Desktop/安装 Debian.desktop" 2>/dev/null || true
 
-    # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用。
-    cat > "${autostart_dir}/ming-desktop-organizer.desktop" << DESKORGAUTO
-[Desktop Entry]
-Type=Application
-Name=Ming Desktop Organizer
-Comment=同步新安装应用到 Ming 手机式桌面
-Exec=sh -c "sleep 5 && /usr/local/bin/ming-desktop-organizer --watch"
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5
-DESKORGAUTO
+    # Launcher/state changes are handled inside the phone desktop with
+    # Gio.FileMonitor. Remove the legacy long-running organizer during upgrade.
+    rm -f "${autostart_dir}/ming-desktop-organizer.desktop"
 
     # Compatibility filename retained for Settings/upgrade migrations.  The
     # old session watchdog is intentionally disabled; the unified coordinator
@@ -5281,14 +5975,14 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         self.add(self.main_box)
 
         css = b'''
-        window { background-color: #F7F9F6; border-radius: 16px; }
+        window { background-color: #F7F9F6; border-radius: 8px; }
         .welcome-title { font-size: 28px; font-weight: bold; color: #1D2421; margin-top: 30px; }
         .welcome-subtitle { font-size: 16px; color: #5C6963; margin-top: 10px; margin-bottom: 20px; }
-        .big-button { font-size: 18px; padding: 16px 40px; border-radius: 12px;
+        .big-button { font-size: 18px; padding: 16px 40px; border-radius: 6px;
                       background-color: #2F8A7D; color: white; border: none; min-height: 52px; }
         .big-button:hover { background-color: #28786E; }
-        .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                          background-color: rgba(255,255,255,0.78); color: #1D2421; border: 1px solid rgba(31,98,84,0.14); min-height: 52px; }
+        .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 6px;
+                          background-color: #FFFFFF; color: #1D2421; border: 1px solid #D8E2DD; min-height: 52px; }
         .step-label { font-size: 14px; color: #5C6963; margin-top: 16px; }
         .done-icon { font-size: 64px; color: #2F8A7D; }
         '''
@@ -5412,9 +6106,18 @@ class WelcomeWindow(Gtk.ApplicationWindow):
 
     def open_wifi(self):
         try:
-            subprocess.Popen(['nm-connection-editor'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except:
-            pass
+            subprocess.Popen(['ming-control-center', '--page', 'network'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError):
+            dialog = Gtk.MessageDialog(
+                transient_for=self,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.CLOSE,
+                text='无法打开网络设置',
+            )
+            dialog.format_secondary_text('请完成首次设置后，在 Ming 设置的“网络与蓝牙”页面重试。')
+            dialog.run()
+            dialog.destroy()
+            return
         self.next_step()
 
     def finish(self):
@@ -5487,24 +6190,14 @@ repair_desktop_session() {
 
 # 始终先确保免密自动登录已就位（双保险，独立于用户选择）
 ensure_autologin() {
-    # 入 autologin / nopasswdlogin 组
-    pkexec /bin/bash -c "
-        for g in autologin nopasswdlogin; do
-            getent group \$g >/dev/null 2>&1 || groupadd -r \$g 2>/dev/null || true
-            usermod -aG \$g '${CUR_USER}' 2>/dev/null || true
-        done
-        mkdir -p /etc/lightdm/lightdm.conf.d
-        cat > /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf <<EOF
-[Seat:*]
-autologin-user=${CUR_USER}
-autologin-user-timeout=0
-autologin-session=xfce
-user-session=xfce
-greeter-session=lightdm-gtk-greeter
-allow-guest=false
-EOF
-        chmod 0644 /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf
-    " 2>/dev/null || true
+    # Groups and LightDM autologin are installed statically by module 01.
+    return 0
+}
+
+clear_password_and_verify() {
+    pkexec /usr/local/sbin/ming-account-control clear-password --user "${CUR_USER}" \
+        >/dev/null 2>&1 || return 1
+    passwd -S "${CUR_USER}" 2>/dev/null | awk 'NR == 1 { exit !($2 == "NP") }'
 }
 
 # 欢迎 + 选择：设置账户 / 跳过
@@ -5518,6 +6211,7 @@ RC=$?
 if [[ "${RC}" != "0" ]]; then
     # 跳过：保证免密自动登录，写标记，结束
     ensure_autologin
+    clear_password_and_verify || exit 1
     mkdir -p "$(dirname "${MARKER}")"
     echo "skipped" > "${MARKER}"
     dialog --title="已跳过" --text="已为您启用免密自动登录。\n开机将直接进入桌面。" \
@@ -5539,6 +6233,7 @@ FRC=$?
 if [[ "${FRC}" != "0" ]]; then
     # 关闭表单也视为跳过，仍保证免密
     ensure_autologin
+    clear_password_and_verify || exit 1
     mkdir -p "$(dirname "${MARKER}")"
     echo "skipped" > "${MARKER}"
     repair_desktop_session
@@ -5551,20 +6246,17 @@ PW2=$(echo "${FORM}" | cut -d'|' -f3)
 
 ensure_autologin
 
-# 设置显示名
-if [[ -n "${FULLNAME}" ]]; then
-    pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
-fi
-
 # 设置密码（用于 sudo/解锁；登录仍自动免密）
 if [[ -n "${PW1}" ]]; then
     if [[ "${PW1}" != "${PW2}" ]]; then
         dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
             --width=380 --button="好的:0" 2>/dev/null || true
     else
-        echo -e "${PW1}\n${PW1}" | pkexec passwd "${CUR_USER}" 2>/dev/null \
-            || pkexec /bin/bash -c "echo '${CUR_USER}:${PW1}' | chpasswd" 2>/dev/null || true
+        printf '%s\n' "${PW1}" | pkexec /usr/local/sbin/ming-account-control \
+            set-password --user "${CUR_USER}" >/dev/null 2>&1 || exit 1
     fi
+else
+    clear_password_and_verify || exit 1
 fi
 
 mkdir -p "$(dirname "${MARKER}")"
@@ -5607,7 +6299,7 @@ configure_simplified_menus() {
     <command>/usr/local/bin/ming-package-install-gui "%f"</command>
     <description>验证并安装本地 Debian 软件包</description>
     <range>*</range>
-    <patterns>*.deb</patterns>
+    <patterns>*.deb;*.DEB</patterns>
     <other-files/>
 </action>
 <action>
@@ -5652,10 +6344,10 @@ configure_simplified_menus() {
 </action>
 <action>
     <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
+    <name>打开文件</name>
     <submenu></submenu>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析文件</description>
+    <command>thunar "%f"</command>
+    <description>使用文件管理器打开文件</description>
     <range>*</range>
     <patterns>*</patterns>
     <text-files/>
@@ -5680,6 +6372,26 @@ configure_simplified_menus() {
 UCACFG
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/Thunar/uca.xml"
 
+    # Keep a MIME fallback for file managers that do not reload Thunar custom
+    # actions until the next session.  The same wrapper performs validation,
+    # authorization and application refresh for both entry points.
+    mkdir -p /usr/share/applications
+    cat > /usr/share/applications/ming-deb-installer.desktop << 'DEBINSTALLER'
+[Desktop Entry]
+Type=Application
+Name=安装 DEB 软件包
+Name[zh_CN]=安装 DEB 软件包
+Comment=验证并安装本地 Debian 软件包
+Exec=/usr/local/bin/ming-package-install-gui %f
+Icon=package-x-generic
+Terminal=false
+NoDisplay=true
+MimeType=application/vnd.debian.binary-package;application/x-deb;
+Categories=System;PackageManager;
+DEBINSTALLER
+    chmod 0644 /usr/share/applications/ming-deb-installer.desktop
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+
     # 桌面采用安卓式文件夹分组，不再清空应用入口。
     runuser -u "${MING_USER}" -- /usr/local/bin/ming-desktop-organizer >/tmp/ming-desktop-organizer.log 2>&1 || true
 }
@@ -5687,6 +6399,62 @@ UCACFG
 # ======================== Live 安装器脚本 ========================
 
 deploy_live_installer() {
+    local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
+    local installer_icon_source=/tmp/ming-build/assets/ming-live-install.svg
+    local receipt_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt
+    if [[ ! -s "${verifier_source}" || ! -s "${installer_icon_source}" ]]; then
+        echo "ERROR: missing installer verification or icon asset" >&2
+        return 1
+    fi
+    install -d -m 0755 /usr/local/sbin
+    install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+    install -d -m 0755 "${receipt_module}" /etc/calamares/modules
+    cat > "${receipt_module}/module.desc" << 'TARGETRECEIPTDESC'
+---
+type: "job"
+name: "ming-installer-target-receipt"
+interface: "python"
+script: "main.py"
+TARGETRECEIPTDESC
+    cat > "${receipt_module}/main.py" << 'TARGETRECEIPTPY'
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import pathlib
+
+import libcalamares
+
+
+VERIFIER_PATH = pathlib.Path("/usr/local/sbin/ming-installer-verify")
+LOADER = importlib.machinery.SourceFileLoader("ming_installer_verify", str(VERIFIER_PATH))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+VERIFIER = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(VERIFIER)
+
+
+def run():
+    root_mount_point = libcalamares.globalstorage.value("rootMountPoint")
+    try:
+        VERIFIER.capture_target_receipt(root_mount_point)
+    except VERIFIER.TargetReceiptError as exc:
+        return "Ming installer target receipt failed", str(exc)
+    return None
+TARGETRECEIPTPY
+    chmod 0644 "${receipt_module}/main.py"
+    cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
+---
+TARGETRECEIPTCONF
+    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+---
+dontChroot: true
+timeout: 10
+script:
+  - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
+TARGETRECEIPTRESETCONF
+    install -d -m 0755 /usr/share/icons/hicolor/scalable/apps
+    install -m 0644 "${installer_icon_source}" /usr/share/icons/hicolor/scalable/apps/ming-os-install.svg
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
 #!/usr/bin/env bash
 set -u
@@ -5709,6 +6477,11 @@ ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>>"${LOG}" || true
 printf 'Asia/Shanghai\n' > /etc/timezone 2>>"${LOG}" || true
 timeout 5 timedatectl set-timezone Asia/Shanghai >> "${LOG}" 2>&1 || true
 
+if ! /usr/local/sbin/ming-installer-verify receipt --begin-attempt >> "${LOG}" 2>&1; then
+    log "ERROR: cannot begin a fresh authoritative Calamares target receipt attempt"
+    exit 2
+fi
+
 mkdir -p /etc/calamares/modules
 
 cat > /etc/calamares/settings.conf <<'SETTINGS'
@@ -5721,9 +6494,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -5744,7 +6526,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -5753,6 +6537,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -5847,6 +6632,14 @@ script:
   - "/usr/local/sbin/ming-install-bootloader"
 BOOTLOADERCONF
 
+cat > /etc/calamares/modules/ming-installed-desktop-gate.conf <<'INSTALLEDDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+INSTALLEDDESKTOPGATECONF
+
 cat > /etc/default/locale <<'DEFAULTLOCALE'
 LANG=zh_CN.UTF-8
 LANGUAGE=zh_CN:zh
@@ -5915,6 +6708,11 @@ unpack:
     destination: ""
 UNPACKFSCONF
 
+if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
+    log "ERROR: Live Calamares verification failed; manual partitioning or live squashfs contract is invalid"
+    exit 2
+fi
+
 log "unpackfs_source=${squash}"
 log "unpackfs_stable_source=${squash_link}"
 log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
@@ -5959,9 +6757,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -5981,7 +6788,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -5990,11 +6799,23 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
   - finished
 STATICCALASETTINGS
+
+    # The Live preflight rewrites this file at runtime, but the built rootfs
+    # must already contain the gate so the release validator can verify the
+    # installer contract before an ISO is assembled.
+    cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'STATICDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+STATICDESKTOPGATECONF
 
     cat > /etc/calamares/modules/partition.conf << 'STATICPARTCONF'
 ---
@@ -6146,15 +6967,6 @@ is_live_environment() {
     return 1
 }
 
-# Ming OS is an installer-only image. When booted with ming.installer=1 the
-# session launches Calamares immediately and full-screen; the live desktop is
-# only a thin host for the installer, never a destination of its own.
-is_installer_boot() {
-    grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null && return 0
-    grep -qw "install" /proc/cmdline 2>/dev/null && return 0
-    return 1
-}
-
 prepare_installer_disks() {
     mkdir -p /tmp/ming-installer
     chmod 1777 /tmp/ming-installer 2>/dev/null || true
@@ -6194,31 +7006,61 @@ prepare_calamares_runtime() {
     fi
 }
 
-sleep 2
-
-if is_live_environment || is_installer_boot; then
-    if [ -z "${DISPLAY}" ]; then
-        export DISPLAY=:0
-    fi
-    mkdir -p /tmp/ming-installer
-    chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
-
-    if command -v calamares &>/dev/null; then
-        # -style/maximize handled by calamares window manager hint; keep retrying
-        # if the X session is not ready yet.
-        for _try in 1 2 3 4 5; do
-            if /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1; then
-                break
-            fi
-            sleep 2
-        done &
-    else
-        zenity --error --title="安装错误" --text="找不到 Calamares 安装程序。" 2>/dev/null || true
-    fi
+if ! is_live_environment; then
+    zenity --info --title="Ming OS" --text="安装程序只能在 Live 模式中运行。" 2>/dev/null || true
+    exit 1
 fi
+
+# A normal Live session must remain a desktop.  This also makes stale or
+# accidentally re-enabled autostart entries harmless: only the dedicated
+# installer boot entry or a Ming-owned launcher may enter Calamares.
+if ! grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null \
+   && [ "${MING_LIVE_INSTALL_REQUEST:-}" != "1" ]; then
+    zenity --info --title="Ming OS" \
+        --text="Live 模式不会自动打开安装程序。请点击桌面的“安装 Ming OS”图标。" \
+        2>/dev/null || true
+    exit 0
+fi
+
+exec /usr/local/bin/ming-calamares-launcher
 LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
+
+    # Live mode deliberately starts a normal desktop. This labelled launcher is
+    # first in the phone-desktop order and uses a dedicated high-contrast icon.
+    install -d -m 0755 /usr/share/applications "/home/${MING_USER}/Desktop" /etc/skel/Desktop
+    cat > "/usr/share/applications/Install Ming OS.desktop" << 'LIVEINSTALLDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=安装 Ming OS
+Name[zh_CN]=安装 Ming OS
+Comment=将 Ming OS 安装到这台电脑
+Comment[zh_CN]=将 Ming OS 安装到这台电脑
+Exec=env MING_LIVE_INSTALL_REQUEST=1 /usr/local/bin/ming-live-installer.sh
+Icon=ming-os-install
+Terminal=false
+StartupNotify=true
+Categories=System;Settings;
+X-Ming-Managed=true
+X-Ming-Live-Only=true
+X-Ming-Featured=true
+LIVEINSTALLDESKTOP
+    cp "/usr/share/applications/Install Ming OS.desktop" "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+    cp "/usr/share/applications/Install Ming OS.desktop" "/etc/skel/Desktop/Install Ming OS.desktop"
+    chmod 0755 "/usr/share/applications/Install Ming OS.desktop" \
+        "/home/${MING_USER}/Desktop/Install Ming OS.desktop" \
+        "/etc/skel/Desktop/Install Ming OS.desktop"
+    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+
+    # This launcher is created by the image build rather than a Debian package.
+    # The launch broker accepts such system entries only when a root-owned,
+    # read-only receipt binds the exact desktop file path.
+    install -d -m 0755 /var/lib/ming-os/trusted-desktops
+    printf '%s\n' '/usr/share/applications/Install Ming OS.desktop' \
+        > "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
+    chown root:root "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
+    chmod 0644 "/var/lib/ming-os/trusted-desktops/Install Ming OS.desktop"
 
     # Dedicated installer session with a minimal WM for reliable keyboard and
     # mouse focus. Calamares is maximized and automatically restarted on exit.
@@ -6305,9 +7147,7 @@ KISOSESS
 Description=Ming OS Live Installer
 After=lightdm.service display-manager.service
 Wants=lightdm.service
-ConditionKernelCommandLine=|boot=live
-ConditionKernelCommandLine=|live-config
-ConditionKernelCommandLine=|ming.installer=1
+ConditionKernelCommandLine=ming.installer=1
 
 [Service]
 Type=oneshot
@@ -6611,39 +7451,6 @@ XSETTINGSCFG
 </channel>
 SCREENSAVERCFG
 
-    # Whisker Menu 配置（26.3.0 玻璃主题版）
-    mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
-    cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
-button-title=Ming OS
-show-button-title=true
-launcher-icon-size=2
-button-icon=ming-os-menu
-show-favorites=true
-show-commands=true
-show-recent=true
-recent-items-max=6
-show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-edge.desktop,spark-store.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
-command-settings=ming-control-center
-command-lockscreen=ming-lock
-command-switchuser=dm-tool switch-to-greeter
-command-logoutuser=xfce4-session-logout --logout
-command-restart=xfce4-session-logout --reboot
-command-shutdown=xfce4-session-logout --halt
-search-actions=1
-position-categories-alternate=false
-position-commands-alternate=true
-position-search-alternate=false
-category-icon-size=1
-item-icon-size=2
-menu-width=440
-menu-height=540
-menu-opacity=95
-background-opacity=88
-view-mode=1
-sort-categories=true
-WHISKERRC
-
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4"
 }
 
@@ -6655,113 +7462,27 @@ WHISKERRC
 configure_appearance_enforcer() {
     cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
 #!/usr/bin/env bash
-# Ming OS 外观强制应用 - 每次登录运行，确保美化生效
-WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
-WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
-
-appearance_phone_env="${MING_PHONE_DESKTOP-__unset__}"
-if [[ -r /etc/default/ming-os ]]; then
-    . /etc/default/ming-os
+# Appearance is intentionally a bounded, one-shot preference reapply.  The
+# session coordinator exclusively owns the desktop, Dock and Picom lifecycle.
+set -u
+log_file="${HOME}/.cache/ming-os/appearance.log"
+mkdir -p "$(dirname "${log_file}")" 2>/dev/null || true
+if command -v ming-appearance-control >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground 8s ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
+    else
+        ming-appearance-control reapply --json >>"${log_file}" 2>&1 || true
+    fi
 fi
-if [[ "${appearance_phone_env}" != "__unset__" ]]; then
-    MING_PHONE_DESKTOP="${appearance_phone_env}"
+if command -v ming-device-control >/dev/null 2>&1; then
+    # Hardware backlight remains authoritative.  This only reapplies the
+    # user's X11 software dimming state on machines without one.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground 4s ming-device-control reapply-brightness --json >>"${log_file}" 2>&1 || true
+    else
+        ming-device-control reapply-brightness --json >>"${log_file}" 2>&1 || true
+    fi
 fi
-: "${MING_PHONE_DESKTOP:=1}"
-
-# 等待 xfdesktop / xfconfd 就绪
-for i in $(seq 1 15); do
-    if xfconf-query -c xfce4-desktop -l &>/dev/null; then break; fi
-    sleep 1
-done
-
-# 低分辨率优先使用小尺寸壁纸，减小内存占用
-WALL="${WALL_PNG}"
-RES=$(xrandr --current 2>/dev/null | grep '\*' | head -1 | awk '{print $1}')
-W=$(echo "${RES}" | cut -d'x' -f1)
-if [[ -n "${W}" && "${W}" -le 1366 && -f "${WALL_1366}" ]]; then
-    WALL="${WALL_1366}"
-fi
-
-# 对每一个真实 backdrop 属性（逐显示器/逐工作区）套用壁纸。
-# 这样无论连接器叫 monitorVGA-1 / monitorHDMI-1 / monitorscreen 都能命中。
-mapfile -t PROPS < <(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/last-image$')
-if [[ ${#PROPS[@]} -eq 0 ]]; then
-    # 首次登录 xfconf 数据库为空，无法枚举属性。
-    # 解决方案：把所有常见连接器名称全部写一遍，确保至少一个命中。
-    # 真实机器连接器名（xrandr --listmonitors）各不相同：
-    # VGA-1 / HDMI-1 / DP-1 / eDP-1 / LVDS-1 / Virtual-1 / screen 等。
-    for mon in screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1; do
-        for ws in workspace0 workspace1; do
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/last-image" \
-                -n -t string -s "${WALL}" 2>/dev/null || true
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/image-style" \
-                -n -t int -s 5 2>/dev/null || true
-            xfconf-query -c xfce4-desktop \
-                -p "/backdrop/screen0/monitor${mon}/${ws}/image-path" \
-                -n -t string -s "${WALL}" 2>/dev/null || true
-        done
-    done
-else
-    for p in "${PROPS[@]}"; do
-        xfconf-query -c xfce4-desktop -p "${p}" -s "${WALL}" 2>/dev/null || true
-        # 同步设置缩放方式为 5 (zoomed/拉伸填充)
-        style_prop="${p%/last-image}/image-style"
-        xfconf-query -c xfce4-desktop -p "${style_prop}" -n -t int -s 5 2>/dev/null || true
-        # 同时写 image-path（部分 XFCE 版本优先读这个）
-        path_prop="${p%/last-image}/image-path"
-        xfconf-query -c xfce4-desktop -p "${path_prop}" -n -t string -s "${WALL}" 2>/dev/null || true
-    done
-fi
-
-# 强制主题/图标主题（防止首次会话回退到默认）
-xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
-xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/fullscreen-inhibit -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
-
-MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
-PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
-if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
-    sed -i "s/^IconSize=.*/IconSize=36/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
-fi
-
-# Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
-# 停止 xfdesktop，因此启动失败时仍保留原生桌面作为安全后备。
-xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
-
-# Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
-mkdir -p "${HOME}/.cache/sessions"
-rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
-if pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
-    pkill -TERM -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 || true
-fi
-
-# 确保 Ming 手机桌面在运行。它必须早于 Dock 出现，避免只剩空壁纸。
-# MING_PHONE_DESKTOP=0 保留 Xfce 原生桌面作为显式兼容模式。
-if [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && command -v ming-phone-desktop-watchdog &>/dev/null; then
-    /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || true
-elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1; then
-    (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
-fi
-
-# Ensure the primary Plank Dock is visible after the compositor/session settles.
-if command -v ming-plank-watchdog &>/dev/null; then
-    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
-fi
-
-if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then
-    (sleep 1 && nohup xfce4-screensaver >/dev/null 2>&1 &) 2>/dev/null || true
-fi
-
 exit 0
 APPLYAPPEARANCE
     chmod +x /usr/local/bin/ming-apply-appearance
@@ -6954,16 +7675,16 @@ TOUCHEGGAUTO
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.4.0 Dock 桌面定制 <====="
 
     generate_ming_icons
-    configure_hidpi_autoscale
+    configure_hidpi_autoscale   # Retire legacy automatic scaler without touching preferences.
     install_themes
-    setup_wallpaper
+    setup_wallpaper || return 1
     configure_ming_shell
     install_ming_settings
     cleanup_retired_ming_entries
-    install_ming_shell_components
+    install_ming_shell_components || return 1
     install_ota_target_guard
     install_ming_files
     ensure_wps_office
@@ -6977,12 +7698,12 @@ main() {
     configure_simplified_menus   # 只动 Thunar 右键菜单，不再覆盖桌面/xfwm 配置
     deploy_release_readme
     configure_autostart
-    deploy_live_installer
+    deploy_live_installer || return 1
     setup_account_oobe
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.3.2 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.4.0 Dock 桌面定制完成 <====="
 }
 
 main

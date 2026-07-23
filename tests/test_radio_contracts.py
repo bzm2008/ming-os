@@ -42,75 +42,44 @@ class RadioBuildContracts(unittest.TestCase):
         self.assertIn("Before=NetworkManager.service", network)
         self.assertIn("systemctl enable ming-regdom.service", network)
 
-    def test_wifi_backends_are_mutually_exclusive_and_default_to_wpa(self):
+    def test_wifi_uses_fixed_wpa_backend_without_optional_iwd_switch(self):
         network = BASE.split("configure_network() {", 1)[1].split(
             "\ndeploy_hardware_diagnostics()", 1
-        )[0]
-        repair = BASE.split("cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'", 1)[1].split(
-            "NETREPAIR", 1
         )[0]
         self.assertIn("systemctl enable --now wpa_supplicant.service", network)
-        self.assertIn("old_service=wpa_supplicant.service", repair)
-        self.assertIn("old_service=iwd.service", repair)
-        self.assertIn("new_service=iwd.service", repair)
-        self.assertIn("new_service=wpa_supplicant.service", repair)
-        self.assertIn('systemctl disable --now "${old_service}"', repair)
-        self.assertIn('systemctl enable --now "${new_service}"', repair)
-        self.assertNotIn("systemctl restart iwd", repair)
-        self.assertNotIn("systemctl restart wpa_supplicant", repair)
-
-    def test_default_wpa_configuration_explicitly_disables_iwd_service(self):
-        network = BASE.split("configure_network() {", 1)[1].split(
-            "\ndeploy_hardware_diagnostics()", 1
-        )[0]
+        self.assertIn("wifi.backend=wpa_supplicant", network)
+        self.assertNotIn("apt install -y --no-install-recommends iwd", network)
+        self.assertNotIn("/etc/iwd/main.conf", network)
         self.assertIn("systemctl disable --now iwd.service", network)
+        self.assertIn("systemctl mask iwd.service", network)
 
-    def test_runtime_backend_switch_fails_closed_and_never_leaves_iwd_and_wpa_active(self):
+    def test_network_repair_is_interface_scoped_and_uses_bounded_nmcli(self):
         repair = BASE.split("cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'", 1)[1].split(
             "NETREPAIR", 1
         )[0]
-        self.assertIn("switch_backend()", repair)
-        self.assertIn('systemctl disable --now "${old_service}"', repair)
-        self.assertIn('systemctl enable --now "${new_service}"', repair)
-        self.assertIn('mv -f "${config_tmp}" "${config_path}"', repair)
-        self.assertIn('exit 2', repair)
-        self.assertNotIn("systemctl disable --now wpa_supplicant.service 2>/dev/null || true", repair)
-        self.assertNotIn("systemctl enable --now iwd.service 2>/dev/null || true", repair)
+        self.assertIn('[[ "${1:-}" == "--ifname" ]]', repair)
+        self.assertIn('IFNAME_PATTERN=', repair)
+        self.assertIn('LC_ALL=C.UTF-8', repair)
+        self.assertIn('nmcli --wait 8 device wifi rescan ifname "${IFNAME}"', repair)
+        self.assertIn('nmcli --wait 20 device connect "${IFNAME}"', repair)
+        self.assertIn('timeout 5s nmcli', repair)
+        self.assertIn('[[ "${state}" == 100* ]]', repair)
+        self.assertNotIn('"${state,,}" == *connected*', repair)
+        self.assertNotIn("systemctl restart NetworkManager", repair)
+        self.assertNotIn("systemctl enable --now iwd.service", repair)
+        self.assertNotIn("systemctl disable --now wpa_supplicant.service", repair)
+        self.assertNotIn("lspci", repair)
+        self.assertNotIn("lsusb", repair)
+        self.assertNotIn("journalctl", repair)
 
-    def test_runtime_backend_switch_restores_config_and_services_when_networkmanager_restart_fails(self):
+    def test_network_repair_rejects_missing_or_non_wifi_interface(self):
         repair = BASE.split("cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'", 1)[1].split(
             "NETREPAIR", 1
         )[0]
-        self.assertIn("config_backup", repair)
-        self.assertIn("rollback_backend()", repair)
-        restart_failure = repair.index("NetworkManager restart failed")
-        rollback_before_restart = repair.rfind("rollback_backend", 0, restart_failure)
-        self.assertGreater(rollback_before_restart, 0)
-
-    def test_backend_rollback_stops_new_service_before_starting_old_service(self):
-        repair = BASE.split("cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'", 1)[1].split(
-            "NETREPAIR", 1
-        )[0]
-        start = repair.index("rollback_backend() {")
-        end = repair.index('\n    if ! systemctl disable --now "${old_service}"', start)
-        rollback = repair[start:end]
-
-        stop_new = 'if ! systemctl disable --now "${new_service}"; then'
-        start_old = 'if ! systemctl enable --now "${old_service}"; then'
-        self.assertIn(stop_new, rollback)
-        self.assertIn(start_old, rollback)
-        self.assertLess(rollback.index(stop_new), rollback.index(start_old))
-        self.assertNotIn('systemctl disable --now "${new_service}" || true', rollback)
-
-    def test_new_backend_start_failure_uses_the_full_rollback(self):
-        repair = BASE.split("cat > /usr/local/bin/ming-network-repair << 'NETREPAIR'", 1)[1].split(
-            "NETREPAIR", 1
-        )[0]
-        start = repair.index('if ! systemctl enable --now "${new_service}"; then')
-        end = repair.index("\n    fi", start) + len("\n    fi")
-        start_failure = repair[start:end]
-
-        self.assertIn("rollback_backend", start_failure)
+        self.assertIn('Usage: ming-network-repair --ifname IFACE', repair)
+        self.assertIn('device status', repair)
+        self.assertIn('type == "wifi"', repair)
+        self.assertIn('exit 3', repair)
 
     def test_main_propagates_required_radio_firmware_install_failure(self):
         main = shell_function(BASE, "main")

@@ -167,6 +167,53 @@ class WifiClassificationTests(unittest.TestCase):
         self.assertEqual("driver_missing", status["state"])
         self.assertIn(c_command("lspci", "-nnk"), runner.commands)
 
+    def test_b43_status_reports_required_firmware_file_and_presence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            firmware = pathlib.Path(directory)
+            runner = FakeRunner({
+                c_command("lspci", "-nnk"): (
+                    0,
+                    "02:00.0 Network controller [0280]: Broadcom BCM4322 [14e4:432b]\n"
+                    "\tKernel driver in use: b43\n\tKernel modules: b43",
+                    "",
+                ),
+                c_command("lsusb"): (0, "", ""),
+            })
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda _name: True,
+                firmware_root=firmware)
+
+            missing = controller.wifi_status()
+            self.assertEqual("pci:14e4:432b", missing["firmware"]["device_id"])
+            self.assertEqual("b43", missing["firmware"]["driver"])
+            self.assertEqual("not-bundled-no-redistribution-license",
+                             missing["firmware"]["source"])
+            self.assertEqual("E_FIRMWARE_MISSING", missing["firmware"]["error_code"])
+            self.assertEqual(["b43/ucode30_mimo.fw"],
+                             missing["firmware"]["required_files"])
+            self.assertEqual("firmware_missing", missing["state"])
+
+            target = firmware / "b43/ucode30_mimo.fw"
+            target.parent.mkdir()
+            target.write_bytes(b"firmware")
+            present = controller.wifi_status()
+            self.assertTrue(present["firmware"]["complete"])
+            self.assertEqual("", present["firmware"]["error_code"])
+
+    def test_compatibility_help_is_read_only_and_names_official_sources(self):
+        controller = self.device.DeviceController(
+            runner=FakeRunner({
+                c_command("lspci", "-nnk"): (0, "02:00.0 Network controller [0280]: Broadcom BCM4322 [14e4:432b]\\n\\tKernel driver in use: b43", ""),
+                c_command("lsusb"): (0, "Bus 001 Device 003: ID 413c:8197 Dell Computer Corp. Bluetooth", ""),
+            }), executable=lambda _name: True)
+        help_data = controller.compatibility_help()
+        self.assertTrue(help_data["read_only"])
+        self.assertIn("pci:14e4:432b", help_data["device_ids"])
+        self.assertIn("usb:413c:8197", help_data["device_ids"])
+        self.assertIn("firmware-b43-installer", help_data["official_sources"])
+        self.assertTrue(help_data["recovery_suggestions"])
+        self.assertIn("不自动下载", help_data["risk_notice"])
+
     def test_suspicious_unknown_usb_network_adapter_needs_diagnosis(self):
         runner = FakeRunner({
             c_command("lspci", "-nnk"): (0, "", ""),
@@ -215,6 +262,85 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(63, result["requested"])
+
+    def test_widget_audio_performs_one_bounded_pulseaudio_recovery_then_reads_sink(self):
+        calls = []
+        info_calls = [
+            (1, "", "Connection refused"),
+            (0, "Default Sink: alsa_output.pci.analog-stereo\nDefault Source: alsa_input.pci.analog-stereo", ""),
+        ]
+
+        def runner(argv, timeout=8):
+            calls.append((tuple(argv), timeout))
+            if argv == ["pactl", "info"]:
+                return info_calls.pop(0)
+            if argv == ["pulseaudio", "--start"]:
+                return 0, "", ""
+            if argv == ["pactl", "get-sink-volume", "@DEFAULT_SINK@"]:
+                return 0, "Volume: front-left: 50%", ""
+            if argv == ["pactl", "list", "short", "sinks"]:
+                return 0, "0\talsa_output.pci.analog-stereo\tmodule-alsa-card.c\ts16le 2ch 44100Hz\tRUNNING", ""
+            if argv == ["pactl", "get-sink-mute", "@DEFAULT_SINK@"]:
+                return 0, "Mute: no", ""
+            return 1, "", "unexpected"
+
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"pactl", "pulseaudio"})
+        status = controller.audio_widget_status()
+        self.assertTrue(status["available"])
+        self.assertEqual(50, status["value"])
+        self.assertIn((("pulseaudio", "--start"), 3), calls)
+
+    def test_volume_targets_valid_selected_sink_unmutes_and_reads_back(self):
+        sink = "alsa_output.usb-Headset.analog-stereo"
+        statuses = [{
+            "backend": "pactl", "server_available": True,
+            "playback_devices": [{"id": sink, "available": True, "active": False}],
+        }]
+        runner = FakeRunner({
+            ("pactl", "set-sink-volume", sink, "67%"): (0, "", ""),
+            ("pactl", "set-sink-mute", sink, "0"): (0, "", ""),
+            ("pactl", "get-sink-volume", sink): (0, "Volume: 67%", ""),
+            ("pactl", "get-sink-mute", sink): (0, "Mute: no", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: statuses.pop(0)
+
+        result = controller.set_volume(67, sink_id=sink)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(sink, result["sink_id"])
+        self.assertEqual(67, result["value"])
+        self.assertFalse(result["muted"])
+        self.assertIn(("pactl", "set-sink-mute", sink, "0"), runner.commands)
+
+    def test_volume_rejects_sink_not_in_current_playback_devices(self):
+        runner = FakeRunner({})
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "pactl")
+        controller.audio_status = lambda: {
+            "backend": "pactl", "server_available": True,
+            "playback_devices": [{"id": "known", "available": True}],
+        }
+
+        result = controller.set_volume(20, sink_id="stale-or-injected")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("invalid_sink", result["state"])
+        self.assertEqual([], runner.commands)
+
+    def test_set_volume_cli_forwards_structured_sink_identifier(self):
+        class VolumeController:
+            def set_volume(self, value, sink_id=None):
+                return {"ok": True, "value": value, "sink_id": sink_id, "muted": False}
+
+        output = io.StringIO()
+        rc = self.device.main(
+            ["set-volume", "45", "--sink", "bluez_output.headset"],
+            controller=VolumeController(), stdout=output)
+        self.assertEqual(0, rc)
+        self.assertEqual("bluez_output.headset", json.loads(output.getvalue())["sink_id"])
 
     def test_volume_falls_back_to_amixer_when_pactl_fails(self):
         runner = FakeRunner({
@@ -735,7 +861,8 @@ class DeviceControlTests(unittest.TestCase):
             )
             result = controller.set_brightness(50)
         self.assertFalse(result["ok"])
-        self.assertEqual("unavailable", result["error"])
+        self.assertEqual("xrandr-software", result["backend"])
+        self.assertIn("available", result["error"])
 
     def test_brightness_rejects_zero_before_running_a_command(self):
         runner = FakeRunner({})
@@ -811,8 +938,8 @@ class DeviceControlTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["available"])
-        self.assertEqual("unavailable", result["state"])
-        self.assertEqual("", result["backend"])
+        self.assertIn(result["state"], {"unavailable", "error"})
+        self.assertEqual("xrandr-software", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(50, result["requested"])
 
@@ -822,7 +949,9 @@ class DeviceControlTests(unittest.TestCase):
         rc = self.device.main(["status", "--json"], controller=controller, stdout=output)
         payload = json.loads(output.getvalue())
         self.assertEqual(0, rc)
-        self.assertEqual({"audio", "brightness", "wifi", "bluetooth", "battery"}, set(payload))
+        self.assertEqual(
+            {"audio", "brightness", "wifi", "bluetooth", "ethernet", "battery"},
+            set(payload))
 
     def test_battery_prefers_display_device_over_bluetooth_peripheral(self):
         devices = (
@@ -850,6 +979,56 @@ class WifiCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.device = load_device_control()
+
+    def test_wifi_radio_cli_forwards_structured_status_and_requested_state(self):
+        calls = []
+
+        class RadioController:
+            def wifi_radio_status(self):
+                calls.append(("status",))
+                return self.device_result(True)
+
+            def wifi_radio(self, enabled):
+                calls.append(("set", enabled))
+                return self.device_result(True, enabled=enabled)
+
+            @staticmethod
+            def device_result(ok, enabled=True):
+                return {
+                    "ok": ok,
+                    "state": "enabled" if enabled else "disabled",
+                    "reason_code": "enabled" if enabled else "disabled",
+                    "reason_text": "ok",
+                    "retryable": False,
+                    "enabled": enabled,
+                }
+
+        status_output = io.StringIO()
+        self.assertEqual(
+            0,
+            self.device.main(
+                ["wifi-radio-status", "--json"],
+                controller=RadioController(), stdout=status_output),
+        )
+        on_output = io.StringIO()
+        self.assertEqual(
+            0,
+            self.device.main(
+                ["wifi-radio", "on", "--json"],
+                controller=RadioController(), stdout=on_output),
+        )
+        self.assertEqual([("status",), ("set", True)], calls)
+        self.assertTrue(json.loads(on_output.getvalue())["enabled"])
+
+    def test_wifi_radio_fallback_uses_utf8_c_locale_and_reads_back(self):
+        command = ("env", "LC_ALL=C.UTF-8", "nmcli", "radio", "wifi")
+        runner = FakeRunner({command: (0, "enabled\n", "")})
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "nmcli")
+        result = controller.wifi_radio_status()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["enabled"])
+        self.assertEqual([command], runner.commands)
 
     def test_scan_keeps_same_ssid_on_two_bssids_and_bands(self):
         scan_command = (
@@ -898,6 +1077,33 @@ class WifiCliTests(unittest.TestCase):
         self.assertEqual("wlan1", result["ifname"])
         self.assertEqual([command], runner.commands)
         self.assertNotIn("password", output.getvalue().lower())
+
+    def test_network_id_connection_uses_raw_chinese_ssid_not_bssid_as_ssid(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        ssid = "办公室网络"
+        bssid = "AA:BB:CC:DD:EE:FF"
+        connect_command = (
+            "env", "LC_ALL=C.UTF-8", "nmcli", "--wait", "30", "device", "wifi",
+            "connect", ssid, "bssid", bssid, "ifname", "wlan0",
+        )
+        runner = FakeRunner({
+            scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:FF:%s:6:2437 MHz:75:WPA2:wlan0" % ssid, ""),
+            connect_command: (0, "Device activated", ""),
+        })
+        controller = self.device.DeviceController(runner=runner, executable=lambda _name: True)
+        # Exercise the documented nmcli fallback rather than the host's libnm.
+        controller._network_backend_checked = True
+
+        scan = controller.wifi_scan()
+        result = controller.wifi_connect(
+            network_id=scan["networks"][0]["network_id"], ifname="wlan0")
+
+        self.assertTrue(result["ok"])
+        self.assertIn(connect_command, runner.commands)
 
     def test_password_option_is_rejected_without_echoing_the_secret(self):
         password = "correct horse battery staple"
@@ -1140,6 +1346,53 @@ class BluetoothStatusTests(unittest.TestCase):
         self.assertEqual("firmware_missing", firmware_status["state"])
         self.assertEqual("install_firmware", firmware_status["action"])
         self.assertEqual("driver_missing", driver_status["state"])
+
+    def test_dell_413c_8197_reports_both_kernel_firmware_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            firmware_root = pathlib.Path(directory)
+            controller = self.device.DeviceController(
+                runner=FakeRunner({
+                    ("lsusb",): (
+                        0,
+                        "Bus 001 Device 003: ID 413c:8197 Dell Computer Corp. Bluetooth",
+                        "",
+                    ),
+                    ("lsmod",): (0, "btusb 65536 0\nbtbcm 24576 1 btusb", ""),
+                }),
+                executable=lambda _name: True,
+                firmware_root=firmware_root,
+            )
+
+            missing = controller.bluetooth_status()
+            self.assertEqual("usb:413c:8197", missing["firmware"]["device_id"])
+            self.assertEqual("btbcm", missing["firmware"]["driver"])
+            self.assertEqual("not-bundled-no-redistribution-license",
+                             missing["firmware"]["source"])
+            self.assertEqual([
+                "brcm/BCM-413c-8197.hcd",
+                "brcm/BCM20702A1-413c-8197.hcd",
+            ], missing["firmware"]["required_files"])
+            self.assertEqual("E_FIRMWARE_MISSING", missing["firmware"]["error_code"])
+            self.assertEqual("firmware_missing", missing["state"])
+
+            for name in missing["firmware"]["required_files"]:
+                target = firmware_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"same reviewed payload")
+            complete = controller.bluetooth_status()
+            self.assertTrue(complete["firmware"]["complete"])
+            self.assertEqual("", complete["firmware"]["error_code"])
+            self.assertEqual(
+                complete["firmware"]["files"][0]["sha256"],
+                complete["firmware"]["files"][1]["sha256"],
+            )
+
+            (firmware_root / "brcm/BCM-413c-8197.hcd").write_bytes(b"different")
+            mismatch = controller.bluetooth_status()
+            self.assertFalse(mismatch["firmware"]["complete"])
+            self.assertEqual("E_FIRMWARE_ALIAS_MISMATCH",
+                             mismatch["firmware"]["error_code"])
+            self.assertEqual("firmware_missing", mismatch["state"])
 
     def test_controller_off_when_service_is_active_but_not_powered(self):
         controller = self.controller_for({

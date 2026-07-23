@@ -197,8 +197,20 @@ class ApplicationCatalogRefreshTests(unittest.TestCase):
     @staticmethod
     def load_phone_catalog_functions():
         tree = ast.parse(PHONE)
-        wanted_assignments = {"APP_CATALOG_FINGERPRINT_VERSION"}
-        wanted_functions = {"app_catalog_fingerprint", "app_id", "read_app"}
+        wanted_assignments = {
+            "APP_CATALOG_FINGERPRINT_VERSION",
+            "APP_CATALOG_MAX_ROOTS",
+            "APP_CATALOG_MAX_DIRECTORY_ENTRIES",
+            "APP_CATALOG_MAX_LAUNCHERS",
+            "APP_CATALOG_LAUNCHER_HASH_BYTES",
+            "APP_CATALOG_TOTAL_HASH_BYTES",
+        }
+        wanted_functions = {
+            "app_catalog_fingerprint",
+            "launcher_content_stamp",
+            "app_id",
+            "read_app",
+        }
         body = [
             node for node in tree.body
             if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names)
@@ -266,10 +278,91 @@ class ApplicationCatalogRefreshTests(unittest.TestCase):
         self.assertIn("app_catalog_fingerprint()", refresh)
         self.assertIn("sync_layout", refresh)
 
-    def test_phone_launch_fails_safely_when_the_shared_verifier_is_missing(self):
+    def test_phone_launch_requires_broker_helpers_and_fails_closed_without_them(self):
         launch = PHONE.split("def launch_item", 1)[1].split("def write_generated_core_launcher", 1)[0]
-        self.assertIn('getattr(COMMON, "parse_desktop_file", None)', launch)
-        self.assertIn('getattr(COMMON, "desktop_launch_diagnostic", None)', launch)
+        self.assertIn('getattr(COMMON, "send_launch_request", None)', launch)
+        self.assertIn('getattr(COMMON, "broker_fallback_argv", None)', launch)
+        self.assertNotIn('getattr(COMMON, "parse_desktop_file", None)', launch)
+        self.assertNotIn('desktop_launch_diagnostic', launch)
+        self.assertNotIn('entry.argv', launch)
+
+        tree = ast.parse(PHONE)
+        launch_node = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_item"
+        )
+        path = "/usr/share/applications/store-wrapper.desktop"
+        attempts = []
+
+        class PoisonEntry:
+            @property
+            def argv(self):
+                raise AssertionError("launch must not read an entry argv")
+
+        class MissingSender:
+            @staticmethod
+            def broker_fallback_argv(_path, _source):
+                return ("ming-launch",)
+
+            @staticmethod
+            def parse_desktop_file(_path):
+                return PoisonEntry()
+
+            @staticmethod
+            def desktop_launch_diagnostic(_argv):
+                return ""
+
+        class MissingFallback:
+            @staticmethod
+            def send_launch_request(_path, _source, _rect):
+                return False
+
+            @staticmethod
+            def parse_desktop_file(_path):
+                return PoisonEntry()
+
+            @staticmethod
+            def desktop_launch_diagnostic(_argv):
+                return ""
+
+        def launch_with(common):
+            class ForbiddenSubprocess:
+                @staticmethod
+                def Popen(*args, **kwargs):
+                    attempts.append((args, kwargs))
+                    raise AssertionError("launch must not execute a local argv")
+
+            namespace = {
+                "COMMON": common,
+                "log": lambda _message: None,
+                "subprocess": ForbiddenSubprocess,
+            }
+            exec(
+                compile(
+                    ast.fix_missing_locations(ast.Module(body=[launch_node], type_ignores=[])),
+                    str(ROOT / "assets" / "ming-phone-desktop.py"),
+                    "exec",
+                ),
+                namespace,
+            )
+            return namespace["launch_item"]
+
+        cases = (
+            (
+                "missing-sender",
+                MissingSender(),
+                {"path": path, "diagnostic": "", "legacy_argv": ("unsafe-direct",)},
+            ),
+            (
+                "missing-fallback",
+                MissingFallback(),
+                {"path": path, "diagnostic": ""},
+            ),
+        )
+        for name, common, item in cases:
+            with self.subTest(common=name):
+                self.assertFalse(launch_with(common)(item))
+        self.assertEqual([], attempts)
 
 
 class StabilityRecoveryContracts(unittest.TestCase):
@@ -432,16 +525,19 @@ fi
         ):
             self.assertIn(marker, helper)
 
-    def test_window_watchdog_requires_three_failures_and_deploys_session_autostart(self):
+    def test_window_watchdog_is_event_triggered_without_a_polling_autostart(self):
         for marker in (
             "ming-window-manager-watchdog",
-            "failure_count >= 3",
-            "sleep 10",
+            "--repair-if-needed",
             "window-manager.log",
-            "ming-window-manager.desktop",
             "ming-window-control repair",
         ):
             self.assertIn(marker, DESKTOP)
+        self.assertNotIn(
+            "Exec=/usr/local/bin/ming-window-manager-watchdog --session",
+            DESKTOP,
+        )
+        self.assertIn("window-manager-changed", (ROOT / "assets" / "ming-window-resource-monitor.py").read_text(encoding="utf-8"))
 
     def test_main_and_lowmem_picom_profiles_keep_windows_redirected(self):
         main = DESKTOP.split("cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'", 1)[1].split("PICOMCFG", 1)[0]
@@ -548,8 +644,10 @@ fi
         for marker in ("status", "apply", "confirm", "rollback", "15"):
             self.assertIn(marker, source)
         self.assertIn("ming-display-control", SETTINGS)
-        self.assertIn("100% 标准", SETTINGS)
         self.assertIn("1920 × 1080", SETTINGS)
+        for marker in ("字体大小", "桌面图标", "Dock 图标"):
+            self.assertIn(marker, SETTINGS)
+        self.assertNotIn("apply_interface_scale", SETTINGS)
 
     def test_status_widget_compact_state_is_persistent_and_uses_a_revealer(self):
         for marker in (
@@ -565,6 +663,11 @@ fi
         self.assertIn("self._height_animation", PHONE)
         self.assertIn("animate_collapsed_state", PHONE)
         self.assertIn("content_revealer.set_reveal_child", PHONE)
+
+    def test_expanded_status_widget_keeps_controls_top_aligned(self):
+        """The expanded card must not reserve a blank compact-row-sized strip above its content."""
+        self.assertIn("box.set_valign(Gtk.Align.START)", PHONE)
+        self.assertIn("expanded.set_valign(Gtk.Align.START)", PHONE)
         self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
 
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):

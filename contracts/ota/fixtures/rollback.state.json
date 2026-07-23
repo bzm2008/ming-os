@@ -1,0 +1,16 @@
+{
+  "schema": "ming.transaction-state.v1",
+  "transaction_id": "tx-20260715-0001",
+  "release_id": "ming-os-26.3.3-amd64-20260715.1",
+  "previous_slot": "legacy",
+  "candidate_slot": "B",
+  "state": "rolled_back",
+  "generation": 9,
+  "created_at": "2026-07-15T12:00:00Z",
+  "updated_at": "2026-07-15T12:05:00Z",
+  "evidence": {
+    "failure_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "previous_saved_entry": "ming-legacy",
+    "candidate_quarantined": true
+  }
+}

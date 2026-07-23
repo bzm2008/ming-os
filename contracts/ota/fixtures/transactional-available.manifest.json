@@ -1,0 +1,35 @@
+{
+  "schema": "ming.transaction-manifest.v1",
+  "release_id": "ming-os-26.3.3-amd64-20260715.1",
+  "version": "26.3.3",
+  "channel": "stable",
+  "architecture": "amd64",
+  "delivery": "transactional-slot-v1",
+  "from_versions": ["26.3.2"],
+  "minimum_bootstrap": "1.0.0",
+  "created_at": "2026-07-15T00:00:00Z",
+  "expires_at": "2026-08-15T00:00:00Z",
+  "kernel_release": "6.12.0-amd64",
+  "payload": {
+    "url": "https://downloads.example.invalid/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "size": 123456789,
+    "signature_url": "https://downloads.example.invalid/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sig"
+  },
+  "content_index": {
+    "url": "https://downloads.example.invalid/objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "size": 123456,
+    "signature_url": "https://downloads.example.invalid/objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.sig"
+  },
+  "space": {
+    "minimum_free_bytes": 8589934592,
+    "reserve_bytes": 2147483648
+  },
+  "slot_policy": {
+    "maximum_uncommitted_boots": 1,
+    "retain_previous_committed_slots": 1
+  },
+  "preserve_paths": ["/home"],
+  "health_profile": "ming-core-v1"
+}

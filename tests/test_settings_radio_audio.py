@@ -102,6 +102,22 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("process.communicate(input_text", stdin_runner)
         self.assertNotIn("password", command.replace("--password-stdin", ""))
 
+    def test_wifi_connection_command_uses_opaque_network_id_not_display_ssid(self):
+        command = function_source("wifi_connect_command")
+        connect = function_source("on_wifi_connect", "MingSettings")
+        self.assertIn('"--network-id"', command)
+        self.assertIn('network_id', command)
+        self.assertNotIn('"--ssid"', command)
+        self.assertIn('network["network_id"]', connect)
+        self.assertIn('network.get("display")', connect)
+
+    def test_wifi_connect_button_enters_progress_and_recovers_after_readback(self):
+        connect = function_source("on_wifi_connect", "MingSettings")
+        self.assertIn('_btn.set_sensitive(False)', connect)
+        self.assertIn('_btn.set_label("连接中...")', connect)
+        self.assertIn('_btn.set_sensitive(True)', connect)
+        self.assertIn('_btn.set_label("连接")', connect)
+
     def test_bluetooth_uses_structured_status_and_only_repairs_allowed_states(self):
         refresh = function_source("refresh_bluetooth_status", "MingSettings")
         repair = function_source("on_bluetooth_repair", "MingSettings")
@@ -110,6 +126,21 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("bluetooth_repair_allowed(status)", refresh)
         self.assertIn('["pkexec", "ming-radio-repair", "bluetooth"]', repair)
         self.assertIn("refresh_bluetooth_status()", repair)
+
+    def test_hardware_wifi_repair_is_interface_scoped_without_backend_switch(self):
+        page = function_source("build_hardware", "MingSettings")
+        repair = function_source("on_wifi_repair", "MingSettings")
+
+        self.assertIn("固定使用 wpa_supplicant", page)
+        self.assertNotIn("切换为 iwd", page)
+        self.assertNotIn("--use-iwd", page)
+        self.assertNotIn("--use-wpa", page)
+        self.assertIn("wifi_diagnostic_snapshot", repair)
+        self.assertIn('"--ifname", ifname', repair)
+        self.assertIn("run_capture_async", repair)
+        self.assertIn("wifi_repair_state.accept", repair)
+        self.assertIn("self.wifi_repair_state = GenerationState()", SETTINGS_SOURCE)
+        self.assertIn("self.wifi_repair_state.invalidate()", SETTINGS_SOURCE)
 
     def test_audio_actions_use_the_device_controller_and_present_readable_result(self):
         advanced = function_source("build_advanced", "MingSettings")
@@ -149,6 +180,62 @@ class SettingsRadioAudioContracts(unittest.TestCase):
 
 
 class SettingsAsyncBehaviorTests(unittest.TestCase):
+    def test_wifi_connect_dialog_uses_opaque_feedback_style(self):
+        class FakeDialog:
+            instance = None
+
+            def __init__(self, **_kwargs):
+                type(self).instance = self
+                self.css_classes = []
+                self.responses = []
+                self.presented = False
+
+            def set_extra_child(self, _child):
+                pass
+
+            def add_response(self, response_id, label):
+                self.responses.append((response_id, label))
+
+            def set_response_appearance(self, _response_id, _appearance):
+                pass
+
+            def add_css_class(self, css_class):
+                self.css_classes.append(css_class)
+
+            def connect(self, _signal, _callback):
+                pass
+
+            def present(self):
+                self.presented = True
+
+        class FakePasswordEntry:
+            def __init__(self, **_kwargs):
+                pass
+
+            def set_placeholder_text(self, _text):
+                pass
+
+        connect = executable_function("on_wifi_connect", {
+            "Adw": types.SimpleNamespace(
+                MessageDialog=FakeDialog,
+                ResponseAppearance=types.SimpleNamespace(SUGGESTED="suggested"),
+            ),
+            "Gtk": types.SimpleNamespace(PasswordEntry=FakePasswordEntry),
+        }, "MingSettings")
+
+        connect(types.SimpleNamespace(), Recorder(), {
+            "display": "Ming Wi-Fi",
+            "bssid": "AA:BB:CC:DD:EE:FF",
+            "network_id": "ming-net-" + "a" * 32,
+            "ifname": "wlan0",
+        })
+
+        self.assertTrue(FakeDialog.instance.presented)
+        self.assertEqual(
+            ["ming-feedback-dialog", "feedback-info"],
+            FakeDialog.instance.css_classes,
+        )
+
     def test_concurrent_device_control_load_waits_for_one_completed_module(self):
         entered = threading.Event()
         release = threading.Event()
@@ -193,40 +280,55 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
         self.assertEqual(2, len(results))
         self.assertTrue(all(result is results[0] and result.ready for result in results))
 
-    def test_hardware_probe_collects_broadcom_off_the_gtk_callback(self):
+    def test_hardware_probe_collects_compatibility_help_off_the_gtk_callback(self):
         calls = []
 
         def fake_run(command, timeout):
             calls.append(("hardware", tuple(command), timeout))
             return 0, '{"devices": {"graphics": {}, "audio": {}, "network": {}}}', ""
 
-        def fake_broadcom():
-            calls.append(("broadcom",))
-            return {"action": "none", "detected": False}
+        def fake_compatibility_help():
+            calls.append(("compatibility_help",))
+            return {"ok": True, "read_only": True, "device_ids": []}
 
         snapshot = executable_function(
             "hardware_status_snapshot", {"run": fake_run, "json": __import__("json"),
-                                         "read_broadcom_status_snapshot": fake_broadcom})()
+                                         "read_compatibility_help_snapshot": fake_compatibility_help})()
 
         self.assertTrue(snapshot["ok"])
-        self.assertIn("broadcom", snapshot)
-        self.assertEqual({"action": "none", "detected": False}, snapshot["broadcom"])
-        self.assertEqual("broadcom", calls[-1][0])
+        self.assertIn("compatibility_help", snapshot)
+        self.assertEqual(
+            {"ok": True, "read_only": True, "device_ids": []},
+            snapshot["compatibility_help"])
+        self.assertEqual("compatibility_help", calls[-1][0])
 
-    def test_hardware_renderer_consumes_probe_broadcom_without_reading_on_callback(self):
+    def test_compatibility_help_preserves_helper_failure_instead_of_forcing_success(self):
+        def fake_run(_command, timeout):
+            self.assertEqual(8, timeout)
+            return 0, '{"ok": false, "error": "设备探测失败"}', ""
+
+        snapshot = executable_function(
+            "read_compatibility_help_snapshot",
+            {"run": fake_run, "json": __import__("json")})()
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual("设备探测失败", snapshot["error"])
+        self.assertTrue(snapshot["read_only"])
+
+    def test_hardware_renderer_consumes_probe_compatibility_help_without_reading_on_callback(self):
         GenerationState = generation_state_type()
         queued = []
 
         def enqueue(task, on_done):
             queued.append((task, on_done))
 
-        def unexpected_broadcom_read():
-            raise AssertionError("Broadcom status must be read by the worker probe, not the GTK callback")
+        def unexpected_compatibility_read():
+            raise AssertionError("Compatibility help must be read by the worker probe, not the GTK callback")
 
         refresh = executable_function("refresh_hardware_status", {
             "run_task_async": enqueue,
             "hardware_status_snapshot": lambda: None,
-            "read_broadcom_status_snapshot": unexpected_broadcom_read,
+            "read_compatibility_help_snapshot": unexpected_compatibility_read,
         }, "MingSettings")
 
         window = types.SimpleNamespace()
@@ -237,17 +339,19 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
         window.hardware_graphics_row = Recorder()
         window.hardware_audio_row = Recorder()
         window.hardware_network_row = Recorder()
-        window.applied_broadcom = []
-        window.apply_broadcom_status = window.applied_broadcom.append
+        window.applied_compatibility_help = []
+        window.apply_compatibility_help = window.applied_compatibility_help.append
 
         refresh(window)
         queued[0][1]({
             "ok": True,
             "devices": {"graphics": {}, "audio": {}, "network": {}},
-            "broadcom": {"action": "none", "detected": False},
+            "compatibility_help": {"ok": True, "read_only": True, "device_ids": []},
         }, None)
 
-        self.assertEqual([{"action": "none", "detected": False}], window.applied_broadcom)
+        self.assertEqual(
+            [{"ok": True, "read_only": True, "device_ids": []}],
+            window.applied_compatibility_help)
 
     def test_bluetooth_repair_refuses_hard_rfkill_after_current_state_recheck(self):
         queued, commands = [], []

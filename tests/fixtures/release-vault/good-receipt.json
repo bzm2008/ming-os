@@ -1,0 +1,15 @@
+{
+  "format": "ming-release-vault-receipt-v1",
+  "bundle_id": "recovery-bundle-1",
+  "generation": 1,
+  "primary_fingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signing_fingerprint": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bundle_bytes": 123,
+  "public_keyring_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "key_policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "encryption_format": "age-v1",
+  "created_at": "2026-07-17T00:00:00Z",
+  "nas_object": "recovery-bundle-1",
+  "status": "verified"
+}

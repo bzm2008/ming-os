@@ -1,0 +1,50 @@
+{
+  "schema": "ming.transaction-fault-matrix.v1",
+  "cases": [
+    {
+      "id": "manifest-signature",
+      "error_code": "E_MANIFEST_SIGNATURE",
+      "test_id": "tests.test_transaction_verify.TransactionVerifyTests.test_verifies_manifest_index_and_payload_signatures_independently"
+    },
+    {
+      "id": "payload-integrity",
+      "error_code": "E_ARTIFACT_HASH",
+      "test_id": "tests.test_transaction_verify.TransactionVerifyTests.test_rejects_payload_and_index_hash_or_size_mismatch"
+    },
+    {
+      "id": "payload-policy",
+      "error_code": "E_CONTENT_POLICY",
+      "test_id": "tests.test_transaction_verify.TransactionVerifyTests.test_positive_allowlist_rejects_signed_but_unapproved_system_paths"
+    },
+    {
+      "id": "space-exhausted",
+      "error_code": "E_SPACE",
+      "test_id": "tests.test_transaction_slot_apply.TransactionSlotApplyTests.test_payload_and_space_validation_happen_before_transaction_writes"
+    },
+    {
+      "id": "staging-interrupted",
+      "error_code": "E_PACKAGE_APPLY",
+      "test_id": "tests.test_transaction_slot_apply.TransactionSlotApplyTests.test_success_and_injected_failure_never_modify_active_root_or_home"
+    },
+    {
+      "id": "health-failed",
+      "error_code": "E_HEALTH_PACKAGES",
+      "test_id": "tests.test_transaction_health_bootstrap.TransactionHealthBootstrapTests.test_health_failure_arms_rollback_and_restores_previous_default"
+    },
+    {
+      "id": "commit-interrupted",
+      "error_code": "E_ROLLBACK_STATE",
+      "test_id": "tests.test_transaction_health_bootstrap.TransactionHealthBootstrapTests.test_power_loss_after_saved_entry_rolls_back_on_previous_root"
+    },
+    {
+      "id": "bootstrap-incomplete",
+      "error_code": "E_BOOTSTRAP_REQUIRED",
+      "test_id": "tests.test_transaction_health_bootstrap.TransactionHealthBootstrapTests.test_2632_requires_bootstrap_until_capability_is_complete"
+    },
+    {
+      "id": "recovery-same-disk",
+      "error_code": "recovery-guard",
+      "test_id": "tests.test_ota_target_guard.OtaTargetGuardTests.test_rejects_root_target_on_preservation_disk"
+    }
+  ]
+}
