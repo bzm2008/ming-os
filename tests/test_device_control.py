@@ -1493,10 +1493,9 @@ class DesktopWidgetContracts(unittest.TestCase):
         for marker in [
             "self.wifi_label",
             "self.bluetooth_label",
-            "self.battery_label",
+            "self.resource_label",
             "self.notification_label",
             ".set_text(",
-            ".set_no_show_all(True)",
         ]:
             self.assertIn(marker, status)
         self.assertNotIn(".set_label(", status)

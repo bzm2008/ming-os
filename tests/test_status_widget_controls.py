@@ -1,7 +1,9 @@
 """Pure tests for the status-widget control request state machine."""
 
 import ast
+import json
 import pathlib
+import tempfile
 import unittest
 
 
@@ -18,6 +20,14 @@ def load_control_state():
     namespace = {}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(PHONE), "exec"), namespace)
     return namespace["ControlRequestState"]
+
+
+def load_metric_functions():
+    source = PHONE.read_text(encoding="utf-8")
+    prefix = source.split("\nimport gi\n", 1)[0]
+    namespace = {"__file__": str(PHONE)}
+    exec(prefix, namespace)
+    return namespace
 
 
 class ControlRequestStateTests(unittest.TestCase):
@@ -75,6 +85,65 @@ class ControlRequestStateTests(unittest.TestCase):
             "queue_draw()",
         ):
             self.assertIn(marker, source)
+
+    def test_resource_metric_button_and_modes_are_persistent(self):
+        for marker in (
+            "metric_mode",
+            "resource_button",
+            "read_resource_metric",
+            "memory",
+            "cpu",
+            "network",
+        ):
+            self.assertIn(marker, self.source)
+
+    def test_memory_metric_reads_proc_without_shell_commands(self):
+        namespace = load_metric_functions()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / "meminfo").write_text(
+                "MemTotal:       1000 kB\nMemAvailable:    600 kB\n", encoding="ascii")
+            result = namespace["read_resource_metric"]("memory", proc_root=root, now=10)
+        self.assertTrue(result["available"])
+        self.assertEqual(40.0, result["value"])
+        self.assertEqual("%", result["unit"])
+
+    def test_cpu_and_network_metrics_use_second_sample(self):
+        namespace = load_metric_functions()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / "stat").write_text("cpu 10 0 10 80 0 0 0 0\n", encoding="ascii")
+            first = namespace["read_resource_metric"]("cpu", proc_root=root, now=1)
+            (root / "stat").write_text("cpu 20 0 20 90 0 0 0 0\n", encoding="ascii")
+            second = namespace["read_resource_metric"](
+                "cpu", {"counters": [10, 0, 10, 80, 0, 0, 0, 0]}, proc_root=root, now=2)
+            self.assertFalse(first["available"])
+            self.assertTrue(second["available"])
+            self.assertGreater(second["value"], 0)
+
+            (root / "net").mkdir()
+            (root / "net" / "route").write_text(
+                "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+                "eth0 00000000 0101A8C0 0001 0 0 0 00000000 0 0 0\n", encoding="ascii")
+            (root / "net" / "dev").write_text(
+                "Inter-| Receive | Transmit\n"
+                " eth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n", encoding="ascii")
+            first_net = namespace["read_resource_metric"]("network", proc_root=root, now=3)
+            (root / "net" / "dev").write_text(
+                "Inter-| Receive | Transmit\n"
+                " eth0: 300 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0\n", encoding="ascii")
+            second_net = namespace["read_resource_metric"](
+                "network", {"interface": "eth0", "bytes": (100, 200), "sample_time": 3},
+                proc_root=root, now=4)
+        self.assertFalse(first_net["available"])
+        self.assertTrue(second_net["available"])
+        self.assertEqual("eth0", second_net["interface"])
+
+    def test_collapsed_refresh_does_not_start_full_device_status_collection(self):
+        refresh = self.source[self.source.index("    def refresh(self):"):
+                         self.source.index("    def collect_status(self):")]
+        self.assertIn("if self.collapsed:", refresh)
+        self.assertNotIn("collect_status", refresh.split("if self.collapsed:", 1)[1].split("return True", 1)[0])
 
     def test_scale_styles_include_visible_trough_slider_and_highlight(self):
         source = self.source

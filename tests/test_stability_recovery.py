@@ -185,12 +185,12 @@ class StatusWidgetStatePureTests(unittest.TestCase):
         exec(prefix, namespace)
         with tempfile.TemporaryDirectory() as temporary:
             state_path = pathlib.Path(temporary) / "status-widget.json"
-            self.assertEqual({"collapsed": False}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
             state_path.write_text("not json", encoding="utf-8")
-            self.assertEqual({"collapsed": False}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
             namespace["save_widget_state"](True, state_path)
-            self.assertEqual({"collapsed": True}, json.loads(state_path.read_text(encoding="utf-8")))
-            self.assertEqual({"collapsed": True}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, json.loads(state_path.read_text(encoding="utf-8")))
+            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
 
 
 class ApplicationCatalogRefreshTests(unittest.TestCase):
