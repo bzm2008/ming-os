@@ -42,6 +42,35 @@ class RadioBuildContracts(unittest.TestCase):
         self.assertIn("Before=NetworkManager.service", network)
         self.assertIn("systemctl enable ming-regdom.service", network)
 
+    def test_installed_system_uses_only_networkmanager_without_legacy_service_competition(self):
+        identity = BASE.split("cat > /usr/local/sbin/ming-fix-installed-identity << 'MINGIDENTITY'", 1)[1].split(
+            "MINGIDENTITY", 1
+        )[0]
+        self.assertIn("systemctl enable NetworkManager", identity)
+        self.assertIn("systemctl disable networking.service", identity)
+        self.assertIn("systemctl disable systemd-networkd.service", identity)
+        self.assertNotIn("for svc in NetworkManager networking systemd-networkd", identity)
+
+    def test_network_drivers_are_not_forced_by_modules_load_or_preload(self):
+        preload = BASE.split("cat > /usr/local/sbin/ming-hardware-preload << 'HWPRELOAD'", 1)[1].split(
+            "HWPRELOAD", 1
+        )[0]
+        static_defaults = shell_function(BASE, "configure_installed_system_static_defaults")
+        identity = BASE.split("cat > /usr/local/sbin/ming-fix-installed-identity << 'MINGIDENTITY'", 1)[1].split(
+            "MINGIDENTITY", 1
+        )[0]
+        identity_modules = identity.split(
+            'cat > "${target}/etc/modules-load.d/ming-network.conf" << \'NETMOD\'', 1
+        )[1].split("NETMOD", 1)[0]
+        static_modules = static_defaults.split(
+            "cat > /etc/modules-load.d/ming-network.conf << 'STATICNETMOD'", 1
+        )[1].split("STATICNETMOD", 1)[0]
+        for marker in ["r8169", "r8168", "iwlwifi", "ath9k", "ath10k_pci", "rtl8192ee", "rtl8188ee", "e1000e"]:
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, preload)
+                self.assertNotIn(marker, static_modules)
+                self.assertNotIn(marker, identity_modules)
+
     def test_wifi_backends_are_mutually_exclusive_and_default_to_wpa(self):
         network = BASE.split("configure_network() {", 1)[1].split(
             "\ndeploy_hardware_diagnostics()", 1
@@ -218,6 +247,16 @@ class RadioBuildContracts(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, runtime_gate)
         self.assertNotIn("firmware-ralink", runtime_gate)
+
+    def test_rootfs_gate_rejects_forced_wifi_and_ethernet_preload(self):
+        gate = BUILD.split("hardware_modules = require_file", 1)[1].split(
+            "old_hw_modprobe", 1
+        )[0]
+        self.assertIn("for forbidden in", gate)
+        for marker in ["r8169", "r8168", "iwlwifi", "ath9k", "ath10k_pci"]:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, gate)
+        self.assertNotIn('"r8169", "btusb"', gate)
 
     def test_rootfs_firmware_gate_uses_trixie_available_misc_nonfree_package(self):
         rootfs_gate = BUILD.split("for firmware_package in [", 1)[1].split("]:", 1)[0]

@@ -198,11 +198,6 @@ set -u
 
 LOG=/tmp/ming-hardware-preload.log
 modules=(
-iwlmvm
-iwlwifi
-ath9k
-ath10k_pci
-r8169
 btusb
 btintel
 btrtl
@@ -2392,27 +2387,19 @@ elif [[ -x "${target}/usr/sbin/grub-mkconfig" ]]; then
     chroot "${target}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/tmp/ming-update-grub.log 2>&1 || true
 fi
 
-# 确保 NetworkManager 已启用，并强制加载常见老网卡驱动模块（Bug2: 安装后无网卡）
-# i5-2430M 等 Sandy Bridge 机器常用 iwlwifi / Realtek r8169 / r8168
-for svc in NetworkManager networking systemd-networkd; do
-    if [ -f "${target}/usr/lib/systemd/system/${svc}.service" ] || \
-       [ -f "${target}/lib/systemd/system/${svc}.service" ]; then
-        chroot "${target}" systemctl enable "${svc}" 2>/dev/null || true
-    fi
-done
-# 写 /etc/modules-load.d 确保常见非 Broadcom 网卡模块在下次开机自动加载。
-# Broadcom 驱动彼此冲突，必须交给 modalias/udev 或 Ming 驱动管理器选择。
+# 已安装系统只由 NetworkManager 管理网络；legacy networking/systemd-networkd
+# 不参与普通桌面连接，避免同一网卡被重复管理后反复断开。
+if [ -f "${target}/usr/lib/systemd/system/NetworkManager.service" ] || \
+   [ -f "${target}/lib/systemd/system/NetworkManager.service" ]; then
+    chroot "${target}" systemctl enable NetworkManager >/dev/null 2>&1 || true
+fi
+chroot "${target}" systemctl disable networking.service >/dev/null 2>&1 || true
+chroot "${target}" systemctl disable systemd-networkd.service >/dev/null 2>&1 || true
+# 不强制加载具体以太网或 Wi-Fi 模块。驱动选择交给内核 modalias/udev；
+# 这里保留空的受管文件，便于 OTA 清理旧版本留下的强制预加载项。
 mkdir -p "${target}/etc/modules-load.d"
 cat > "${target}/etc/modules-load.d/ming-network.conf" << 'NETMOD'
-# Ming OS：确保常见老网卡驱动在开机时加载
-r8169
-r8168
-iwlwifi
-ath9k
-ath10k_pci
-rtl8192ee
-rtl8188ee
-e1000e
+# Ming OS: NetworkManager owns networking; kernel modalias/udev selects drivers.
 NETMOD
 # 确保固件被 initramfs 包含（update-initramfs 已在前面运行）
 chroot "${target}" depmod -a 2>/dev/null || true
@@ -3797,16 +3784,7 @@ configure_installed_system_static_defaults() {
     install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
 
     cat > /etc/modules-load.d/ming-network.conf << 'STATICNETMOD'
-# Ming OS: keep common non-Broadcom legacy network modules available at boot.
-# Broadcom selection is delegated to udev/modalias or ming-broadcom-driver.
-r8169
-r8168
-iwlwifi
-ath9k
-ath10k_pci
-rtl8192ee
-rtl8188ee
-e1000e
+# Ming OS: NetworkManager owns networking; kernel modalias/udev selects drivers.
 STATICNETMOD
 
     cat > /etc/grub.d/09_ming_os << 'STATICGRUB'

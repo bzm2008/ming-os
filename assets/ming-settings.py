@@ -260,12 +260,27 @@ def audio_output_label(device):
     return label
 
 
-def wifi_connect_command(ssid, bssid, ifname, with_secret=False):
+def wifi_connect_command(network_id, ifname, with_secret=False):
     command = device_control_cli_command(
-        "wifi-connect", "--ssid", ssid, "--bssid", bssid, "--ifname", ifname)
+        "wifi-connect", "--network-id", network_id, "--ifname", ifname)
     if with_secret:
         command.append("--password-stdin")
     return command
+
+
+def ethernet_status_snapshot():
+    command = device_control_cli_command("ethernet-status", "--json")
+    rc, output, error = run(command, timeout=12)
+    if rc != 0:
+        return {"ok": False, "state": "diagnostic_unavailable", "devices": [],
+                "reason_code": "E_ETHERNET_STATUS_FAILED",
+                "reason_text": error or output or "有线网络状态读取失败。"}
+    try:
+        return json.loads(output)
+    except (TypeError, ValueError):
+        return {"ok": False, "state": "diagnostic_unavailable", "devices": [],
+                "reason_code": "E_ETHERNET_STATUS_JSON",
+                "reason_text": "有线网络状态返回了无效数据。"}
 
 
 def bluetooth_status_snapshot():
@@ -498,6 +513,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_probe_state = GenerationState()
         self.wifi_probe_state = GenerationState()
         self.wifi_connect_state = GenerationState()
+        self.ethernet_probe_state = GenerationState()
         self.bluetooth_probe_state = GenerationState()
         self.audio_probe_state = GenerationState()
         self.playback_audio_probe_state = GenerationState()
@@ -748,6 +764,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_probe_state.invalidate()
         self.wifi_probe_state.invalidate()
         self.wifi_connect_state.invalidate()
+        self.ethernet_probe_state.invalidate()
         self.bluetooth_probe_state.invalidate()
         self.audio_probe_state.invalidate()
         self.playback_audio_probe_state.invalidate()
@@ -1063,6 +1080,19 @@ class MingSettings(Adw.ApplicationWindow):
         time_grp.add(self.time_sync_row)
         box.append(time_grp)
 
+        ethernet_grp = Adw.PreferencesGroup(
+            title="有线网络", description="只检测和修复指定有线接口，不重启整个 NetworkManager。")
+        self.ethernet_status_row = Adw.ActionRow(
+            title="正在检测有线网络", subtitle="正在读取网线、DHCP、路由、DNS 与互联网状态...")
+        refresh_ethernet = Gtk.Button(label="刷新状态")
+        refresh_ethernet.set_valign(Gtk.Align.CENTER)
+        refresh_ethernet.connect("clicked", lambda _button: self.refresh_ethernet_status())
+        self.ethernet_status_row.add_suffix(refresh_ethernet)
+        ethernet_grp.add(self.ethernet_status_row)
+        self.ethernet_detail_grp = ethernet_grp
+        self.ethernet_rows = []
+        box.append(ethernet_grp)
+
         # WLAN 开关
         self.wifi_diagnostic = {
             "state": "checking", "present": False, "available": False,
@@ -1130,6 +1160,7 @@ class MingSettings(Adw.ApplicationWindow):
         bt_grp.add(open_blueman)
         box.append(bt_grp)
         GLib.idle_add(self.on_wifi_status_refresh, None)
+        GLib.idle_add(self.refresh_ethernet_status)
         GLib.idle_add(self.refresh_bluetooth_status)
         GLib.idle_add(self.refresh_time_sync_status)
 
@@ -1138,7 +1169,7 @@ class MingSettings(Adw.ApplicationWindow):
                 self.wifi_switch.set_active(output.strip() == "enabled")
             self.loading_wifi_state = False
 
-        run_capture_async(["nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
+        run_capture_async(["env", "LC_ALL=C", "nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
         return sc
 
     def apply_time_sync_status(self, status):
@@ -1195,12 +1226,94 @@ class MingSettings(Adw.ApplicationWindow):
 
         run_capture_async(["pkexec", TIME_SYNC_HELPER, "sync"], timeout=80, on_done=done)
 
+    def refresh_ethernet_status(self):
+        generation = self.ethernet_probe_state.begin()
+        self.ethernet_status_row.set_title("正在检测有线网络")
+        self.ethernet_status_row.set_subtitle("正在读取网线、DHCP、路由、DNS 与互联网状态...")
+
+        def done(snapshot, error):
+            if not self.ethernet_probe_state.accept(generation):
+                return False
+            if self.network_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {"ok": False, "devices": [], "reason_text": error or "无法读取有线网络。"}
+            devices = snapshot.get("devices") or []
+            for row in getattr(self, "ethernet_rows", []):
+                self.ethernet_detail_grp.remove(row)
+            self.ethernet_rows = []
+            if not devices:
+                self.ethernet_status_row.set_title("未检测到有线网络")
+                self.ethernet_status_row.set_subtitle(
+                    snapshot.get("reason_text") or "当前没有 NetworkManager 管理的有线网卡。")
+                return False
+            best = devices[0]
+            internet = best.get("internet") or {}
+            self.ethernet_status_row.set_title(
+                "有线网络%s" % ("已联网" if internet.get("state") == "online" else "需要检查"))
+            self.ethernet_status_row.set_subtitle(
+                internet.get("reason_text") or "已检测到有线网卡。")
+            for device in devices:
+                internet = device.get("internet") or {}
+                ipv4 = device.get("ipv4") or {}
+                title = "%s · %s" % (device.get("ifname") or "有线接口",
+                                      device.get("state") or "unknown")
+                subtitle = (
+                    "网线：%s · 速率：%sMbps · IP：%s · DNS：%s · 联网：%s" % (
+                        "已连接" if device.get("carrier") else "未确认",
+                        device.get("speed_mbps") or "未知",
+                        ", ".join(ipv4.get("addresses") or []) or "未获取",
+                        ", ".join(ipv4.get("dns") or []) or "未获取",
+                        internet.get("reason_text") or internet.get("state") or "待验证"))
+                row = Adw.ActionRow(title=title, subtitle=subtitle)
+                repair = Gtk.Button(label="重连此接口")
+                repair.set_valign(Gtk.Align.CENTER)
+                repair.connect("clicked", self.on_ethernet_repair, device.get("ifname") or "")
+                row.add_suffix(repair)
+                self.ethernet_detail_grp.add(row)
+                self.ethernet_rows.append(row)
+            return False
+
+        run_task_async(ethernet_status_snapshot, done)
+
+    def on_ethernet_repair(self, button, ifname):
+        if not ifname:
+            self.toast("有线修复未执行：接口名称为空。", "warning")
+            return
+        generation = self.ethernet_probe_state.begin()
+        button.set_sensitive(False)
+        button.set_label("正在重连...")
+
+        def done(rc, output, error):
+            if not self.ethernet_probe_state.accept(generation):
+                return False
+            if self.network_page.get_root() is not self:
+                return False
+            button.set_sensitive(True)
+            button.set_label("重连此接口")
+            try:
+                result = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.toast("已请求重连有线接口 %s。" % ifname, "info")
+            else:
+                self.toast(
+                    "有线重连失败：%s" % (
+                        result.get("reason_text") or error or "NetworkManager 未返回可读原因。"),
+                    "error")
+            self.refresh_ethernet_status()
+            return False
+
+        run_capture_async(
+            device_control_cli_command("ethernet-repair", "--ifname", ifname, "--json"),
+            timeout=30, on_done=done)
+
     def on_wifi_toggle(self, sw, _p):
         if self.loading_wifi_state:
             return
         state = "on" if sw.get_active() else "off"
         run_capture_async(
-            ["nmcli", "radio", "wifi", state], timeout=8,
+            ["env", "LC_ALL=C", "nmcli", "radio", "wifi", state], timeout=8,
             on_done=lambda rc, _output, error: (
                 self.toast("无线网络切换失败：%s" % (error or "NetworkManager 不可用"))
                 if rc != 0 else None))
@@ -1385,6 +1498,7 @@ class MingSettings(Adw.ApplicationWindow):
         run_task_async(wifi_scan_snapshot, done)
 
     def on_wifi_connect(self, _btn, network):
+        network_id = network["network_id"]
         ssid = network["ssid"]
         bssid = network["bssid"]
         ifname = network["ifname"]
@@ -1402,8 +1516,11 @@ class MingSettings(Adw.ApplicationWindow):
                 generation = self.wifi_connect_state.begin()
                 secret = entry.get_text()
                 entry.set_text("")
+                if _btn:
+                    _btn.set_sensitive(False)
+                    _btn.set_label("正在连接...")
                 def connected(result, error):
-                    self.apply_wifi_connect_result(generation, ssid, bssid, result, error)
+                    self.apply_wifi_connect_result(generation, ssid, bssid, result, error, _btn)
 
                 def parse_connected(rc, output, error):
                     try:
@@ -1412,7 +1529,7 @@ class MingSettings(Adw.ApplicationWindow):
                         result = None
                     connected(result, error if rc != 0 else "")
 
-                command = wifi_connect_command(ssid, bssid, ifname, with_secret=bool(secret))
+                command = wifi_connect_command(network_id, ifname, with_secret=bool(secret))
                 if secret:
                     run_capture_stdin_async(command, secret + "\n", timeout=40, on_done=parse_connected)
                 else:
@@ -1420,17 +1537,22 @@ class MingSettings(Adw.ApplicationWindow):
         dlg.connect("response", on_resp)
         dlg.present()
 
-    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error):
+    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error, button=None):
         if not self.wifi_connect_state.accept(generation):
             return False
         if self.network_page.get_root() is not self:
             return False
+        if button:
+            button.set_sensitive(True)
+            button.set_label("连接")
         result = result or {"ok": False, "error": error or "无线连接失败。"}
         self.toast(
             "已连接 %s（%s）。" % (ssid, bssid) if result.get("ok")
             else "连接失败：%s" % (
-                result.get("error") or "NetworkManager 未返回可读原因。"),
+                result.get("reason_text") or result.get("error") or "NetworkManager 未返回可读原因。"),
             "info" if result.get("ok") else "error")
+        if result.get("ok"):
+            self.on_wifi_scan(self.wifi_scan_btn)
         return False
 
     # ---- 3. 存储可视化（合并后空间使用率） ----

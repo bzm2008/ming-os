@@ -1650,15 +1650,21 @@ for marker in [
 if not os.access(root / "usr/local/sbin/ming-radio-repair", os.X_OK):
     errors.append("ming-radio-repair must be executable")
 
-hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "iwlwifi")
+hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "btusb")
 for marker in [
-    "r8169", "btusb", "btintel", "btrtl", "btbcm", "ath3k",
+    "btusb", "btintel", "btrtl", "btbcm", "ath3k",
     "hid_multitouch", "bcm5974", "hid_apple", "applespi",
     "spi_pxa2xx_platform", "spi_pxa2xx_pci", "thinkpad_acpi", "ideapad_laptop",
     "huawei_wmi", "surface_aggregator", "surface_hid_core",
 ]:
     if marker not in hardware_modules:
         errors.append(f"hardware modules preload missing {marker}")
+for forbidden in [
+    "r8169", "r8168", "iwlwifi", "iwlmvm", "ath9k", "ath10k_pci",
+    "rtl8192ee", "rtl8188ee", "e1000e",
+]:
+    if f"\n{forbidden}\n" in f"\n{hardware_modules}\n":
+        errors.append(f"network driver must be selected by modalias/udev, not forced by ming-hardware-preload: {forbidden}")
 require_file("etc/systemd/system/ming-hardware-preload.service", "Before=NetworkManager.service bluetooth.service display-manager.service")
 require_file("etc/modules-load.d/ming-hardware.conf", "loop")
 

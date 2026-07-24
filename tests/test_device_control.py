@@ -4,6 +4,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+import base64
 from contextlib import redirect_stderr
 
 
@@ -916,7 +917,7 @@ class DeviceControlTests(unittest.TestCase):
         rc = self.device.main(["status", "--json"], controller=controller, stdout=output)
         payload = json.loads(output.getvalue())
         self.assertEqual(0, rc)
-        self.assertEqual({"audio", "brightness", "wifi", "bluetooth", "battery"}, set(payload))
+        self.assertEqual({"audio", "brightness", "wifi", "ethernet", "bluetooth", "battery"}, set(payload))
 
     def test_battery_prefers_display_device_over_bluetooth_peripheral(self):
         devices = (
@@ -972,6 +973,202 @@ class WifiCliTests(unittest.TestCase):
         self.assertEqual(["2.4GHz", "5GHz"], [item["band"] for item in result["networks"]])
         self.assertEqual(["AA:AA:AA:AA:AA:01", "BB:BB:BB:BB:BB:02"],
                          [item["bssid"] for item in result["networks"]])
+
+    def test_scan_assigns_an_opaque_network_id_and_preserves_chinese_ssid_bytes(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        runner = FakeRunner({
+            scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:FF:家庭网络:1:2412 MHz:80:WPA2:wlan0", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda _name: True,
+                wifi_scan_cache_path=cache_path)
+            result = controller.wifi_scan()
+            network = result["networks"][0]
+
+            self.assertRegex(network["network_id"], r"^[a-f0-9]{32}$")
+            self.assertEqual("utf-8", network["encoding"])
+            self.assertEqual("家庭网络".encode("utf-8"),
+                             base64.b64decode(network["ssid_bytes_b64"]))
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(network["network_id"], cache["networks"][0]["network_id"])
+
+    def test_network_id_connect_uses_cached_chinese_ssid_without_reconstructing_it_from_ui(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        readback_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        connect_command = c_command(
+            "nmcli", "--ask", "--wait", "30", "device", "wifi", "connect", "家庭网络",
+            "bssid", "AA:BB:CC:DD:EE:FF", "ifname", "wlan0",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            scanner = self.device.DeviceController(
+                runner=FakeRunner({
+                    scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:FF:家庭网络:1:2412 MHz:80:WPA2:wlan0", ""),
+                }), executable=lambda _name: True, wifi_scan_cache_path=cache_path)
+            network_id = scanner.wifi_scan()["networks"][0]["network_id"]
+            input_runner = FakeInputRunner({connect_command: (0, "Device activated", "")})
+            controller = self.device.DeviceController(
+                runner=FakeRunner({readback_command: (0, "wlan0:wifi:connected:家庭网络", "")} ),
+                input_runner=input_runner, executable=lambda _name: True,
+                wifi_scan_cache_path=cache_path)
+            output = io.StringIO()
+            rc = self.device.main(
+                ["wifi-connect", "--network-id", network_id, "--ifname", "wlan0", "--password-stdin"],
+                controller=controller, stdout=output, stdin=io.StringIO("secret\n"))
+
+        self.assertEqual(0, rc)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertEqual("connected", result["state"])
+        self.assertEqual("wlan0", result["ifname"])
+        self.assertEqual([(connect_command, "secret\n")], input_runner.inputs)
+        self.assertNotIn("secret", output.getvalue())
+
+    def test_network_id_connect_rejects_stale_cached_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            cache_path.write_text(json.dumps({
+                "schema": 1, "generated_at": 0,
+                "networks": [{
+                    "network_id": "a" * 32, "ssid_bytes_b64": "T2ZmaWNl",
+                    "bssid": "AA:BB:CC:DD:EE:FF", "ifname": "wlan0",
+                }],
+            }), encoding="utf-8")
+            controller = self.device.DeviceController(
+                runner=FakeRunner({}), executable=lambda _name: True,
+                wifi_scan_cache_path=cache_path)
+            result = controller.wifi_connect_network_id("a" * 32, "wlan0")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("E_WIFI_NETWORK_STALE", result["reason_code"])
+
+    def test_lossy_ssid_scan_is_not_labeled_utf8_or_allowed_to_connect(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        runner = FakeRunner({
+            scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:01:\ufffd网络:1:2412 MHz:50:WPA2:wlan0", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda _name: True,
+                wifi_scan_cache_path=cache_path)
+            network = controller.wifi_scan()["networks"][0]
+            self.assertNotEqual("utf-8", network["encoding"])
+            result = controller.wifi_connect_network_id(network["network_id"], "wlan0")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("E_WIFI_SSID_ENCODING", result["reason_code"])
+
+
+class EthernetCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device = load_device_control()
+
+    def test_ethernet_connectivity_probe_is_bound_to_the_requested_interface(self):
+        status_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        detail_command = c_command(
+            "nmcli", "-t", "-f",
+            "GENERAL.DEVICE,GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER,"
+            "WIRED-PROPERTIES.SPEED,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS,IP6.GATEWAY",
+            "device", "show", "enp0s25")
+        route_command = c_command("ip", "-4", "route", "get", "1.1.1.1", "oif", "enp0s25")
+        probe_command = (
+            "curl", "--interface", "enp0s25", "--connect-timeout", "2", "--max-time", "5",
+            "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
+            "https://connectivitycheck.gstatic.com/generate_204",
+        )
+        runner = FakeRunner({
+            status_command: (0, "enp0s25:ethernet:connected:Wired connection 1\\nwlan0:wifi:connected:家庭网络", ""),
+            detail_command: (0, "GENERAL.DEVICE:enp0s25\\nGENERAL.STATE:100 (connected)\\n"
+                                "GENERAL.CONNECTION:Wired connection 1\\nWIRED-PROPERTIES.CARRIER:on\\n"
+                                "WIRED-PROPERTIES.SPEED:1000 Mb/s\\nIP4.ADDRESS[1]:192.168.1.8/24\\n"
+                                "IP4.GATEWAY:192.168.1.1\\nIP4.DNS[1]:192.168.1.1", ""),
+            route_command: (0, "1.1.1.1 via 192.168.1.1 dev enp0s25 src 192.168.1.8", ""),
+            probe_command: (0, "204", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            sysfs = pathlib.Path(directory) / "net"
+            (sysfs / "enp0s25").mkdir(parents=True)
+            (sysfs / "enp0s25" / "carrier").write_text("1\\n", encoding="utf-8")
+            (sysfs / "enp0s25" / "speed").write_text("1000\\n", encoding="utf-8")
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "curl", net_root=sysfs)
+            result = controller.ethernet_status()
+
+        ethernet = result["devices"][0]
+        self.assertEqual("enp0s25", ethernet["ifname"])
+        self.assertEqual("online", ethernet["internet"]["state"])
+        self.assertEqual("enp0s25", ethernet["internet"]["interface"])
+        self.assertIn(probe_command, runner.commands)
+        self.assertNotIn(("curl", "--interface", "wlan0"), runner.commands)
+
+    def test_ethernet_repair_reconnects_only_the_requested_interface(self):
+        status_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        reconnect_command = c_command("nmcli", "device", "connect", "enp0s25")
+        runner = FakeRunner({
+            status_command: (0, "enp0s25:ethernet:disconnected:--", ""),
+            reconnect_command: (0, "Device successfully activated", ""),
+        })
+        controller = self.device.DeviceController(runner=runner, executable=lambda _name: False)
+        result = controller.ethernet_repair("enp0s25")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("enp0s25", result["ifname"])
+        self.assertIn(reconnect_command, runner.commands)
+        self.assertFalse(any("networking" in command or "NetworkManager" in command
+                             for command in runner.commands))
+
+    def test_top_level_status_does_not_run_periodic_internet_probe(self):
+        status_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        detail_command = c_command(
+            "nmcli", "-t", "-f",
+            "GENERAL.DEVICE,GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER,"
+            "WIRED-PROPERTIES.SPEED,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS,IP6.GATEWAY",
+            "device", "show", "enp0s25")
+        route_command = c_command("ip", "-4", "route", "get", "1.1.1.1", "oif", "enp0s25")
+        runner = FakeRunner({
+            status_command: (0, "enp0s25:ethernet:connected:Wired connection 1", ""),
+            detail_command: (0, "GENERAL.DEVICE:enp0s25\nGENERAL.STATE:100 (connected)\n"
+                                "WIRED-PROPERTIES.CARRIER:on\nIP4.ADDRESS[1]:192.168.1.8/24\n"
+                                "IP4.GATEWAY:192.168.1.1", ""),
+            route_command: (0, "1.1.1.1 via 192.168.1.1 dev enp0s25 src 192.168.1.8", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            sysfs = pathlib.Path(directory) / "net"
+            (sysfs / "enp0s25").mkdir(parents=True)
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "curl", net_root=sysfs)
+            result = controller.status()
+
+        self.assertIn("ethernet", result)
+        self.assertEqual("E_ETHERNET_ROUTE_CONFIRMED",
+                         result["ethernet"]["devices"][0]["internet"]["reason_code"])
+        self.assertFalse(any(command and command[0] == "curl" for command in runner.commands))
+
+
+class WifiCliLegacyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device = load_device_control()
 
     def test_connect_uses_selected_bssid_and_interface_without_public_password(self):
         command = (
