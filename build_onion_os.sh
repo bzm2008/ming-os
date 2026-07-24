@@ -1319,6 +1319,7 @@ for marker in [
     "systemd-analyze", "/proc/meminfo", "scaling_governor",
     "discard_max_bytes", "fstrim.timer", "sensors", "ModemManager",
     "bluetooth.service", "pgrep", "vainfo", "probe_timeout_seconds",
+    "cgroup.controllers", "timer_migration", "systemd-oomd", "earlyoom",
 ]:
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
@@ -1336,6 +1337,8 @@ for relative_path in [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
     "usr/local/sbin/ming-performance-status",
+    "usr/local/sbin/ming-oom-policy",
+    "usr/local/sbin/ming-timer-policy",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
@@ -1346,6 +1349,8 @@ for relative_path in [
     "etc/systemd/system/ming-intel-xorg-migration.service",
     "etc/systemd/system/ming-regdom.service",
     "etc/systemd/system/ming-hardware-preload.service",
+    "etc/systemd/system/ming-oom-policy.service",
+    "etc/systemd/system/ming-timer-policy.service",
 ]:
     validate_systemd_unit(relative_path)
 if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():

@@ -113,7 +113,7 @@ class PerformanceStatusTests(unittest.TestCase):
         }
         service = self.module.PerformanceStatus(
             runner=RecordingRunner(self.module),
-            read_text=lambda path: values.get(str(path)),
+            read_text=lambda path: values.get(str(path).replace("\\", "/")),
             globber=lambda pattern: ["/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"]
             if "scaling_governor" in pattern else [],
         )
@@ -126,6 +126,44 @@ class PerformanceStatusTests(unittest.TestCase):
         self.assertEqual("0x123", status["microcode"])
         self.assertEqual("acpi-cpufreq", status["driver"])
         self.assertEqual("kernel-tlp", status["thermal_strategy"])
+
+    def test_status_exposes_policy_cgroup_timer_and_oom_sections(self):
+        runner = RecordingRunner(self.module)
+        service = self.module.PerformanceStatus(
+            runner=runner,
+            read_text=lambda _path: None,
+            globber=lambda _pattern: [],
+        )
+
+        payload = service.status()
+
+        self.assertIn("cgroup", payload)
+        self.assertIn("policy", payload)
+        self.assertIn("timers", payload)
+        self.assertIn("oom", payload)
+        self.assertIn(payload["oom"]["backend"], {"none", "earlyoom", "systemd-oomd", "conflict"})
+        self.assertIn("degraded", payload["policy"])
+
+    def test_status_reads_runtime_oom_and_timer_evidence(self):
+        values = {
+            "/sys/fs/cgroup/cgroup.controllers": "cpu io memory pids\n",
+            "/proc/sys/kernel/timer_migration": "1\n",
+            "/boot/config-test": "CONFIG_NO_HZ_IDLE=y\n",
+            "/run/ming-os/oom-policy": "backend=earlyoom\nforeground_protected=false\n",
+        }
+        service = self.module.PerformanceStatus(
+            runner=RecordingRunner(self.module),
+            read_text=lambda path: values.get(str(path).replace(chr(92), "/")),
+            globber=lambda pattern: ["/boot/config-test"] if pattern == "/boot/config-*" else [],
+        )
+
+        payload = service.status()
+
+        self.assertEqual(2, payload["cgroup"]["version"])
+        self.assertEqual("earlyoom", payload["oom"]["backend"])
+        self.assertFalse(payload["oom"]["foreground_protected"])
+        self.assertTrue(payload["timers"]["timer_migration"])
+        self.assertTrue(payload["timers"]["no_hz_idle"])
 
 
 class PerformanceStatusDeploymentTests(unittest.TestCase):
@@ -151,6 +189,22 @@ class PerformanceStatusDeploymentTests(unittest.TestCase):
     def test_base_main_fails_fast_when_performance_status_cannot_deploy(self):
         main = BASE.split("main() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("deploy_performance_status || return 1", main)
+
+    def test_low_memory_profile_caps_cache_pressure_and_uses_one_oom_backend(self):
+        self.assertNotIn("vfs_cache_pressure=120", BASE)
+        self.assertIn("ming-oom-policy", BASE)
+        self.assertNotIn("--prefer '^(firefox|chromium|code)$'", BASE)
+
+    def test_oom_policy_is_deployed_as_a_runtime_selector(self):
+        for marker in (
+            "/usr/local/sbin/ming-oom-policy",
+            "systemd-oomd",
+            "earlyoom",
+            "cgroup.controllers",
+            "backend=",
+            "ming-oom-policy.service",
+        ):
+            self.assertIn(marker, BASE)
 
 
 if __name__ == "__main__":

@@ -174,7 +174,8 @@ install_base_packages() {
         firmware-intel-graphics \
         firmware-nvidia-graphics \
         firmware-ti-connectivity \
-        intel-microcode; do
+        intel-microcode \
+        systemd-oomd; do
         apt install -y --no-install-recommends "${pkg}" || true
     done
 
@@ -3055,7 +3056,9 @@ if [[ "${mem_mb}" -le 2600 ]]; then
     profile="low-memory"
     zram_percent=100
     swappiness=80
-    vfs_cache_pressure=120
+    # Keep cache pressure within the supported policy range.  A value above
+    # 100 evicts useful file cache too aggressively on 2 GB machines.
+    vfs_cache_pressure=100
     dirty_ratio=8
     dirty_background_ratio=2
 elif [[ "${mem_mb}" -le 4200 ]]; then
@@ -3214,16 +3217,118 @@ JOURNALCFG
         systemctl disable --now serial-getty@ttyS0.service 2>/dev/null || true
     fi
 
-    # 启用 zram 与低内存保护
-    systemctl enable ming-memory-profile.service 2>/dev/null || true
-    systemctl enable zramswap 2>/dev/null || true
-    systemctl enable earlyoom 2>/dev/null || true
-    systemctl enable irqbalance 2>/dev/null || true
+    # Select exactly one OOM backend at runtime.  The selector prefers
+    # systemd-oomd only when unified cgroup memory control is actually
+    # available; otherwise earlyoom remains the bounded fallback.
+    cat > /usr/local/sbin/ming-oom-policy << 'MINGOOMPOLICY'
+#!/usr/bin/env bash
+set -u
+
+STATE_DIR=/run/ming-os
+STATE_FILE="${STATE_DIR}/oom-policy"
+mkdir -p "${STATE_DIR}"
+backend=none
+foreground_protected=false
+
+has_unified_memory() {
+    [[ -r /sys/fs/cgroup/cgroup.controllers ]] \
+        && grep -qw memory /sys/fs/cgroup/cgroup.controllers 2>/dev/null
+}
+
+unit_available() {
+    systemctl cat "$1" >/dev/null 2>&1
+}
+
+if has_unified_memory && unit_available systemd-oomd.service; then
+    systemctl enable --now systemd-oomd.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet systemd-oomd.service 2>/dev/null; then
+        backend=systemd-oomd
+        systemctl disable --now earlyoom.service >/dev/null 2>&1 || true
+    fi
+fi
+
+if [[ "${backend}" != systemd-oomd ]] && unit_available earlyoom.service; then
+    systemctl disable --now systemd-oomd.service >/dev/null 2>&1 || true
+    systemctl enable --now earlyoom.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet earlyoom.service 2>/dev/null; then
+        backend=earlyoom
+    fi
+fi
+
+# This file is diagnostic state only.  It is replaced atomically so a helper
+# restart cannot leave a partially written backend name for the settings page.
+temporary="${STATE_FILE}.tmp.$$"
+{
+    printf 'backend=%s\n' "${backend}"
+    printf 'foreground_protected=%s\n' "${foreground_protected}"
+    printf 'updated_at=%s\n' "$(date +%s)"
+} > "${temporary}" 2>/dev/null && mv -f "${temporary}" "${STATE_FILE}" 2>/dev/null || rm -f "${temporary}"
+exit 0
+MINGOOMPOLICY
+    chmod 0755 /usr/local/sbin/ming-oom-policy
+
+    cat > /etc/systemd/system/ming-oom-policy.service << 'MINGOOMPOLICYSVC'
+[Unit]
+Description=Ming OS mutually exclusive OOM backend selector
+After=local-fs.target systemd-udev-settle.service
+Before=graphical.target
+ConditionPathExists=/usr/local/sbin/ming-oom-policy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-oom-policy
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+MINGOOMPOLICYSVC
+
+    # Keep both vendor units installed for hardware compatibility, but let the
+    # selector own activation so they cannot race during normal boot.
+    systemctl disable --now earlyoom.service systemd-oomd.service 2>/dev/null || true
+    systemctl enable ming-oom-policy.service 2>/dev/null || true
 
     mkdir -p /etc/default
     cat > /etc/default/earlyoom << EARLYOOMCFG
-EARLYOOM_ARGS="-m 4 -s 8 -r 60 --prefer '^(firefox|chromium|code)$' --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager)$'"
+EARLYOOM_ARGS="-m 4 -s 8 -r 60 --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager|pipewire|pulseaudio|wireplumber|fcitx5|ming-phone-desktop|ming-update)$'"
 EARLYOOMCFG
+
+    # Apply timer migration only when this kernel exposes the key.  The helper
+    # uses the same key-aware sysctl path as the rest of Ming's runtime tuning.
+    cat > /usr/local/sbin/ming-timer-policy << 'MINGTIMERPOLICY'
+#!/usr/bin/env bash
+set -u
+
+if [[ -e /proc/sys/kernel/timer_migration ]]; then
+    install -d -m 0755 /run/ming-os
+    printf 'kernel.timer_migration=1\n' > /run/ming-os/timer-policy.conf
+    /usr/local/sbin/ming-sysctl-apply /run/ming-os/timer-policy.conf >/dev/null 2>&1 || true
+fi
+exit 0
+MINGTIMERPOLICY
+    chmod 0755 /usr/local/sbin/ming-timer-policy
+
+    cat > /etc/systemd/system/ming-timer-policy.service << 'MINGTIMERPOLICYSVC'
+[Unit]
+Description=Ming OS bounded timer coalescing policy
+After=local-fs.target
+Before=graphical.target
+ConditionPathExists=/usr/local/sbin/ming-timer-policy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-timer-policy
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+MINGTIMERPOLICYSVC
+    systemctl enable ming-timer-policy.service 2>/dev/null || true
+
+    # 启用 zram 与低内存保护
+    systemctl enable ming-memory-profile.service 2>/dev/null || true
+    systemctl enable zramswap 2>/dev/null || true
+    systemctl enable irqbalance 2>/dev/null || true
 
     # 配置 I/O 调度器（针对 SSD 和 HDD 的优化）
     cat > /etc/udev/rules.d/60-ioscheduler.rules << IOSCHEDRULE
