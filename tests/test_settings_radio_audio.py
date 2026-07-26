@@ -77,6 +77,23 @@ class Page:
 
 
 class SettingsRadioAudioContracts(unittest.TestCase):
+    def test_settings_typography_uses_noto_and_static_spacing_without_effects(self):
+        install_css = function_source("install_css", "MingSettings")
+
+        self.assertIn('font-family: "Noto Sans CJK SC", sans-serif;', install_css)
+        self.assertIn("font-weight: 400;", install_css)
+        self.assertIn("font-weight: 600;", install_css)
+        self.assertIn("padding: 8px;", install_css)
+        self.assertNotIn("animation:", install_css)
+
+    def test_interface_scaling_keeps_the_explicit_noto_font_source(self):
+        scale = function_source("apply_interface_scale", "MingSettings")
+
+        self.assertIn('"Noto Sans CJK SC %d" % size', scale)
+        self.assertIn('"Noto Sans CJK SC Medium %d" % size', scale)
+        self.assertNotIn('"Sans %d" % size', scale)
+        self.assertNotIn('"Sans Bold %d" % size', scale)
+
     def test_wifi_scan_uses_structured_controller_records_without_ssid_deduplication(self):
         scan = function_source("wifi_scan_snapshot")
         network_ui = function_source("on_wifi_scan", "MingSettings")
@@ -105,6 +122,25 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertNotIn('"--bssid"', command)
         self.assertIn("process.communicate(input_text", stdin_runner)
         self.assertNotIn("password", command.replace("--password-stdin", ""))
+
+    def test_wifi_status_surfaces_b43_compatibility_help_not_fake_repair(self):
+        refresh = function_source("on_wifi_status_refresh", "MingSettings")
+        page = function_source("build_network", "MingSettings")
+
+        self.assertIn("firmware_external_required", refresh)
+        self.assertIn("show_b43_help", refresh)
+        self.assertIn("不可内置", page)
+        self.assertNotIn("firmware-b43-installer", page)
+
+    def test_wifi_b43_compatibility_help_is_visible_and_not_labeled_repairable(self):
+        refresh = function_source("on_wifi_status_refresh", "MingSettings")
+        hardware = function_source("build_hardware", "MingSettings")
+
+        self.assertIn("firmware_policy", refresh)
+        self.assertIn("unredistributable_b43", refresh)
+        self.assertIn("兼容说明", refresh)
+        self.assertIn("b43", hardware)
+        self.assertIn("不可内置", hardware)
 
     def test_network_page_exposes_ethernet_status_and_single_interface_repair(self):
         page = function_source("build_network", "MingSettings")
@@ -154,6 +190,13 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("复制原始诊断", page)
         self.assertIn("get_clipboard().set_text(content)", export)
         self.assertNotIn("pci_driver_summary", refresh)
+
+    def test_hardware_page_exposes_input_method_repair(self):
+        page = function_source("build_hardware", "MingSettings")
+
+        self.assertIn("修复输入法", page)
+        self.assertIn("ming-input-repair", page)
+        self.assertIn("--user", page)
 
     def test_feedback_uses_high_contrast_specific_headings_instead_of_generic_hint(self):
         toast = function_source("toast", "MingSettings")

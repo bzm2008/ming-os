@@ -72,8 +72,9 @@ def write_core_desktops(root):
         "ming-settings.desktop": "/usr/local/bin/ming-control-center",
         "ming-files.desktop": "/usr/local/bin/ming-files",
         "ming-terminal.desktop": "/usr/local/bin/ming-terminal",
-        "ming-edge.desktop": "/usr/local/bin/ming-edge",
+        "ming-firefox.desktop": "/usr/local/bin/ming-firefox",
         "spark-store.desktop": "/usr/local/bin/ming-spark-store",
+        "papyrus.desktop": "/usr/bin/papyrus",
     }
     applications = root / "usr/share/applications"
     applications.mkdir(parents=True, exist_ok=True)
@@ -112,7 +113,8 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("/usr/local/bin/ming-package-install-gui \"%f\"", final_menu)
         self.assertIn("以管理员身份编辑", final_menu)
         self.assertIn("以管理员身份打开", final_menu)
-        self.assertIn("询问 Garlic Claw", final_menu)
+        self.assertNotIn("Garlic Claw", final_menu)
+        self.assertNotIn("garlic-claw", final_menu)
 
     def test_downloaded_debs_have_a_default_mime_handler_not_just_a_context_menu(self):
         self.assertIn("ming-package-installer.desktop", DESKTOP)
@@ -141,7 +143,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('run_required_step install_xfce_desktop', main)
         self.assertIn('run_required_step install_required_desktop_runtime', main)
         self.assertIn('run_required_step install_fcitx5', main)
-        self.assertIn('run_optional_step install_edge', main)
+        self.assertIn('run_required_step install_firefox_esr', main)
         self.assertIn('run_required_step install_app_store', main)
 
     def test_every_required_install_function_propagates_mandatory_command_failures(self):
@@ -200,8 +202,9 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "ming-settings.desktop",
             "ming-files.desktop",
             "ming-terminal.desktop",
-            "ming-edge.desktop",
+            "ming-firefox.desktop",
             "spark-store.desktop",
+            "papyrus.desktop",
         ]:
             self.assertIn(desktop, function)
         self.assertIn("shlex.split(exec_line)", function)
@@ -214,19 +217,19 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('[[ -n "${audit_output}" ]]', function)
         self.assertIn("return 1", function)
 
-    def test_edge_wrapper_without_a_real_browser_backend_is_rejected(self):
+    def test_firefox_wrapper_without_a_real_browser_backend_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             write_core_desktops(root)
             result = run_backend_validator(root)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("missing Microsoft Edge browser backend", result.stderr)
+            self.assertIn("missing Firefox ESR browser backend", result.stderr)
 
     def test_spark_wrapper_requires_an_executable_install_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             write_core_desktops(root)
-            write_executable(root, "usr/bin/microsoft-edge-stable")
+            write_executable(root, "usr/bin/firefox-esr")
             result = run_backend_validator(root)
             self.assertNotEqual(0, result.returncode)
             self.assertIn("Spark Store repair fallback", result.stderr)

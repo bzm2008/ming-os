@@ -37,10 +37,14 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertIn("ensure_audio_session", supervisor.split("startup_once()", 1)[1])
         self.assertIn("ensure_audio_session", supervisor.split("supervise_once()", 1)[1])
 
-    def test_edge_and_wechat_preflight_audio_without_forcing_a_valid_output(self):
-        edge = heredoc(APPS, "cat > /usr/local/bin/ming-edge << 'MINGEDGE'", "MINGEDGE")
+    def test_firefox_and_wechat_preflight_audio_without_forcing_a_valid_output(self):
+        firefox = heredoc(
+            APPS,
+            "cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'",
+            "MINGFIREFOX",
+        )
         wechat = heredoc(APPS, "cat > /usr/local/bin/ming-wechat << 'WECHATWRAP'", "WECHATWRAP")
-        self.assertIn("ming-audio-session ensure", edge)
+        self.assertIn("ming-audio-session ensure", firefox)
         self.assertIn("ming-audio-session ensure", wechat)
         self.assertIn("ming-device-control audio-repair-playback", wechat)
         self.assertLess(

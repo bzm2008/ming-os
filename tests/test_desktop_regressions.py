@@ -76,6 +76,14 @@ class DesktopSourceTests(unittest.TestCase):
         ]:
             self.assertIn(marker, self.phone)
 
+    def test_visible_cairo_desktop_labels_use_the_noto_family(self):
+        fallback = self.phone[
+            self.phone.index("def draw_icon_fallback"):
+            self.phone.index("def item_at")
+        ]
+        self.assertIn('DESKTOP_LABEL_FONT = "Noto Sans CJK SC Medium 10"', self.phone)
+        self.assertIn("Pango.FontDescription(DESKTOP_LABEL_FONT)", fallback)
+
     def test_android_desktop_is_enabled(self):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
         self.assertIn("X-Ming-Managed-Components=phone-desktop;plank;picom", self.desktop)
@@ -108,6 +116,14 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn('Gtk.Button(label="关闭")', self.drawer)
         self.assertIn('window.connect("delete-event"', self.drawer)
 
+    def test_shell_typography_uses_noto_and_lighter_readable_weights(self):
+        css = self.phone[self.phone.index('CSS = b"""'):self.phone.index('"""\n\n\ndef log')]
+        self.assertIn('font-family: "Noto Sans CJK SC", sans-serif;', css)
+        self.assertIn("font-weight: 500;", css)
+        self.assertIn("padding: 8px 12px;", css)
+        self.assertIn("padding: 12px 16px;", css)
+        self.assertNotIn("font-weight: 800;", css)
+
     def test_app_drawer_activates_on_explicit_primary_release(self):
         self.assertIn('button.connect("button-release-event", self._activate_button, app)', self.drawer)
         self.assertIn("def _activate_button", self.drawer)
@@ -121,10 +137,23 @@ class DesktopSourceTests(unittest.TestCase):
             '"ming-control-center.desktop": "settings"',
             '"ming-files.desktop": "files"',
             '"ming-terminal.desktop": "terminal"',
-            '"ming-edge.desktop": "edge"',
+            '"ming-firefox.desktop": "browser"',
+            '"firefox-esr.desktop": "browser"',
+            '"papyrus.desktop": "agent"',
             'basename == "ming-update.desktop"',
         ]:
             self.assertIn(marker, self.drawer)
+        self.assertNotIn("garlic-claw.desktop", self.drawer)
+
+    def test_phone_desktop_deduplicates_core_application_families(self):
+        for marker in (
+            "CANONICAL_LAUNCHERS",
+            '"ming-firefox.desktop": "browser"',
+            '"firefox-esr.desktop": "browser"',
+            '"papyrus.desktop": "agent"',
+            "def deduplicate_apps(apps):",
+        ):
+            self.assertIn(marker, self.phone)
 
     def test_desktop_preserves_last_known_good_layout_and_has_a_blank_area_menu(self):
         for marker in [
@@ -161,6 +190,18 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("COMMON.send_launch_request", self.phone)
         self.assertIn("COMMON.send_launch_request", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
+
+    def test_power_button_uses_ming_menu_before_session_logout_actions(self):
+        power_menu = self.phone[
+            self.phone.index("    def open_power_menu"):
+            self.phone.index("    def refresh", self.phone.index("    def open_power_menu"))
+        ]
+        self.assertIn("show_ming_power_menu", self.phone)
+        self.assertIn("include_update", self.phone)
+        self.assertNotIn('["xfce4-session-logout"]', power_menu)
+        self.assertNotIn("gnome-session-quit", power_menu)
+        self.assertNotIn("mate-session-save", power_menu)
+        self.assertNotIn("lxqt-leave", power_menu)
 
     def test_status_panel_fills_its_allocated_width(self):
         self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)
@@ -394,6 +435,13 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn('button.connect("clicked"', folder)
         self.assertIn('button.connect("button-press-event"', folder)
 
+    def test_cairo_icon_renderer_falls_back_when_an_app_icon_is_missing(self):
+        draw = self.phone[self.phone.index("    def draw_icon_fallback"):
+                          self.phone.index("    def item_at", self.phone.index("    def draw_icon_fallback"))]
+        self.assertIn('fallback_icon = "application-x-executable"', draw)
+        self.assertIn("for candidate in (icon_name, fallback_icon):", draw)
+        self.assertIn("pixbuf = icon_theme.load_icon(candidate, ICON_SIZE", draw)
+
     def test_normal_windows_are_opaque(self):
         for forbidden in [
             "inactive-opacity = 0.92",
@@ -427,7 +475,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
-        self.assertIn("UrgentBounceTime=600", self.desktop)
+        self.assertIn("UrgentBounceTime=420", self.desktop)
         self.assertNotIn("Exec=/usr/local/bin/ming-dock-watchdog --session", self.desktop)
 
     def test_virtualbox_parent_click_fallback_is_deduplicated(self):
@@ -490,6 +538,16 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("window_is_ready", self.phone)
         self.assertIn("启动时间较长，应用会继续在后台打开", self.phone)
 
+    def test_launch_feedback_bounds_long_titles_and_details_inside_its_fixed_area(self):
+        overlay = self.phone[
+            self.phone.index("class LaunchFeedbackOverlay"):
+            self.phone.index("class StatusWidget")
+        ]
+        self.assertIn("self.title.set_ellipsize(Pango.EllipsizeMode.END)", overlay)
+        self.assertIn("self.title.set_max_width_chars(20)", overlay)
+        self.assertIn("self.detail.set_lines(2)", overlay)
+        self.assertIn("self.detail.set_ellipsize(Pango.EllipsizeMode.END)", overlay)
+
     def test_launch_feedback_window_probe_does_not_block_gtk(self):
         self.assertIn("def start_window_probe", self.phone)
         self.assertIn("threading.Thread(target=self.check_window_ready", self.phone)
@@ -504,6 +562,27 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("class StatusWidget", self.phone)
         for marker in ["nmcli", "bluetoothctl", "upower", "ming-control-center"]:
             self.assertIn(marker, self.phone)
+
+    def test_status_widget_shows_battery_only_for_portable_host(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn("self.header_battery_label", status)
+        self.assertIn("self.compact_battery_label", status)
+        self.assertIn('battery.get("portable")', status)
+        self.assertIn("self.header_battery_label.set_visible(show_battery)", status)
+        self.assertIn("self.compact_battery_label.set_visible(show_battery)", status)
+        self.assertIn("self.header_battery_label.set_text(battery_text)", status)
+        self.assertNotIn("self.battery_label = self.resource_label", status)
+
+    def test_collapsed_status_widget_refreshes_only_laptop_battery_in_background(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        refresh = status[status.index("    def refresh(self):"):
+                         status.index("    def collect_status", status.index("    def refresh(self):"))]
+        self.assertIn("self.refresh_battery_status()", refresh)
+        self.assertIn("def refresh_battery_status", status)
+        self.assertIn("threading.Thread(target=self.collect_battery_status, daemon=True).start()", status)
+        self.assertIn("self.device_controller.battery_status()", status)
 
     def test_status_wifi_button_uses_ming_diagnostics_not_empty_nm_editor(self):
         status = self.phone[self.phone.index("class StatusWidget"):
@@ -553,8 +632,8 @@ class DesktopPolishContractTests(unittest.TestCase):
         ]:
             self.assertIn(marker, self.apps)
 
-    def test_edge_is_excluded_from_compositor_borders(self):
-        self.assertGreaterEqual(self.desktop.count("class_g = 'Microsoft-edge'"), 3)
+    def test_firefox_is_excluded_from_compositor_borders(self):
+        self.assertGreaterEqual(self.desktop.count("class_g = 'Firefox'"), 3)
         self.assertIn("shadow-exclude", self.desktop)
         self.assertIn("rounded-corners-exclude", self.desktop)
 

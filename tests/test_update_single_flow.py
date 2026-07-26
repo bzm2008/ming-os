@@ -44,6 +44,12 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn('"--manifest", self.update_manifest_path', apply)
         self.assertIn('"--sha256", self.update_manifest_sha256', apply)
 
+    def test_settings_one_click_apply_requests_restart_after_a_successful_stage(self):
+        apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")
+
+        self.assertIn('"--restart-after-stage"', apply)
+        self.assertIn("完成后会自动重启", apply)
+
     def test_cli_exposes_machine_readable_status_and_a_single_type_aware_apply(self):
         self.assertIn("show_status_json()", self.ota)
         self.assertIn("apply_update()", self.ota)
@@ -56,16 +62,31 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("download_update", apply)
         self.assertIn("major_install_with_home_backup", apply)
 
-    def test_power_menu_only_offers_update_shutdown_after_a_background_confirmation(self):
+    def test_power_menu_only_offers_update_restart_after_a_background_confirmation(self):
         self.assertIn("def background_update_available", self.phone)
         self.assertIn('status.get("background_available")', self.phone)
         power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
         entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
         self.assertIn("background_update_available()", entry)
-        self.assertIn("更新并关机", power)
-        self.assertIn('["pkexec", "ming-update", "auto-shutdown"]', self.phone)
+        self.assertIn("更新并重启", power)
+        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
         self.assertIn("MING_UPDATE_BACKGROUND_CHECK", self.ota)
         self.assertIn("BACKGROUND_AVAILABILITY_FILE", self.ota)
+
+    def test_power_menu_uses_update_restart_for_a_fully_automatic_major_upgrade(self):
+        power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
+
+        self.assertIn("更新并重启", power)
+        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
+        self.assertNotIn("auto-shutdown", power)
+
+    def test_default_power_button_shows_ming_menu_before_session_action(self):
+        entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
+
+        self.assertIn("show_basic_power_menu", entry)
+        self.assertNotIn('["xfce4-session-logout"]', entry)
+        self.assertNotIn('["gnome-session-quit", "--logout"]', entry)
+        self.assertNotIn('["mate-session-save", "--logout-dialog"]', entry)
 
     def test_legacy_update_launcher_redirects_to_the_settings_page(self):
         self.assertIn('exec /usr/local/bin/ming-control-center --page update "$@"', self.ota)
@@ -91,6 +112,49 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("stage_selected_manifest", apply)
         self.assertIn("check_update", apply)
         self.assertIn("clear_applied_update_cache", apply)
+
+    def test_apply_restart_after_stage_is_explicit_and_runs_only_after_successful_stage(self):
+        apply = method_block(self.ota, "apply_update() {", "auto_shutdown_update() {")
+        automatic = method_block(self.ota, "auto_shutdown_update() {", 'case "${1:-help}" in')
+
+        self.assertIn("--restart-after-stage)", apply)
+        self.assertIn("restart_after_stage=false", apply)
+        self.assertIn("schedule_update_restart", apply)
+        self.assertIn("apply_update --checked --restart-after-stage", automatic)
+        self.assertIn("systemctl reboot", self.ota)
+
+    def test_major_stage_sets_and_verifies_a_one_shot_grub_entry_before_restart(self):
+        install = method_block(
+            self.ota,
+            "install_update() {",
+            "manifest_apply_identity() {",
+        )
+        self.assertIn("configure_ota_next_boot() {", self.ota)
+        helper = method_block(
+            self.ota,
+            "configure_ota_next_boot() {",
+            "manifest_apply_identity() {",
+        )
+
+        self.assertIn('configure_ota_next_boot "Ming OS ${version} OTA Installer"', install)
+        self.assertIn("grub-reboot", helper)
+        self.assertIn("grub-editenv", helper)
+        self.assertIn("next_entry", helper)
+        self.assertIn("return 1", helper)
+
+    def test_online_ota_requires_a_distinct_signed_release_manifest(self):
+        check = method_block(self.ota, "check_update() {", "download_update() {")
+        self.assertIn("verify_signed_ota_manifest() {", self.ota)
+        verifier = method_block(
+            self.ota,
+            "verify_signed_ota_manifest() {",
+            "download_update() {",
+        )
+
+        self.assertIn("OTA_RELEASE_PUBLIC_KEY", verifier)
+        self.assertIn("minisign", verifier)
+        self.assertIn("signature", verifier)
+        self.assertIn("verify_signed_ota_manifest", check)
 
     def test_status_exposes_a_fingerprint_only_for_an_actionable_manifest(self):
         status = method_block(self.ota, "show_status_json() {", "show_status() {")

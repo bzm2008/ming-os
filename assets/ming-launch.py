@@ -2,6 +2,7 @@
 """Single-instance application launch broker with bounded visual feedback."""
 
 import argparse
+import configparser
 import importlib.util
 import json
 import os
@@ -13,7 +14,7 @@ import threading
 import time
 
 
-ANIMATION_DURATION_MS = 200
+ANIMATION_DURATION_MS = 160
 FEEDBACK_TIMEOUT_MS = 4000
 DEDUP_SECONDS = 0.6
 IPC_VERSION = 1
@@ -125,41 +126,6 @@ def request_from_message(message, allowed_dirs=None):
     return LaunchRequest(entry.argv, message.get("source", "unknown"), message.get("rect"), str(path))
 
 
-def resolve_origin(request, workarea):
-    if request.source in {"desktop", "drawer", "dock"} and request.rect is not None:
-        return request.rect
-    workarea = COMMON.Rect.from_mapping(workarea)
-    center = workarea.x + workarea.width / 2.0
-    bottom = workarea.y + workarea.height
-    return COMMON.Rect(center - 0.5, bottom - 1.0, 1.0, 1.0)
-
-
-def feedback_geometry(origin, workarea, progress):
-    origin = COMMON.Rect.from_mapping(origin.to_dict() if hasattr(origin, "to_dict") else origin)
-    workarea = COMMON.Rect.from_mapping(workarea)
-    progress = COMMON.ease_out_cubic(max(0.0, min(1.0, float(progress))))
-    start_width = 52.0
-    start_height = 52.0
-    start_center_x, start_bottom = origin.bottom_center
-    start_x = start_center_x - start_width / 2.0
-    start_y = start_bottom - start_height
-
-    target_width = min(420.0, max(280.0, workarea.width * 0.34))
-    target_height = min(260.0, max(168.0, workarea.height * 0.28))
-    target_x = workarea.x + (workarea.width - target_width) / 2.0
-    target_y = workarea.y + max(36.0, (workarea.height - target_height) * 0.42)
-
-    def blend(start, end):
-        return start + (end - start) * progress
-
-    return COMMON.Rect(
-        blend(start_x, target_x),
-        blend(start_y, target_y),
-        blend(start_width, target_width),
-        blend(start_height, target_height),
-    )
-
-
 def reduced_motion_enabled(path=None):
     override = os.environ.get("MING_REDUCED_MOTION", "").strip().lower()
     if override in {"1", "true", "yes", "on"}:
@@ -187,6 +153,40 @@ def _default_workarea():
         return {"x": 0, "y": 0, "width": 1280, "height": 720}
 
 
+def desktop_window_tokens(desktop_file):
+    tokens = []
+    if desktop_file:
+        path = pathlib.Path(desktop_file)
+        tokens.append(path.stem.casefold())
+        try:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.optionxform = str
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                parser.read_file(stream)
+            if parser.has_section("Desktop Entry"):
+                section = parser["Desktop Entry"]
+                for key in ("StartupWMClass", "Name", "Name[zh_CN]"):
+                    value = section.get(key, "").strip()
+                    if value:
+                        tokens.append(value.casefold())
+        except (OSError, configparser.Error):
+            pass
+    return tuple(dict.fromkeys(token for token in tokens if token))
+
+
+def window_matches(stdout, pid=None, desktop_file=""):
+    lines = (stdout or "").casefold().splitlines()
+    pid_token = " {} ".format(pid) if pid else ""
+    tokens = desktop_window_tokens(desktop_file)
+    for line in lines:
+        padded = " {} ".format(line)
+        if pid_token and pid_token in padded:
+            return True
+        if any(token in line for token in tokens):
+            return True
+    return False
+
+
 def probe_window_async(
         process, desktop_file="", on_ready=None, on_failure=None,
         on_timeout=None, attempts=20, interval=0.15):
@@ -195,25 +195,21 @@ def probe_window_async(
     def probe():
         for _attempt in range(attempts):
             returncode = process.poll() if hasattr(process, "poll") else None
-            if returncode is not None:
-                if returncode != 0 and on_failure:
-                    on_failure(RuntimeError("application exited with status {}".format(returncode)))
-                elif returncode == 0 and on_timeout:
-                    on_timeout()
-                return
             try:
                 result = subprocess.run(
-                    ["wmctrl", "-lp"], capture_output=True, text=True, timeout=1,
+                    ["wmctrl", "-lx", "-p"], capture_output=True, text=True, timeout=1,
                     check=False, shell=False,
                 )
-                needle = pathlib.Path(desktop_file).stem.casefold() if desktop_file else ""
-                lines = result.stdout.casefold().splitlines()
-                if any((pid and " {} ".format(pid) in " {} ".format(line)) or (needle and needle in line) for line in lines):
+                if window_matches(result.stdout, pid=pid, desktop_file=desktop_file):
                     if on_ready:
                         on_ready()
                     return
             except (OSError, subprocess.SubprocessError):
                 break
+            if returncode not in (None, 0):
+                if on_failure:
+                    on_failure(RuntimeError("application exited with status {}".format(returncode)))
+                return
             if interval:
                 time.sleep(interval)
         returncode = process.poll() if hasattr(process, "poll") else None
@@ -267,10 +263,11 @@ class LaunchBroker:
             return False
         self._recent[key] = moment
         self.record_event(request, "spawned")
-        origin = resolve_origin(request, self.workarea())
         finish = None
-        if not self.reduced_motion():
-            finish = self.animate(request, origin)
+        # The phone desktop owns its own launch feedback.  Showing another
+        # broker popup there causes two competing animations for one click.
+        if not self.reduced_motion() and request.source != "desktop":
+            finish = self.animate(request, self.workarea())
 
         def ready():
             self.record_event(request, "ready")
@@ -285,6 +282,7 @@ class LaunchBroker:
             self.report_error(request, error)
 
         def timed_out():
+            self._recent.pop(key, None)
             self.record_event(request, "window_timeout")
             if callable(finish):
                 finish()
@@ -307,7 +305,7 @@ class LaunchBroker:
         return True
 
 
-def animate_launch(request, origin):
+def animate_launch(request, workarea=None):
     try:
         import gi
         gi.require_version("Gtk", "3.0")
@@ -315,7 +313,7 @@ def animate_launch(request, origin):
         from gi.repository import Gdk, GLib, Gtk
     except (ImportError, ValueError):
         return
-    workarea = _default_workarea()
+    workarea = COMMON.Rect.from_mapping(workarea or _default_workarea())
     window = Gtk.Window(type=Gtk.WindowType.POPUP)
     window.set_decorated(False)
     window.set_app_paintable(True)
@@ -326,36 +324,43 @@ def animate_launch(request, origin):
     if visual:
         window.set_visual(visual)
 
-    initial = feedback_geometry(origin, workarea, 0.0)
-    window.resize(int(initial.width), int(initial.height))
-    window.move(int(initial.x), int(initial.y))
-    window.set_opacity(0.18)
+    width = min(320, max(240, int(workarea.width * 0.28)))
+    height = 76
+    window.resize(width, height)
+    window.move(
+        int(workarea.x + (workarea.width - width) / 2.0),
+        int(workarea.y + max(24, min(72, workarea.height * 0.10))),
+    )
+    window.set_opacity(0.0)
 
     provider = Gtk.CssProvider()
     provider.load_from_data(
-        b".ming-launch-feedback { background-color: rgba(247,252,250,0.94);"
-        b" border: 1px solid rgba(38,110,91,0.38); border-radius: 16px; }"
+        b".ming-launch-feedback { background-color: rgba(247,252,250,0.96);"
+        b" border: 1px solid rgba(38,110,91,0.30); border-radius: 10px;"
+        b" padding: 10px 14px; }"
     )
     window.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     window.get_style_context().add_class("ming-launch-feedback")
 
-    overlay = Gtk.Overlay()
+    panel = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    panel.get_style_context().add_class("ming-launch-feedback")
     icon_name = "application-x-executable"
     if request.desktop_file:
         entry = COMMON.parse_desktop_file(request.desktop_file)
         if entry and entry.icon:
             icon_name = entry.icon
     image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DIALOG)
-    image.set_halign(Gtk.Align.CENTER)
-    image.set_valign(Gtk.Align.CENTER)
-    overlay.add(image)
+    image.set_pixel_size(28)
+    panel.pack_start(image, False, False, 0)
+    text = Gtk.Label(label="正在打开 %s" % (
+        pathlib.Path(request.desktop_file).stem if request.desktop_file else "应用"))
+    text.set_halign(Gtk.Align.START)
+    text.set_hexpand(True)
+    panel.pack_start(text, True, True, 0)
     spinner = Gtk.Spinner()
-    spinner.set_halign(Gtk.Align.CENTER)
-    spinner.set_valign(Gtk.Align.END)
-    spinner.set_margin_bottom(18)
     spinner.start()
-    overlay.add_overlay(spinner)
-    window.add(overlay)
+    panel.pack_start(spinner, False, False, 0)
+    window.add(panel)
     window.show_all()
     started = GLib.get_monotonic_time()
 
@@ -373,12 +378,9 @@ def animate_launch(request, origin):
     def step():
         elapsed = (GLib.get_monotonic_time() - started) / 1000.0
         progress = min(1.0, elapsed / ANIMATION_DURATION_MS)
-        geometry = feedback_geometry(origin, workarea, progress)
-        window.move(int(geometry.x), int(geometry.y))
-        window.resize(max(1, int(geometry.width)), max(1, int(geometry.height)))
-        window.set_opacity(0.18 + 0.60 * COMMON.ease_out_cubic(progress))
+        window.set_opacity(0.94 * COMMON.ease_out_cubic(progress))
         return progress < 1.0 and not state["destroyed"]
-    GLib.timeout_add(16, step)
+    GLib.timeout_add(33, step)
     GLib.timeout_add(FEEDBACK_TIMEOUT_MS, destroy)
     return finish
 

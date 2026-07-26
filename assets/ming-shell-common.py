@@ -63,6 +63,31 @@ class DesktopEntry:
         self.diagnostic = str(diagnostic or "")
 
 
+def resolve_icon_path(icon, desktop_path):
+    """Return an image file referenced by a desktop entry, if one is usable.
+
+    Desktop entries may use an icon-theme name, an absolute image path, or a
+    path relative to the desktop entry.  Theme names deliberately return None
+    so callers can ask Gtk for the normal themed fallback.
+    """
+    value = str(icon or "").strip()
+    if not value:
+        return None
+    candidate = pathlib.Path(value)
+    if not candidate.is_absolute():
+        if "/" not in value and "\\" not in value:
+            return None
+        candidate = pathlib.Path(desktop_path).parent / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        mode = resolved.stat().st_mode
+    except (OSError, RuntimeError):
+        return None
+    if not stat.S_ISREG(mode) or resolved.suffix.lower() not in {".png", ".svg", ".xpm"}:
+        return None
+    return str(resolved)
+
+
 class CommandResult:
     __slots__ = ("argv", "returncode", "stdout", "stderr", "timed_out")
 

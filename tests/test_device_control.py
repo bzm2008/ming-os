@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import base64
 from contextlib import redirect_stderr
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -99,6 +100,31 @@ class WifiClassificationTests(unittest.TestCase):
             firmware_output="iwlwifi: failed to load firmware",
         )
         self.assertEqual("firmware_missing", status["state"])
+
+    def test_b43_missing_ucode_is_compatibility_help_not_installable_firmware(self):
+        status = self.classify(
+            pci_output="02:00.0 Network controller: Broadcom BCM4311",
+            firmware_output="b43-phy0 ERROR: Firmware file b43-open/ucode15.fw not found\n"
+                            "b43-phy0 ERROR: Firmware file b43/ucode15.fw not found",
+        )
+        self.assertEqual("firmware_external_required", status["state"])
+        self.assertEqual("show_b43_help", status["action"])
+        self.assertFalse(status["redistributable_firmware"])
+        self.assertIn("不可内置", status["detail"])
+
+    def test_b43_missing_ucode_is_reported_as_compatibility_help_not_auto_fix(self):
+        status = self.classify(
+            pci_output="02:00.0 Network controller: Broadcom BCM4312",
+            firmware_output=(
+                'b43-phy0 ERROR: Firmware file "b43-open/ucode15.fw" not found\n'
+                'b43-phy0 ERROR: Firmware file "b43/ucode15.fw" not found'
+            ),
+        )
+        self.assertEqual("firmware_external_required", status["state"])
+        self.assertEqual("show_b43_help", status["action"])
+        self.assertEqual("unredistributable_b43", status["firmware_policy"])
+        self.assertFalse(status["redistributable_firmware"])
+        self.assertIn("不可内置", status["detail"])
 
     def test_rfkill_block_wins_over_ready_interface(self):
         status = self.classify(
@@ -940,6 +966,58 @@ class DeviceControlTests(unittest.TestCase):
             runner.commands,
         )
 
+    def test_battery_marks_portable_host_from_power_profile_for_widget(self):
+        devices = "/org/freedesktop/UPower/devices/DisplayDevice"
+        runner = FakeRunner({
+            ("upower", "-e"): (0, devices, ""),
+            ("upower", "-i", "/org/freedesktop/UPower/devices/DisplayDevice"):
+                (0, "percentage: 81%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = pathlib.Path(directory) / "power-profile"
+            profile_path.write_text("battery=true\nlaptop=true\nportable=true\n", encoding="utf-8")
+            with mock.patch.object(
+                    self.device, "POWER_PROFILE_PATH", profile_path, create=True):
+                controller = self.device.DeviceController(
+                    runner=runner, executable=lambda name: name == "upower")
+                status = controller.battery_status()
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status.get("portable"))
+
+    def test_battery_does_not_mark_desktop_display_device_as_portable(self):
+        devices = "/org/freedesktop/UPower/devices/DisplayDevice"
+        runner = FakeRunner({
+            ("upower", "-e"): (0, devices, ""),
+            ("upower", "-i", "/org/freedesktop/UPower/devices/DisplayDevice"):
+                (0, "percentage: 81%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = pathlib.Path(directory) / "power-profile"
+            profile_path.write_text("battery=false\nlaptop=false\nportable=false\n", encoding="utf-8")
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "upower",
+                power_profile_path=profile_path)
+            status = controller.battery_status()
+
+        self.assertTrue(status["available"])
+        self.assertFalse(status["portable"])
+
+    def test_battery_uses_native_bat_as_early_boot_portable_fallback(self):
+        native_battery = "/org/freedesktop/UPower/devices/battery_BAT0"
+        runner = FakeRunner({
+            ("upower", "-e"): (0, native_battery, ""),
+            ("upower", "-i", native_battery): (0, "percentage: 63%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "upower",
+                power_profile_path=pathlib.Path(directory) / "not-yet-written")
+            status = controller.battery_status()
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status["portable"])
+
 
 class WifiCliTests(unittest.TestCase):
     @classmethod
@@ -1035,23 +1113,42 @@ class WifiCliTests(unittest.TestCase):
         self.assertEqual([(connect_command, "secret\n")], input_runner.inputs)
         self.assertNotIn("secret", output.getvalue())
 
-    def test_network_id_connect_rejects_stale_cached_selection(self):
+    def test_network_id_connect_refreshes_stale_cache_before_connecting(self):
+        scan_command = (
+            "nmcli", "-t", "-f",
+            "IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY,DEVICE",
+            "dev", "wifi", "list",
+        )
+        readback_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        connect_command = c_command(
+            "nmcli", "--ask", "--wait", "30", "device", "wifi", "connect", "Office",
+            "bssid", "AA:BB:CC:DD:EE:FF", "ifname", "wlan0",
+        )
         with tempfile.TemporaryDirectory() as directory:
             cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            network_id = self.device.DeviceController._wifi_network_id(
+                b"Office", "AA:BB:CC:DD:EE:FF", "wlan0")
             cache_path.write_text(json.dumps({
                 "schema": 1, "generated_at": 0,
                 "networks": [{
-                    "network_id": "a" * 32, "ssid_bytes_b64": "T2ZmaWNl",
-                    "bssid": "AA:BB:CC:DD:EE:FF", "ifname": "wlan0",
+                    "network_id": network_id, "ssid_bytes_b64": "T2ZmaWNl",
+                    "encoding": "utf-8", "bssid": "AA:BB:CC:DD:EE:FF", "ifname": "wlan0",
                 }],
             }), encoding="utf-8")
+            input_runner = FakeInputRunner({connect_command: (0, "Device activated", "")})
             controller = self.device.DeviceController(
-                runner=FakeRunner({}), executable=lambda _name: True,
+                runner=FakeRunner({
+                    scan_command: (0, ":AA\\:BB\\:CC\\:DD\\:EE\\:FF:Office:1:2412 MHz:75:WPA2:wlan0", ""),
+                    readback_command: (0, "wlan0:wifi:connected:Office", ""),
+                }),
+                input_runner=input_runner, executable=lambda _name: True,
                 wifi_scan_cache_path=cache_path)
-            result = controller.wifi_connect_network_id("a" * 32, "wlan0")
+            result = controller.wifi_connect_network_id(network_id, "wlan0", password="secret")
 
-        self.assertFalse(result["ok"])
-        self.assertEqual("E_WIFI_NETWORK_STALE", result["reason_code"])
+        self.assertTrue(result["ok"])
+        self.assertEqual("connected", result["state"])
+        self.assertEqual([(connect_command, "secret\n")], input_runner.inputs)
 
     def test_lossy_ssid_scan_is_not_labeled_utf8_or_allowed_to_connect(self):
         scan_command = (

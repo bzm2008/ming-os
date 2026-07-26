@@ -24,6 +24,12 @@ def input_control_source():
     )[1].split("MINGINPUTCONTROL", 1)[0].lstrip()
 
 
+def input_repair_source():
+    return APPS.split(
+        "cat > /usr/local/sbin/ming-input-repair << 'MINGINPUTREPAIR'", 1
+    )[1].split("MINGINPUTREPAIR", 1)[0].lstrip()
+
+
 class MingInputMethodContractTests(unittest.TestCase):
     def test_fcitx_install_includes_rime_and_seeds_a_non_package_theme(self):
         source = install_fcitx5_source()
@@ -105,10 +111,26 @@ class MingInputMethodContractTests(unittest.TestCase):
             '"Name=rime"',
             '"usr/local/share/fcitx5/themes/Ming-Candidate/theme.conf"',
             '"usr/local/sbin/ming-input-control"',
+            '"usr/local/sbin/ming-input-repair"',
             "fcitx5-rime",
             "rime-data-luna-pinyin",
         ]:
             self.assertIn(marker, BUILD)
+
+    def test_input_repair_migrates_existing_users_without_im_config_conflict(self):
+        source = input_repair_source()
+        for marker in (
+            "--user",
+            "/home",
+            ".xinputrc.ming-legacy-backup",
+            "run_im fcitx5",
+            "export XMODIFIERS=@im=fcitx",
+            ".config/autostart/fcitx5.desktop",
+            "DefaultIM=pinyin",
+            '"repaired":%s',
+        ):
+            self.assertIn(marker, source)
+        self.assertNotIn("im-config", source)
 
     def run_control(self, *args, rime_schema=True, rime_addon=True, rime_fails=False):
         with tempfile.TemporaryDirectory() as directory:

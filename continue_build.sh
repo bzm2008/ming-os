@@ -109,9 +109,7 @@ trap 'umount_chroot 2>/dev/null' EXIT
 
 # mount_chroot - 已挂载过，现在 chroot 已包含 live-boot
 
-# log_info "运行 04_garlic_claw.sh"
-# chroot_exec bash /tmp/onion-build/modules/04_garlic_claw.sh
-# 04_garlic_claw.sh 已成功完成，直接继续
+# 已弃用的旧 AI 助手模块不再参与 26.4.1 构建。
 
 # log_info "生成 initramfs"
 # generate_initramfs - initramfs 已由 live-boot 重新生成

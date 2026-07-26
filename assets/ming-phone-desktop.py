@@ -20,6 +20,7 @@ def widget_state_path():
 
 
 METRIC_MODES = ("memory", "cpu", "network")
+COMPACT_BATTERY_REFRESH_SECONDS = 30
 
 
 def normalize_metric_mode(value):
@@ -239,28 +240,47 @@ CORE_NAMES = {
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-terminal.desktop",
-    "ming-edge.desktop",
+    "ming-firefox.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
+    "papyrus.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-settings.desktop",
     "ming-files.desktop",
-    "ming-edge.desktop",
+    "ming-firefox.desktop",
     "spark-store.desktop",
-    "garlic-claw.desktop",
+    "papyrus.desktop",
     "ming-terminal.desktop",
 ])}
 CORE_FALLBACKS = {
-    "ming-edge.desktop": ["microsoft-edge.desktop", "microsoft-edge-stable.desktop"],
+    "ming-firefox.desktop": ["firefox-esr.desktop", "firefox.desktop"],
     "spark-store.desktop": ["ming-install-spark-store.desktop"],
+}
+CANONICAL_LAUNCHERS = {
+    "ming-settings.desktop": "settings",
+    "ming-control-center.desktop": "settings",
+    "xfce4-settings-manager.desktop": "settings",
+    "ming-files.desktop": "files",
+    "thunar.desktop": "files",
+    "ming-terminal.desktop": "terminal",
+    "xfce4-terminal.desktop": "terminal",
+    "ming-firefox.desktop": "browser",
+    "firefox-esr.desktop": "browser",
+    "firefox.desktop": "browser",
+    "papyrus.desktop": "agent",
+}
+CANONICAL_PREFERENCE = {
+    "settings": "ming-settings.desktop",
+    "files": "ming-files.desktop",
+    "terminal": "ming-terminal.desktop",
+    "browser": "ming-firefox.desktop",
+    "agent": "papyrus.desktop",
 }
 CORE_GENERATED = {
     "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-control-center", "Settings;System;"),
     "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
     "ming-terminal.desktop": ("Ming 终端", "ming-terminal", "ming-terminal", "System;TerminalEmulator;"),
-    "ming-edge.desktop": ("Microsoft Edge", "ming-edge", "microsoft-edge", "Network;WebBrowser;"),
-    "garlic-claw.desktop": ("Garlic Claw", "xfce4-terminal --hide-menubar --title=\"Garlic Claw\" -e garlic-claw", "utilities-terminal", "Utility;"),
+    "ming-firefox.desktop": ("Firefox ESR", "ming-firefox", "firefox-esr", "Network;WebBrowser;"),
 }
 LOG_PATH = HOME / ".cache" / "ming-os" / "ming-phone-desktop.log"
 ACTION_LOG_PATH = HOME / ".cache" / "ming-os" / "status-actions.log"
@@ -289,6 +309,7 @@ TILE_W = 82
 TILE_H = 96
 LABEL_W = 68
 LABEL_H = 32
+DESKTOP_LABEL_FONT = "Noto Sans CJK SC Medium 10"
 DRAG_THRESHOLD = 12
 ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
@@ -303,13 +324,15 @@ WALLPAPER_PATHS = [
 CSS = b"""
 window.ming-desktop {
   background-color: #EFF7F2;
+  font-family: "Noto Sans CJK SC", sans-serif;
+  font-weight: 400;
 }
 .tile {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.34);
   border: 1px solid rgba(255, 255, 255, 0.54);
   box-shadow: 0 8px 22px rgba(21, 68, 56, 0.08), inset 0 1px 0 rgba(255,255,255,0.58);
-  padding: 7px 6px 6px;
+  padding: 8px;
   color: #1D2421;
 }
 .tile:hover, .tile.dragging {
@@ -324,7 +347,8 @@ window.ming-desktop {
 .label {
   color: #1D2421;
   font-size: 10.5px;
-  font-weight: 700;
+  font-weight: 500;
+  letter-spacing: 0;
   text-shadow: 0 1px 0 rgba(255,255,255,0.82);
 }
 .folder-title {
@@ -336,37 +360,42 @@ window.ming-desktop {
   background: rgba(251, 253, 251, 0.98);
   border: 1px solid rgba(31, 98, 84, 0.10);
   border-radius: 12px;
-  padding: 18px;
+  padding: 16px;
 }
 .folder-action {
   border-radius: 9px;
-  padding: 7px 10px;
+  padding: 8px 12px;
 }
 .clock-widget {
   border-radius: 14px;
-  padding: 9px 13px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.70);
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.75);
 }
 .clock-time {
   font-size: 26px;
-  font-weight: 800;
+  font-weight: 700;
   color: #17231F;
 }
 .clock-date {
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 500;
   color: #2D695C;
+}
+.clock-battery {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #517168;
 }
 .clock-subdate {
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 400;
   color: #6A7670;
 }
 .status-widget {
   border-radius: 14px;
-  padding: 12px 14px;
+  padding: 12px 16px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.78);
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
@@ -380,19 +409,20 @@ window.ming-desktop {
 .status-compact-pill {
   min-height: 54px;
   border-radius: 27px;
-  padding: 8px 14px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.92);
   box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
   color: #17231F;
 }
 .status-compact-pill:hover { background: rgba(255, 255, 255, 0.96); }
-.status-compact-time { font-size: 19px; font-weight: 800; color: #17231F; }
-.status-compact-date { font-size: 10.5px; font-weight: 700; color: #2D695C; }
-.status-compact-arrow { font-size: 15px; font-weight: 800; color: #2F8A7D; }
+.status-compact-time { font-size: 19px; font-weight: 700; color: #17231F; }
+.status-compact-date { font-size: 10.5px; font-weight: 500; color: #2D695C; }
+.status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
+.status-compact-arrow { font-size: 15px; font-weight: 700; color: #2F8A7D; }
 .status-button {
   border-radius: 9px;
-  padding: 4px 7px;
+  padding: 4px 8px;
   background: rgba(255, 255, 255, 0.54);
   border: 1px solid rgba(47, 138, 125, 0.10);
   color: #21302A;
@@ -436,17 +466,17 @@ window.ming-desktop {
 .status-scale:disabled progress { background: rgba(47, 138, 125, 0.34); }
 .status-scale:disabled slider { background: transparent; }
 .notification-panel { padding: 12px; background: #F9FCFA; }
-.notification-title { font-weight: 800; color: #17231F; }
-.notification-body { color: #596760; font-size: 10px; }
+.notification-title { font-weight: 700; color: #17231F; }
+.notification-body { color: #596760; font-size: 10px; font-weight: 400; }
 .launch-feedback {
   border-radius: 14px;
-  padding: 14px 18px;
+  padding: 12px 16px;
   background: rgba(252, 254, 252, 0.94);
   border: 1px solid rgba(47, 138, 125, 0.16);
   box-shadow: 0 14px 36px rgba(21, 68, 56, 0.16);
 }
-.launch-title { color: #17231F; font-size: 14px; font-weight: 800; }
-.launch-detail { color: #5B6963; font-size: 10.5px; }
+.launch-title { color: #17231F; font-size: 14px; font-weight: 700; }
+.launch-detail { color: #5B6963; font-size: 10.5px; font-weight: 400; }
 """
 
 
@@ -771,6 +801,21 @@ def add_core_app(apps_by_basename, basename):
     return False
 
 
+def canonical_identity(app):
+    return CANONICAL_LAUNCHERS.get(app["basename"], app["basename"])
+
+
+def deduplicate_apps(apps):
+    selected = {}
+    for app in apps:
+        identity = canonical_identity(app)
+        preferred = CANONICAL_PREFERENCE.get(identity)
+        current = selected.get(identity)
+        if current is None or app["basename"] == preferred:
+            selected[identity] = app
+    return list(selected.values())
+
+
 def load_apps(default_only=False):
     apps_by_basename = {}
     if default_only:
@@ -781,7 +826,7 @@ def load_apps(default_only=False):
             continue
         for path in sorted(directory.glob("*.desktop")):
             add_app_from_path(apps_by_basename, path, default_only=default_only)
-    apps = list(apps_by_basename.values())
+    apps = deduplicate_apps(list(apps_by_basename.values()))
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item["basename"], 999), item["name"].lower()))
     return apps
 
@@ -1465,7 +1510,7 @@ def window_is_ready(item):
         name.split()[0] if name else "",
     }
     aliases = {
-        "ming-edge": "microsoft-edge",
+        "ming-firefox": "firefox",
         "spark-store": "spark-store",
         "ming-files": "thunar",
         "ming-terminal": "xfce4-terminal",
@@ -1483,17 +1528,23 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         self.generation = 0
         self.probe_running = False
         self.probe_generation = 0
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         box.get_style_context().add_class("launch-feedback")
         self.icon = Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.DIALOG)
         self.icon.set_pixel_size(34)
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.title = Gtk.Label(label="正在打开")
         self.title.set_halign(Gtk.Align.START)
+        self.title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title.set_max_width_chars(20)
         self.title.get_style_context().add_class("launch-title")
         self.detail = Gtk.Label(label="请稍候…")
         self.detail.set_halign(Gtk.Align.START)
         self.detail.set_line_wrap(True)
+        self.detail.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.detail.set_lines(2)
+        self.detail.set_ellipsize(Pango.EllipsizeMode.END)
+        self.detail.set_max_width_chars(20)
         self.detail.get_style_context().add_class("launch-detail")
         self.spinner = Gtk.Spinner()
         box.pack_start(self.icon, False, False, 0)
@@ -1509,7 +1560,11 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         generation = self.generation
         self.item = item
         self.started_at = time.monotonic()
-        self.icon.set_from_icon_name(item.get("icon") or "application-x-executable", Gtk.IconSize.DIALOG)
+        icon_path = COMMON.resolve_icon_path(item.get("icon"), item.get("path", ""))
+        if icon_path:
+            self.icon.set_from_file(icon_path)
+        else:
+            self.icon.set_from_icon_name(item.get("icon") or "application-x-executable", Gtk.IconSize.DIALOG)
         self.icon.set_pixel_size(34)
         self.title.set_text("正在打开 %s" % item.get("name", "应用"))
         self.detail.set_text("正在准备应用窗口…")
@@ -1753,6 +1808,8 @@ class StatusWidget(Gtk.Box):
         self.metric_generation = 0
         self.metric_refreshing = False
         self.battery_text = ""
+        self.battery_refreshing = False
+        self.battery_next_refresh_at = 0.0
         self.refreshing = False
         self.notifications = load_notifications_helper()
         device_module = load_device_control()
@@ -1785,6 +1842,15 @@ class StatusWidget(Gtk.Box):
         self.compact_date_label = Gtk.Label()
         self.compact_date_label.get_style_context().add_class("status-compact-date")
         compact.pack_start(self.compact_date_label, False, False, 0)
+        self.compact_battery_separator = Gtk.Label(label="|")
+        self.compact_battery_separator.set_no_show_all(True)
+        self.compact_battery_separator.set_visible(False)
+        compact.pack_start(self.compact_battery_separator, False, False, 0)
+        self.compact_battery_label = Gtk.Label()
+        self.compact_battery_label.get_style_context().add_class("status-compact-battery")
+        self.compact_battery_label.set_no_show_all(True)
+        self.compact_battery_label.set_visible(False)
+        compact.pack_start(self.compact_battery_label, False, False, 0)
         compact.pack_start(Gtk.Label(label="|"), False, False, 0)
         self.compact_arrow_label = Gtk.Label(label="展开 ▾")
         self.compact_arrow_label.get_style_context().add_class("status-compact-arrow")
@@ -1798,10 +1864,19 @@ class StatusWidget(Gtk.Box):
         self.time_label.set_halign(Gtk.Align.START)
         header.pack_start(self.time_label, True, True, 0)
 
+        header_details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        header_details.set_halign(Gtk.Align.END)
         self.date_label = Gtk.Label()
         self.date_label.get_style_context().add_class("clock-date")
         self.date_label.set_halign(Gtk.Align.END)
-        header.pack_start(self.date_label, False, False, 0)
+        header_details.pack_start(self.date_label, False, False, 0)
+        self.header_battery_label = Gtk.Label()
+        self.header_battery_label.get_style_context().add_class("clock-battery")
+        self.header_battery_label.set_halign(Gtk.Align.END)
+        self.header_battery_label.set_no_show_all(True)
+        self.header_battery_label.set_visible(False)
+        header_details.pack_start(self.header_battery_label, False, False, 0)
+        header.pack_start(header_details, False, False, 0)
         self.collapse_button = Gtk.Button(label="收起 ▴")
         self.collapse_button.get_style_context().add_class("status-button")
         self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
@@ -1824,10 +1899,10 @@ class StatusWidget(Gtk.Box):
         self.wifi_label = self.wifi_button.ming_label
         self.bluetooth_label = self.bluetooth_button.ming_label
         self.resource_label = self.resource_button.ming_label
-        # Compatibility aliases for older callers; the resource button owns the
-        # optional battery subtitle instead of creating a hidden blank tile.
+        # Keep old callers working while displaying battery independently from
+        # the resource sampler, which regularly replaces its label text.
         self.battery_button = self.resource_button
-        self.battery_label = self.resource_label
+        self.battery_label = self.header_battery_label
         self.notification_label = self.notification_button.ming_label
         self.settings_label = self.settings_button.ming_label
         self.power_label = self.power_button.ming_label
@@ -2300,16 +2375,16 @@ class StatusWidget(Gtk.Box):
             return False
         return bool(isinstance(status, dict) and status.get("background_available"))
 
-    def open_update_and_shutdown_dialog(self, _item=None):
+    def open_update_and_restart_dialog(self, _item=None):
         dialog = Gtk.MessageDialog(
             transient_for=self.get_toplevel(), flags=0,
             message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-            text="确认更新并关机？",
+            text="确认更新并重启？",
         )
         dialog.format_secondary_text(
-            "系统会自动完成已确认更新，完成后关机。没有可用更新时不会关机。")
+            "系统会自动完成已确认更新，完成后自动重启。没有可用更新时不会重启。")
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        dialog.add_button("更新并关机", Gtk.ResponseType.OK)
+        dialog.add_button("更新并重启", Gtk.ResponseType.OK)
 
         def respond(current, response):
             current.destroy()
@@ -2317,67 +2392,76 @@ class StatusWidget(Gtk.Box):
                 return
             try:
                 subprocess.Popen(
-                    ["pkexec", "ming-update", "auto-shutdown"],
+                    ["pkexec", "ming-update", "auto-restart"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             except OSError as exc:
-                log("update and shutdown launch failed: %s" % exc)
+                log("update and restart launch failed: %s" % exc)
 
         dialog.connect("response", respond)
         dialog.show_all()
 
+    def open_update_and_shutdown_dialog(self, _item=None):
+        """Compatibility alias for launchers created before automatic restart."""
+        self.open_update_and_restart_dialog(_item)
+
     def show_confirmed_update_power_menu(self, button):
         """Keep the usual session actions while adding the gated update action."""
+        self.show_ming_power_menu(button, include_update=True)
+
+    def show_basic_power_menu(self, button, include_update=False):
+        """Show Ming's own power choices before invoking session actions."""
+        self.show_ming_power_menu(button, include_update=include_update)
+
+    def show_ming_power_menu(self, button, include_update=False):
+        """Show Ming's own power choices before invoking session actions."""
         menu = Gtk.Menu()
 
-        def add_item(label, callback):
+        def add_item(label, commands):
             item = Gtk.MenuItem(label=label)
-            item.connect("activate", callback)
+            if callable(commands):
+                item.connect("activate", commands)
+                menu.append(item)
+                return
+            choices = commands if commands and isinstance(commands[0], list) else [commands]
+
+            def activate(_item):
+                for command in choices:
+                    if not shutil.which(command[0]):
+                        continue
+                    try:
+                        subprocess.Popen(
+                            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
+                    except OSError as exc:
+                        log("power action failed %s: %s" % (command[0], exc))
+
+            item.connect("activate", activate)
             menu.append(item)
 
-        def launch(command):
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:
-                log("power action failed %s: %s" % (command[0], exc))
-
-        add_item("锁定屏幕", lambda _item: launch(["ming-lock"]))
-        add_item("更新并关机", self.open_update_and_shutdown_dialog)
+        add_item("锁定屏幕", ["ming-lock"])
+        if include_update:
+            add_item("更新并重启", self.open_update_and_restart_dialog)
         menu.append(Gtk.SeparatorMenuItem())
-        add_item("注销", lambda _item: launch(["xfce4-session-logout", "--logout"]))
-        add_item("重新启动", lambda _item: launch(["xfce4-session-logout", "--reboot"]))
-        add_item("关机", lambda _item: launch(["xfce4-session-logout", "--halt"]))
+        add_item("注销", [
+            ["xfce4-session-logout", "--logout"],
+            ["gnome-session-quit", "--logout"],
+            ["mate-session-save", "--logout-dialog"],
+        ])
+        add_item("重新启动", [
+            ["xfce4-session-logout", "--reboot"],
+            ["gnome-session-quit", "--reboot"],
+        ])
+        add_item("关机", [
+            ["xfce4-session-logout", "--halt"],
+            ["gnome-session-quit", "--power-off"],
+        ])
         menu.show_all()
         menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
 
     def open_power_menu(self, _button):
-        if self.background_update_available():
-            self.show_confirmed_update_power_menu(_button)
-            return
-        commands = [
-            ["xfce4-session-logout"],
-            ["gnome-session-quit", "--logout"],
-            ["mate-session-save", "--logout-dialog"],
-            ["lxqt-leave"],
-        ]
-        for command in commands:
-            if not shutil.which(command[0]):
-                continue
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
-            except Exception as exc:
-                log("power menu failed %s: %s" % (command[0], exc))
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(),
-            flags=0,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.CLOSE,
-            text="未找到系统电源菜单",
-        )
-        dialog.format_secondary_text("请从系统菜单注销或管理电源。")
-        dialog.run()
-        dialog.destroy()
+        self.show_basic_power_menu(
+            _button, include_update=self.background_update_available())
 
     def refresh(self):
         now = datetime.datetime.now()
@@ -2389,11 +2473,44 @@ class StatusWidget(Gtk.Box):
         self.compact_time_label.set_text(time_text)
         self.compact_date_label.set_text(date_text)
         if self.collapsed:
+            self.refresh_battery_status()
             return True
         if not self.refreshing:
             self.refreshing = True
             threading.Thread(target=self.collect_status, daemon=True).start()
         return True
+
+    def refresh_battery_status(self):
+        now = time.monotonic()
+        if self.battery_refreshing or now < self.battery_next_refresh_at:
+            return False
+        self.battery_refreshing = True
+        self.battery_next_refresh_at = now + COMPACT_BATTERY_REFRESH_SECONDS
+        threading.Thread(target=self.collect_battery_status, daemon=True).start()
+        return True
+
+    def collect_battery_status(self):
+        try:
+            battery = (
+                self.device_controller.battery_status()
+                if self.device_controller else {})
+        except Exception as exc:
+            log(f"battery status collection failed: {exc}")
+            battery = {}
+        GLib.idle_add(self.apply_battery_status, battery)
+
+    def apply_battery_status(self, battery):
+        battery = battery if isinstance(battery, dict) else {}
+        show_battery = bool(battery.get("portable") and battery.get("available"))
+        battery_text = "电量 %s" % battery.get("text", "--") if show_battery else ""
+        self.battery_text = battery_text
+        self.header_battery_label.set_text(battery_text)
+        self.header_battery_label.set_visible(show_battery)
+        self.compact_battery_separator.set_visible(show_battery)
+        self.compact_battery_label.set_text(battery_text)
+        self.compact_battery_label.set_visible(show_battery)
+        self.battery_refreshing = False
+        return False
 
     def collect_status(self):
         try:
@@ -2419,7 +2536,7 @@ class StatusWidget(Gtk.Box):
         brightness = status.get("brightness", {})
         self.wifi_label.set_text("Wi-Fi %s" % wifi_text)
         self.bluetooth_label.set_text("蓝牙 %s" % bluetooth.get("text", "不可用"))
-        self.battery_text = ("电量 %s" % battery.get("text", "--")) if battery.get("available") else ""
+        self.apply_battery_status(battery)
         self.notification_label.set_text(
             "通知 %d" % notification_count if notification_count else "通知")
         self.updating_controls = True
@@ -2710,10 +2827,23 @@ class PhoneDesktop(Gtk.Window):
             cr.set_line_width(1)
             cr.stroke()
             icon_name = "folder" if is_folder else (item.get("icon") or "application-x-executable")
-            try:
-                pixbuf = icon_theme.load_icon(icon_name, ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
-            except Exception:
-                pixbuf = None
+            fallback_icon = "application-x-executable"
+            pixbuf = None
+            icon_path = None if is_folder else COMMON.resolve_icon_path(icon_name, item.get("path", ""))
+            if icon_path:
+                try:
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                        icon_path, ICON_SIZE, ICON_SIZE, True)
+                except Exception:
+                    pixbuf = None
+            for candidate in (icon_name, fallback_icon):
+                if pixbuf:
+                    break
+                try:
+                    pixbuf = icon_theme.load_icon(candidate, ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+                    break
+                except Exception:
+                    continue
             if pixbuf:
                 Gdk.cairo_set_source_pixbuf(cr, pixbuf, x + int((TILE_W - ICON_SIZE) / 2), y + 7)
                 cr.paint()
@@ -2724,7 +2854,7 @@ class PhoneDesktop(Gtk.Window):
             layout.set_alignment(Pango.Alignment.CENTER)
             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
             layout.set_ellipsize(Pango.EllipsizeMode.END)
-            layout.set_font_description(Pango.FontDescription("Sans Bold 10"))
+            layout.set_font_description(Pango.FontDescription(DESKTOP_LABEL_FONT))
             cr.set_source_rgba(0.11, 0.15, 0.13, 0.96)
             cr.move_to(x + int((TILE_W - LABEL_W) / 2), y + 49)
             PangoCairo.show_layout(cr, layout)

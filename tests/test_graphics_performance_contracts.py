@@ -63,6 +63,9 @@ class PicomPerformanceContracts(unittest.TestCase):
         config = fallback.group(0)
         self.assertIn("backend = \"xrender\";", config)
         self.assertIn("shadow = false;", config)
+        self.assertIn("fading = false;", config)
+        self.assertNotIn("fade-in-step", config)
+        self.assertNotIn("fade-out-step", config)
         self.assertIn("dock = {", config)
         self.assertIn("notification = {", config)
 
@@ -83,6 +86,29 @@ class FontPerformanceContracts(unittest.TestCase):
         self.assertIn('title_font" type="string" value="Noto Sans CJK SC', DESKTOP)
         self.assertIn('FontName" type="string" value="Noto Sans CJK SC', DESKTOP)
 
+    def test_gtk_theme_keeps_noto_readable_with_static_compact_spacing(self):
+        start = DESKTOP.index("cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css")
+        end = DESKTOP.index("\nMINGGLASSCSS", start)
+        theme = DESKTOP[start:end]
+        self.assertIn('font-family: "Noto Sans CJK SC", sans-serif;', theme)
+        self.assertIn("font-weight: 400;", theme)
+        self.assertIn("padding: 6px 12px;", theme)
+        self.assertIn("padding: 8px 12px;", theme)
+        self.assertNotIn("animation:", theme)
+        self.assertIn('title_font" type="string" value="Noto Sans CJK SC Medium 11"', DESKTOP)
+
+    def test_display_scaler_never_reduces_noto_below_ten_point(self):
+        start = DESKTOP.index("cat > /usr/local/bin/ming-scale")
+        end = DESKTOP.index("\nMINGSCALE", start)
+        scaler = DESKTOP[start:end]
+        self.assertNotIn("FONT_SIZE=9", scaler)
+        self.assertIn("FONT_SIZE=$((FONT_SIZE > 10 ? FONT_SIZE - 1 : 10))", scaler)
+        self.assertIn('"Noto Sans CJK SC ${FONT_SIZE}"', scaler)
+        self.assertIn("SCALE_POLICY_VERSION=2", scaler)
+        self.assertIn('grep -Fxq "font-policy=${SCALE_POLICY_VERSION}" "${SCALE_CONFIG}"', scaler)
+        self.assertIn('printf "font-policy=%s\\n" "${SCALE_POLICY_VERSION}" > "${SCALE_CONFIG}"', scaler)
+        self.assertNotIn('if [[ -f "${SCALE_CONFIG}" ]]; then', scaler)
+
     def test_fontconfig_does_not_override_explicit_monospace_requests(self):
         start = APPS.index("cat > /etc/fonts/conf.d/99-ming-os-fonts.conf << 'MINGFONTS'")
         end = APPS.index("\nMINGFONTS", start)
@@ -99,26 +125,24 @@ class FontPerformanceContracts(unittest.TestCase):
         self.assertIn("MenuFont=Noto Sans CJK SC 16", BUILD)
 
 
-class EdgeVaapiContracts(unittest.TestCase):
-    def test_edge_wrapper_uses_explicit_verified_vaapi_flags_and_software_fallback(self):
-        start = APPS.index("cat > /usr/local/bin/ming-edge << 'MINGEDGE'")
-        end = APPS.index("\nMINGEDGE", start + len("cat > /usr/local/bin/ming-edge << 'MINGEDGE'"))
+class FirefoxPerformanceContracts(unittest.TestCase):
+    def test_firefox_wrapper_uses_a_small_startup_path_and_audio_preflight(self):
+        start = APPS.index("cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'")
+        end = APPS.index("\nMINGFIREFOX", start + len("cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'"))
         wrapper = APPS[start:end]
-        self.assertIn("--enable-accelerated-video-decode", wrapper)
-        self.assertIn("VaapiVideoDecodeLinuxGL", wrapper)
-        self.assertIn("UseMultiPlaneFormatForHardwareVideo", wrapper)
-        self.assertIn("--disable-gpu", wrapper)
-        self.assertIn("--disable-gpu-compositing", wrapper)
-        self.assertIn('"edge_hardware_video": true', wrapper)
-        self.assertIn('"render_access": true', wrapper)
+        self.assertIn("firefox_args=(--new-instance)", wrapper)
+        self.assertIn("ming-audio-session ensure --json", wrapper)
+        self.assertIn("timeout 3", wrapper)
+        self.assertIn("exec firefox-esr", wrapper)
 
-    def test_edge_wrapper_uses_generic_capability_result_not_intel_only_driver_name(self):
-        start = APPS.index("cat > /usr/local/bin/ming-edge << 'MINGEDGE'")
-        end = APPS.index("\nMINGEDGE", start + len("cat > /usr/local/bin/ming-edge << 'MINGEDGE'"))
+    def test_firefox_wrapper_does_not_inherit_chromium_only_gpu_switches(self):
+        start = APPS.index("cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'")
+        end = APPS.index("\nMINGFIREFOX", start + len("cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'"))
         wrapper = APPS[start:end]
-        self.assertIn('"desktop_rendering": true', wrapper)
-        self.assertNotIn('"driver": "i915"', wrapper)
-        self.assertIn("(i915|amdgpu|radeon|nouveau)\\.modeset=0", wrapper)
+        self.assertNotIn("VaapiVideoDecodeLinuxGL", wrapper)
+        self.assertNotIn("UseMultiPlaneFormatForHardwareVideo", wrapper)
+        self.assertNotIn("--disable-gpu-compositing", wrapper)
+        self.assertNotIn("edge_hardware_video", wrapper)
 
     def test_build_gate_requires_intel_and_radeon_vaapi_backends_and_font_matching(self):
         self.assertIn("i965_drv_video.so", BUILD)

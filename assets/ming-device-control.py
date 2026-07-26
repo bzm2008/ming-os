@@ -34,6 +34,7 @@ NETWORK_ID_PATTERN = re.compile(r"[a-f0-9]{32}\Z")
 WIFI_SCAN_CACHE_MAX_AGE = 180
 NET_ROOT = Path("/sys/class/net")
 ETHERNET_CONNECTIVITY_URL = "https://connectivitycheck.gstatic.com/generate_204"
+POWER_PROFILE_PATH = Path("/run/ming-os/power-profile")
 
 
 def run_command(command, timeout=8):
@@ -140,6 +141,11 @@ def classify_wifi(
     hardware_found = bool(wifi_devices or pci_output.strip() or usb_output.strip())
     blocked = bool(re.search(
         r"(?:Soft|Hard) blocked:\s*yes", rfkill_output or "", re.I))
+    firmware_policy = "redistributable_or_unknown"
+    action = "none"
+    if re.search(r'\bb43(?:-open)?/ucode\d+[^"\s]*\.fw\b', firmware_output or "", re.I):
+        firmware_policy = "unredistributable_b43"
+        action = "show_b43_help"
 
     if not hardware_found:
         if not hardware_probes_ok:
@@ -167,6 +173,14 @@ def classify_wifi(
         state = "firmware_missing"
         title = "无线硬件缺少固件"
         detail = firmware_output.strip()
+        if firmware_policy == "unredistributable_b43":
+            state = "firmware_external_required"
+            title = "Broadcom b43 固件需手动处理"
+            detail = (
+                "%s\n\n检测到 Broadcom b43 固件缺失。该固件不属于 Ming OS "
+                "可随公开 ISO 再分发的固件集合，因此不可内置或伪装为一键修复；"
+                "请查看兼容说明，按硬件型号选择官方固件、有线联网或 USB 网卡等方案。"
+            ) % detail
     else:
         state = "driver_missing"
         title = "无线硬件未绑定可用驱动"
@@ -181,6 +195,9 @@ def classify_wifi(
         "title": title,
         "detail": detail,
         "devices": [name for name, _state in wifi_devices],
+        "action": action,
+        "firmware_policy": firmware_policy,
+        "redistributable_firmware": firmware_policy != "unredistributable_b43",
     }
 
 
@@ -188,7 +205,8 @@ class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
                  backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
                  settings_path=None, software_brightness_path=None, environment=None,
-                 wifi_scan_cache_path=None, net_root=NET_ROOT):
+                 wifi_scan_cache_path=None, net_root=NET_ROOT,
+                 power_profile_path=None):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
@@ -203,6 +221,8 @@ class DeviceController:
             Path(wifi_scan_cache_path) if wifi_scan_cache_path else
             Path.home() / ".cache" / "ming-os" / "wifi-scan.json")
         self.net_root = Path(net_root)
+        self.power_profile_path = (
+            Path(power_profile_path) if power_profile_path else POWER_PROFILE_PATH)
 
     def _run(self, command, timeout=8):
         return self.runner(command, timeout=timeout)
@@ -1438,9 +1458,14 @@ class DeviceController:
         generated_at = cache.get("generated_at") if cache else None
         if (not cache or cache.get("schema") != 1 or not isinstance(generated_at, int) or
                 generated_at < 1 or time.time() - generated_at > WIFI_SCAN_CACHE_MAX_AGE):
-            return self._wifi_result(
-                False, "stale", "E_WIFI_NETWORK_STALE", "扫描结果已过期，请重新扫描。", True,
-                ifname=ifname, network_id=network_id)
+            self.wifi_scan()
+            cache = self._read_wifi_scan_cache()
+            generated_at = cache.get("generated_at") if cache else None
+            if (not cache or cache.get("schema") != 1 or not isinstance(generated_at, int) or
+                    generated_at < 1 or time.time() - generated_at > WIFI_SCAN_CACHE_MAX_AGE):
+                return self._wifi_result(
+                    False, "stale", "E_WIFI_NETWORK_STALE", "扫描结果已过期，请重新扫描。", True,
+                    ifname=ifname, network_id=network_id)
         record = next((item for item in cache.get("networks", [])
                        if isinstance(item, dict) and item.get("network_id") == network_id), None)
         if not record:
@@ -1811,12 +1836,39 @@ class DeviceController:
                 "已关闭" if state in {"rfkill_blocked", "controller_off"} else "不可用"),
         }
 
+    def _portable_host_from_profile(self):
+        """Return the root-owned portable classification, or None when absent."""
+        try:
+            lines = self.power_profile_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in lines:
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "portable":
+                normalized = value.strip().lower()
+                if normalized == "true":
+                    return True
+                if normalized == "false":
+                    return False
+        return None
+
     def battery_status(self):
+        portable_from_profile = self._portable_host_from_profile()
         if not self._can_run("upower"):
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         rc, output, _error = self._run(["upower", "-e"])
         if rc != 0:
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         devices = [line.strip() for line in output.splitlines() if line.strip()]
         display_devices = [line for line in devices if line.rsplit("/", 1)[-1] == "DisplayDevice"]
         native_batteries = [
@@ -1825,7 +1877,12 @@ class DeviceController:
         ]
         candidates = display_devices + native_batteries
         if not candidates:
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         value = None
         for battery in candidates:
             rc, info, _error = self._run(["upower", "-i", battery])
@@ -1835,6 +1892,12 @@ class DeviceController:
                 break
         return {
             "available": value is not None,
+            # The profile is authoritative when available.  The BAT-name
+            # fallback keeps the indicator useful during early boot or live
+            # sessions before the profile service has written its state.
+            "portable": (
+                portable_from_profile if portable_from_profile is not None
+                else bool(native_batteries)),
             "value": value,
             "text": "%d%%" % value if value is not None else "--",
         }

@@ -29,10 +29,10 @@ readonly DEFAULT_DESKTOP_LAYOUT="${USER_HOME}/.config/ming-os/desktop-layout.jso
 readonly DESKTOP_LAUNCHERS=(
     "ming-settings.desktop"
     "ming-files.desktop"
-    "ming-edge.desktop"
+    "ming-firefox.desktop"
     "spark-store.desktop"
     "ming-update.desktop"
-    "garlic-claw.desktop"
+    "papyrus.desktop"
     "ming-terminal.desktop"
 )
 
@@ -64,9 +64,9 @@ copy_default_launcher() {
     local source="/usr/share/applications/${launcher}"
 
     case "${launcher}" in
-        ming-edge.desktop)
-            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge.desktop"
-            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge-stable.desktop"
+        ming-firefox.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/firefox-esr.desktop"
+            [[ -f "${source}" ]] || source="/usr/share/applications/firefox.desktop"
             ;;
         spark-store.desktop)
             [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-spark-store.desktop"

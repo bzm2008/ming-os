@@ -797,9 +797,114 @@ configure_users() {
         getent group "${grp}" >/dev/null 2>&1 && usermod -aG "${grp}" "${MING_USER}" || true
     done
 
-    # 配置 sudo 免密（方便初学者，避免频繁输入密码）
-    echo "${MING_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"${MING_USER}"
-    chmod 440 /etc/sudoers.d/"${MING_USER}"
+    # Keep graphical auto-login separate from administrator authority.  A
+    # passwordless sudo rule turns every desktop process into root, so desktop
+    # maintenance actions cross a named Polkit boundary instead.
+    rm -f /etc/sudoers.d/"${MING_USER}" /etc/sudoers.d/user
+
+    install -d -m 0755 /usr/local/lib/ming-os /usr/share/polkit-1/actions
+    cat > /usr/share/polkit-1/actions/org.ming-os.account-password.policy << 'ACCOUNT_PASSWORD_POLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming-os.account-password">
+    <description>Change the current Ming OS account password</description>
+    <message>Authentication is required to change the current account password.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-account-password</annotate>
+  </action>
+</policyconfig>
+ACCOUNT_PASSWORD_POLICY
+
+    cat > /usr/local/sbin/ming-account-password << 'ACCOUNT_PASSWORD_HELPER'
+#!/usr/bin/env python3
+"""Set or clear the invoking desktop user's password through Polkit."""
+
+import argparse
+import os
+import pwd
+import subprocess
+import sys
+
+
+MAX_PASSWORD_BYTES = 1024
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def invoking_user(name):
+    if os.geteuid() != 0:
+        fail("ming-account-password requires Polkit authorization")
+    try:
+        caller_uid = int(os.environ["PKEXEC_UID"])
+        account = pwd.getpwnam(name)
+    except (KeyError, ValueError):
+        fail("invalid invoking account")
+    if caller_uid < 1000 or account.pw_uid != caller_uid or account.pw_uid == 0:
+        fail("the helper can only change the invoking regular account")
+    return account
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="ming-account-password")
+    parser.add_argument("--user", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--password-stdin", action="store_true")
+    mode.add_argument("--clear", action="store_true")
+    args = parser.parse_args(argv)
+    account = invoking_user(args.user)
+
+    if args.clear:
+        subprocess.run(["/usr/bin/passwd", "-d", account.pw_name], check=True)
+        return 0
+
+    password = sys.stdin.buffer.read(MAX_PASSWORD_BYTES + 1)
+    if (not password or len(password) > MAX_PASSWORD_BYTES or b"\x00" in password
+            or b"\r" in password or b"\n" in password or b":" in password):
+        fail("password input contains forbidden characters or is too long")
+    subprocess.run(
+        ["/usr/sbin/chpasswd"],
+        input=account.pw_name.encode("utf-8") + b":" + password + b"\n",
+        check=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+ACCOUNT_PASSWORD_HELPER
+    chmod 0755 /usr/local/sbin/ming-account-password
+
+    cat > /usr/local/sbin/ming-timeshift-restore << 'TIMESHIFT_RESTORE_HELPER'
+#!/usr/bin/env bash
+set -u
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "ming-timeshift-restore requires Polkit authorization" >&2
+    exit 3
+fi
+command -v timeshift >/dev/null 2>&1 || {
+    echo "timeshift is not installed" >&2
+    exit 127
+}
+
+snapshot="$(timeshift --list --scripted 2>/dev/null \
+    | awk '/ming-factory|O / {print $3; exit}')"
+if [[ -n "${snapshot}" ]]; then
+    exec timeshift --restore --snapshot "${snapshot}" --yes
+fi
+exec timeshift --restore --yes
+TIMESHIFT_RESTORE_HELPER
+    chmod 0755 /usr/local/sbin/ming-timeshift-restore
 
     # 创建用户桌面等 XDG 目录
     sudo -u "${MING_USER}" mkdir -p \
@@ -1279,6 +1384,108 @@ PY
         echo "[ERROR] ming-performance-status failed Python syntax validation" >&2
         return 1
     fi
+}
+
+deploy_performance_policy() {
+    # Installs safe, best-effort policy controls.  The helper validates
+    # PID+starttime+UID before touching scheduling state and reports missing
+    # cgroup/ionice/renice support as degradation instead of blocking login.
+    local asset="/tmp/ming-build/assets/ming-performance-policy.py"
+    local target
+    if [[ ! -s "${asset}" ]]; then
+        echo "[ERROR] missing performance policy asset: ${asset}" >&2
+        return 1
+    fi
+    python3 -m py_compile "${asset}" || return 1
+    for target in \
+        /usr/local/sbin/ming-performance-policy \
+        /usr/local/sbin/ming-interaction-boost \
+        /usr/local/sbin/ming-background-policy \
+        /usr/local/bin/ming-prefetch; do
+        install -m 0755 "${asset}" "${target}" || return 1
+    done
+
+    cat > /usr/local/bin/ming-ota-run << 'MINGOTARUN'
+#!/usr/bin/env bash
+set -uo pipefail
+
+if [[ "$#" -lt 1 ]]; then
+    echo "Usage: ming-ota-run <ming-update arguments...>" >&2
+    exit 2
+fi
+
+run_direct_low_priority() {
+    if command -v ionice >/dev/null 2>&1; then
+        exec nice -n 10 ionice -c3 /usr/local/bin/ming-update "$@"
+    fi
+    exec nice -n 10 /usr/local/bin/ming-update "$@"
+}
+
+scope_started=false
+run_in_systemd_scope() {
+    local started_marker wrapped_rc
+    [[ -r /sys/fs/cgroup/cgroup.controllers ]] || return 125
+    command -v systemd-run >/dev/null 2>&1 || return 125
+    mkdir -p -m 0755 /run/ming-os 2>/dev/null || return 125
+    started_marker="$(mktemp /run/ming-os/ming-ota-started.XXXXXX)" || return 125
+    rm -f -- "${started_marker}"
+
+    if systemd-run --quiet --wait --collect --scope \
+        -p Slice=ming-ota.slice \
+        -p CPUWeight=20 \
+        -p IOWeight=20 \
+        -p Nice=10 \
+        -p IOSchedulingClass=idle \
+        /bin/sh -c '
+            started_marker=$1
+            shift
+            : > "${started_marker}" || exit 125
+            exec "$@"
+        ' ming-ota-run "${started_marker}" /usr/local/bin/ming-update "$@"; then
+        if [[ -e "${started_marker}" ]]; then
+            scope_started=true
+            rm -f -- "${started_marker}"
+            return 0
+        fi
+        return 125
+    else
+        wrapped_rc=$?
+        if [[ -e "${started_marker}" ]]; then
+            scope_started=true
+            rm -f -- "${started_marker}"
+            return "${wrapped_rc}"
+        fi
+        rm -f -- "${started_marker}"
+        return 125
+    fi
+}
+
+if run_in_systemd_scope "$@"; then
+    exit 0
+else
+    scope_rc=$?
+fi
+if [[ "${scope_started}" == true ]]; then
+    exit "${scope_rc}"
+fi
+
+run_direct_low_priority "$@"
+MINGOTARUN
+    chmod 0755 /usr/local/bin/ming-ota-run
+
+    cat > /etc/systemd/system/ming-ota.slice << 'MINGOTASLICE'
+[Unit]
+Description=Ming OS low-priority OTA workload slice
+
+[Slice]
+CPUWeight=20
+IOWeight=20
+MINGOTASLICE
+
+    mkdir -p /run/ming-os
+    cat > /run/ming-os/resource-policy.json << 'MINGRESOURCEDEFAULT' 2>/dev/null || true
+{"mode":"adaptive","active_leases":0,"background_throttled":0,"degraded":["policy-service-not-yet-active"]}
+MINGRESOURCEDEFAULT
 }
 
 deploy_hardware_diagnostics() {
@@ -1943,7 +2150,7 @@ MINGOTAPREFLIGHT
 set -uo pipefail
 
 target="${1:-}"
-version="${MING_OS_VERSION:-26.3.2}"
+version="${MING_OS_VERSION:-26.4.1}"
 
 find_target_root() {
     local candidate
@@ -2349,8 +2556,9 @@ else
     ln -sfn /lib/systemd/system/graphical.target "${target}/etc/systemd/system/default.target" 2>/dev/null || true
 fi
 
-echo "user ALL=(ALL) NOPASSWD: ALL" > "${target}/etc/sudoers.d/user" 2>/dev/null || true
-chmod 440 "${target}/etc/sudoers.d/user" 2>/dev/null || true
+# The target inherits the named Polkit helpers from the unpacked Live rootfs.
+# Remove any legacy global sudo grant left by a resumed 26.3-era installation.
+rm -f "${target}/etc/sudoers.d/user" "${target}/etc/sudoers.d/ming"
 
 # The installed system is produced by unpacking the Live filesystem. Restore
 # the real util-linux binary before removing Live-only installer components.
@@ -3102,7 +3310,7 @@ MEMPROFILE
 [Unit]
 Description=Ming OS runtime memory profile
 DefaultDependencies=no
-After=local-fs.target
+After=local-fs.target systemd-sysctl.service
 Before=zramswap.service sysinit.target
 
 [Service]
@@ -3116,13 +3324,10 @@ MEMSVC
 
     # 系统内核参数优化
     cat > /etc/sysctl.d/99-ming-performance.conf << 'SYSCTLCONF'
-# Ming OS 26.3.2 内核深度优化
+# Ming OS 26.4.1 内核深度优化
 # 目标：兼容 2GB+ RAM / 老 i3-i5-E3 / 老 AMD / 机械硬盘，同时保持桌面流畅
 
-# ---- 内存：老机器优先减少换页 ----
-vm.swappiness=10
-vm.vfs_cache_pressure=60
-vm.page-cluster=0
+# ---- 内存：按实际内存由 ming-memory-profile 在 sysctl 后写入 ----
 vm.watermark_boost_factor=0
 vm.watermark_scale_factor=125
 # 禁止内核 OOM 过于激进地杀进程（桌面常驻应用保护）
@@ -3270,7 +3475,7 @@ MINGOOMPOLICY
     cat > /etc/systemd/system/ming-oom-policy.service << 'MINGOOMPOLICYSVC'
 [Unit]
 Description=Ming OS mutually exclusive OOM backend selector
-After=local-fs.target systemd-udev-settle.service
+After=local-fs.target
 Before=graphical.target
 ConditionPathExists=/usr/local/sbin/ming-oom-policy
 
@@ -3441,7 +3646,8 @@ DEVICETUNE
     cat > /etc/systemd/system/ming-device-tune.service << DEVICETUNESVC
 [Unit]
 Description=Ming OS disk, CPU, and memory runtime tuning
-After=local-fs.target
+Wants=ming-power-profile.service
+After=local-fs.target ming-power-profile.service
 
 [Service]
 Type=oneshot
@@ -3555,17 +3761,17 @@ MINGPOWERPROFILESVC
     mkdir -p /etc/tlp.d
     cat > /etc/tlp.d/ming-laptop.conf << TLPCONF
 # Ming OS 笔记本电池优化
-CPU_SCALING_GOVERNOR_ON_AC=performance
-CPU_SCALING_GOVERNOR_ON_BAT=powersave
+CPU_SCALING_GOVERNOR_ON_AC=schedutil
+CPU_SCALING_GOVERNOR_ON_BAT=schedutil
 CPU_ENERGY_PERF_POLICY_ON_AC=balance_performance
-CPU_ENERGY_PERF_POLICY_ON_BAT=power
+CPU_ENERGY_PERF_POLICY_ON_BAT=balance_performance
 PLATFORM_PROFILE_ON_AC=balanced
-PLATFORM_PROFILE_ON_BAT=low-power
+PLATFORM_PROFILE_ON_BAT=balanced
 DISK_DEVICES="nvme0n1 sda"
 DISK_APM_LEVEL_ON_AC="254"
 DISK_APM_LEVEL_ON_BAT="128"
 WIFI_PWR_ON_AC=off
-WIFI_PWR_ON_BAT=on
+WIFI_PWR_ON_BAT=off
 USB_AUTOSUSPEND=0
 # Old laptops often expose Wi-Fi/HID/audio through USB bridges whose autosuspend
 # support is incomplete.  Keep autosuspend disabled globally and retain the
@@ -3575,7 +3781,7 @@ USB_EXCLUDE_AUDIO=1
 USB_EXCLUDE_WWAN=1
 USB_EXCLUDE_PRINTER=1
 RUNTIME_PM_ON_AC=on
-RUNTIME_PM_ON_BAT=auto
+RUNTIME_PM_ON_BAT=on
 TLPCONF
 
     # systemd-logind 合盖行为（笔记本合盖不挂起，仅锁定屏幕）
@@ -3747,6 +3953,185 @@ configure_seamless_storage() {
     systemctl disable --now ming-storage.service 2>/dev/null || true
     rm -f /etc/systemd/system/multi-user.target.wants/ming-storage.service \
         /etc/udev/rules.d/99-ming-storage.rules
+
+    cat > /usr/local/bin/ming-volume-automount << 'VOLUMEAUTOMOUNT'
+#!/usr/bin/env bash
+set -u
+
+JSON=false
+MONITOR=false
+for arg in "$@"; do
+    case "${arg}" in
+        --json) JSON=true ;;
+        --monitor) MONITOR=true ;;
+    esac
+done
+
+MING_TARGET_USER="${SUDO_USER:-${USER:-user}}"
+if [[ "${MING_TARGET_USER}" == root || -z "${MING_TARGET_USER}" ]]; then
+    MING_TARGET_USER="$(awk -F: '$3>=1000 && $3<60000 && $1!="nobody"{print $1; exit}' /etc/passwd 2>/dev/null || true)"
+fi
+[[ -n "${MING_TARGET_USER}" ]] || MING_TARGET_USER=user
+MING_TARGET_HOME="$(getent passwd "${MING_TARGET_USER}" 2>/dev/null | cut -d: -f6)"
+[[ -n "${MING_TARGET_HOME}" ]] || MING_TARGET_HOME="/home/${MING_TARGET_USER}"
+mkdir -p "/media/${MING_TARGET_USER}" 2>/dev/null || true
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
+
+emit() {
+    local dev="$1" state="$2" detail="$3"
+    if [[ "${JSON}" == true ]]; then
+        printf '{"device":"%s","state":"%s","detail":"%s"}\n' \
+            "$(json_escape "${dev}")" "$(json_escape "${state}")" "$(json_escape "${detail}")"
+    fi
+}
+
+safe_name() {
+    local name="$1"
+    name="${name//[^A-Za-z0-9._-]/_}"
+    [[ -n "${name}" ]] || name="volume"
+    printf '%s' "${name}"
+}
+
+supported_fs() {
+    case "$1" in
+        ntfs|ntfs3|exfat|vfat|fat|ext2|ext3|ext4) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+excluded_fs() {
+    case "$1" in
+        ""|swap|crypto_LUKS|linux_raid_member|LVM2_member|zfs_member|btrfs) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+excluded_label() {
+    case "$1" in
+        *MING_INSTALL*|*MING_OTA*|*MING_RECOVERY*|*MING_BOOT*|MING_OS*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+protected_sources() {
+    findmnt -R -no SOURCE / "${MING_TARGET_HOME}" 2>/dev/null | sed '/^$/d' | sort -u
+}
+
+try_mount() {
+    local dev="$1" label="$2" uuid="$3"
+    local base detail
+    base="$(safe_name "${label}")"
+    [[ "${base}" != volume && "${base}" != "_" ]] || base="$(safe_name "${uuid}")"
+    [[ "${base}" != volume && "${base}" != "_" ]] || base="$(basename "${dev}")"
+    # Keep /media/<user> explicit for users coming from Windows drive letters.
+    mkdir -p "/media/${MING_TARGET_USER}/${base}" 2>/dev/null || true
+    if command -v udisksctl >/dev/null 2>&1; then
+        if detail="$(udisksctl mount -b "${dev}" --no-user-interaction 2>&1)"; then
+            emit "${dev}" mounted "${detail}"
+            return 0
+        fi
+    elif command -v gio >/dev/null 2>&1; then
+        if detail="$(gio mount -d "${dev}" 2>&1)"; then
+            emit "${dev}" mounted "${detail}"
+            return 0
+        fi
+    else
+        emit "${dev}" no_mount_backend "udisksctl/gio unavailable"
+        return 1
+    fi
+    emit "${dev}" mount_failed "${detail}"
+    return 1
+}
+
+scan_once() {
+    local protected
+    protected="$(protected_sources)"
+    while IFS= read -r -d '' NAME \
+        && IFS= read -r -d '' TYPE \
+        && IFS= read -r -d '' FSTYPE \
+        && IFS= read -r -d '' MOUNTPOINT \
+        && IFS= read -r -d '' LABEL \
+        && IFS= read -r -d '' UUID \
+        && IFS= read -r -d '' PARTTYPE \
+        && IFS= read -r -d '' RM; do
+        local dev="/dev/${NAME}"
+        [[ "${TYPE}" == part ]] || continue
+        if [[ -z "${FSTYPE}" ]]; then
+            emit "${dev}" not_formatted "no filesystem"
+            continue
+        fi
+        if excluded_fs "${FSTYPE}"; then
+            emit "${dev}" skipped "excluded filesystem ${FSTYPE}"
+            continue
+        fi
+        if ! supported_fs "${FSTYPE}"; then
+            emit "${dev}" skipped "unsupported filesystem ${FSTYPE}"
+            continue
+        fi
+        if [[ -n "${MOUNTPOINT}" ]]; then
+            emit "${dev}" already_mounted "${MOUNTPOINT}"
+            continue
+        fi
+        if excluded_label "${LABEL}"; then
+            emit "${dev}" skipped "protected label ${LABEL}"
+            continue
+        fi
+        if printf '%s\n' "${protected}" | grep -Fxq "${dev}"; then
+            emit "${dev}" already_mounted "protected root or home source"
+            continue
+        fi
+        try_mount "${dev}" "${LABEL}" "${UUID}" || true
+    done < <(
+        lsblk --json -o NAME,TYPE,FSTYPE,MOUNTPOINT,LABEL,UUID,PARTTYPE,RM 2>/dev/null |
+        python3 -c '
+import json
+import sys
+
+FIELDS = ("name", "type", "fstype", "mountpoint", "label", "uuid", "parttype", "rm")
+
+def flatten(nodes):
+    for node in nodes or []:
+        yield node
+        yield from flatten(node.get("children", []))
+
+for record in flatten(json.load(sys.stdin).get("blockdevices", [])):
+    for field in FIELDS:
+        value = record.get(field, "")
+        if isinstance(value, list):
+            value = next((item for item in value if item), "")
+        sys.stdout.buffer.write(str(value or "").encode("utf-8", "surrogateescape") + b"\0")
+'
+    )
+}
+
+scan_once
+if [[ "${MONITOR}" == true ]] && command -v udisksctl >/dev/null 2>&1; then
+    udisksctl monitor 2>/dev/null | while IFS= read -r _event; do
+        sleep 1
+        scan_once
+    done
+fi
+VOLUMEAUTOMOUNT
+    chmod 0755 /usr/local/bin/ming-volume-automount
+
+    mkdir -p /etc/xdg/autostart
+    cat > /etc/xdg/autostart/ming-volume-automount.desktop << 'VOLUMEAUTOMOUNTDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Ming Volume Automount
+Name[zh_CN]=Ming 自动挂载数据分区
+Comment=Mount safe data partitions in the user session without editing fstab.
+Exec=sh -c '/usr/local/bin/ming-volume-automount --json >/dev/null 2>&1; exec /usr/local/bin/ming-volume-automount --monitor --json >/dev/null 2>&1'
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+VOLUMEAUTOMOUNTDESKTOP
 
     cat > /usr/local/sbin/ming-storage-manager << 'STORAGEMGR'
 #!/usr/bin/env bash
@@ -3954,6 +4339,7 @@ main() {
     deploy_service_profile || return 1
     deploy_time_sync || return 1
     deploy_performance_status || return 1
+    deploy_performance_policy || return 1
     deploy_hardware_diagnostics || return 1
     configure_os_identity
     configure_installer_identity

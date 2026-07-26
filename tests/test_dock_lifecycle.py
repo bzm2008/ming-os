@@ -6,12 +6,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
+BUILD = ROOT / "build_onion_os.sh"
 
 
 class DockLifecycleContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = DESKTOP.read_text(encoding="utf-8")
+        cls.build = BUILD.read_text(encoding="utf-8")
         cls.plank_settings = cls.source.split(
             "cat > \"${plank_dir}/settings\" << 'PLANKSETTINGS'", 1
         )[1].split("PLANKSETTINGS", 1)[0]
@@ -102,6 +104,40 @@ class DockLifecycleContracts(unittest.TestCase):
         for marker in ("DockItems=", "IconSize=", "ZoomEnabled=", "Theme=Ming"):
             self.assertIn(marker, self.watchdog)
         self.assertIn("ming-refresh-dock-launchers", settings)
+
+    def test_light_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
+        self.assertIn("IconSize=38", self.plank_settings)
+        self.assertIn("ZoomEnabled=true", self.plank_settings)
+        self.assertIn("ZoomPercent=112", self.plank_settings)
+        self.assertIn("ZoomPercent=112", self.watchdog)
+        self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
+        self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
+        self.assertIn("dock_zoom=false", self.source)
+        self.assertIn('"ZoomPercent=112"', self.build)
+        self.assertIn('"LaunchBounceTime=150"', self.build)
+        self.assertIn('"ItemMoveTime=130"', self.build)
+
+    def test_compact_rail_theme_is_visibly_distinct_and_low_cost(self):
+        for marker in (
+            "TopRoundness=6",
+            "BottomRoundness=6",
+            "HorizPadding=8",
+            "ItemPadding=3",
+            "IndicatorSize=4",
+            "LaunchBounceHeight=0.20",
+        ):
+            self.assertIn(marker, self.source)
+
+    def test_compact_rail_profile_migrates_existing_2640_users_once(self):
+        for marker in (
+            "MingDockProfile=2641-compact-rail-1",
+            "migrate_compact_rail_profile",
+            "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
+            "s/^IconSize=.*/IconSize=38/",
+            "s/^ZoomPercent=.*/ZoomPercent=112/",
+        ):
+            self.assertIn(marker, self.watchdog)
+        self.assertIn("migrate_compact_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(

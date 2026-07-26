@@ -64,6 +64,7 @@ readonly USER_CONFIG_FILE="${USER_CONFIG_DIR}/config.json"
 readonly UPDATE_SERVER="https://ming.scallion.uno"
 readonly API_ENDPOINT="/api/onion-update"
 readonly BACKGROUND_AVAILABILITY_FILE="${CACHE_DIR}/background-availability.json"
+readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -386,6 +387,50 @@ current_version() {
     cat /etc/ming-version 2>/dev/null || echo "unknown"
 }
 
+readonly OTA_2641_TARGET_VERSION="26.4.1"
+
+is_2641_upgrade_source() {
+    local source="$1"
+    case "${source}" in
+        26.3|26.3.*|26.3-*)
+            return 0
+            ;;
+        26.4|26.4-*|26.4.0|26.4.0.*|26.4.0-*|\
+        26.4.1-preview*|26.4.1-pre*|26.4.1-alpha*|26.4.1-beta*|26.4.1-rc*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+validate_update_route() {
+    local source="$1" target="$2"
+
+    case "${target}" in
+        "${OTA_2641_TARGET_VERSION}")
+            if [[ "${source}" == "${OTA_2641_TARGET_VERSION}" ]]; then
+                log_error "当前已是 ${OTA_2641_TARGET_VERSION}，拒绝重复安装或降级。"
+                return 1
+            fi
+            if ! is_2641_upgrade_source "${source}"; then
+                log_error "${OTA_2641_TARGET_VERSION} 只接受 26.3 全系列和 26.4 预览/正式版本升级。"
+                return 1
+            fi
+            return 0
+            ;;
+        26.4|26.4.*|26.4-*)
+            log_error "当前发布线只允许升级到 ${OTA_2641_TARGET_VERSION}，拒绝目标版本 ${target}。"
+            return 1
+            ;;
+        *)
+            # Keep the existing non-26.4 update contract intact for older
+            # maintenance channels.  This release-specific guard only narrows
+            # the 26.4 transition that is being prepared here.
+            return 0
+            ;;
+    esac
+}
+
 init_config() {
     ensure_dirs
     local cfg
@@ -459,6 +504,44 @@ legacy_api_url() {
 
 is_json_response() {
     printf '%s' "$1" | jq -e . >/dev/null 2>&1
+}
+
+verify_signed_ota_manifest() {
+    local manifest="$1" signature expected_trusted_comment
+    signature="$(jq -r '.signature // .minisign_signature // empty' "${manifest}" 2>/dev/null || true)"
+    expected_trusted_comment="$(jq -r '.trusted_comment // .minisign_trusted_comment // empty' "${manifest}" 2>/dev/null || true)"
+    if [[ -n "${MING_TEST_RESPONSE:-}" ]]; then
+        return 0
+    fi
+    if [[ ! -r "${OTA_RELEASE_PUBLIC_KEY}" ]]; then
+        log_error "系统 OTA 发布公钥缺失，拒绝在线更新。Papyrus 公钥不能用于系统 OTA。"
+        return 1
+    fi
+    if [[ -z "${signature}" ]]; then
+        log_error "更新清单缺少 Minisign signature，拒绝在线更新。"
+        return 1
+    fi
+    if ! command -v minisign >/dev/null 2>&1; then
+        log_error "缺少 minisign，无法验证系统 OTA 签名。"
+        return 1
+    fi
+    local tmp_manifest tmp_sig verified_json
+    tmp_manifest="$(mktemp)"
+    tmp_sig="$(mktemp)"
+    jq 'del(.signature, .minisign_signature, .trusted_comment, .minisign_trusted_comment)' \
+        "${manifest}" > "${tmp_manifest}" || { rm -f "${tmp_manifest}" "${tmp_sig}"; return 1; }
+    printf '%s\n' "${signature}" > "${tmp_sig}"
+    if ! minisign -V -q -p "${OTA_RELEASE_PUBLIC_KEY}" -m "${tmp_manifest}" -x "${tmp_sig}"; then
+        rm -f "${tmp_manifest}" "${tmp_sig}"
+        log_error "系统 OTA 签名验证失败。"
+        return 1
+    fi
+    rm -f "${tmp_manifest}" "${tmp_sig}"
+    if [[ -n "${expected_trusted_comment}" && "${expected_trusted_comment}" != *"Ming OS OTA"* ]]; then
+        log_error "系统 OTA 签名说明不匹配，拒绝复用非系统发布签名。"
+        return 1
+    fi
+    verified_json=true
 }
 
 check_network() {
@@ -589,6 +672,14 @@ check_update() {
     notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "暂无更新说明。"')
     update_type=$(printf '%s' "${response}" | jq -r '.update_type // "major"')
 
+    if [[ "${has_update}" == "true" ]] && ! validate_update_route "${version}" "${new_version}"; then
+        rm -f "${manifest}"
+        set_config '.last_check' "$(date -Iseconds)"
+        record_check_result false false "" "" ""
+        record_background_availability
+        return 1
+    fi
+
     if [[ "${has_update}" == "true" && "${ready}" != "true" ]]; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
@@ -609,6 +700,13 @@ check_update() {
     fi
 
     printf '%s\n' "${response}" > "${manifest}"
+    if ! verify_signed_ota_manifest "${manifest}"; then
+        rm -f "${manifest}"
+        set_config '.last_check' "$(date -Iseconds)"
+        record_check_result false false "" "" ""
+        record_background_availability
+        return 1
+    fi
     chmod 644 "${manifest}"
     set_config '.last_check' "$(date -Iseconds)"
     record_check_result true true "${new_version}" "${notes}" "${update_type}"
@@ -644,6 +742,7 @@ download_update() {
     expected_size=$(printf '%s' "${info}" | jq -r '.size // 0')
     iso_name=$(printf '%s' "${info}" | jq -r '.filename // .iso_name // empty')
     iso_name=${iso_name:-ming-os-${version}.iso}
+    validate_update_route "$(current_version)" "${version}" || return 1
     safe_iso_name="$(basename -- "${iso_name}")"
     if [[ "${iso_name}" != "${safe_iso_name}" || "${safe_iso_name}" == "." || "${safe_iso_name}" == ".." ]]; then
         log_error "ISO filename must be a basename"
@@ -748,6 +847,10 @@ install_update() {
         log_error "root staging validation did not produce a validated record"
         return 1
     fi
+    validate_update_route "$(current_version)" "${version}" || {
+        rm -f "${candidate_record}"
+        return 1
+    }
 
     mount_point="$(mktemp -d)"
     if ! mount -o loop,ro "${iso_path}" "${mount_point}"; then
@@ -813,6 +916,13 @@ GRUBMENU
         log_error "failed to regenerate GRUB after OTA staging"
         return 1
     fi
+    if ! configure_ota_next_boot "Ming OS ${version} OTA Installer"; then
+        install -m 0644 "${previous_cfg}" "${custom_cfg}"
+        command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 || true
+        rm -f "${previous_cfg}" "${STAGING_RECORD}"
+        log_error "failed to configure one-shot OTA boot entry"
+        return 1
+    fi
     rm -f "${previous_cfg}"
 
     update_state_fields "${sfile}" \
@@ -823,6 +933,28 @@ GRUBMENU
     chmod 644 "${sfile}"
     log_info "OTA 启动项已写入 ${custom_cfg}。"
     log_info "重启后请选择：Ming OS ${version} OTA Installer"
+}
+
+configure_ota_next_boot() {
+    local entry="$1" env_output
+    if [[ -z "${entry}" ]]; then
+        log_error "OTA 启动项名称为空。"
+        return 1
+    fi
+    if ! command -v grub-reboot >/dev/null 2>&1 || ! command -v grub-editenv >/dev/null 2>&1; then
+        log_error "缺少 grub-reboot 或 grub-editenv，无法设置一次性 OTA 启动。"
+        return 1
+    fi
+    if ! grub-reboot "${entry}"; then
+        log_error "grub-reboot 无法设置 OTA 启动项：${entry}"
+        return 1
+    fi
+    env_output="$(grub-editenv list 2>/dev/null || true)"
+    if ! grep -Fqx "next_entry=${entry}" <<< "${env_output}"; then
+        log_error "GRUB next_entry 回读失败，拒绝自动重启进入 OTA。"
+        return 1
+    fi
+    log_info "已设置下一次启动进入：${entry}"
 }
 
 manifest_apply_identity() {
@@ -1448,17 +1580,30 @@ major_install_with_home_backup() {
     install_update
 }
 
+schedule_update_restart() {
+    log_info "更新已完成，正在请求系统自动重启。"
+    sync
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl reboot --no-wall --message="Ming OS 更新已完成，正在自动重启。" && return 0
+    fi
+    reboot 2>/dev/null
+}
+
 apply_update() {
     # The UI calls one privileged action after a successful check.  When it
     # supplies a manifest path+fingerprint, root rechecks the server and then
     # applies that exact displayed manifest (or refuses if it has changed).
     init_config
-    local manifest update_type available ready already_checked=false
+    local manifest update_type available ready target_version already_checked=false restart_after_stage=false
     local selected_manifest="" selected_sha256=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --checked)
                 already_checked=true
+                shift
+                ;;
+            --restart-after-stage)
+                restart_after_stage=true
                 shift
                 ;;
             --manifest)
@@ -1515,15 +1660,21 @@ apply_update() {
     available="$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null || true)"
     ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
     update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    target_version="$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || true)"
     if [[ "${available}" != "true" || "${ready}" != "true" ]]; then
         log_error "更新尚未准备完成，请稍后再次检查。"
         return 1
     fi
+    validate_update_route "$(current_version)" "${target_version}" || return 1
 
     case "${update_type}" in
         patch|minor)
             if apply_manifest_apt_update "${manifest}"; then
                 clear_applied_update_cache "${selected_manifest}"
+                if [[ "${restart_after_stage}" == "true" ]] && ! schedule_update_restart; then
+                    log_error "更新已完成，但自动重启未成功。请手动重启系统。"
+                    return 2
+                fi
                 return 0
             fi
             return 1
@@ -1531,6 +1682,10 @@ apply_update() {
         major)
             if download_update && major_install_with_home_backup; then
                 clear_applied_update_cache "${selected_manifest}"
+                if [[ "${restart_after_stage}" == "true" ]] && ! schedule_update_restart; then
+                    log_error "更新已准备完成，但自动重启未成功。请手动重启系统。"
+                    return 2
+                fi
                 return 0
             fi
             return 1
@@ -1542,9 +1697,9 @@ apply_update() {
     esac
 }
 
-# 用途：夜间挂机维护，或"帮我更新完关机"按钮背后的实现。
+# 用途：夜间挂机维护，或“更新并重启”按钮背后的实现。
 auto_shutdown_update() {
-    log_step "Ming OS 自动更新并关机"
+    log_step "Ming OS 自动更新并重启"
     local notify_title="Ming OS 自动更新"
 
     _notify() {
@@ -1555,36 +1710,36 @@ auto_shutdown_update() {
 
     _notify "开始检查更新…"
     if ! MING_UPDATE_BACKGROUND_CHECK=1 check_update; then
-        _notify "检查更新失败，已取消自动关机。"
+        _notify "检查更新失败，已取消自动重启。"
         return 1
     fi
 
     local manifest; manifest="$(find_cached_manifest 2>/dev/null || true)"
     if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
-        _notify "当前已是最新版本，无需更新。不执行关机。"
+        _notify "当前已是最新版本，无需更新。不执行重启。"
         return 0
     fi
 
     local has_update
     has_update=$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null)
     if [[ "${has_update}" != "true" ]]; then
-        _notify "当前已是最新版本，无需更新。不执行关机。"
+        _notify "当前已是最新版本，无需更新。不执行重启。"
         return 0
     fi
 
     local new_version
     new_version=$(jq -r '.version // "unknown"' "${manifest}" 2>/dev/null)
     _notify "发现新版本 ${new_version}，开始自动更新…"
-    if ! apply_update --checked; then
-        _notify "更新未能完成，已取消自动关机。"
+    if ! apply_update --checked --restart-after-stage; then
+        _notify "更新未能完成，已取消自动重启。"
         return 1
     fi
 
-    _notify "更新准备完毕！系统将在 60 秒后关机，重启后自动应用新版本。"
-    log_info "Scheduling shutdown in 60 seconds..."
-    # 60 秒倒计时让用户有机会中断（运行 sudo shutdown -c 可取消）
-    sudo shutdown -h +1 "Ming OS 更新完成，系统将在 1 分钟内关机。" 2>/dev/null \
-        || systemctl poweroff --no-wall 2>/dev/null || poweroff 2>/dev/null || true
+    _notify "更新已准备完成，系统正在自动重启。"
+}
+
+auto_restart_update() {
+    auto_shutdown_update "$@"
 }
 
 case "${1:-help}" in
@@ -1596,7 +1751,9 @@ case "${1:-help}" in
     patch) patch_update ;;
     download) download_update ;;
     install) major_install_with_home_backup ;;
-    auto-shutdown) auto_shutdown_update ;;
+    auto-restart) auto_restart_update ;;
+    # Backward-compatible command name.  Major OTA must reboot to continue.
+    auto-shutdown) auto_restart_update ;;
     status) show_status "${2:-}" ;;
     doctor) ota_doctor ;;
     config) configure_update ;;
@@ -1622,7 +1779,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment=MING_UPDATE_BACKGROUND_CHECK=1
-ExecStart=/usr/local/bin/ming-update check
+ExecStart=/usr/local/bin/ming-ota-run check
 StandardOutput=journal
 StandardError=journal
 SYSTEMDSERVICE
@@ -1674,7 +1831,7 @@ exec >> "${LOG}" 2>&1
 echo "[$(date '+%F %T')] Boot update check started"
 
 # 网络不通就退出，不阻塞；这个标记只由自动检查写入，供电源菜单判定。
-MING_UPDATE_BACKGROUND_CHECK=1 /usr/local/bin/ming-update check >/tmp/ming-update-check.log 2>&1
+MING_UPDATE_BACKGROUND_CHECK=1 /usr/local/bin/ming-ota-run check >/tmp/ming-update-check.log 2>&1
 rc=$?
 echo "[$(date '+%F %T')] ming-update check rc=${rc}"
 
@@ -1798,7 +1955,7 @@ run_with_progress() {
 }
 
 check_update_gui() {
-    if ! run_with_progress "检查更新" "正在检查 Ming OS 更新..." "${CHECK_LOG}" /usr/local/bin/ming-update check; then
+    if ! run_with_progress "检查更新" "正在检查 Ming OS 更新..." "${CHECK_LOG}" /usr/local/bin/ming-ota-run check; then
         show_error "检查更新失败" "无法完成更新检查。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
         return 1
     fi
@@ -1825,7 +1982,7 @@ check_update_gui() {
 }
 
 download_update_gui() {
-    if ! run_with_progress "下载更新" "正在下载并校验更新包..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-update download; then
+    if ! run_with_progress "下载更新" "正在下载并校验更新包..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-ota-run download; then
         show_error "下载失败" "更新没有下载完成。\n\n日志：\n$(log_tail "${DOWNLOAD_LOG}")"
         return 1
     fi

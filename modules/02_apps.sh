@@ -640,170 +640,68 @@ MINGFONTS
     fc-cache -f -v || return 1
 }
 
-# ======================== Microsoft Edge ========================
+# ======================== Firefox ESR ========================
 
-install_edge() {
+install_firefox_esr() {
     apt install -y --no-install-recommends \
-        apt-transport-https \
+        firefox-esr \
         ca-certificates \
-        curl \
-        gnupg \
-        xdg-utils
+        xdg-utils \
+        desktop-file-utils || return 1
 
-    install -d -m 0755 /usr/share/keyrings
-    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-        | gpg --dearmor -o /usr/share/keyrings/microsoft-edge.gpg.tmp
-    mv -f /usr/share/keyrings/microsoft-edge.gpg.tmp /usr/share/keyrings/microsoft-edge.gpg
-    chmod 0644 /usr/share/keyrings/microsoft-edge.gpg
-
-    cat > /etc/apt/sources.list.d/microsoft-edge.list << 'EDGEREPO'
-deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main
-EDGEREPO
-    apt update
-    apt install -y --no-install-recommends microsoft-edge-stable
-
-    cat > /usr/local/bin/ming-edge << 'MINGEDGE'
+    cat > /usr/local/bin/ming-firefox << 'MINGFIREFOX'
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 homepage=/usr/share/ming-os/homepage/index.html
-edge_args=()
-edge_graphics_mode=software
-
-edge_gpu_mode() {
-    local probe_cache probe_tmp probe_json
-    if [[ ! -e /dev/dri/renderD128 ]] \
-        || (command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet) \
-        || grep -Eq '(^|[[:space:]])nomodeset([[:space:]]|$)|(i915|amdgpu|radeon|nouveau)\.modeset=0' /proc/cmdline 2>/dev/null; then
-        printf '%s\n' software
-        return
-    fi
-    command -v ming-hardware-status >/dev/null 2>&1 || { printf '%s\n' software; return; }
-    probe_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/edge-hardware.json"
-    mkdir -p "$(dirname "${probe_cache}")"
-    if [[ ! -s "${probe_cache}" ]] || ! find "${probe_cache}" -mmin -5 -print -quit 2>/dev/null | grep -q .; then
-        probe_tmp="${probe_cache}.tmp.$$"
-        if timeout 4 ming-hardware-status status --json > "${probe_tmp}" 2>/dev/null; then
-            mv -f "${probe_tmp}" "${probe_cache}"
-        else
-            rm -f "${probe_tmp}"
-        fi
-    fi
-    probe_json="$(cat "${probe_cache}" 2>/dev/null || true)"
-    if ! grep -Fq '"desktop_rendering": true' <<< "${probe_json}" \
-        || ! grep -Fq '"render_access": true' <<< "${probe_json}"; then
-        printf '%s\n' software
-    elif grep -Fq '"edge_hardware_video": true' <<< "${probe_json}"; then
-        printf '%s\n' video
-    else
-        # The compositor can still use the native GPU when VA-API has no
-        # matching codec.  Do not turn a healthy Radeon/Zhaoxin desktop into
-        # llvmpipe merely because browser video decode is unavailable.
-        printf '%s\n' desktop
-    fi
-}
-
-edge_graphics_mode="$(edge_gpu_mode)"
-if [[ "${edge_graphics_mode}" == software ]]; then
-    # VirtualBox, no render node, safe-graphics mode, or failed VA-API all
-    # use a deterministic software path to avoid black borders and hangs.
-    edge_args+=(--ozone-platform=x11 --disable-gpu --disable-gpu-compositing)
-elif [[ "${edge_graphics_mode}" == video ]]; then
-    # Only enable Chromium's VA-API path after ming-hardware-status has
-    # confirmed a real KMS/Mesa path, render access and at least one supported
-    # browser codec on a non-virtual host.
-    edge_args+=(
-        --enable-accelerated-video-decode
-        --enable-features=VaapiVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo
-        --use-gl=egl
-    )
-else
-    edge_args+=(--ozone-platform=x11 --disable-accelerated-video-decode)
-fi
-# Keep browser playback independent from a stale PulseAudio user session.  This
-# is intentionally bounded and only repairs a missing/broken default output;
-# ming-audio-session preserves a valid user-selected HDMI, Bluetooth or USB
-# sink rather than overriding it with an internal device.
-if command -v ming-audio-session >/dev/null 2>&1; then
-    audio_log="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/audio-session.log"
-    mkdir -p "$(dirname "${audio_log}")" 2>/dev/null || true
-    (timeout 3 ming-audio-session ensure --json >>"${audio_log}" 2>&1 &) || true
-fi
+firefox_args=(--new-instance)
 if [[ "$#" -eq 0 ]] && [[ -r "${homepage}" ]]; then
     set -- "file://${homepage}"
 fi
-if command -v microsoft-edge-stable >/dev/null 2>&1; then
-    exec microsoft-edge-stable "${edge_args[@]}" "$@"
-elif command -v microsoft-edge >/dev/null 2>&1; then
-    exec microsoft-edge "${edge_args[@]}" "$@"
-elif command -v xdg-open >/dev/null 2>&1 && [[ "$#" -gt 0 ]]; then
-    exec xdg-open "$1"
+if command -v ming-audio-session >/dev/null 2>&1; then
+    (timeout 3 ming-audio-session ensure --json >/dev/null 2>&1 &) || true
+fi
+if command -v firefox-esr >/dev/null 2>&1; then
+    exec firefox-esr "${firefox_args[@]}" "$@"
+elif command -v firefox >/dev/null 2>&1; then
+    exec firefox "${firefox_args[@]}" "$@"
 else
-    echo "Microsoft Edge is not installed." >&2
+    echo "Firefox ESR is not installed." >&2
     exit 127
 fi
-MINGEDGE
-    chmod 0755 /usr/local/bin/ming-edge
+MINGFIREFOX
+    chmod 0755 /usr/local/bin/ming-firefox
 
-    cat > /usr/share/applications/ming-edge.desktop << 'MINGEDGEDESKTOP'
+    cat > /usr/share/applications/ming-firefox.desktop << 'MINGFIREFOXDESKTOP'
 [Desktop Entry]
 Type=Application
-Name=Microsoft Edge
-Name[zh_CN]=Microsoft Edge Browser
-Comment=Browse the web with Microsoft Edge
-Exec=/usr/local/bin/ming-edge %U
-Icon=microsoft-edge
+Name=Firefox ESR
+Name[zh_CN]=Firefox ESR 浏览器
+Comment=Browse the web with Firefox ESR
+Exec=/usr/local/bin/ming-firefox %U
+Icon=firefox-esr
 Terminal=false
 Categories=Network;WebBrowser;
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 StartupNotify=true
-StartupWMClass=microsoft-edge
-MINGEDGEDESKTOP
+StartupWMClass=Firefox-esr
+MINGFIREFOXDESKTOP
 
     mkdir -p "/home/${MING_USER}/.config"
     cat > "/home/${MING_USER}/.config/mimeapps.list" << 'MIMECFG'
 [Default Applications]
-text/html=ming-edge.desktop
-text/xml=ming-edge.desktop
-application/xhtml+xml=ming-edge.desktop
-x-scheme-handler/http=ming-edge.desktop
-x-scheme-handler/https=ming-edge.desktop
+text/html=ming-firefox.desktop
+text/xml=ming-firefox.desktop
+application/xhtml+xml=ming-firefox.desktop
+x-scheme-handler/http=ming-firefox.desktop
+x-scheme-handler/https=ming-firefox.desktop
 MIMECFG
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/mimeapps.list"
-    sudo -u "${MING_USER}" xdg-settings set default-web-browser ming-edge.desktop 2>/dev/null || true
-    update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200 2>/dev/null || true
-    update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200 2>/dev/null || true
+    sudo -u "${MING_USER}" xdg-settings set default-web-browser ming-firefox.desktop 2>/dev/null || true
+    update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox-esr 200 2>/dev/null || true
+    update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox-esr 200 2>/dev/null || true
 
-    configure_edge_policies
+    configure_firefox_policies
     deploy_browser_homepage
-}
-
-configure_edge_policies() {
-    local pol_dirs=(
-        "/etc/opt/edge/policies/managed"
-        "/etc/chromium/policies/managed"
-    )
-    for d in "${pol_dirs[@]}"; do
-        mkdir -p "${d}"
-        cat > "${d}/ming-os.json" << 'EDGEPOLICY'
-{
-  "ExtensionSettings": {
-    "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
-      "installation_mode": "force_installed",
-      "update_url": "https://clients2.google.com/service/update2/crx"
-    }
-  },
-  "HomepageLocation": "file:///usr/share/ming-os/homepage/index.html",
-  "RestoreOnStartup": 4,
-  "RestoreOnStartupURLs": ["file:///usr/share/ming-os/homepage/index.html"],
-  "ShowHomeButton": true,
-  "DefaultBrowserSettingEnabled": false,
-  "MetricsReportingEnabled": false,
-  "PromotionalTabsEnabled": false,
-  "HideFirstRunExperience": true
-}
-EDGEPOLICY
-    done
-    echo "[02_apps] Edge policies deployed."
 }
 
 # ---- Firefox 适老化：policies.json（预装 uBlock Origin、屏蔽复杂菜单、锁定主页） ----
@@ -1233,10 +1131,10 @@ WECHATWRAP
 #!/usr/bin/env bash
 set -e
 url="https://wx.qq.com/"
-if command -v ming-edge >/dev/null 2>&1; then
-    exec ming-edge --new-window "${url}"
-elif command -v microsoft-edge-stable >/dev/null 2>&1; then
-    exec microsoft-edge-stable --new-window "${url}"
+if command -v ming-firefox >/dev/null 2>&1; then
+    exec ming-firefox --new-window "${url}"
+elif command -v firefox-esr >/dev/null 2>&1; then
+    exec firefox-esr --new-window "${url}"
 elif command -v xdg-open >/dev/null 2>&1; then
     exec xdg-open "${url}"
 else
@@ -1813,6 +1711,231 @@ case "${1:-}" in
 esac
 MINGINPUTCONTROL
     chmod 0755 /usr/local/sbin/ming-input-control
+
+    cat > /usr/local/sbin/ming-input-repair << 'MINGINPUTREPAIR'
+#!/usr/bin/env bash
+set -u
+
+TARGET_USER=""
+JSON=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user)
+            TARGET_USER="${2:-}"
+            shift 2
+            ;;
+        --json)
+            JSON=true
+            shift
+            ;;
+        *)
+            printf 'usage: ming-input-repair [--user USER] [--json]\n' >&2
+            exit 2
+            ;;
+    esac
+done
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
+
+emit_result() {
+    local user="$1" repaired="$2" detail="$3"
+    if [[ "${JSON}" == true ]]; then
+        printf '{"user":"%s","repaired":%s,"detail":"%s"}\n' \
+            "$(json_escape "${user}")" "${repaired}" "$(json_escape "${detail}")"
+    else
+        printf '%s: %s\n' "${user}" "${detail}"
+    fi
+}
+
+backup_file() {
+    local path="$1"
+    # ~/.xinputrc becomes ~/.xinputrc.ming-legacy-backup.
+    if [[ -e "${path}" && ! -e "${path}.ming-legacy-backup" ]]; then
+        cp -a "${path}" "${path}.ming-legacy-backup" || return 1
+    fi
+}
+
+write_xinputrc() {
+    local home="$1"
+    cat > "${home}/.xinputrc" << 'MINGREPAIREDXINPUT'
+# Ming OS Fcitx5 environment. The daemon is started by ~/.config/autostart/fcitx5.desktop.
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS=@im=fcitx
+export SDL_IM_MODULE=fcitx
+export GLFW_IM_MODULE=fcitx
+MINGREPAIREDXINPUT
+}
+
+write_autostart() {
+    local home="$1"
+    mkdir -p "${home}/.config/autostart"
+    cat > "${home}/.config/autostart/fcitx5.desktop" << 'MINGREPAIREDAUTO'
+[Desktop Entry]
+Type=Application
+Name=Fcitx5
+Exec=sh -c 'sleep 2; fcitx5 -d --replace'
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+MINGREPAIREDAUTO
+}
+
+write_profile() {
+    local home="$1"
+    mkdir -p "${home}/.config/fcitx5/conf"
+    cat > "${home}/.config/fcitx5/profile" << 'MINGREPAIREDPROFILE'
+[Groups/0]
+Name=Default
+Default Layout=us
+DefaultIM=pinyin
+
+[Groups/0/Items/0]
+Name=keyboard-us
+Layout=
+
+[Groups/0/Items/1]
+Name=pinyin
+Layout=
+
+[Groups/0/Items/2]
+Name=rime
+Layout=
+MINGREPAIREDPROFILE
+    cat > "${home}/.config/fcitx5/conf/classicui.conf" << 'MINGREPAIREDUI'
+Theme=Ming-Candidate
+Font=Noto Sans CJK SC 15
+MenuFont=Noto Sans CJK SC 16
+Vertical Candidate List=True
+MINGREPAIREDUI
+    cat > "${home}/.config/fcitx5/config" << 'MINGREPAIREDCONFIG'
+DefaultPageSize=7
+MINGREPAIREDCONFIG
+}
+
+repair_one() {
+    local user="$1" home uid gid changed=false
+    home="$(getent passwd "${user}" 2>/dev/null | cut -d: -f6)"
+    uid="$(id -u "${user}" 2>/dev/null || true)"
+    gid="$(id -g "${user}" 2>/dev/null || true)"
+    [[ -n "${home}" ]] || home="/home/${user}"
+    if [[ ! -d "${home}" || -z "${uid}" || -z "${gid}" ]]; then
+        emit_result "${user}" false "home missing"
+        return 0
+    fi
+    if [[ -f "${home}/.xinputrc" ]] && { grep -Fq 'run_im fcitx5' "${home}/.xinputrc" || grep -Fq 'fcitx5 -d --replace' "${home}/.xinputrc" || ! grep -Fq 'export XMODIFIERS=@im=fcitx' "${home}/.xinputrc"; }; then
+        backup_file "${home}/.xinputrc" || { emit_result "${user}" false "backup failed"; return 1; }
+        changed=true
+    fi
+    write_xinputrc "${home}" || { emit_result "${user}" false "xinputrc failed"; return 1; }
+    write_autostart "${home}" || { emit_result "${user}" false "autostart failed"; return 1; }
+    write_profile "${home}" || { emit_result "${user}" false "profile failed"; return 1; }
+    chown -R "${uid}:${gid}" "${home}/.xinputrc" "${home}/.config/autostart" "${home}/.config/fcitx5" 2>/dev/null || true
+    emit_result "${user}" true "repaired"
+}
+
+if [[ -n "${TARGET_USER}" ]]; then
+    repair_one "${TARGET_USER}"
+else
+    for home in /home/*; do
+        [[ -d "${home}" ]] || continue
+        user="$(basename "${home}")"
+        id -u "${user}" >/dev/null 2>&1 || continue
+        repair_one "${user}"
+    done
+fi
+MINGINPUTREPAIR
+    chmod 0755 /usr/local/sbin/ming-input-repair
+}
+
+# ======================== Papyrus 写作工作台 ========================
+
+install_papyrus() {
+    local vendor_dir="/tmp/ming-build/assets/vendor/papyrus"
+    local integration="${vendor_dir}/Papyrus-Debian13-Integration_1.1.0.tar.gz"
+    local deb="${vendor_dir}/Papyrus_1.1.0_amd64.deb"
+    local sums="${vendor_dir}/SHA256SUMS"
+    local integration_sha256="c03ea2fed4fb81f54465623a4753ecfdea76343b0bb964abbfd9ab836ad47fe9"
+    local deb_sha256="e6e8a2ae7f023d0f8bfc9d1da2c3d6b279ea0982e74b3f77d4ddb1027b573972"
+    local workdir control_package control_version control_arch
+
+    for asset in "${integration}" "${deb}" "${sums}"; do
+        if [[ ! -s "${asset}" ]]; then
+            echo "[ERROR] verified Papyrus build asset is missing: ${asset}" >&2
+            return 1
+        fi
+    done
+    if ! printf '%s  %s\n' "${integration_sha256}" "${integration}" | sha256sum -c -; then
+        echo "[ERROR] Papyrus Debian integration SHA256 verification failed" >&2
+        return 1
+    fi
+    if ! printf '%s  %s\n' "${deb_sha256}" "${deb}" | sha256sum -c -; then
+        echo "[ERROR] Papyrus Debian package SHA256 verification failed" >&2
+        return 1
+    fi
+    if ! grep -Fq "${deb_sha256}  Papyrus_1.1.0_amd64.deb" "${sums}"; then
+        echo "[ERROR] Papyrus SHA256SUMS does not include the approved Debian package" >&2
+        return 1
+    fi
+
+    control_package="$(dpkg-deb -f "${deb}" "Package" 2>/dev/null || true)"
+    control_version="$(dpkg-deb -f "${deb}" "Version" 2>/dev/null || true)"
+    control_arch="$(dpkg-deb -f "${deb}" "Architecture" 2>/dev/null || true)"
+    if [[ "${control_package}" != "papyrus" \
+        || "${control_version}" != "1.1.0" \
+        || "${control_arch}" != "amd64" ]]; then
+        echo "[ERROR] Papyrus Debian package metadata does not match the approved release" >&2
+        return 1
+    fi
+
+    apt install -y --no-install-recommends \
+        libwebkit2gtk-4.1-0 \
+        libgtk-3-0 \
+        xdg-utils \
+        desktop-file-utils || return 1
+
+    workdir="$(mktemp -d /tmp/papyrus-rootfs-install.XXXXXX)" || return 1
+    tar -xzf "${integration}" -C "${workdir}" || { rm -rf "${workdir}"; return 1; }
+    (
+        cd "${workdir}/os-integration/debian13" || exit 1
+        env PAPYRUS_ROOTFS= bash ./install-papyrus.sh "${deb}"
+    ) || { rm -rf "${workdir}"; return 1; }
+    rm -rf "${workdir}"
+
+    chown -R root:root /opt/papyrus || return 1
+    chmod -R a+rX /opt/papyrus || return 1
+    chmod 0755 /opt/papyrus /opt/papyrus/launch-papyrus || return 1
+
+    if [[ ! -x /opt/papyrus/launch-papyrus \
+        || ! -e /usr/bin/papyrus \
+        || ! -s /usr/share/applications/papyrus.desktop ]]; then
+        echo "[ERROR] Papyrus was not installed into the Debian rootfs" >&2
+        return 1
+    fi
+    if ! grep -Fq 'Exec=/usr/bin/papyrus' /usr/share/applications/papyrus.desktop \
+        || ! grep -Fq 'StartupWMClass=uno.scallion.papyrus' /usr/share/applications/papyrus.desktop; then
+        echo "[ERROR] Papyrus desktop entry is incomplete" >&2
+        return 1
+    fi
+    if [[ "$(readlink -f /usr/bin/papyrus 2>/dev/null || true)" != "/opt/papyrus/launch-papyrus" ]]; then
+        echo "[ERROR] Papyrus command does not resolve to the approved launcher" >&2
+        return 1
+    fi
+    if ! desktop-file-validate /usr/share/applications/papyrus.desktop; then
+        echo "[ERROR] Papyrus desktop entry failed validation" >&2
+        return 1
+    fi
+    if [[ ! -s /usr/share/icons/hicolor/128x128/apps/papyrus.png ]]; then
+        echo "[ERROR] Papyrus application icon is missing" >&2
+        return 1
+    fi
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    echo "[02_apps] Papyrus 1.1.0 has been preinstalled into the Debian rootfs."
 }
 
 # ======================== 应用商店 (星火应用商店) ========================
@@ -2179,9 +2302,10 @@ main() {
     run_required_step install_fcitx5 || return 1
     run_required_step deploy_eyecare || return 1
 
-    run_optional_step install_edge
+    run_required_step install_firefox_esr || return 1
     run_optional_step install_wps_office
     run_optional_step install_wechat
+    run_required_step install_papyrus || return 1
     run_required_step install_app_store || return 1
     run_optional_step install_utilities
 

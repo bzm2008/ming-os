@@ -58,9 +58,9 @@ class AppDrawerCoreTests(unittest.TestCase):
         geometry = self.drawer.drawer_geometry({"x": 10, "y": 20, "width": 1000, "height": 800})
         self.assertEqual(576.0, geometry.height)
         self.assertEqual(244.0, geometry.y)
-        self.assertEqual(200, self.drawer.ANIMATION_DURATION_MS)
-        self.assertGreaterEqual(self.drawer.ANIMATION_DURATION_MS, 180)
-        self.assertLessEqual(self.drawer.ANIMATION_DURATION_MS, 220)
+        self.assertEqual(160, self.drawer.ANIMATION_DURATION_MS)
+        self.assertGreaterEqual(self.drawer.ANIMATION_DURATION_MS, 140)
+        self.assertLessEqual(self.drawer.ANIMATION_DURATION_MS, 180)
 
     def test_reduced_motion_setting_disables_drawer_slide_animation(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -72,13 +72,51 @@ class AppDrawerCoreTests(unittest.TestCase):
             self.assertEqual(1.0, transition["start_opacity"])
 
     def test_drawer_animation_reverses_from_its_current_progress_without_stacking(self):
-        animation = self.drawer.DrawerAnimation(duration_ms=200)
+        animation = self.drawer.DrawerAnimation(duration_ms=160)
         animation.set_target(1.0, 0)
-        self.assertAlmostEqual(0.5, animation.advance(100))
-        animation.set_target(0.0, 100)
-        self.assertAlmostEqual(0.25, animation.advance(150))
-        self.assertAlmostEqual(0.0, animation.advance(200))
+        self.assertAlmostEqual(0.5, animation.advance(80))
+        animation.set_target(0.0, 80)
+        self.assertAlmostEqual(0.25, animation.advance(120))
+        self.assertAlmostEqual(0.0, animation.advance(160))
         self.assertFalse(animation.active)
+
+    def test_drawer_uses_a_short_reveal_and_low_frequency_opacity_transition(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        show = source[source.index("    def show(self):"):source.index("    def hide(self):")]
+        animate = source[source.index("    def _animate_to"):source.index("    def toggle(self):")]
+        self.assertIn("DRAWER_REVEAL_OFFSET = 32", source)
+        self.assertIn("geometry.y + DRAWER_REVEAL_OFFSET", show)
+        self.assertIn("self.window.set_opacity", animate)
+        self.assertIn("GLib.timeout_add(33, step)", animate)
+        self.assertNotIn("active_geometry.height * (1.0 - eased)", animate)
+
+    def test_drawer_uses_lighter_labels_and_a_fixed_spacing_rhythm(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        css = source[source.index("provider.load_from_data(b\"\"\""):source.index("        \"\"\")", source.index("provider.load_from_data(b\"\"\""))]
+        self.assertIn("padding: 16px;", css)
+        self.assertIn("padding: 8px 12px;", css)
+        self.assertIn("font-weight: 500;", css)
+        self.assertNotIn("font-weight: 700;", css)
+
+    def test_drawer_tile_reserves_a_stable_height_for_two_line_names_and_diagnostic(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        refresh = source[source.index("    def refresh(self):"):source.index("    def _activate_button", source.index("    def refresh(self):"))]
+        self.assertIn("button.set_size_request(116, 112)", refresh)
+        self.assertIn("image.set_pixel_size(40)", refresh)
+        self.assertIn("spacing=4", refresh)
+        self.assertIn("diagnostic.set_lines(1)", refresh)
+        self.assertIn("diagnostic.set_max_width_chars(11)", refresh)
+
+    def test_category_controls_wrap_on_narrow_workareas(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        window = source[source.index("    def _build_window"):
+                        source.index("    def _on_delete", source.index("    def _build_window"))]
+        self.assertIn("categories = Gtk.FlowBox()", window)
+        self.assertIn("categories.set_selection_mode(Gtk.SelectionMode.NONE)", window)
+        self.assertIn("categories.set_row_spacing(4)", window)
+        self.assertIn("categories.set_column_spacing(8)", window)
+        self.assertIn("categories.add(button)", window)
+        self.assertNotIn("categories = Gtk.Box(spacing=8)", window)
 
     def test_desktop_context_action_is_structured(self):
         app = FakeApp("Browser", path="/usr/share/applications/browser.desktop")
@@ -165,14 +203,14 @@ class LaunchBrokerCoreTests(unittest.TestCase):
     def setUpClass(cls):
         cls.launch = load_script("ming_launch", LAUNCH_PATH)
 
-    def test_process_starts_before_animation(self):
+    def test_process_starts_before_drawer_feedback(self):
         events = []
         broker = self.launch.LaunchBroker(
             spawn=lambda argv: events.append(("spawn", tuple(argv))) or object(),
-            animate=lambda request, origin: events.append(("animate", origin.to_dict())),
+            animate=lambda request, workarea: events.append(("animate", dict(workarea))),
             now=lambda: 1.0,
         )
-        request = self.launch.LaunchRequest(("browser",), source="desktop", rect={
+        request = self.launch.LaunchRequest(("browser",), source="drawer", rect={
             "x": 1, "y": 2, "width": 30, "height": 40,
         })
         self.assertTrue(broker.launch(request))
@@ -198,28 +236,30 @@ class LaunchBrokerCoreTests(unittest.TestCase):
         self.assertTrue(broker.launch(request))
         self.assertEqual(2, len(calls))
 
-    def test_origin_uses_source_rect_or_dock_bottom_center_fallback(self):
-        direct = self.launch.resolve_origin(
-            self.launch.LaunchRequest(("app",), source="drawer", rect={"x": 5, "y": 6, "width": 20, "height": 30}),
-            {"x": 0, "y": 0, "width": 1000, "height": 700},
+    def test_desktop_source_keeps_the_phone_desktop_as_the_only_feedback_owner(self):
+        events = []
+        broker = self.launch.LaunchBroker(
+            spawn=lambda _argv: events.append("spawn") or object(),
+            animate=lambda *_args: events.append("animate"),
+            now=lambda: 1.0,
+            reduced_motion=lambda: False,
         )
-        fallback = self.launch.resolve_origin(
-            self.launch.LaunchRequest(("app",), source="unknown"),
-            {"x": 0, "y": 0, "width": 1000, "height": 700},
-        )
-        self.assertEqual((15.0, 36.0), direct.bottom_center)
-        self.assertEqual((500.0, 700.0), fallback.bottom_center)
+        request = self.launch.LaunchRequest(("browser",), source="desktop", rect={
+            "x": 1, "y": 2, "width": 30, "height": 40,
+        })
 
-    def test_launch_feedback_geometry_expands_from_icon_toward_workarea(self):
-        origin = self.launch.COMMON.Rect(20, 30, 64, 64)
-        workarea = {"x": 0, "y": 0, "width": 1000, "height": 700}
-        start = self.launch.feedback_geometry(origin, workarea, 0.0)
-        finish = self.launch.feedback_geometry(origin, workarea, 1.0)
-        self.assertEqual(origin.bottom_center, start.bottom_center)
-        self.assertGreater(finish.width, start.width)
-        self.assertGreater(finish.height, start.height)
-        self.assertAlmostEqual(500.0, finish.x + finish.width / 2.0)
-        self.assertLess(finish.y + finish.height, 700)
+        self.assertTrue(broker.launch(request))
+        self.assertEqual(["spawn"], events)
+
+    def test_launch_feedback_is_a_fixed_short_fade_without_geometry_animation(self):
+        source = LAUNCH_PATH.read_text(encoding="utf-8")
+        animation = source[source.index("def animate_launch"):source.index("def schedule_launch")]
+        step = animation[animation.index("    def step():"):]
+        self.assertIn("ANIMATION_DURATION_MS = 160", source)
+        self.assertIn("GLib.timeout_add(33, step)", animation)
+        self.assertNotIn("feedback_geometry", animation)
+        self.assertNotIn("window.move", step)
+        self.assertNotIn("window.resize", step)
 
     def test_reduced_motion_disables_animation_but_not_process(self):
         events = []

@@ -57,7 +57,7 @@ class ReleaseGateContracts(unittest.TestCase):
             "ming-update": "Zenity",
             "ming-settings": "uno.scallion.MingSettings",
             "ming-files": "org.mingos.Files",
-            "ming-edge": "microsoft-edge",
+            "ming-firefox": "Firefox-esr",
         }
         for launcher, wm_class in expected_fallbacks.items():
             self.assertIn(
@@ -78,6 +78,9 @@ class ReleaseGateContracts(unittest.TestCase):
         launcher_block = finalizer.split("readonly DESKTOP_LAUNCHERS=(", 1)[1].split(")", 1)[0]
         self.assertNotIn("ming-app-library.desktop", launcher_block)
         self.assertNotIn("ming-disk-hub.desktop", launcher_block)
+        self.assertNotIn("ming-edge.desktop", launcher_block)
+        self.assertNotIn("garlic-claw.desktop", launcher_block)
+        self.assertIn("papyrus.desktop", launcher_block)
 
     def test_control_center_executes_ming_settings(self):
         self.assertIn("exec /usr/local/bin/ming-settings", self.desktop)
@@ -93,6 +96,15 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.phone)
 
+    def test_live_installer_session_warns_that_live_data_is_temporary(self):
+        for marker in (
+            "Live 模式",
+            "尚未安装",
+            "不会保留任何数据",
+            "继续安装 Ming OS",
+        ):
+            self.assertIn(marker, self.desktop)
+
     def test_build_validates_new_release_surface(self):
         for marker in [
             "ming-app-drawer",
@@ -102,6 +114,16 @@ class ReleaseGateContracts(unittest.TestCase):
             "boot/grub/themes/ming/theme.txt",
         ]:
             self.assertIn(marker, self.build)
+
+    def test_build_identity_targets_2641(self):
+        self.assertIn('readonly MING_OS_VERSION="26.4.1"', self.build)
+        self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2641"', self.build)
+
+    def test_runtime_release_handoff_does_not_advertise_2632(self):
+        release_doc = self.desktop.split("deploy_release_readme() {", 1)[1].split("deploy_xfce_modern_style() {", 1)[0]
+        self.assertIn("26.4.1", release_doc)
+        self.assertNotIn("26.3.2", release_doc)
+        self.assertNotIn("MING_OS_2632", release_doc)
 
     def test_rootfs_recovery_gate_validates_generated_helpers_and_units(self):
         """A completed image must reject malformed recovery helpers before release."""
@@ -115,6 +137,34 @@ class ReleaseGateContracts(unittest.TestCase):
             "legacy Intel DDX",
         ]:
             self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_classifies_generated_helpers_by_interpreter(self):
+        """Shell helpers must not be sent through Python bytecode validation."""
+        for marker in [
+            "bash_generated_helpers = [",
+            '"usr/local/sbin/ming-oom-policy"',
+            '"usr/local/sbin/ming-timer-policy"',
+            '"usr/local/bin/ming-ota-run"',
+            "for relative_path in bash_generated_helpers:",
+            "python_generated_helpers = [",
+            "for relative_path in python_generated_helpers:",
+        ]:
+            self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_validates_slice_units_with_slice_schema(self):
+        """A systemd slice has a [Slice] section, not a service ExecStart."""
+        for marker in [
+            'if relative_path.endswith(".slice"):',
+            '"[Slice]" not in text',
+            "has no slice directive",
+        ]:
+            self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_matches_the_shipped_dock_theme_indicator_size(self):
+        self.assertIn(
+            'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
+            self.build,
+        )
 
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""

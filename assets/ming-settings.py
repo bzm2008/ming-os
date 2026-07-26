@@ -21,6 +21,8 @@ HOME = os.path.expanduser("~")
 SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
+ACCOUNT_PASSWORD_HELPER = "/usr/local/sbin/ming-account-password"
+MAX_ACCOUNT_PASSWORD_BYTES = 1024
 SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
     "/usr/local/lib/ming-os/ming-device-control.py",
@@ -139,6 +141,29 @@ def run_capture_stdin_async(cmd, input_text, timeout=20, on_done=None):
         if on_done:
             GLib.idle_add(on_done, *result)
     threading.Thread(target=worker, daemon=True).start()
+
+
+def validate_account_password(password):
+    """Keep account-password input structurally safe before it reaches Polkit."""
+    if not isinstance(password, str):
+        return False, "密码格式无效。"
+    try:
+        encoded = password.encode("utf-8")
+    except UnicodeEncodeError:
+        return False, "密码包含无法保存的字符。"
+    if not encoded:
+        return False, "密码不能为空。"
+    if len(encoded) > MAX_ACCOUNT_PASSWORD_BYTES:
+        return False, "密码过长。"
+    if any(character in password for character in ("\r", "\n", "\x00", ":")):
+        return False, "密码不能包含换行、冒号或空字符。"
+    return True, ""
+
+
+def account_password_command(user, clear=False):
+    command = ["pkexec", ACCOUNT_PASSWORD_HELPER, "--user", user]
+    command.append("--clear" if clear else "--password-stdin")
+    return command
 
 
 def run_task_async(task, on_done=None):
@@ -573,7 +598,7 @@ class MingSettings(Adw.ApplicationWindow):
             row = Gtk.ListBoxRow()
             row.add_css_class("ming-nav-row")
             hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            hb.set_margin_top(9); hb.set_margin_bottom(9)
+            hb.set_margin_top(8); hb.set_margin_bottom(8)
             hb.set_margin_start(12); hb.set_margin_end(12)
             img = Gtk.Image.new_from_icon_name(icon)
             lbl = Gtk.Label(label=title, xalign=0)
@@ -599,6 +624,13 @@ class MingSettings(Adw.ApplicationWindow):
         window.ming-settings-window {
             background: #F4F7F3;
             color: #1B2320;
+            font-family: "Noto Sans CJK SC", sans-serif;
+            font-weight: 400;
+        }
+
+        .ming-settings-window .title,
+        .ming-settings-window .heading {
+            font-weight: 600;
         }
 
         .ming-settings-sidebar {
@@ -618,13 +650,13 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window list.navigation-sidebar {
             background: transparent;
-            margin: 10px;
+            margin: 12px;
         }
 
         .ming-settings-window row.ming-nav-row {
             border-radius: 12px;
-            margin: 3px 0;
-            min-height: 46px;
+            margin: 4px 0;
+            min-height: 48px;
         }
 
         .ming-settings-window row.ming-nav-row:hover {
@@ -662,21 +694,20 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup {
-            margin-bottom: 6px;
+            margin-bottom: 8px;
         }
 
         .ming-settings-window preferencesgroup > box {
             background: alpha(#FFFFFF, 0.94);
             border-radius: 14px;
             border: 1px solid alpha(#2F8A7D, 0.06);
-            padding: 4px;
+            padding: 8px;
         }
 
         .ming-settings-window button {
             border-radius: 10px;
-            min-height: 38px;
-            padding-left: 15px;
-            padding-right: 15px;
+            min-height: 36px;
+            padding: 6px 12px;
         }
 
         .ming-settings-window button.suggested-action {
@@ -691,6 +722,8 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
             border-radius: 10px;
+            min-height: 36px;
+            padding: 6px 12px;
         }
 
         .ming-settings-window progressbar trough {
@@ -1047,22 +1080,23 @@ class MingSettings(Adw.ApplicationWindow):
             return
         if not p1:
             # 清空密码 = 保持免密
-            run(["pkexec", "passwd", "-d", USER])
-            self.toast("已设为免密登录。")
+            rc, _out, error = run(account_password_command(USER, clear=True))
+            self.toast("已设为免密登录。" if rc == 0 else "设置失败：%s" % (error or "权限被拒绝"))
             return
-        # 通过 pkexec chpasswd 设置
-        try:
-            proc = subprocess.run(
-                ["pkexec", "bash", "-c", "chpasswd"],
-                input="%s:%s\n" % (USER, p1), text=True,
-                capture_output=True, timeout=20)
-            if proc.returncode == 0:
+        valid, error = validate_account_password(p1)
+        if not valid:
+            self.toast(error)
+            return
+
+        def done(rc, _out, error):
+            if rc == 0:
                 self.toast("密码已更新。开机仍自动进入桌面。")
                 self.pw1.set_text(""); self.pw2.set_text("")
             else:
-                self.toast("设置失败：%s" % (proc.stderr or "权限被拒绝"))
-        except Exception as e:
-            self.toast("设置失败：%s" % e)
+                self.toast("设置失败：%s" % (error or "权限被拒绝"))
+
+        run_capture_stdin_async(
+            account_password_command(USER), p1, timeout=20, on_done=done)
 
     # ---- 2. 网络与蓝牙 ----
     def build_network(self):
@@ -1099,7 +1133,7 @@ class MingSettings(Adw.ApplicationWindow):
             "title": "正在检测无线网络", "detail": "正在读取硬件与驱动状态..."}
         wifi_grp = Adw.PreferencesGroup(
             title="无线网络 (WLAN)",
-            description="没有可用网络时会同时显示硬件、驱动、rfkill 与固件状态。")
+            description="没有可用网络时会同时显示硬件、驱动、rfkill 与固件状态；b43 私有固件不可内置时只显示兼容说明。")
         self.wifi_diagnostic_row = Adw.ActionRow(
             title=self.wifi_diagnostic["title"],
             subtitle=self.wifi_diagnostic["detail"])
@@ -1334,10 +1368,20 @@ class MingSettings(Adw.ApplicationWindow):
             self.wifi_diagnostic = snapshot or {
                 "state": "no_hardware", "present": False, "available": False,
                 "title": "无线网络检测失败", "detail": error or "未知错误"}
+            if self.wifi_diagnostic.get("firmware_policy") == "unredistributable_b43":
+                if self.wifi_diagnostic.get("state") == "firmware_external_required":
+                    pass
+                self.wifi_diagnostic["title"] = "Broadcom b43 需要兼容说明"
+                self.wifi_diagnostic["detail"] = (
+                    self.wifi_diagnostic.get("detail") or
+                    "检测到 b43 固件缺失；该固件不可内置到公开 ISO。")
+                self.wifi_scan_btn.set_label("查看兼容说明")
             self.wifi_diagnostic_row.set_title(self.wifi_diagnostic["title"])
             self.wifi_diagnostic_row.set_subtitle(self.wifi_diagnostic["detail"])
             self.wifi_switch.set_sensitive(self.wifi_diagnostic["present"])
-            self.wifi_scan_btn.set_sensitive(self.wifi_diagnostic["available"])
+            self.wifi_scan_btn.set_sensitive(
+                self.wifi_diagnostic["available"] or
+                self.wifi_diagnostic.get("action") in {"compatibility_help", "show_b43_help"})
             if self.wifi_list_state_row:
                 self.wifi_list_state_row.set_title(self.wifi_diagnostic["title"])
                 self.wifi_list_state_row.set_subtitle(self.wifi_diagnostic["detail"])
@@ -1697,9 +1741,9 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_action_button.set_sensitive(True)
         if action == "reboot":
             self.update_action_state = "reboot"
-            self.update_action_button.set_label("已安排重启")
+            self.update_action_button.set_label("正在自动重启")
             self.update_action_button.set_sensitive(False)
-            self.update_status.set_label("新版本 %s 已准备完成，将在下一次重启时继续安装。" % (version or ""))
+            self.update_status.set_label("新版本 %s 已准备完成，系统将自动重启并继续安装。" % (version or ""))
             return
         if available and ready and action == "apply":
             if not manifest_path or not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest_sha256):
@@ -1765,7 +1809,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_visible(True)
         self.update_bar.set_fraction(0.1)
         self.update_bar.set_text("正在更新…")
-        self.update_status.set_label("正在自动选择更新方式并执行…")
+        self.update_status.set_label("正在自动选择更新方式并执行；完成后会自动重启…")
 
         def line(message):
             if message:
@@ -1775,8 +1819,9 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_bar.set_fraction(1.0)
             if rc == 0:
                 self.update_bar.set_text("完成")
-                self.update_status.set_label("更新操作已完成，正在刷新状态…")
-                self.refresh_update_status()
+                self.update_action_state = "reboot"
+                self.update_action_button.set_label("正在自动重启")
+                self.update_status.set_label("更新操作已完成，系统正在自动重启…")
             else:
                 self.update_bar.set_text("失败")
                 self.update_status.set_label("更新未完成，请查看系统更新日志后重试。")
@@ -1786,6 +1831,7 @@ class MingSettings(Adw.ApplicationWindow):
             "pkexec", "ming-update", "apply",
             "--manifest", self.update_manifest_path,
             "--sha256", self.update_manifest_sha256,
+            "--restart-after-stage",
         ], on_line=line, on_done=done)
 
     # ---- 5. 显示与无障碍（真实 xrandr 模式 + 独立界面大小） ----
@@ -1970,8 +2016,8 @@ class MingSettings(Adw.ApplicationWindow):
         percent = min((100, 125, 150, 175, 200), key=lambda value: abs(value - int(percent)))
         size = int(round(11 * percent / 100.0))
         # 1) 系统字体
-        run(["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "Sans %d" % size])
-        run(["xfconf-query", "-c", "xfwm4", "-p", "/general/title_font", "-s", "Sans Bold %d" % size])
+        run(["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "Noto Sans CJK SC %d" % size])
+        run(["xfconf-query", "-c", "xfwm4", "-p", "/general/title_font", "-s", "Noto Sans CJK SC Medium %d" % size])
         # 2) 桌面图标随字体等比（xfdesktop icon-size），基准 11→48px
         icon_px = int(round(48 * size / 11.0))
         run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/desktop-icons/icon-size",
@@ -2016,7 +2062,7 @@ class MingSettings(Adw.ApplicationWindow):
             "窗口自动置顶延迟", "仅在跟随鼠标模式下生效，单位毫秒。",
             "window_raise_delay", 0, 2000, 100, 250))
         window_grp.add(self.backend_switch_row(
-            "减少动态效果", "使用短淡入替代抽屉和应用展开动画。",
+            "减少动态效果", "关闭抽屉、应用启动和小组件的动态过渡。",
             "reduced_motion", False))
         window_grp.add(self.backend_combo_row(
             "合成器模式", "自动模式优先；老显卡或虚拟机可选择软件模式。",
@@ -2475,7 +2521,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         broadcom_grp = Adw.PreferencesGroup(
             title="Broadcom 无线兼容",
-            description="默认使用内核开源驱动；仅在官方支持的设备没有无线接口时提供离线 STA 备选。")
+            description="默认使用内核开源驱动；b43 私有固件不可内置到公开 ISO，仅显示兼容说明；只在官方支持设备没有无线接口时提供离线 STA 备选。")
         box.append(broadcom_grp)
         self.broadcom_row = Adw.ActionRow(title="Broadcom 无线驱动")
         self.broadcom_button = Gtk.Button()
@@ -2508,9 +2554,16 @@ class MingSettings(Adw.ApplicationWindow):
                 self.pkexec_cmd("/usr/local/bin/ming-disk-health"), "磁盘健康检查"))
         surface = Gtk.Button(label="安装 Surface 支持")
         surface.connect("clicked", lambda _b: self.run_helper(self.pkexec_cmd("ming-surface-support"), "Surface 支持"))
+        input_repair = Gtk.Button(label="修复输入法")
+        input_repair.connect(
+            "clicked",
+            lambda _b: self.run_helper(
+                self.pkexec_cmd("ming-input-repair", "--user", USER, "--json"),
+                "输入法修复"))
         diag_grp.add(self.button_row("问题诊断包", "把安装器、网络、驱动和启动日志打包到桌面。", bundle))
         diag_grp.add(self.button_row("经典轻量模式", "关闭模糊和重动画，更适合机械硬盘与老 CPU。", classic))
         diag_grp.add(self.button_row("磁盘健康", "按需读取 SATA、SAS 和 NVMe 磁盘的 SMART 状态，不开启常驻监控。", disk_health))
+        diag_grp.add(self.button_row("修复输入法", "备份旧 .xinputrc，恢复 Fcitx5 拼音/Rime 配置并避免 im-config 冲突。", input_repair))
         diag_grp.add(self.button_row("Surface 支持", "仅 Surface 设备需要；会添加 linux-surface 第三方源。", surface))
 
         raw_grp = Adw.PreferencesGroup(
@@ -2778,10 +2831,7 @@ class MingSettings(Adw.ApplicationWindow):
             else:
                 self.restore_status.set_label("回滚失败：未找到出厂快照或权限不足。")
         # timeshift 选择最早的 O(nboot/factory) 快照名
-        run_async(["pkexec", "bash", "-c",
-                   "snap=$(timeshift --list | awk '/ming-factory|O /{print $3; exit}'); "
-                   "[ -n \"$snap\" ] && timeshift --restore --snapshot \"$snap\" --yes "
-                   "|| timeshift --restore --yes"],
+        run_async(["pkexec", "/usr/local/sbin/ming-timeshift-restore"],
                   on_line=line, on_done=done)
 
     # __PAGE_BUILDERS__

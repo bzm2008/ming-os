@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ming OS 26.3.0 Home Edition - 主构建脚本
+# Ming OS 26.4.1 Home Edition - 主构建脚本
 # ============================================================================
 # 设计意图：
 #   在 Debian 13 (Trixie) 宿主系统上，通过 debootstrap 构建一个完整的
@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
-readonly MING_OS_VERSION="26.3.2"
+readonly MING_OS_VERSION="26.4.1"
 readonly MING_OS_BUILD_SUFFIX=""
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
-readonly ISO_VOLUME_ID="MING_OS_2632"
+readonly ISO_VOLUME_ID="MING_OS_2641"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
@@ -277,7 +277,6 @@ run_modules() {
         "01_base.sh"
         "02_apps.sh"
         "03_desktop.sh"
-        "04_garlic_claw.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"
         "07_finalize.sh"
@@ -902,8 +901,9 @@ desktop_names = [
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-terminal.desktop",
-    "ming-edge.desktop",
+    "ming-firefox.desktop",
     "spark-store.desktop",
+    "papyrus.desktop",
 ]
 search_path = ":".join(str(root / item) for item in (
     "usr/local/bin", "usr/bin", "bin", "usr/local/sbin", "usr/sbin", "sbin"
@@ -937,13 +937,12 @@ for name in desktop_names:
     if not found:
         errors.append(f"unresolved Exec target in {name}: {command}")
 
-edge_backends = [
-    root / "usr/bin/microsoft-edge-stable",
-    root / "usr/bin/microsoft-edge",
-    root / "opt/microsoft/msedge/microsoft-edge",
+firefox_backends = [
+    root / "usr/bin/firefox-esr",
+    root / "usr/bin/firefox",
 ]
-if not any(path.is_file() and os.access(path, os.X_OK) for path in edge_backends):
-    errors.append("missing Microsoft Edge browser backend behind ming-edge wrapper")
+if not any(path.is_file() and os.access(path, os.X_OK) for path in firefox_backends):
+    errors.append("missing Firefox ESR browser backend behind ming-firefox wrapper")
 
 spark_backends = [
     root / "usr/bin/spark-store",
@@ -982,6 +981,7 @@ validate_r4_compatibility() {
 from pathlib import Path
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1042,6 +1042,12 @@ def validate_systemd_unit(relative_path):
     """Perform a small structural gate before systemd-analyze verifies the unit."""
     text = require_file(relative_path)
     if not text:
+        return
+    if relative_path.endswith(".slice"):
+        if "[Unit]" not in text or "[Slice]" not in text:
+            errors.append(f"{relative_path} is not a complete systemd slice unit")
+        if not re.search(r"^(CPUWeight|IOWeight|MemoryMax|TasksMax|StartupCPUWeight|StartupIOWeight)=.+$", text, flags=re.MULTILINE):
+            errors.append(f"{relative_path} has no slice directive")
         return
     if "[Timer]" in text:
         if "[Unit]" not in text or "[Timer]" not in text:
@@ -1123,23 +1129,26 @@ if "X-GNOME-Autostart-enabled=true" not in phone_autostart or "Hidden=false" not
     errors.append("phone desktop autostart must be enabled")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
+for marker in ["IconSize=38", "ZoomEnabled=true", "ZoomPercent=112", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
     errors.append("Plank settings must contain exactly one application drawer item")
 if "ming-disk-hub.dockitem" in plank_settings:
     errors.append("Plank settings must not include the retired All Disks item")
-if "ming-edge.dockitem" not in plank_settings:
-    errors.append("Plank settings must include ming-edge.dockitem as the default browser")
-if "firefox-esr.dockitem" in plank_settings or "firefox.dockitem" in plank_settings:
-    errors.append("Plank settings must not include Firefox dock items")
+if "ming-firefox.dockitem" not in plank_settings:
+    errors.append("Plank settings must include ming-firefox.dockitem as the default browser")
+if "papyrus.dockitem" not in plank_settings:
+    errors.append("Plank settings must include papyrus.dockitem as the default agent")
 for forbidden_dock in ["wechat.dockitem", "wps-office.dockitem"]:
     if forbidden_dock in plank_settings:
         errors.append(f"Plank settings must not include retired dock item {forbidden_dock}")
+for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split(";;"):
+    if "claw" in dock_item.casefold():
+        errors.append(f"Plank settings contains a retired agent item: {dock_item}")
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
-for marker in ["UrgentBounceTime=600", "LaunchBounceTime=520", "ItemMoveTime=260"]:
+for marker in ["UrgentBounceTime=420", "LaunchBounceTime=150", "ItemMoveTime=130"]:
     if marker not in plank_theme:
         errors.append(f"Plank theme missing animation marker {marker}")
 
@@ -1172,6 +1181,36 @@ else:
     spark_actual_sha256 = spark_hasher.hexdigest().upper()
     if spark_actual_sha256 != spark_expected_sha256:
         errors.append("verified Spark Store asset SHA256 mismatch")
+
+papyrus_launcher = require_file("opt/papyrus/launch-papyrus", "APP_ROOT=/opt/papyrus")
+papyrus_command = root / "usr/bin/papyrus"
+if not papyrus_command.is_symlink():
+    errors.append("Papyrus command must be a symlink to the normalized launcher")
+else:
+    link_target = os.readlink(papyrus_command)
+    target = (
+        root / link_target.lstrip("/")
+        if os.path.isabs(link_target)
+        else papyrus_command.parent / link_target
+    )
+    expected_target = root / "opt/papyrus/launch-papyrus"
+    if os.path.normpath(str(target)) != os.path.normpath(str(expected_target)):
+        errors.append(f"Papyrus command symlink points to unexpected target: {link_target}")
+papyrus_root = root / "opt/papyrus"
+if not papyrus_root.is_dir():
+    errors.append("missing Papyrus install directory: opt/papyrus")
+elif stat.S_IMODE(papyrus_root.stat().st_mode) & 0o055 != 0o055:
+    errors.append("Papyrus install directory is not readable by desktop users")
+papyrus_launcher_path = root / "opt/papyrus/launch-papyrus"
+if papyrus_launcher_path.is_file() and stat.S_IMODE(papyrus_launcher_path.stat().st_mode) & 0o055 != 0o055:
+    errors.append("Papyrus launcher is not executable by desktop users")
+papyrus_desktop = require_file("usr/share/applications/papyrus.desktop", "StartupWMClass=uno.scallion.papyrus")
+for marker in ["Exec=/usr/bin/papyrus", "Icon=papyrus", "StartupWMClass=uno.scallion.papyrus"]:
+    if marker not in papyrus_desktop:
+        errors.append(f"Papyrus desktop entry missing {marker}")
+papyrus_icon = root / "usr/share/icons/hicolor/128x128/apps/papyrus.png"
+if not papyrus_icon.is_file() or papyrus_icon.stat().st_size == 0:
+    errors.append("missing Papyrus app icon: usr/share/icons/hicolor/128x128/apps/papyrus.png")
 
 ota_backup = require_file("usr/local/sbin/ming-ota-backup", "--system-target")
 for marker in ["sha256", "readlink", "headroom", "verify_command"]:
@@ -1225,9 +1264,10 @@ for helper in [
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-window-control",
     "usr/local/bin/ming-window-manager-watchdog",
+    "usr/local/bin/ming-volume-automount",
     "usr/local/bin/ming-input-healthcheck",
     "usr/local/bin/ming-phone-desktop-watchdog",
-    "usr/local/bin/ming-edge",
+    "usr/local/bin/ming-firefox",
     "usr/local/bin/ming-spark-store",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
@@ -1323,7 +1363,7 @@ for marker in [
 ]:
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
-for relative_path in [
+bash_generated_helpers = [
     "usr/local/sbin/ming-time-sync",
     "etc/NetworkManager/dispatcher.d/90-ming-time-sync",
     "usr/local/sbin/ming-intel-xorg-setup",
@@ -1331,19 +1371,27 @@ for relative_path in [
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-window-manager-watchdog",
-]:
+    "usr/local/sbin/ming-oom-policy",
+    "usr/local/sbin/ming-timer-policy",
+    "usr/local/bin/ming-ota-run",
+]
+for relative_path in bash_generated_helpers:
     validate_generated_executable(relative_path, "bash")
-for relative_path in [
+
+python_generated_helpers = [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
     "usr/local/sbin/ming-performance-status",
-    "usr/local/sbin/ming-oom-policy",
-    "usr/local/sbin/ming-timer-policy",
+    "usr/local/sbin/ming-performance-policy",
+    "usr/local/sbin/ming-interaction-boost",
+    "usr/local/sbin/ming-background-policy",
+    "usr/local/bin/ming-prefetch",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
-]:
+]
+for relative_path in python_generated_helpers:
     validate_generated_executable(relative_path, "python")
 for relative_path in [
     "etc/systemd/system/ming-intel-xorg-migration.service",
@@ -1351,6 +1399,7 @@ for relative_path in [
     "etc/systemd/system/ming-hardware-preload.service",
     "etc/systemd/system/ming-oom-policy.service",
     "etc/systemd/system/ming-timer-policy.service",
+    "etc/systemd/system/ming-ota.slice",
 ]:
     validate_systemd_unit(relative_path)
 if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():
@@ -1423,7 +1472,7 @@ for retired_path in [
     "home/user/Desktop/wechat.desktop",
     "home/user/Desktop/wps-office.desktop",
 ]:
-    require_absent(retired_path, "WeChat and WPS are optional installs in Ming OS 26.3.2")
+    require_absent(retired_path, "WeChat and WPS are optional installs in Ming OS 26.4.1")
 
 for binary in [
     "usr/bin/wmctrl",
@@ -1442,11 +1491,10 @@ for binary in [
     require_path(binary)
 
 if not any(((root / candidate).is_file() or (root / candidate).is_symlink()) for candidate in [
-    "usr/bin/microsoft-edge-stable",
-    "usr/bin/microsoft-edge",
-    "opt/microsoft/msedge/microsoft-edge",
+    "usr/bin/firefox-esr",
+    "usr/bin/firefox",
 ]):
-    errors.append("missing Microsoft Edge browser binary")
+    errors.append("missing Firefox ESR browser binary")
 
 if not any((root / candidate).is_file() for candidate in [
     "usr/libexec/bluetooth/bluetoothd",
@@ -1455,15 +1503,14 @@ if not any((root / candidate).is_file() for candidate in [
 ]):
     errors.append("missing bluetoothd daemon")
 
-require_file("usr/share/applications/ming-edge.desktop", "Exec=/usr/local/bin/ming-edge")
-edge_wrapper = require_file("usr/local/bin/ming-edge", "homepage=/usr/share/ming-os/homepage/index.html")
-for marker in ["--ozone-platform=x11", "--disable-gpu"]:
-    if marker not in edge_wrapper:
-        errors.append(f"ming-edge missing VM graphics marker {marker}")
+require_file("usr/share/applications/ming-firefox.desktop", "Exec=/usr/local/bin/ming-firefox")
+firefox_wrapper = require_file("usr/local/bin/ming-firefox", "homepage=/usr/share/ming-os/homepage/index.html")
+if "firefox-esr" not in firefox_wrapper:
+    errors.append("ming-firefox wrapper does not launch Firefox ESR")
 require_file("usr/share/ming-os/homepage/index.html", "Ming OS")
-edge_policy = require_file("etc/opt/edge/policies/managed/ming-os.json", "HomepageLocation")
-if "RestoreOnStartupURLs" not in edge_policy:
-    errors.append("Edge policy must restore the Ming OS homepage")
+firefox_policy = require_file("etc/firefox-esr/policies/policies.json", "Homepage")
+if "file:///usr/share/ming-os/homepage/index.html" not in firefox_policy:
+    errors.append("Firefox policy must restore the Ming OS homepage")
 
 require_path("usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so")
 require_path("usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so")
@@ -1622,6 +1669,10 @@ input_control = require_file("usr/local/sbin/ming-input-control", "set-engine")
 for marker in ["RIME_SCHEMA", "rime_addon_available"]:
     if marker not in input_control:
         errors.append(f"ming-input-control missing {marker} readiness check")
+input_repair = require_file("usr/local/sbin/ming-input-repair", "DefaultIM=pinyin")
+for marker in ["--user", ".xinputrc.ming-legacy-backup", "run_im fcitx5"]:
+    if marker not in input_repair:
+        errors.append(f"ming-input-repair missing {marker} migration guard")
 
 bt_conf = require_file("etc/bluetooth/main.conf", "AutoEnable=true")
 if "ControllerMode = dual" not in bt_conf:
