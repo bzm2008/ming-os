@@ -586,6 +586,7 @@ class MingSettings(Adw.ApplicationWindow):
         # 注册分类页（图标, 标题, 构建函数）
         self.pages = [
             ("avatar-default-symbolic", "账户", self.build_account),
+            ("security-high-symbolic", "安全", self.build_security),
             ("network-wireless-symbolic", "网络与蓝牙", self.build_network),
             ("drive-harddisk-symbolic", "存储", self.build_storage),
             ("software-update-available-symbolic", "系统更新", self.build_update),
@@ -1104,6 +1105,98 @@ class MingSettings(Adw.ApplicationWindow):
             self.toast("账户密码状态已更新并确认。")
         else:
             self.toast("设置失败：%s" % (result.get("error") or error or "授权被取消"))
+
+    def build_security(self):
+        sc, box = self.page_scroller()
+        self.security_page = sc
+        self.loading_security_state = True
+        summary = Adw.PreferencesGroup(
+            title="安全状态", description="显示防火墙、远程终端和安全更新的实际状态。")
+        self.security_summary_row = Adw.ActionRow(
+            title="正在检查", subtitle="正在读取系统保护状态...")
+        summary.add(self.security_summary_row)
+        box.append(summary)
+
+        controls = Adw.PreferencesGroup(
+            title="保护设置", description="更改后会再次读取确认；失败会恢复原设置。")
+        self.firewall_switch = Adw.SwitchRow(title="防火墙", subtitle="阻止未经请求的外部连接")
+        self.ssh_switch = Adw.SwitchRow(
+            title="远程终端", subtitle="开启后仍只允许局域网通过防火墙访问")
+        self.security_updates_switch = Adw.SwitchRow(
+            title="自动安全更新", subtitle="自动安装 Debian 安全修复")
+        self.home_profile_switch = Adw.SwitchRow(
+            title="家庭网络模式", subtitle="允许局域网发现；关闭时使用公共网络规则")
+        for name, control in (
+                ("firewall", self.firewall_switch), ("ssh", self.ssh_switch),
+                ("security-updates", self.security_updates_switch),
+                ("profile", self.home_profile_switch)):
+            control.set_sensitive(False)
+            control.connect("notify::active", self.on_security_toggle, name)
+            controls.add(control)
+        box.append(controls)
+        GLib.idle_add(self.refresh_security_status)
+        return sc
+
+    def refresh_security_status(self):
+        def done(rc, output, error):
+            if self.security_page.get_root() is not self:
+                return False
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except ValueError:
+                status = {}
+            if not status.get("ok"):
+                self.security_summary_row.set_title("安全状态暂不可用")
+                self.security_summary_row.set_subtitle(error or "无法读取系统保护状态。")
+                return False
+            firewall = status.get("firewall") or {}
+            profile = status.get("profile") or {}
+            updates = status.get("security_updates") or {}
+            ssh = status.get("ssh") or {}
+            self.loading_security_state = True
+            self.firewall_switch.set_active(bool(firewall.get("configured")))
+            self.ssh_switch.set_active(bool(ssh.get("active") and ssh.get("firewall_allowed")))
+            self.security_updates_switch.set_active(bool(updates.get("configured")))
+            self.home_profile_switch.set_active(profile.get("configured") == "home")
+            self.loading_security_state = False
+            for control in (self.firewall_switch, self.ssh_switch,
+                            self.security_updates_switch, self.home_profile_switch):
+                control.set_sensitive(True)
+            self.security_summary_row.set_title("安全状态已更新")
+            self.security_summary_row.set_subtitle(
+                "防火墙%s · 远程终端%s · 安全更新%s" % (
+                    "已开启" if firewall.get("effective") else "未生效",
+                    "已开启" if ssh.get("active") else "已关闭",
+                    "已开启" if updates.get("effective") else "未生效"))
+            return False
+
+        run_capture_async(
+            ["/usr/local/sbin/ming-security-control", "status", "--json"],
+            timeout=10, on_done=done)
+
+    def on_security_toggle(self, control, _prop, name):
+        if self.loading_security_state:
+            return
+        value = ("home" if control.get_active() else "public") if name == "profile" else (
+            "on" if control.get_active() else "off")
+        for item in (self.firewall_switch, self.ssh_switch,
+                     self.security_updates_switch, self.home_profile_switch):
+            item.set_sensitive(False)
+
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except ValueError:
+                result = {}
+            if rc != 0 or not result.get("ok"):
+                self.toast("安全设置未能应用：%s" % (
+                    result.get("error") or error or "授权被取消"))
+            self.refresh_security_status()
+            return False
+
+        run_capture_async(
+            ["pkexec", "/usr/local/sbin/ming-security-control", name, value],
+            timeout=40, on_done=done)
 
     # ---- 2. 网络与蓝牙 ----
     def build_network(self):

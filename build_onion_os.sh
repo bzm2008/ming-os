@@ -1184,6 +1184,16 @@ for marker in [
     if marker not in settings:
         errors.append(f"ming-settings does not expose {marker}")
 
+security_control = require_file(
+    "usr/local/sbin/ming-security-control", "apply_firewall_atomic")
+for marker in ["status", "quick-check", "firewall", "profile", "ssh", "security-updates"]:
+    if marker not in security_control:
+        errors.append(f"ming-security-control missing interface marker {marker}")
+require_file(
+    "usr/share/polkit-1/actions/org.ming.security.control.policy",
+    "/usr/local/sbin/ming-security-control")
+validate_generated_executable("usr/local/sbin/ming-security-control", "python")
+
 settings_desktop = require_file("usr/share/applications/ming-settings.desktop", "Exec=/usr/local/bin/ming-control-center")
 if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
     errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
