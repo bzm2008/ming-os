@@ -5611,11 +5611,17 @@ setup_account_oobe() {
 set -uo pipefail
 
 MARKER="${HOME}/.config/ming-os/oobe-account-done"
-[[ -f "${MARKER}" ]] && exit 0
 
 # 仅在已安装系统的首次开机运行；Live/安装器会话中不弹出（那里只跑 Calamares）
 if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null \
    || [ -f /.disk/info ] || [ -d /lib/live/mount/medium ]; then
+    exit 0
+fi
+
+if [[ -f "${MARKER}" ]]; then
+    if [[ "$(head -n 1 "${MARKER}" 2>/dev/null || true)" == "skipped" ]]; then
+        pkexec /usr/local/sbin/ming-account-control migrate-skipped --user "$(id -un)" >/dev/null 2>&1 || exit 1
+    fi
     exit 0
 fi
 
@@ -5636,24 +5642,8 @@ repair_desktop_session() {
 
 # 始终先确保免密自动登录已就位（双保险，独立于用户选择）
 ensure_autologin() {
-    # 入 autologin / nopasswdlogin 组
-    pkexec /bin/bash -c "
-        for g in autologin nopasswdlogin; do
-            getent group \$g >/dev/null 2>&1 || groupadd -r \$g 2>/dev/null || true
-            usermod -aG \$g '${CUR_USER}' 2>/dev/null || true
-        done
-        mkdir -p /etc/lightdm/lightdm.conf.d
-        cat > /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf <<EOF
-[Seat:*]
-autologin-user=${CUR_USER}
-autologin-user-timeout=0
-autologin-session=xfce
-user-session=xfce
-greeter-session=lightdm-gtk-greeter
-allow-guest=false
-EOF
-        chmod 0644 /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf
-    " 2>/dev/null || true
+    # Groups and LightDM autologin are installed by the base module.
+    return 0
 }
 
 # 欢迎 + 选择：设置账户 / 跳过
@@ -5711,8 +5701,8 @@ if [[ -n "${PW1}" ]]; then
         dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
             --width=380 --button="好的:0" 2>/dev/null || true
     else
-        echo -e "${PW1}\n${PW1}" | pkexec passwd "${CUR_USER}" 2>/dev/null \
-            || pkexec /bin/bash -c "echo '${CUR_USER}:${PW1}' | chpasswd" 2>/dev/null || true
+        printf '%s\n' "${PW1}" | pkexec /usr/local/sbin/ming-account-control \
+            set-password --user "${CUR_USER}" >/dev/null 2>&1 || exit 1
     fi
 fi
 

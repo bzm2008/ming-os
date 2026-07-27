@@ -12,7 +12,7 @@ OUTPUT_DIR="$SCRIPT_DIR/output"
 ISO_FILENAME="onion-os-${ONION_OS_VERSION}-home-amd64.iso"
 ONION_USER="onion"
 ONION_USER_PASS="onion"
-ROOT_PASS="root"
+ROOT_PASS="${ROOT_PASS:-}"
 
 echo "=====> 继续 Onion OS 构建 <====="
 

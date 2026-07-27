@@ -780,12 +780,13 @@ KBCFG
 # ======================== 用户与权限 ========================
 
 configure_users() {
-    # 设置 root 密码
-    echo "root:${ROOT_PASS}" | chpasswd
+    # Never publish a factory password. Root is locked and the desktop user
+    # starts passwordless until the user explicitly configures one in OOBE.
+    passwd -l root
 
     # 创建默认用户 ming
     useradd -m -s /bin/bash -c "Ming OS User" "${MING_USER}"
-    echo "${MING_USER}:${MING_USER_PASS}" | chpasswd
+    passwd -d "${MING_USER}"
 
     # 创建必要的组（如果不存在）
     for grp in lpadmin plugdev nopasswdlogin autologin render; do
@@ -793,96 +794,37 @@ configure_users() {
     done
 
     # 将 ming 用户加入必要组（逐个添加，跳过不存在的组）
-    for grp in sudo adm cdrom dip plugdev lpadmin netdev audio video render input scanner bluetooth nopasswdlogin autologin; do
+    for grp in adm cdrom dip plugdev lpadmin netdev audio video render input scanner bluetooth nopasswdlogin autologin; do
         getent group "${grp}" >/dev/null 2>&1 && usermod -aG "${grp}" "${MING_USER}" || true
     done
+    gpasswd -d "${MING_USER}" sudo >/dev/null 2>&1 || true
 
     # Keep graphical auto-login separate from administrator authority.  A
     # passwordless sudo rule turns every desktop process into root, so desktop
     # maintenance actions cross a named Polkit boundary instead.
     rm -f /etc/sudoers.d/"${MING_USER}" /etc/sudoers.d/user
 
-    install -d -m 0755 /usr/local/lib/ming-os /usr/share/polkit-1/actions
-    cat > /usr/share/polkit-1/actions/org.ming-os.account-password.policy << 'ACCOUNT_PASSWORD_POLICY'
+    install -d -m 0755 /usr/local/sbin /usr/share/polkit-1/actions
+    install -m 0755 /tmp/ming-build/assets/ming-account-control.py /usr/local/sbin/ming-account-control
+    cat > /usr/share/polkit-1/actions/org.ming.account.control.policy << 'ACCOUNT_CONTROL_POLICY'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <action id="org.ming-os.account-password">
-    <description>Change the current Ming OS account password</description>
-    <message>Authentication is required to change the current account password.</message>
+  <action id="org.ming.account.control">
+    <description>Manage the current Ming OS account password</description>
+    <message>Authentication is required to manage the current account password.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-account-password</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-account-control</annotate>
   </action>
 </policyconfig>
-ACCOUNT_PASSWORD_POLICY
+ACCOUNT_CONTROL_POLICY
 
-    cat > /usr/local/sbin/ming-account-password << 'ACCOUNT_PASSWORD_HELPER'
-#!/usr/bin/env python3
-"""Set or clear the invoking desktop user's password through Polkit."""
-
-import argparse
-import os
-import pwd
-import subprocess
-import sys
-
-
-MAX_PASSWORD_BYTES = 1024
-
-
-def fail(message):
-    print(message, file=sys.stderr)
-    raise SystemExit(2)
-
-
-def invoking_user(name):
-    if os.geteuid() != 0:
-        fail("ming-account-password requires Polkit authorization")
-    try:
-        caller_uid = int(os.environ["PKEXEC_UID"])
-        account = pwd.getpwnam(name)
-    except (KeyError, ValueError):
-        fail("invalid invoking account")
-    if caller_uid < 1000 or account.pw_uid != caller_uid or account.pw_uid == 0:
-        fail("the helper can only change the invoking regular account")
-    return account
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="ming-account-password")
-    parser.add_argument("--user", required=True)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--password-stdin", action="store_true")
-    mode.add_argument("--clear", action="store_true")
-    args = parser.parse_args(argv)
-    account = invoking_user(args.user)
-
-    if args.clear:
-        subprocess.run(["/usr/bin/passwd", "-d", account.pw_name], check=True)
-        return 0
-
-    password = sys.stdin.buffer.read(MAX_PASSWORD_BYTES + 1)
-    if (not password or len(password) > MAX_PASSWORD_BYTES or b"\x00" in password
-            or b"\r" in password or b"\n" in password or b":" in password):
-        fail("password input contains forbidden characters or is too long")
-    subprocess.run(
-        ["/usr/sbin/chpasswd"],
-        input=account.pw_name.encode("utf-8") + b":" + password + b"\n",
-        check=True,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-ACCOUNT_PASSWORD_HELPER
-    chmod 0755 /usr/local/sbin/ming-account-password
 
     cat > /usr/local/sbin/ming-timeshift-restore << 'TIMESHIFT_RESTORE_HELPER'
 #!/usr/bin/env bash
@@ -2196,7 +2138,7 @@ ensure_ming_user() {
     local user_name="user"
     local user_home="/home/${user_name}"
     local groups=(
-        users sudo adm cdrom dip plugdev lp lpadmin netdev audio video render input
+        users adm cdrom dip plugdev lp lpadmin netdev audio video render input
         scanner bluetooth nopasswdlogin autologin
     )
     local grp
@@ -2208,13 +2150,15 @@ ensure_ming_user() {
             || chroot "${target}" groupadd -r "${grp}" >/dev/null 2>&1 \
             || true
     done
+    chroot "${target}" gpasswd -d "${user_name}" sudo >/dev/null 2>&1 || true
 
     if chroot "${target}" getent passwd "${user_name}" >/dev/null 2>&1; then
         chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     else
         chroot "${target}" useradd -m -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
-        printf '%s:%s\n' "${user_name}" "${user_name}" | chroot "${target}" chpasswd >/dev/null 2>&1 || true
     fi
+    chroot "${target}" passwd -d "${user_name}" >/dev/null 2>&1 || return 1
+    chroot "${target}" passwd -l root >/dev/null 2>&1 || return 1
 
     for grp in "${groups[@]}"; do
         chroot "${target}" getent group "${grp}" >/dev/null 2>&1 \

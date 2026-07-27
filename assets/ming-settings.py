@@ -21,7 +21,6 @@ HOME = os.path.expanduser("~")
 SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
-ACCOUNT_PASSWORD_HELPER = "/usr/local/sbin/ming-account-password"
 MAX_ACCOUNT_PASSWORD_BYTES = 1024
 SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
@@ -161,8 +160,9 @@ def validate_account_password(password):
 
 
 def account_password_command(user, clear=False):
-    command = ["pkexec", ACCOUNT_PASSWORD_HELPER, "--user", user]
-    command.append("--clear" if clear else "--password-stdin")
+    command = ["pkexec", "/usr/local/sbin/ming-account-control"]
+    command.append("clear-password" if clear else "set-password")
+    command.extend(["--user", user])
     return command
 
 
@@ -1080,23 +1080,30 @@ class MingSettings(Adw.ApplicationWindow):
             return
         if not p1:
             # 清空密码 = 保持免密
-            rc, _out, error = run(account_password_command(USER, clear=True))
-            self.toast("已设为免密登录。" if rc == 0 else "设置失败：%s" % (error or "权限被拒绝"))
+            run_capture_async(
+                account_password_command(USER, clear=True),
+                timeout=30,
+                on_done=self.on_password_saved)
             return
         valid, error = validate_account_password(p1)
         if not valid:
             self.toast(error)
             return
 
-        def done(rc, _out, error):
-            if rc == 0:
-                self.toast("密码已更新。开机仍自动进入桌面。")
-                self.pw1.set_text(""); self.pw2.set_text("")
-            else:
-                self.toast("设置失败：%s" % (error or "权限被拒绝"))
-
         run_capture_stdin_async(
-            account_password_command(USER), p1, timeout=20, on_done=done)
+            account_password_command(USER), p1, timeout=30, on_done=self.on_password_saved)
+
+    def on_password_saved(self, rc, output, error):
+        try:
+            result = json.loads(output or "{}")
+        except (TypeError, ValueError):
+            result = {}
+        if rc == 0 and result.get("ok"):
+            self.pw1.set_text("")
+            self.pw2.set_text("")
+            self.toast("账户密码状态已更新并确认。")
+        else:
+            self.toast("设置失败：%s" % (result.get("error") or error or "授权被取消"))
 
     # ---- 2. 网络与蓝牙 ----
     def build_network(self):

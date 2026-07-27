@@ -43,8 +43,8 @@ readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly MING_USER="user"
-readonly MING_USER_PASS="user"
-readonly ROOT_PASS="root"
+readonly MING_USER_PASS="${MING_USER_PASS:-}"
+readonly ROOT_PASS="${ROOT_PASS:-}"
 # 日志颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'

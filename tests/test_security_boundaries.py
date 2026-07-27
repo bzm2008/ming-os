@@ -28,8 +28,8 @@ def method_source(class_name, name):
 class PrivilegeBoundaryContracts(unittest.TestCase):
     def test_generated_sudoers_never_grants_global_passwordless_root(self):
         self.assertNotRegex(BASE, r"NOPASSWD\s*:\s*ALL")
-        self.assertIn("ming-account-password", BASE)
-        self.assertIn("org.ming-os.account-password", BASE)
+        self.assertIn("ming-account-control", BASE)
+        self.assertIn("org.ming.account.control", BASE)
         self.assertIn("auth_admin_keep", BASE)
 
     def test_automount_uses_lsblk_json_without_eval(self):
@@ -56,20 +56,18 @@ class PasswordHelperContracts(unittest.TestCase):
             self.assertFalse(validate(value)[0], value)
 
     def test_settings_uses_fixed_password_helper_and_stdin_not_shell(self):
-        namespace = {
-            "ACCOUNT_PASSWORD_HELPER": "/usr/local/sbin/ming-account-password",
-        }
+        namespace = {}
         exec(textwrap.dedent(function_source("account_password_command")), namespace)
         command = namespace["account_password_command"]("user")
         clear = namespace["account_password_command"]("user", clear=True)
         handler = method_source("MingSettings", "on_set_password")
 
         self.assertEqual(
-            ["pkexec", "/usr/local/sbin/ming-account-password", "--user", "user", "--password-stdin"],
+            ["pkexec", "/usr/local/sbin/ming-account-control", "set-password", "--user", "user"],
             command,
         )
         self.assertEqual(
-            ["pkexec", "/usr/local/sbin/ming-account-password", "--user", "user", "--clear"],
+            ["pkexec", "/usr/local/sbin/ming-account-control", "clear-password", "--user", "user"],
             clear,
         )
         self.assertIn("run_capture_stdin_async", handler)

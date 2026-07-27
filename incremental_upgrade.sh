@@ -16,7 +16,7 @@ MODULES_DIR="$SCRIPT_DIR/modules"
 CONFIG_DIR="$SCRIPT_DIR/config"
 ONION_USER="onion"
 ONION_USER_PASS="onion"
-ROOT_PASS="root"
+ROOT_PASS="${ROOT_PASS:-}"
 
 echo "=====> Onion OS 增量升级开始 <====="
 
