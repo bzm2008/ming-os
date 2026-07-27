@@ -326,8 +326,15 @@ class PerformancePolicyBuildContracts(unittest.TestCase):
         self.assertNotIn("RUNTIME_PM_ON_BAT=auto", tlp)
 
     def test_ota_checks_use_wrapper_without_modifying_transaction_engine(self):
-        self.assertIn("/usr/local/bin/ming-ota-run check", OTA)
-        self.assertIn("/usr/local/bin/ming-ota-run download", OTA)
+        self.assertGreaterEqual(OTA.count("/usr/local/bin/ming-ota-run check"), 2)
+        service = OTA.split("cat > /etc/systemd/system/ming-update-check.service", 1)[1].split(
+            "SYSTEMDSERVICE", 2)[1]
+        boot_check = OTA.split("cat > /usr/local/bin/ming-boot-update-check", 1)[1].split(
+            "BOOTCHECKSCRIPT", 2)[1]
+        self.assertNotIn("/usr/local/bin/ming-update check", service)
+        self.assertNotIn("/usr/local/bin/ming-update check", boot_check)
+        self.assertIn(
+            'exec /usr/local/bin/ming-control-center --page update "$@"', OTA)
         self.assertIn("/usr/local/bin/ming-ota-run", BASE)
 
     def test_launch_does_not_spawn_an_unprivileged_scheduler_boost_helper(self):
