@@ -156,6 +156,14 @@ class SecurityDeploymentContracts(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    def test_main_build_runs_security_module_before_ota_and_settings(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        security = build.index('"05_security_tools.sh"')
+        ota = build.index('"06_ota_update.sh"')
+        settings = build.index('"08_settings_hub.sh"')
+        self.assertLess(security, ota)
+        self.assertLess(security, settings)
+
     def test_settings_uses_security_control_for_mutations(self):
         settings = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
         self.assertIn('["pkexec", "/usr/local/sbin/ming-security-control"', settings)
