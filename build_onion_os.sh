@@ -237,7 +237,11 @@ settle_chroot_dpkg() {
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
     if [[ ! -s "${SCRIPT_DIR}/assets/wallpaper-ming-2640-abstract.png" ]]; then
-        log_error "missing final 26.4.0 wallpaper asset: assets/wallpaper-ming-2640-abstract.png"
+        log_error "missing required build asset: assets/wallpaper-ming-2640-abstract.png"
+        return 1
+    fi
+    if [[ ! -s "${SCRIPT_DIR}/assets/ming-installer-verify.py" ]]; then
+        log_error "missing required build asset: assets/ming-installer-verify.py"
         return 1
     fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
@@ -443,12 +447,13 @@ validate_iso_boot_layout() {
 
 validate_calamares_config() {
     log_info "Validating Calamares installer configuration..."
-    python3 - "${CHROOT_DIR}" <<'PY'
+    python3 - "${CHROOT_DIR}" "${SCRIPT_DIR}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
 root = Path(sys.argv[1])
+source_root = Path(sys.argv[2])
 errors = []
 
 def load_yaml(relative_path):
@@ -477,8 +482,10 @@ for phase in settings.get("sequence", []) or []:
         exec_steps = phase.get("exec") or []
 expected_steps = [
     "shellprocess@ming-ota-preflight", "ming-ota-target-guard@ming-ota-target-guard",
-    "partition", "mount", "unpackfs", "machineid", "fstab", "networkcfg",
-    "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity", "shellprocess@ming-bootloader",
+    "partition", "shellprocess@ming-installer-target-receipt-reset", "mount",
+    "ming-installer-target-receipt@ming-installer-target-receipt", "unpackfs", "machineid",
+    "fstab", "networkcfg", "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity",
+    "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader",
     "umount",
 ]
 for step in expected_steps:
@@ -490,9 +497,29 @@ if all(step in exec_steps for step in ["shellprocess@ming-ota-preflight", "parti
 if all(step in exec_steps for step in ["ming-ota-target-guard@ming-ota-target-guard", "partition"]):
     if exec_steps.index("ming-ota-target-guard@ming-ota-target-guard") > exec_steps.index("partition"):
         errors.append("OTA target disk guard must run before the destructive partition step")
-if all(step in exec_steps for step in ["shellprocess@ming-identity", "shellprocess@ming-bootloader"]):
+receipt_order = [
+    "partition",
+    "shellprocess@ming-installer-target-receipt-reset",
+    "mount",
+    "ming-installer-target-receipt@ming-installer-target-receipt",
+    "unpackfs",
+]
+if all(step in exec_steps for step in receipt_order):
+    if [exec_steps.index(step) for step in receipt_order] != sorted(
+        exec_steps.index(step) for step in receipt_order
+    ):
+        errors.append("fresh receipt reset must run before mount and capture immediately after mount")
+if all(step in exec_steps for step in [
+    "shellprocess@ming-identity",
+    "shellprocess@ming-installed-desktop-gate",
+    "shellprocess@ming-bootloader",
+]):
     if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-bootloader"):
         errors.append("installed identity and root UUID must be finalized before GRUB installation")
+    if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-installed-desktop-gate"):
+        errors.append("installed desktop gate must run after identity repair")
+    if exec_steps.index("shellprocess@ming-installed-desktop-gate") > exec_steps.index("shellprocess@ming-bootloader"):
+        errors.append("installed desktop gate must run before bootloader installation")
 blocked_show_steps = {"locale", "keyboard", "users"}
 for step in blocked_show_steps.intersection(show_steps):
     errors.append(f"settings.conf visible sequence must not show {step}")
@@ -517,8 +544,14 @@ if not any(isinstance(item, dict) and item.get("id") == "ming-ota-preflight" for
     errors.append("settings.conf missing ming-ota-preflight instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-ota-target-guard" for item in instances):
     errors.append("settings.conf missing ming-ota-target-guard instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt-reset" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt-reset instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
     errors.append("settings.conf missing ming-identity instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installed-desktop-gate" for item in instances):
+    errors.append("settings.conf missing ming-installed-desktop-gate instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-bootloader" for item in instances):
     errors.append("settings.conf missing ming-bootloader instance")
 
@@ -540,6 +573,68 @@ if partition.get("initialPartitioningChoice") != "none":
     errors.append("partition.conf must not force one-click erase; initialPartitioningChoice must be none")
 if partition.get("allowManualPartitioning") is not True:
     errors.append("partition.conf must allow manual partitioning")
+
+desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
+if desktop_gate.get("dontChroot") is not True or \
+        "/usr/local/sbin/ming-installer-verify installed --receipt" not in (desktop_gate.get("script") or []):
+    errors.append("installed desktop gate must use the authoritative target receipt")
+receipt_reset = load_yaml("etc/calamares/modules/ming-installer-target-receipt-reset.conf")
+if receipt_reset.get("dontChroot") is not True or \
+        "/usr/local/sbin/ming-installer-verify receipt --begin-attempt" not in (receipt_reset.get("script") or []):
+    errors.append("authoritative target receipt reset must clear stale state before mount")
+receipt_module = root / "usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt"
+if not (receipt_module / "module.desc").is_file() or not (receipt_module / "main.py").is_file():
+    errors.append("authoritative Calamares target receipt module is missing")
+else:
+    receipt_job = (receipt_module / "main.py").read_text(encoding="utf-8", errors="replace")
+    if 'globalstorage.value("rootMountPoint")' not in receipt_job:
+        errors.append("receipt module must capture Calamares globalstorage.rootMountPoint")
+    if "calamares-root" in receipt_job or "glob(" in receipt_job:
+        errors.append("receipt module must not scan candidate target directories")
+
+def source_settings_block(path, opener, marker):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if opener not in text:
+        errors.append(f"missing generated settings path in {path.name}: {opener}")
+        return {}
+    block = text.split(opener, 1)[1]
+    if marker not in block:
+        errors.append(f"unterminated generated settings path in {path.name}: {marker}")
+        return {}
+    try:
+        return yaml.safe_load(block.split(marker, 1)[0]) or {}
+    except Exception as exc:
+        errors.append(f"generated settings YAML parse failed in {path.name}: {exc}")
+        return {}
+
+generated_settings = [
+    source_settings_block(
+        source_root / "modules/01_base.sh",
+        "cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'\n",
+        "\nCALAMARESSETTINGS",
+    ),
+    source_settings_block(
+        source_root / "modules/03_desktop.sh",
+        "cat > /etc/calamares/settings.conf <<'SETTINGS'\n",
+        "\nSETTINGS",
+    ),
+    source_settings_block(
+        source_root / "modules/03_desktop.sh",
+        "cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'\n",
+        "\nSTATICCALASETTINGS",
+    ),
+]
+for generated in generated_settings:
+    generated_exec = []
+    for phase in generated.get("sequence", []) or []:
+        if isinstance(phase, dict) and "exec" in phase:
+            generated_exec = phase.get("exec") or []
+    if any(step not in generated_exec for step in expected_steps):
+        errors.append("generated Calamares settings path is missing receipt or desktop gate steps")
+    elif [generated_exec.index(step) for step in receipt_order] != sorted(
+        generated_exec.index(step) for step in receipt_order
+    ):
+        errors.append("generated Calamares settings path has unsafe receipt ordering")
 
 locale = load_yaml("etc/calamares/modules/locale.conf")
 if locale.get("region") != "Asia" or locale.get("zone") != "Shanghai":
@@ -578,6 +673,7 @@ if not grub_install.is_file():
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
     "usr/local/sbin/ming-install-bootloader",
+    "usr/local/sbin/ming-installer-verify",
     "usr/local/sbin/ming-finish-install-reboot",
     "usr/local/bin/ming-calamares-launcher",
     "usr/local/bin/ming-live-installer.sh",

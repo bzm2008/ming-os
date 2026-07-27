@@ -922,9 +922,23 @@ class InstallerBootContractTests(unittest.TestCase):
         self.assertIn("must not eject the mounted live medium", self.build)
 
     def test_identity_and_root_uuid_are_finalized_before_grub_install(self):
-        expected = "  - shellprocess@ming-identity\n  - shellprocess@ming-bootloader"
-        self.assertIn(expected, self.base)
-        self.assertGreaterEqual(self.desktop.count(expected), 2)
+        settings_blocks = (
+            self.base.split("cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'", 1)[1]
+            .split("CALAMARESSETTINGS", 1)[0],
+            self.desktop.split("cat > /etc/calamares/settings.conf <<'SETTINGS'", 1)[1]
+            .split("SETTINGS", 1)[0],
+            self.desktop.split("cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'", 1)[1]
+            .split("STATICCALASETTINGS", 1)[0],
+        )
+        expected_order = (
+            "shellprocess@ming-identity",
+            "shellprocess@ming-installed-desktop-gate",
+            "shellprocess@ming-bootloader",
+        )
+        for settings in settings_blocks:
+            with self.subTest(settings=settings[:40]):
+                positions = [settings.index(step) for step in expected_order]
+                self.assertEqual(sorted(positions), positions)
 
     def test_bios_grub_uses_target_environment_and_rejects_bad_config(self):
         start = self.base.index("install_bios_grub()")

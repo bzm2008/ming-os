@@ -5825,6 +5825,65 @@ UCACFG
 # ======================== Live 安装器脚本 ========================
 
 deploy_live_installer() {
+    local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
+    local receipt_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt
+    if [[ ! -s "${verifier_source}" ]]; then
+        echo "ERROR: missing installer verification asset" >&2
+        return 1
+    fi
+    install -d -m 0755 /usr/local/sbin "${receipt_module}" /etc/calamares/modules
+    install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+    cat > "${receipt_module}/module.desc" << 'TARGETRECEIPTDESC'
+---
+type: "job"
+name: "ming-installer-target-receipt"
+interface: "python"
+script: "main.py"
+TARGETRECEIPTDESC
+    cat > "${receipt_module}/main.py" << 'TARGETRECEIPTPY'
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import pathlib
+
+import libcalamares
+
+
+VERIFIER_PATH = pathlib.Path("/usr/local/sbin/ming-installer-verify")
+LOADER = importlib.machinery.SourceFileLoader("ming_installer_verify", str(VERIFIER_PATH))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+VERIFIER = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(VERIFIER)
+
+
+def run():
+    root_mount_point = libcalamares.globalstorage.value("rootMountPoint")
+    try:
+        VERIFIER.capture_target_receipt(root_mount_point)
+    except VERIFIER.TargetReceiptError as exc:
+        return "Ming installer target receipt failed", str(exc)
+    return None
+TARGETRECEIPTPY
+    chmod 0644 "${receipt_module}/main.py"
+
+    cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
+---
+TARGETRECEIPTCONF
+    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+---
+dontChroot: true
+timeout: 10
+script:
+  - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
+TARGETRECEIPTRESETCONF
+    cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'INSTALLEDDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+INSTALLEDDESKTOPGATECONF
+
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
 #!/usr/bin/env bash
 set -u
@@ -5849,7 +5908,7 @@ timeout 5 timedatectl set-timezone Asia/Shanghai >> "${LOG}" 2>&1 || true
 
 mkdir -p /etc/calamares/modules
 
-cat > /etc/calamares/settings.conf <<'SETTINGS'
+    cat > /etc/calamares/settings.conf <<'SETTINGS'
 ---
 modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
 instances:
@@ -5859,9 +5918,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -5882,7 +5950,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -5891,6 +5961,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -6053,6 +6124,11 @@ unpack:
     destination: ""
 UNPACKFSCONF
 
+if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
+    log "ERROR: Live Calamares verification failed"
+    exit 2
+fi
+
 log "unpackfs_source=${squash}"
 log "unpackfs_stable_source=${squash_link}"
 log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
@@ -6097,9 +6173,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -6119,7 +6204,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -6128,6 +6215,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
