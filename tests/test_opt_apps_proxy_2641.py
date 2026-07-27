@@ -104,6 +104,7 @@ class OptAppsProxyTests(unittest.TestCase):
             second.parent.mkdir(parents=True)
             executable.parent.mkdir(parents=True)
             executable.write_text("binary", encoding="utf-8")
+            executable.chmod(0o755)
             second.write_text(
                 "[Desktop Entry]\nType=Application\nName=Second\nExec=%s\n" % executable.as_posix(),
                 encoding="utf-8")

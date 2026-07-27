@@ -277,11 +277,11 @@ class DesktopSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             launcher = pathlib.Path(temp_dir) / "terminal.desktop"
             launcher.write_text(
-                "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python -V %U\n",
+                "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python3 -V %U\n",
                 encoding="utf-8",
             )
             entry = namespace["legacy_desktop_entry"](launcher)
-        self.assertEqual(["python", "-V"], entry["argv"])
+        self.assertEqual(["python3", "-V"], entry["argv"])
         self.assertEqual("", entry["diagnostic"])
         self.assertIn('legacy_argv = item.get("legacy_argv")', self.phone)
 
