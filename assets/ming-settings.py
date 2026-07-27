@@ -21,6 +21,17 @@ HOME = os.path.expanduser("~")
 SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
+STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
+APPEARANCE_CONTROL_HELPER = "/usr/local/bin/ming-appearance-control"
+APPEARANCE_THEMES = ["system", "light", "dark"]
+APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
+APPEARANCE_WALLPAPERS = ["default", "light", "dark"]
+LIBINPUT_PROPERTIES = {
+    "left_handed": ("libinput Left Handed Enabled",),
+    "natural_scroll": ("libinput Natural Scrolling Enabled",),
+    "tap": ("libinput Tapping Enabled",),
+    "disable_while_typing": ("libinput Disable While Typing Enabled",),
+}
 MAX_ACCOUNT_PASSWORD_BYTES = 1024
 SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
@@ -176,6 +187,68 @@ def run_task_async(task, on_done=None):
         if on_done:
             GLib.idle_add(on_done, value, error)
     threading.Thread(target=worker, daemon=True).start()
+
+
+def storage_partition_snapshot():
+    """Read local disk state without mounting or changing storage."""
+    rc, output, error = run(
+        [STORAGE_STATUS_HELPER, "partitions", "--json"], timeout=5)
+    try:
+        payload = json.loads(output or "{}")
+    except (TypeError, ValueError):
+        return {"ok": False, "partitions": [], "error": error or "存储清单返回了无效数据。"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "partitions": [], "error": "存储清单格式无效。"}
+    if rc != 0 or not payload.get("ok"):
+        payload.setdefault("error", error or "无法读取本机分区。")
+    return payload
+
+
+def pointer_device_snapshot():
+    rc, output, error = run(["xinput", "list", "--short"], timeout=5)
+    if rc != 0:
+        return {"ok": False, "devices": [], "error": error or output or "xinput 不可用"}
+    devices = []
+    for line in output.splitlines():
+        match = re.search(r"(?:↳\s*)?(.*?)\s+id=(\d+)", line)
+        if not match or "Virtual core" in match.group(1):
+            continue
+        device_id = match.group(2)
+        prop_rc, props, prop_error = run(["xinput", "list-props", device_id], timeout=5)
+        if prop_rc == 0 and "libinput" in props:
+            devices.append({"id": device_id, "name": match.group(1).strip(), "properties": props})
+        elif prop_error:
+            error = prop_error
+    return {"ok": bool(devices), "devices": devices,
+            "error": "" if devices else (error or "未检测到 libinput 指针设备")}
+
+
+def pointer_property_value(properties, setting):
+    for name in LIBINPUT_PROPERTIES.get(setting, ()):
+        match = re.search(r"(?m)^\s*%s\s*\([^)]*\):\s*([01])\s*$" % re.escape(name),
+                          properties or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def set_pointer_property(device_id, setting, value):
+    snapshot = pointer_device_snapshot()
+    device = next((item for item in snapshot["devices"] if item["id"] == str(device_id)), None)
+    if not device:
+        return {"ok": False, "error": "指针设备已断开。"}
+    name = next((candidate for candidate in LIBINPUT_PROPERTIES.get(setting, ())
+                 if candidate in device["properties"]), None)
+    if not name:
+        return {"ok": False, "error": "设备不支持此设置。"}
+    rc, output, error = run(
+        ["xinput", "set-prop", str(device_id), name, str(int(value))], timeout=5)
+    verify_rc, verify, verify_error = run(
+        ["xinput", "list-props", str(device_id)], timeout=5)
+    actual = pointer_property_value(verify, setting)
+    return {"ok": rc == 0 and verify_rc == 0 and actual == int(value),
+            "error": error or verify_error or output or (
+                "写入后读回不一致。" if actual != int(value) else "")}
 
 
 def read_text_file(path, fallback="未知"):
@@ -477,6 +550,28 @@ class GenerationState:
         self.generation += 1
 
 
+class PointerMutationSerial:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.states = {}
+
+    def begin(self, key):
+        with self.lock:
+            generation, mutation_lock = self.states.get(key, (0, threading.Lock()))
+            self.states[key] = (generation + 1, mutation_lock)
+            return generation + 1
+
+    def apply(self, key, generation, operation):
+        with self.lock:
+            _current, mutation_lock = self.states.setdefault(key, (0, threading.Lock()))
+        with mutation_lock:
+            with self.lock:
+                current, _lock = self.states[key]
+                if generation != current:
+                    return None
+            return operation()
+
+
 def read_broadcom_status_snapshot():
     manager = "/usr/local/sbin/ming-broadcom-driver"
     rc, output, error = run([manager, "status", "--json"], timeout=8)
@@ -518,6 +613,7 @@ PAGE_ALIASES = {
     "account": "账户",
     "network": "网络与蓝牙",
     "storage": "存储",
+    "appearance": "外观与指针",
     "update": "系统更新",
     "display": "显示与无障碍",
     "advanced": "高级设置",
@@ -543,6 +639,8 @@ class MingSettings(Adw.ApplicationWindow):
         self.audio_probe_state = GenerationState()
         self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
+        self.pointer_probe_state = GenerationState()
+        self.pointer_mutations = PointerMutationSerial()
         self.connect("close-request", self.on_close_request)
         self.install_css()
 
@@ -589,6 +687,7 @@ class MingSettings(Adw.ApplicationWindow):
             ("security-high-symbolic", "安全", self.build_security),
             ("network-wireless-symbolic", "网络与蓝牙", self.build_network),
             ("drive-harddisk-symbolic", "存储", self.build_storage),
+            ("preferences-desktop-theme-symbolic", "外观与指针", self.build_appearance_pointer),
             ("software-update-available-symbolic", "系统更新", self.build_update),
             ("preferences-desktop-display-symbolic", "显示与无障碍", self.build_display),
             ("preferences-other-symbolic", "高级设置", self.build_advanced),
@@ -803,6 +902,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.audio_probe_state.invalidate()
         self.playback_audio_probe_state.invalidate()
         self.time_sync_probe_state.invalidate()
+        self.pointer_probe_state.invalidate()
         return False
 
     # ---- 通用 UI 助手 ----
@@ -1699,6 +1799,153 @@ class MingSettings(Adw.ApplicationWindow):
             self.on_wifi_scan(self.wifi_scan_btn)
         return False
 
+    def appearance_command(self, *arguments):
+        if os.path.isfile(APPEARANCE_CONTROL_HELPER):
+            return [APPEARANCE_CONTROL_HELPER] + list(arguments)
+        return [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              "ming-appearance-control.py")] + list(arguments)
+
+    def build_appearance_pointer(self):
+        sc, box = self.page_scroller()
+        self.appearance_loading = True
+        self.appearance_controls = []
+        appearance = Adw.PreferencesGroup(
+            title="外观与桌面", description="设置会保存到当前用户，并在写入后读取确认。")
+        box.append(appearance)
+
+        def choice(title, values, labels, argument):
+            row = Adw.ActionRow(title=title)
+            dropdown = Gtk.DropDown.new_from_strings(labels)
+            dropdown.connect("notify::selected", self.on_appearance_choice,
+                             values, argument)
+            row.add_suffix(dropdown)
+            appearance.add(row)
+            self.appearance_controls.append(dropdown)
+
+        choice("主题", APPEARANCE_THEMES, ["跟随系统", "浅色", "深色"], "--theme")
+        choice("字体大小", APPEARANCE_FONT_SIZES,
+               [str(value) for value in APPEARANCE_FONT_SIZES], "--font-size")
+        choice("内置壁纸", APPEARANCE_WALLPAPERS, ["默认", "浅色", "深色"], "--wallpaper")
+        restore = Gtk.Button(label="恢复默认壁纸")
+        restore.connect("clicked", lambda _button: self.apply_appearance(["--wallpaper", "default"]))
+        appearance.add(self.button_row("壁纸", "恢复当前 26.4.0 兼容的默认壁纸。", restore))
+
+        pointer = Adw.PreferencesGroup(
+            title="鼠标与触控板", description="直接读取并应用设备支持的 libinput 设置；虚拟机没有指针设备时会明确提示。")
+        box.append(pointer)
+        self.pointer_page = sc
+        self.pointer_status = Adw.ActionRow(title="指针设备", subtitle="正在读取…")
+        pointer.add(self.pointer_status)
+        self.pointer_switches = {}
+        for title, setting in (("左手主键", "left_handed"),
+                               ("自然滚动", "natural_scroll"),
+                               ("轻触点击", "tap"),
+                               ("打字时禁用触控板", "disable_while_typing")):
+            switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            switch.set_sensitive(False)
+            switch.connect("notify::active", self.on_pointer_toggle, setting)
+            row = Adw.ActionRow(title=title)
+            row.add_suffix(switch)
+            pointer.add(row)
+            self.pointer_switches[setting] = switch
+        GLib.idle_add(self.refresh_appearance_status)
+        GLib.idle_add(self.refresh_pointer_status)
+        return sc
+
+    def refresh_appearance_status(self):
+        def done(rc, output, error):
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except (TypeError, ValueError):
+                status = {}
+            if not isinstance(status, dict):
+                status = {}
+            values = [status.get("theme", "system"), status.get("font_size", 11),
+                      status.get("wallpaper", "default")]
+            for control, value, choices in zip(
+                    self.appearance_controls, values,
+                    (APPEARANCE_THEMES, APPEARANCE_FONT_SIZES, APPEARANCE_WALLPAPERS)):
+                self.appearance_loading = True
+                control.set_selected(choices.index(value) if value in choices else 0)
+            self.appearance_loading = False
+            if rc != 0:
+                self.toast(error or "无法读取外观设置。", "warning")
+            return False
+        run_capture_async(self.appearance_command("status", "--json"), timeout=8, on_done=done)
+        return False
+
+    def on_appearance_choice(self, widget, _param, values, argument):
+        if self.appearance_loading:
+            return
+        selected = min(widget.get_selected(), len(values) - 1)
+        self.apply_appearance([argument, str(values[selected])])
+
+    def apply_appearance(self, arguments):
+        self.appearance_loading = True
+        def done(rc, output, error):
+            if rc != 0:
+                self.toast(error or output or "外观设置未能应用，已恢复上次有效配置。", "warning")
+            self.refresh_appearance_status()
+            return False
+        run_capture_async(self.appearance_command("apply", *arguments, "--json"),
+                          timeout=15, on_done=done)
+
+    def refresh_pointer_status(self):
+        generation = self.pointer_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.pointer_probe_state.accept(generation):
+                return False
+            if self.pointer_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {"devices": [], "error": error or "指针设备读取失败。"}
+            devices = snapshot.get("devices") or []
+            self.pointer_status.set_subtitle(
+                " · ".join(item.get("name", "未知设备") for item in devices)
+                or snapshot.get("error") or "未检测到指针设备。")
+            self.pointer_snapshot = snapshot
+            for setting, switch in self.pointer_switches.items():
+                values = [pointer_property_value(item.get("properties"), setting)
+                          for item in devices]
+                values = [value for value in values if value is not None]
+                switch.set_sensitive(bool(values))
+                self.pointer_loading = True
+                if values:
+                    switch.set_active(all(value == 1 for value in values))
+                self.pointer_loading = False
+            return False
+
+        run_task_async(pointer_device_snapshot, done)
+        return False
+
+    def on_pointer_toggle(self, switch, _param, setting):
+        if getattr(self, "pointer_loading", False):
+            return
+        devices = list(getattr(self, "pointer_snapshot", {}).get("devices", []))
+        value = int(switch.get_active())
+        generations = {(device["id"], setting): self.pointer_mutations.begin(
+            (device["id"], setting)) for device in devices}
+
+        def apply_all():
+            results = []
+            for device in devices:
+                key = (device["id"], setting)
+                result = self.pointer_mutations.apply(
+                    key, generations[key],
+                    lambda target=device: set_pointer_property(target["id"], setting, value))
+                if result is not None:
+                    results.append(result)
+            return results
+
+        def done(results, error):
+            failure = next((result for result in (results or []) if not result.get("ok")), None)
+            if failure or error:
+                self.toast((failure or {}).get("error") or error, "warning")
+            self.refresh_pointer_status()
+            return False
+
+        run_task_async(apply_all, done)
+
     # ---- 3. 存储可视化（合并后空间使用率） ----
     def build_storage(self):
         sc, box = self.page_scroller()
@@ -1743,9 +1990,56 @@ class MingSettings(Adw.ApplicationWindow):
 
         refresh = Gtk.Button(label="刷新")
         refresh.set_margin_top(12)
-        refresh.connect("clicked", lambda _b: self.toast("已是最新空间使用情况。"))
+        refresh.connect("clicked", lambda _b: self.refresh_storage_partitions())
         box.append(refresh)
+
+        partition_group = Adw.PreferencesGroup(
+            title="本机分区", description="只读显示磁盘和分区状态，不会自动挂载、格式化或修改启动配置。")
+        self.storage_partition_group = partition_group
+        self.storage_partition_status = Adw.ActionRow(
+            title="正在读取", subtitle="正在读取本机磁盘清单…")
+        partition_group.add(self.storage_partition_status)
+        self.storage_partition_rows = []
+        self.storage_partition_probe_state = GenerationState()
+        box.append(partition_group)
+        self.refresh_storage_partitions()
         return sc
+
+    def refresh_storage_partitions(self):
+        generation = self.storage_partition_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.storage_partition_probe_state.accept(generation):
+                return False
+            if self.storage_partition_group.get_root() is not self:
+                return False
+            for row in self.storage_partition_rows:
+                self.storage_partition_group.remove(row)
+            self.storage_partition_rows = []
+            snapshot = snapshot or {"ok": False, "error": error or "无法读取本机分区。"}
+            if not snapshot.get("ok"):
+                self.storage_partition_status.set_title("分区清单不可用")
+                self.storage_partition_status.set_subtitle(snapshot.get("error") or "无法读取本机分区。")
+                return False
+            partitions = snapshot.get("partitions") or []
+            self.storage_partition_status.set_title("已读取 %d 个本机设备" % len(partitions))
+            self.storage_partition_status.set_subtitle(
+                "仅显示本地磁盘与分区；虚拟、光盘和压缩设备已隐藏。")
+            for item in partitions:
+                path = str(item.get("path") or "未知设备")
+                state = "已挂载" if item.get("state") == "mounted" else "未挂载"
+                mountpoints = ", ".join(item.get("mountpoints") or []) or "无挂载点"
+                fstype = str(item.get("fstype") or "未知文件系统")
+                size = self._hsize(int(item.get("size") or 0))
+                row = Adw.ActionRow(
+                    title="%s · %s" % (path, state),
+                    subtitle="%s · %s · %s" % (fstype, size, mountpoints))
+                self.storage_partition_group.add(row)
+                self.storage_partition_rows.append(row)
+            return False
+
+        run_task_async(storage_partition_snapshot, done)
+        return False
 
     def _hsize(self, n):
         for unit in ["B", "KB", "MB", "GB", "TB"]:

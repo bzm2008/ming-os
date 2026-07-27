@@ -54,6 +54,21 @@ refresh_dock_launchers() {
     done
 }
 
+seed_trusted_desktop_receipts() {
+    local receipt_dir="/var/lib/ming-os/trusted-desktops"
+    local launcher source
+    install -d -m 0755 "${receipt_dir}"
+    for launcher in \
+        "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "Install Ming OS.desktop"; do
+        source="/usr/share/applications/${launcher}"
+        [[ -f "${source}" ]] || continue
+        printf '%s\n' "${source}" > "${receipt_dir}/${launcher}"
+        chown root:root "${receipt_dir}/${launcher}" 2>/dev/null || true
+        chmod 0644 "${receipt_dir}/${launcher}"
+    done
+}
+
 # Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
 copy_default_launcher() {
     local launcher="$1"
@@ -203,6 +218,7 @@ main() {
     echo "=====> [07_finalize] 开始收尾与配置固化 (${MING_OS_VERSION}) <====="
 
     refresh_dock_launchers || return 1
+    seed_trusted_desktop_receipts
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

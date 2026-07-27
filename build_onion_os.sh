@@ -1194,9 +1194,33 @@ require_file(
     "/usr/local/sbin/ming-security-control")
 validate_generated_executable("usr/local/sbin/ming-security-control", "python")
 
+storage_status = require_file("usr/local/bin/ming-storage-status", "LSBLK_FIELDS")
+for marker in ["partitions", "--json", "parse_lsblk", "timeout=3"]:
+    if marker not in storage_status:
+        errors.append(f"ming-storage-status missing read-only marker {marker}")
+validate_generated_executable("usr/local/bin/ming-storage-status", "python")
+
+appearance_control = require_file(
+    "usr/local/bin/ming-appearance-control", "apply_and_commit")
+for marker in ["status", "apply", "reset", "reapply", "appearance.last-good.json"]:
+    if marker not in appearance_control:
+        errors.append(f"ming-appearance-control missing interface marker {marker}")
+validate_generated_executable("usr/local/bin/ming-appearance-control", "python")
+
 settings_desktop = require_file("usr/share/applications/ming-settings.desktop", "Exec=/usr/local/bin/ming-control-center")
 if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
     errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
+
+trusted_receipts = root / "var/lib/ming-os/trusted-desktops"
+if not trusted_receipts.is_dir():
+    errors.append("trusted desktop receipt directory is missing")
+for launcher in [
+    "ming-settings.desktop", "ming-files.desktop", "ming-app-library.desktop",
+    "ming-firefox.desktop", "ming-terminal.desktop", "Install Ming OS.desktop",
+]:
+    launcher_path = root / "usr/share/applications" / launcher
+    if launcher_path.is_file() and not (trusted_receipts / launcher).is_file():
+        errors.append(f"missing trusted desktop receipt for {launcher}")
 
 desktop_organizer = require_file("usr/local/bin/ming-desktop-organizer", "sync_apps")
 if "ming-phone-desktop --sync" not in desktop_organizer:
@@ -1280,6 +1304,13 @@ for path, marker in [
     ("usr/local/sbin/ming-ota-backup", "doctor"),
 ]:
     require_file(path, marker)
+
+package_installer = require_file(
+    "usr/local/sbin/ming-package-installer", "sync_opt_app_proxies")
+launch_broker = require_file("usr/local/bin/ming-launch", "verify_desktop_proxy")
+for marker in ["manifest-v1.json", "manifest_sha256", "source_sha256", "proxy_sha256"]:
+    if marker not in package_installer or marker not in launch_broker:
+        errors.append(f"managed /opt/apps proxy contract missing {marker}")
 
 spark_asset = root / "usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
 spark_expected_sha256 = "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"

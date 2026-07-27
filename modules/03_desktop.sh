@@ -239,7 +239,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py; do
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -255,6 +255,8 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
+    install -m 0755 "${asset_dir}/ming-storage-status.py" /usr/local/bin/ming-storage-status
+    install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
@@ -6940,6 +6942,14 @@ configure_appearance_enforcer() {
     cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
 #!/usr/bin/env bash
 # Ming OS 外观强制应用 - 每次登录运行，确保美化生效
+set -u
+appearance_log="${HOME}/.cache/ming-os/appearance.log"
+mkdir -p "$(dirname "${appearance_log}")" 2>/dev/null || true
+if command -v ming-appearance-control >/dev/null 2>&1; then
+    timeout --foreground 8s ming-appearance-control reapply --json \
+        >>"${appearance_log}" 2>&1 || true
+    exit 0
+fi
 WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
 WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
 
