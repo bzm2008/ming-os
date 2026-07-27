@@ -320,6 +320,8 @@ ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
 CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 20
+STATUS_WIDGET_COMPACT_HEIGHT = 58
+STATUS_WIDGET_EXPANDED_HEIGHT = 248
 WALLPAPER_PATHS = [
     Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
@@ -412,7 +414,7 @@ window.ming-desktop {
   box-shadow: none;
 }
 .status-compact-pill {
-  min-height: 54px;
+  min-height: 38px;
   border-radius: 27px;
   padding: 8px 12px;
   background: rgba(255, 255, 255, 0.82);
@@ -2077,6 +2079,8 @@ class StatusWidget(Gtk.Box):
         # target.  Gtk.EventBox creates an input window around the whole card,
         # which prevents GtkRange's native drag handling from seeing motion.
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_valign(Gtk.Align.START)
+        self.set_vexpand(False)
         widget_state = load_widget_state()
         self.collapsed = widget_state["collapsed"]
         self.metric_mode = widget_state["metric_mode"]
@@ -2101,11 +2105,15 @@ class StatusWidget(Gtk.Box):
         self.action_starts = {}
         self._height_animation = None
         self._height_animation_source = 0
-        self._display_height = 54 if self.collapsed else 286
+        self._display_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
         box.get_style_context().add_class("status-widget")
         box.set_halign(Gtk.Align.FILL)
         box.set_hexpand(True)
+        box.set_valign(Gtk.Align.START)
+        box.set_vexpand(False)
         self.widget_box = box
 
         self.compact_button = Gtk.Button()
@@ -2225,6 +2233,8 @@ class StatusWidget(Gtk.Box):
         controls.attach(self.brightness_scale, 0, 3, 3, 1)
 
         expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        expanded.set_valign(Gtk.Align.START)
+        expanded.set_vexpand(False)
         expanded.pack_start(header, False, False, 0)
         expanded.pack_start(controls, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
@@ -2234,7 +2244,7 @@ class StatusWidget(Gtk.Box):
         self.content_revealer.add(expanded)
         box.pack_start(self.compact_button, False, False, 0)
         box.pack_start(self.content_revealer, False, False, 0)
-        self.add(box)
+        self.pack_start(box, False, False, 0)
         self.apply_collapsed_state(animate=False)
         self.refresh()
         self.refresh_resource_metric()
@@ -2261,7 +2271,9 @@ class StatusWidget(Gtk.Box):
             style.remove_class("status-widget-compact")
         self.compact_button.set_visible(self.collapsed)
         self.content_revealer.set_reveal_child(not self.collapsed)
-        target_height = 54 if self.collapsed else 286
+        target_height = (
+            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
+            else STATUS_WIDGET_EXPANDED_HEIGHT)
         if animate:
             self.animate_collapsed_state(target_height)
         else:

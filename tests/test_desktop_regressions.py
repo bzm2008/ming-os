@@ -824,6 +824,13 @@ class DesktopPolishContractTests(unittest.TestCase):
         for marker in ["nmcli", "bluetoothctl", "upower", "ming-control-center"]:
             self.assertIn(marker, self.phone)
 
+    def test_compact_status_pill_keeps_its_38px_visual_minimum(self):
+        compact_style = self.phone[
+            self.phone.index(".status-compact-pill {"):
+            self.phone.index(".status-compact-pill:hover")
+        ]
+        self.assertIn("min-height: 38px", compact_style)
+
     def test_status_widget_shows_battery_only_for_portable_host(self):
         status = self.phone[self.phone.index("class StatusWidget"):
                             self.phone.index("class WallpaperCanvas")]

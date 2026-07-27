@@ -163,6 +163,24 @@ class ControlRequestStateTests(unittest.TestCase):
         self.assertNotIn("class StatusWidget(Gtk.EventBox):", status)
         self.assertNotIn("set_visible_window(False)", status)
 
+    def test_status_widget_geometry_stays_top_aligned_and_non_expanding(self):
+        status = self.source[self.source.index("class StatusWidget"):
+                             self.source.index("class WallpaperCanvas")]
+        init = status[status.index("    def __init__(self):"):
+                      status.index("    def preferred_height(self):")]
+        for marker in (
+            "self.set_valign(Gtk.Align.START)",
+            "self.set_vexpand(False)",
+            "box.set_valign(Gtk.Align.START)",
+            "box.set_vexpand(False)",
+            "expanded.set_valign(Gtk.Align.START)",
+            "expanded.set_vexpand(False)",
+            "box.pack_start(self.content_revealer, False, False, 0)",
+            "self.pack_start(box, False, False, 0)",
+        ):
+            self.assertIn(marker, init)
+        self.assertNotIn("self.add(box)", init)
+
     def test_scales_have_renderer_independent_value_indicator(self):
         self.assertIn("class StatusSlider(Gtk.EventBox):", self.source)
         slider = self.source[self.source.index("class StatusSlider"):

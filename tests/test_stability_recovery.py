@@ -567,6 +567,17 @@ fi
         self.assertIn("content_revealer.set_reveal_child", PHONE)
         self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
 
+    def test_status_widget_uses_the_final_264_named_height_contract(self):
+        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT = 58", PHONE)
+        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 248", PHONE)
+        status = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
+        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed", status)
+        self.assertIn("else STATUS_WIDGET_EXPANDED_HEIGHT", status)
+        self.assertIn(
+            "self.status.set_size_request(widget_w, self.status.preferred_height())",
+            PHONE,
+        )
+
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):
         for marker in (
             "ming-window-control",
