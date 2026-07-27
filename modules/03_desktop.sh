@@ -1647,7 +1647,12 @@ THEMEINDEX
 
 setup_wallpaper() {
     mkdir -p /usr/share/backgrounds/ming-os
+    command -v convert >/dev/null 2>&1 || {
+        echo "[03_desktop][ERROR] ImageMagick convert is required to generate wallpaper caches" >&2
+        return 1
+    }
 
+    local asset_2640="/tmp/ming-build/assets/wallpaper-ming-2640-abstract.png"
     local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
     local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
     local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
@@ -1658,9 +1663,13 @@ setup_wallpaper() {
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 默认壁纸：优先 Ming 浅色纸感壁纸，风景壁纸保留为可选资产。
+    # 26.4.0 final wallpaper is the canonical default; older assets are fallback.
     local primary=""
-    if [[ -f "${asset_light}" ]]; then
+    if [[ -s "${asset_2640}" ]]; then
+        primary="${asset_2640}"
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2640.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default.png
+    elif [[ -f "${asset_light}" ]]; then
         primary="${asset_light}"
         cp "${asset_light}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
@@ -1679,16 +1688,18 @@ setup_wallpaper() {
 
     if [[ -n "${primary}" ]]; then
         cp "${primary}" /usr/share/backgrounds/ming-os/default.png
-        if command -v convert &>/dev/null; then
-            convert /usr/share/backgrounds/ming-os/default.png \
-                -resize 1366x768^ \
+        local geometry output
+        for geometry in 3840x2160 1920x1080 1366x768; do
+            output="/usr/share/backgrounds/ming-os/default-${geometry}.png"
+            if ! convert /usr/share/backgrounds/ming-os/default.png \
+                -resize "${geometry}^" \
                 -gravity center \
-                -extent 1366x768 \
-                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || \
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        else
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        fi
+                -extent "${geometry}" \
+                "${output}" 2>/dev/null; then
+                echo "[03_desktop][ERROR] failed to generate wallpaper cache ${geometry}" >&2
+                return 1
+            fi
+        done
     fi
 
     cat > /usr/share/backgrounds/ming-os/default.svg << 'WALLPAPERSVG'
@@ -1904,7 +1915,7 @@ configure_plank_dock() {
 [PlankDockPreferences]
 # MingDockProfile=2641-compact-rail-1
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -1977,7 +1988,6 @@ _plank_launcher() {
             ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
             ming-firefox) wm_class="${wm_class:-Firefox-esr}" ;;
             ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
-            ming-update) wm_class="${wm_class:-Zenity}" ;;
         esac
         exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
         cat > "${proxy_path}" << DOCKPROXY
@@ -2006,7 +2016,6 @@ for launcher in \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
     "papyrus:papyrus.desktop" \
-    "ming-update:ming-update.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
@@ -2077,7 +2086,6 @@ APPS = [
     ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
     ('papyrus.desktop', 'papyrus', 'Papyrus'),
-    ('ming-update.desktop', 'ming-update-icon', '系统更新'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -3010,7 +3018,7 @@ write_default_plank_settings() {
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
 # MingDockProfile=2641-compact-rail-1
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 IconSize=38
@@ -3033,7 +3041,7 @@ migrate_compact_rail_profile() {
     local settings="$1"
     grep -q '^# MingDockProfile=2641-compact-rail-1$' "${settings}" 2>/dev/null && return 0
 
-    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-update.dockitem;;ming-terminal.dockitem'
+    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
         sed -i "s|^DockItems=.*|DockItems=${dock_items}|" "${settings}" 2>/dev/null || true
     else
@@ -6821,7 +6829,7 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-update.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-terminal.desktop
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter
@@ -7157,11 +7165,11 @@ main() {
     generate_ming_icons
     configure_hidpi_autoscale
     install_themes
-    setup_wallpaper
+    setup_wallpaper || return 1
     configure_ming_shell
+    install_ming_shell_components
     install_ming_settings
     cleanup_retired_ming_entries
-    install_ming_shell_components
     install_ota_target_guard
     install_ming_files
     ensure_wps_office

@@ -1875,226 +1875,26 @@ BOOTCHECKSCRIPT
 }
 
 deploy_gui_tool() {
-    echo "Deploying ming-update GUI (Chinese final)..."
+    echo "Deploying ming-update compatibility redirect..."
 
-    cat > /usr/local/bin/ming-update-gui << 'OTAGUI'
-#!/usr/bin/env bash
-set -uo pipefail
-
-readonly CACHE_DIR="/var/cache/ming-update"
-readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
-readonly CHECK_LOG="/tmp/ming-update-check.log"
-readonly DOWNLOAD_LOG="/tmp/ming-update-download.log"
-readonly INSTALL_LOG="/tmp/ming-update-install.log"
-
-have_zenity() { command -v zenity >/dev/null 2>&1; }
-
-manifest_file() {
-    if [[ -f "${CACHE_DIR}/update_info.json" ]]; then
-        printf '%s\n' "${CACHE_DIR}/update_info.json"
-    else
-        printf '%s\n' "${USER_CACHE_DIR}/update_info.json"
-    fi
-}
-
-log_tail() {
-    local file="$1"
-    if [[ -f "${file}" ]]; then
-        tail -n 80 "${file}"
-    else
-        echo "没有日志文件：${file}"
-    fi
-}
-
-show_info() {
-    if have_zenity; then
-        zenity --info --title="$1" --text="$2" --width=560 2>/dev/null || true
-    else
-        printf '%s\n%s\n' "$1" "$2"
-    fi
-}
-
-show_error() {
-    if have_zenity; then
-        zenity --error --title="$1" --text="$2" --width=660 2>/dev/null || true
-    else
-        printf '错误：%s\n%s\n' "$1" "$2" >&2
-    fi
-}
-
-ask_yes_no() {
-    if have_zenity; then
-        zenity --question --title="$1" --text="$2" --ok-label="${3:-确定}" --cancel-label="${4:-取消}" --width=580 2>/dev/null
-    else
-        printf '%s\n%s\n' "$1" "$2"
-        return 1
-    fi
-}
-
-run_with_progress() {
-    local title="$1"
-    local text="$2"
-    local log_file="$3"
-    shift 3
-
-    : > "${log_file}"
-    if have_zenity; then
-        (
-            echo "10"
-            echo "# ${text}"
-            "$@" > "${log_file}" 2>&1
-            rc=$?
-            echo "${rc}" > "${log_file}.rc"
-            echo "100"
-            echo "# 完成"
-        ) | zenity --progress --title="${title}" --text="${text}" --percentage=0 --auto-close --no-cancel --width=480 2>/dev/null || true
-        return "$(cat "${log_file}.rc" 2>/dev/null || echo 1)"
-    fi
-
-    "$@" > "${log_file}" 2>&1
-}
-
-check_update_gui() {
-    if ! run_with_progress "检查更新" "正在检查 Ming OS 更新..." "${CHECK_LOG}" /usr/local/bin/ming-ota-run check; then
-        show_error "检查更新失败" "无法完成更新检查。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
-        return 1
-    fi
-
-    local manifest
-    manifest=$(manifest_file)
-    if [[ ! -f "${manifest}" ]]; then
-        show_info "已是最新版本" "当前没有可安装更新。\n\n日志：\n$(log_tail "${CHECK_LOG}")"
-        return 0
-    fi
-
-    local version notes ready
-    version=$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || echo "unknown")
-    notes=$(jq -r '.release_notes // .message // "暂无更新说明。"' "${manifest}" 2>/dev/null || echo "暂无更新说明。")
-    ready=$(jq -r '.ready // true' "${manifest}" 2>/dev/null || echo "true")
-    if [[ "${ready}" != "true" ]]; then
-        show_info "更新尚未就绪" "服务器已登记版本 ${version}，但下载包仍在准备或校验中。\n\n${notes}"
-        return 0
-    fi
-
-    if ask_yes_no "发现新版本" "发现 Ming OS ${version}。\n\n${notes}\n\n是否现在下载？" "下载" "稍后"; then
-        download_update_gui
-    fi
-}
-
-download_update_gui() {
-    if ! run_with_progress "下载更新" "正在下载并校验更新包..." "${DOWNLOAD_LOG}" /usr/local/bin/ming-ota-run download; then
-        show_error "下载失败" "更新没有下载完成。\n\n日志：\n$(log_tail "${DOWNLOAD_LOG}")"
-        return 1
-    fi
-    if ask_yes_no "下载完成" "更新已下载并校验完成。\n\n是否写入 OTA 启动项？" "安装" "稍后"; then
-        install_update_gui
-    else
-        show_info "下载完成" "你可以稍后重新打开系统更新并选择安装。"
-    fi
-}
-
-install_update_gui() {
-    if ! ask_yes_no "安装更新" "安装会写入 GRUB OTA 启动项，之后需要重启并选择 Ming OS OTA Installer。\n\n是否继续？" "继续" "取消"; then
-        return 0
-    fi
-
-    : > "${INSTALL_LOG}"
-    local rc=1
-    if command -v pkexec >/dev/null 2>&1; then
-        pkexec /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    else
-        /usr/local/bin/ming-update install > "${INSTALL_LOG}" 2>&1
-        rc=$?
-    fi
-
-    if [[ ${rc} -eq 0 ]]; then
-        show_info "安装准备完成" "OTA 启动项已写入。\n\n重启后在 GRUB 中选择 Ming OS OTA Installer。"
-    else
-        show_error "安装失败" "无法写入 OTA 启动项。\n\n日志：\n$(log_tail "${INSTALL_LOG}")"
-    fi
-    return "${rc}"
-}
-
-main_menu() {
-    if ! have_zenity; then
-        /usr/local/bin/ming-update "${1:-check}"
-        return $?
-    fi
-
-    while true; do
-        local choice
-        choice=$(zenity --list \
-            --title="Ming OS 更新管理器" \
-            --text="请选择操作" \
-            --column="操作" --column="说明" \
-            "检查更新" "检查是否有新版本" \
-            "下载更新" "下载并校验已发现的更新" \
-            "安装更新" "写入 OTA 启动项" \
-            "查看状态" "显示当前更新状态" \
-            --width=560 --height=360 \
-            --ok-label="执行" --cancel-label="退出" 2>/dev/null)
-        [[ $? -eq 0 ]] || break
-        case "${choice}" in
-            "检查更新") check_update_gui ;;
-            "下载更新") download_update_gui ;;
-            "安装更新") install_update_gui ;;
-            "查看状态")
-                local status_text
-                status_text=$(/usr/local/bin/ming-update status 2>&1)
-                show_info "更新状态" "${status_text}"
-                ;;
-        esac
-    done
-}
-
-case "${1:-menu}" in
-    menu) main_menu ;;
-    check) check_update_gui ;;
-    download) download_update_gui ;;
-    install) install_update_gui ;;
-    *) echo "用法：ming-update-gui [menu|check|download|install]"; exit 1 ;;
-esac
-OTAGUI
-
-    chmod +x /usr/local/bin/ming-update-gui
-    bash -n /usr/local/bin/ming-update-gui
-
-    # Keep old launchers working without retaining a second, divergent update
-    # workflow.  All visible update choices now live in Ming Settings.
     cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'
 #!/usr/bin/env bash
-# Ming OS 更新管理器（兼容入口；实际界面统一位于 Ming 设置中心）
-# 系统更新兼容入口：统一跳转到铭设置的系统更新页。
+# Compatibility command: the only update UI lives in Ming Settings.
 exec /usr/local/bin/ming-control-center --page update "$@"
 OTAGUIREDIRECT
     chmod +x /usr/local/bin/ming-update-gui
     bash -n /usr/local/bin/ming-update-gui
 
-    cat > /usr/share/applications/ming-update.desktop << DESKTOPFILE
-[Desktop Entry]
-Name=系统更新
-Name[zh_CN]=系统更新
-Comment=检查并安装 Ming OS 更新
-Comment[zh_CN]=检查并安装 Ming OS 系统更新
-Exec=/usr/local/bin/ming-control-center --page update
-Icon=ming-update-icon
-Terminal=false
-Type=Application
-Categories=System;Settings;
-Keywords=update;upgrade;system;
-StartupNotify=true
-NoDisplay=true
-DESKTOPFILE
-
-    mkdir -p "/home/${MING_USER}/Desktop"
-    cp /usr/share/applications/ming-update.desktop "/home/${MING_USER}/Desktop/"
-    chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Desktop/ming-update.desktop"
-    chmod +x "/home/${MING_USER}/Desktop/ming-update.desktop"
+    # Remove standalone launchers left by older rootfs builds and users.
+    rm -f /usr/share/applications/ming-update.desktop
+    rm -f "/home/${MING_USER}/Desktop/ming-update.desktop"
+    rm -f /home/*/Desktop/ming-update.desktop
+    rm -f /home/*/.config/plank/dock1/launchers/ming-update.dockitem
+    rm -f /etc/skel/Desktop/ming-update.desktop
+    rm -f /etc/skel/.config/plank/dock1/launchers/ming-update.dockitem
+    rm -f /usr/share/applications/ming-dock-ming-update.desktop
 }
+
 
 create_version_file() {
     echo "Creating Ming OS version files..."

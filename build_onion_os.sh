@@ -236,6 +236,10 @@ settle_chroot_dpkg() {
 # 将模块脚本和配置文件复制到 chroot 中
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
+    if [[ ! -s "${SCRIPT_DIR}/assets/wallpaper-ming-2640-abstract.png" ]]; then
+        log_error "missing final 26.4.0 wallpaper asset: assets/wallpaper-ming-2640-abstract.png"
+        return 1
+    fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
@@ -983,9 +987,11 @@ import os
 import re
 import stat
 import subprocess
+import struct
 import sys
 import tempfile
 import hashlib
+import zlib
 
 root = Path(sys.argv[1])
 errors = []
@@ -1224,6 +1230,9 @@ for retired_path in [
     "home/user/Desktop/所有磁盘.desktop",
     "home/user/Desktop/ming-app-library.desktop",
     "home/user/Desktop/ming-disk-hub.desktop",
+    "usr/share/applications/ming-update.desktop",
+    "home/user/Desktop/ming-update.desktop",
+    "home/user/.config/plank/dock1/launchers/ming-update.dockitem",
 ]:
     require_absent(retired_path, "retired Ming shell surface")
 
@@ -1231,11 +1240,43 @@ drawer_desktop = require_file("usr/share/applications/ming-app-library.desktop",
 if "NoDisplay=true" not in drawer_desktop:
     errors.append("application drawer desktop entry must stay hidden outside the Dock")
 
-update_gui = require_file("usr/local/bin/ming-update-gui", "Ming OS 更新管理器")
-if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "System Update" in update_gui:
-    errors.append("ming-update-gui must keep user-facing update UI in Chinese")
+update_gui = require_file("usr/local/bin/ming-update-gui", "exec /usr/local/bin/ming-control-center --page update")
+for forbidden in ["zenity", "ming-update.desktop", "/usr/local/bin/ming-update check"]:
+    if forbidden in update_gui:
+        errors.append(f"ming-update-gui must only redirect to Ming Settings, found {forbidden}")
 
-require_path("usr/share/backgrounds/ming-os/default.png")
+expected_wallpaper_sizes = {
+    "usr/share/backgrounds/ming-os/default-2640.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default-3840x2160.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default-1920x1080.png": (1920, 1080),
+    "usr/share/backgrounds/ming-os/default-1366x768.png": (1366, 768),
+}
+for wallpaper_path, expected_size in expected_wallpaper_sizes.items():
+    wallpaper = root / wallpaper_path
+    if not wallpaper.is_file() or wallpaper.stat().st_size == 0:
+        errors.append(f"missing or empty wallpaper: {wallpaper_path}")
+        continue
+    try:
+        data = wallpaper.read_bytes()
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("invalid PNG signature or truncated header")
+        if struct.unpack(">I", data[8:12])[0] != 13 or data[12:16] != b"IHDR":
+            raise ValueError("missing initial PNG IHDR chunk")
+        stored_crc = struct.unpack(">I", data[29:33])[0]
+        if stored_crc != (zlib.crc32(data[12:29]) & 0xFFFFFFFF):
+            raise ValueError("invalid PNG IHDR checksum")
+        if not data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+            raise ValueError("missing PNG IEND chunk")
+        dimensions = struct.unpack(">II", data[16:24])
+    except (OSError, ValueError, struct.error) as error:
+        errors.append(f"invalid wallpaper PNG {wallpaper_path}: {error}")
+        continue
+    if dimensions != expected_size:
+        errors.append(
+            f"wallpaper dimensions mismatch for {wallpaper_path}: "
+            f"expected {expected_size[0]}x{expected_size[1]}, got {dimensions[0]}x{dimensions[1]}"
+        )
 appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
 for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog", "ming-plank-watchdog"]:
     if marker not in appearance:

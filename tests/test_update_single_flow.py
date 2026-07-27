@@ -10,6 +10,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / "assets" / "ming-settings.py"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 OTA = ROOT / "modules" / "06_ota_update.sh"
+DESKTOP = ROOT / "modules" / "03_desktop.sh"
+FINALIZE = ROOT / "modules" / "07_finalize.sh"
 
 
 def method_block(source, start, end):
@@ -22,6 +24,8 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.phone = PHONE.read_text(encoding="utf-8")
         cls.ota = OTA.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP.read_text(encoding="utf-8")
+        cls.finalizer = FINALIZE.read_text(encoding="utf-8")
 
     def test_settings_starts_with_one_check_action_and_promotes_it_after_detection(self):
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
@@ -89,9 +93,48 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertNotIn('["mate-session-save", "--logout-dialog"]', entry)
 
     def test_legacy_update_launcher_redirects_to_the_settings_page(self):
-        self.assertIn('exec /usr/local/bin/ming-control-center --page update "$@"', self.ota)
-        desktop = self.ota[self.ota.index("cat > /usr/share/applications/ming-update.desktop") :]
-        self.assertIn("NoDisplay=true", desktop)
+        self.assertEqual(1, self.ota.count("cat > /usr/local/bin/ming-update-gui"))
+        redirect = method_block(
+            self.ota,
+            "cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'",
+            "    chmod +x /usr/local/bin/ming-update-gui",
+        )
+        self.assertIn('exec /usr/local/bin/ming-control-center --page update "$@"', redirect)
+        self.assertNotIn("zenity", redirect)
+        self.assertNotIn("ming-update.desktop", redirect)
+
+    def test_standalone_update_launcher_is_removed_from_new_and_existing_users(self):
+        self.assertNotIn("cat > /usr/share/applications/ming-update.desktop", self.ota)
+        self.assertNotIn("ming-update.dockitem", self.desktop)
+        self.assertNotIn("ming-update.desktop", self.finalizer)
+        for retired in (
+            "rm -f /usr/share/applications/ming-update.desktop",
+            'rm -f "/home/${MING_USER}/Desktop/ming-update.desktop"',
+            'rm -f /home/*/Desktop/ming-update.desktop',
+            'rm -f /home/*/.config/plank/dock1/launchers/ming-update.dockitem',
+        ):
+            self.assertIn(retired, self.ota)
+
+    def test_control_center_final_writer_is_ming_settings_wrapper(self):
+        main = self.desktop.split("main() {", 1)[1].split("\n}\n\nmain", 1)[0]
+        self.assertLess(main.index("install_ming_shell_components"), main.index("install_ming_settings"))
+
+        wrapper_writer = method_block(
+            self.desktop,
+            "install_ming_settings() {",
+            "cleanup_retired_ming_entries() {",
+        )
+        legacy_writer = method_block(
+            self.desktop,
+            "install_ming_shell_components() {",
+            "ensure_wps_office() {",
+        )
+        self.assertIn("cat > /usr/local/bin/ming-control-center", wrapper_writer)
+        self.assertIn("MINGCONTROLWRAPPER", wrapper_writer)
+        self.assertIn('exec /usr/local/bin/ming-settings "$@"', wrapper_writer)
+        self.assertNotIn("TASKS = [", wrapper_writer)
+        self.assertIn("TASKS = [", legacy_writer)
+        self.assertIn("('检查系统更新', 'ming-update-icon'", legacy_writer)
 
     def test_boot_check_reads_the_same_root_cache_used_by_the_cli(self):
         boot = self.ota[self.ota.index("cat > /usr/local/bin/ming-boot-update-check") :]

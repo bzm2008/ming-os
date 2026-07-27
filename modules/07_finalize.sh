@@ -29,7 +29,6 @@ readonly DESKTOP_LAUNCHERS=(
     "ming-files.desktop"
     "ming-firefox.desktop"
     "spark-store.desktop"
-    "ming-update.desktop"
     "papyrus.desktop"
     "ming-terminal.desktop"
 )
@@ -46,7 +45,7 @@ refresh_dock_launchers() {
     fi
 
     local name
-    for name in ming-update ming-settings; do
+    for name in ming-settings; do
         if [[ ! -s "/usr/share/applications/ming-dock-${name}.desktop" \
            || ! -s "${USER_HOME}/.config/plank/dock1/launchers/${name}.dockitem" ]]; then
             echo "[07_finalize][ERROR] final Dock launcher missing: ${name}" >&2
