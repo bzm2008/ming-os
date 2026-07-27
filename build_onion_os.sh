@@ -1447,7 +1447,11 @@ if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():
     errors.append("NetworkManager-wait-online drop-ins must not gate graphical boot")
 
 display_control = require_file("usr/local/bin/ming-display-control", "parse_xrandr_snapshot")
-for marker in ["status", "apply", "confirm", "rollback", "CONFIRM_SECONDS = 15", "request_is_supported"]:
+for marker in [
+    "status", "apply", "confirm", "rollback", "CONFIRM_SECONDS = 15",
+    "request_is_supported", "parse_xrandr_brightness", "software-status",
+    "software-set", "software-reapply", "--wait-seconds",
+]:
     if marker not in display_control:
         errors.append(f"ming-display-control missing confirmed-display marker {marker}")
 display_control_path = root / "usr/local/bin/ming-display-control"

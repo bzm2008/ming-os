@@ -772,15 +772,19 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("pactl", payload["backend"])
 
     def test_brightness_without_sysfs_device_is_explicitly_unavailable(self):
+        runner = FakeRunner({})
         with tempfile.TemporaryDirectory() as directory:
             controller = self.device.DeviceController(
-                runner=FakeRunner({}),
+                runner=runner,
                 executable=lambda _name: True,
                 backlight_root=pathlib.Path(directory),
             )
             result = controller.set_brightness(50)
         self.assertFalse(result["ok"])
-        self.assertIn("X11", result["error"])
+        self.assertEqual("xrandr-software", result["backend"])
+        self.assertIn(
+            ("/usr/local/bin/ming-display-control", "software-set", "50", "--json"),
+            runner.commands)
 
     def test_brightness_rejects_zero_before_running_a_command(self):
         runner = FakeRunner({})
@@ -857,26 +861,24 @@ class DeviceControlTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(result["available"])
         self.assertEqual("unavailable", result["state"])
-        self.assertEqual("", result["backend"])
+        self.assertEqual("xrandr-software", result["backend"])
         self.assertIsNone(result["value"])
         self.assertEqual(50, result["requested"])
 
     def test_brightness_uses_reversible_x11_fallback_without_physical_backlight(self):
         runner = FakeRunner({
-            ("xrandr", "--query"): [
-                (0, "HDMI-1 connected 1920x1080+0+0\nDP-1 connected 1920x1080+0+0", ""),
-                (0, "HDMI-1 connected 1920x1080+0+0\nDP-1 connected 1920x1080+0+0", ""),
-            ],
-            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
-            ("xrandr", "--output", "DP-1", "--brightness", "0.45"): (0, "", ""),
+            ("/usr/local/bin/ming-display-control", "software-set", "45", "--json"): (
+                0, json.dumps({
+                    "ok": True, "available": True, "state": "ready",
+                    "backend": "xrandr-software", "requested": 45, "value": 45,
+                    "outputs": ["HDMI-1", "DP-1"], "error": "",
+                }), ""),
         })
         with tempfile.TemporaryDirectory() as directory:
             controller = self.device.DeviceController(
                 runner=runner,
-                executable=lambda name: name == "xrandr",
+                executable=lambda name: name == "/usr/local/bin/ming-display-control",
                 backlight_root=pathlib.Path(directory) / "backlight",
-                software_brightness_path=pathlib.Path(directory) / "software-brightness.json",
-                environment={"DISPLAY": ":0"},
             )
             result = controller.set_brightness(45)
 
@@ -887,55 +889,59 @@ class DeviceControlTests(unittest.TestCase):
 
     def test_software_brightness_rolls_back_previously_changed_outputs_on_failure(self):
         runner = FakeRunner({
-            ("xrandr", "--query"): (0, "HDMI-1 connected\nDP-1 connected", ""),
-            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
-            ("xrandr", "--output", "DP-1", "--brightness", "0.45"): (1, "", "output failed"),
-            ("xrandr", "--output", "HDMI-1", "--brightness", "1.00"): (0, "", ""),
+            ("/usr/local/bin/ming-display-control", "software-set", "45", "--json"): (
+                2, json.dumps({
+                    "ok": False, "available": False, "state": "error",
+                    "backend": "xrandr-software", "requested": 45, "value": 80,
+                    "outputs": ["HDMI-1", "DP-1"], "error": "DP-1 设置失败，已恢复",
+                }), ""),
         })
         with tempfile.TemporaryDirectory() as directory:
             controller = self.device.DeviceController(
                 runner=runner,
-                executable=lambda name: name == "xrandr",
+                executable=lambda name: name == "/usr/local/bin/ming-display-control",
                 backlight_root=pathlib.Path(directory) / "backlight",
-                software_brightness_path=pathlib.Path(directory) / "software-brightness.json",
-                environment={"DISPLAY": ":0"},
             )
             result = controller.set_brightness(45)
 
         self.assertFalse(result["ok"])
         self.assertEqual("error", result["state"])
-        self.assertIn(("xrandr", "--output", "HDMI-1", "--brightness", "1.00"), runner.commands)
+        self.assertEqual(80, result["value"])
+        self.assertFalse(any(command[0] == "xrandr" for command in runner.commands))
 
     def test_software_brightness_state_is_restored_in_a_later_x11_session(self):
         initial_runner = FakeRunner({
-            ("xrandr", "--query"): (0, "HDMI-1 connected", ""),
-            ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+            ("/usr/local/bin/ming-display-control", "software-set", "45", "--json"): (
+                0, json.dumps({
+                    "ok": True, "available": True, "state": "ready",
+                    "backend": "xrandr-software", "value": 45, "error": "",
+                }), ""),
         })
         with tempfile.TemporaryDirectory() as directory:
-            state_path = pathlib.Path(directory) / "software-brightness.json"
             initial = self.device.DeviceController(
                 runner=initial_runner,
-                executable=lambda name: name == "xrandr",
+                executable=lambda name: name == "/usr/local/bin/ming-display-control",
                 backlight_root=pathlib.Path(directory) / "backlight",
-                software_brightness_path=state_path,
-                environment={"DISPLAY": ":0"},
             )
             self.assertTrue(initial.set_brightness(45)["ok"])
 
             restore_runner = FakeRunner({
-                ("xrandr", "--query"): (0, "HDMI-1 connected", ""),
-                ("xrandr", "--output", "HDMI-1", "--brightness", "0.45"): (0, "", ""),
+                ("/usr/local/bin/ming-display-control", "software-reapply", "--json"): (
+                    0, json.dumps({
+                        "ok": True, "available": True, "state": "ready",
+                        "backend": "xrandr-software", "value": 45, "error": "",
+                    }), ""),
             })
             restored = self.device.DeviceController(
                 runner=restore_runner,
-                executable=lambda name: name == "xrandr",
+                executable=lambda name: name == "/usr/local/bin/ming-display-control",
                 backlight_root=pathlib.Path(directory) / "backlight",
-                software_brightness_path=state_path,
-                environment={"DISPLAY": ":0"},
             ).restore_software_brightness()
 
         self.assertTrue(restored["ok"])
-        self.assertIn(("xrandr", "--output", "HDMI-1", "--brightness", "0.45"), restore_runner.commands)
+        self.assertIn(
+            ("/usr/local/bin/ming-display-control", "software-reapply", "--json"),
+            restore_runner.commands)
 
     def test_status_json_cli_has_stable_sections(self):
         output = io.StringIO()

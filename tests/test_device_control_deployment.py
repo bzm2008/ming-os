@@ -32,7 +32,9 @@ class DeviceControlDeploymentContracts(unittest.TestCase):
 
     def test_software_brightness_state_is_restored_after_x11_is_ready(self):
         self.assertIn('ming-software-brightness.desktop', self.desktop)
-        self.assertIn('ming-device-control restore-brightness', self.desktop)
+        self.assertIn(
+            'ming-device-control reapply-brightness --wait-seconds 10 --json',
+            self.desktop)
 
 
 if __name__ == "__main__":

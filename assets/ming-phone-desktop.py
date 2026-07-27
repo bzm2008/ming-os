@@ -2052,6 +2052,7 @@ class ControlRequestState:
         self.generation = 0
         self.pending = False
         self.optimistic_value = None
+        self.confirmed_value = None
 
     def begin(self, value):
         self.generation += 1
@@ -2067,6 +2068,7 @@ class ControlRequestState:
             return False
         self.pending = False
         self.optimistic_value = value
+        self.confirmed_value = value
         return True
 
     def should_hold_status(self):
@@ -2096,6 +2098,7 @@ class StatusWidget(Gtk.Box):
         self.device_controller = device_module.DeviceController() if device_module else None
         self.volume_timer = None
         self.brightness_timer = None
+        self.brightness_backend = ""
         self.updating_controls = False
         self.control_states = {
             "volume": ControlRequestState(),
@@ -2483,7 +2486,9 @@ class StatusWidget(Gtk.Box):
         if not self.updating_controls:
             value = max(1, min(100, int(round(control.get_value()))))
             generation = self.control_states["brightness"].begin(value)
-            self.brightness_label.set_text("亮度 %d%%" % value)
+            brightness_name = (
+                "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
+            self.brightness_label.set_text("%s %d%%" % (brightness_name, value))
             self.schedule_control("brightness", value, generation)
             self.brightness_scale.queue_draw()
 
@@ -2519,17 +2524,33 @@ class StatusWidget(Gtk.Box):
                 self.volume_label.set_text("音量 %d%%" % value)
                 self.volume_scale.queue_draw()
             else:
+                self.brightness_backend = result.get("backend", self.brightness_backend)
+                brightness_name = (
+                    "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
                 self.brightness_scale.set_value(value)
-                self.brightness_label.set_text("亮度 %d%%" % value)
+                self.brightness_label.set_text("%s %d%%" % (brightness_name, value))
                 self.brightness_scale.queue_draw()
         else:
-            state.pending = False
             message = result.get("error") or "控制失败"
             log("%s control rejected: %s" % (kind, message))
             if kind == "volume":
+                state.pending = False
                 self.volume_label.set_text("音量设置失败，点击重试")
             else:
-                self.brightness_label.set_text("亮度设置失败，点击重试")
+                self.brightness_backend = result.get("backend", self.brightness_backend)
+                fallback_value = value if value is not None else state.confirmed_value
+                if fallback_value is not None:
+                    state.settle(generation, fallback_value)
+                    self.brightness_scale.set_value(fallback_value)
+                    brightness_name = (
+                        "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
+                    self.brightness_label.set_text(
+                        "%s %d%%（设置失败）" % (brightness_name, fallback_value))
+                    self.brightness_scale.queue_draw()
+                else:
+                    state.pending = False
+                    state.optimistic_value = None
+                    self.brightness_label.set_text("亮度设置失败，点击重试")
         self.updating_controls = False
         return False
 
@@ -2841,15 +2862,21 @@ class StatusWidget(Gtk.Box):
             self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)
         brightness_available = bool(brightness.get("available"))
         brightness_value = brightness.get("value") if brightness_available else 1
+        self.brightness_backend = brightness.get("backend", "")
+        brightness_name = (
+            "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
         self.brightness_scale.set_sensitive(brightness_available)
         brightness_state = self.control_states["brightness"]
         if not brightness_state.should_hold_status():
             self.brightness_scale.set_value(max(1, min(100, brightness_value or 1)))
+            brightness_state.confirmed_value = brightness_value if brightness_available else None
             self.brightness_label.set_text(
-                "亮度 %d%%" % brightness_value if brightness_available else "当前设备不支持")
+                "%s %d%%" % (brightness_name, brightness_value)
+                if brightness_available else "当前设备不支持")
         elif brightness_state.optimistic_value is not None:
             self.brightness_scale.set_value(brightness_state.optimistic_value)
-            self.brightness_label.set_text("亮度 %d%%" % brightness_state.optimistic_value)
+            self.brightness_label.set_text(
+                "%s %d%%" % (brightness_name, brightness_state.optimistic_value))
         self.brightness_label.set_visible(True)
         self.brightness_scale.set_visible(True)
         self.display_button.set_visible(True)

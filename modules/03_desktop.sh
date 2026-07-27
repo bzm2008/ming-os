@@ -469,7 +469,7 @@ MINGAUDIOAUTO
 [Desktop Entry]
 Type=Application
 Name=Ming Software Brightness Restore
-Exec=/usr/local/bin/ming-device-control restore-brightness
+Exec=/usr/local/bin/ming-device-control reapply-brightness --wait-seconds 10 --json
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
