@@ -232,9 +232,11 @@ DESKTOP_MANIFEST_PATH = STATE_DIR / "desktop-generated-manifest.json"
 DESKTOP_MANIFEST_VERSION = 1
 DESKTOP_MANAGED_MARKER = "X-Ming-Managed"
 DESKTOP_MANAGED_MARKER_LINE = "X-Ming-Managed=true"
+DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
-APP_DIRS = [DESKTOP_DIR, Path("/usr/share/applications"), HOME / ".local/share/applications"]
+SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
+APP_DIRS = [DESKTOP_DIR, SYSTEM_APPLICATION_DIR, HOME / ".local/share/applications"]
 APP_CATALOG_FINGERPRINT_VERSION = 1
 CORE_NAMES = {
     "ming-settings.desktop",
@@ -267,7 +269,10 @@ CANONICAL_LAUNCHERS = {
     "ming-firefox.desktop": "browser",
     "firefox-esr.desktop": "browser",
     "firefox.desktop": "browser",
+    "firefox esr.desktop": "browser",
+    "firefox esr 浏览器.desktop": "browser",
     "papyrus.desktop": "agent",
+    "ming 设置.desktop": "settings",
 }
 CANONICAL_PREFERENCE = {
     "settings": "ming-settings.desktop",
@@ -671,16 +676,19 @@ def legacy_desktop_entry(path):
 
 
 def read_app(path):
+    source_resolver = globals().get("managed_desktop_source_path")
+    source_path = source_resolver(path) if callable(source_resolver) else None
+    effective_path = source_path or Path(path)
     diagnose = getattr(COMMON, "diagnose_desktop_file", None)
     if not callable(diagnose):
-        legacy = legacy_desktop_entry(path)
+        legacy = legacy_desktop_entry(effective_path)
         if legacy is None:
             return None
         return {
-            "id": app_id(path),
+            "id": app_id(effective_path),
             "type": "app",
-            "path": str(path),
-            "basename": Path(path).name,
+            "path": str(effective_path),
+            "basename": effective_path.name,
             "name": legacy["name"],
             "icon": legacy["icon"],
             "categories": legacy["categories"],
@@ -688,17 +696,17 @@ def read_app(path):
             "diagnostic": legacy["diagnostic"],
         }
     try:
-        entry = diagnose(path)
+        entry = diagnose(effective_path)
     except (OSError, ValueError):
         return None
     if entry is None:
         return None
     return {
-        "id": app_id(path),
+        "id": app_id(effective_path),
         "type": "app",
-        "path": str(path),
-        "basename": Path(path).name,
-        "name": entry.name or Path(path).stem,
+        "path": str(effective_path),
+        "basename": effective_path.name,
+        "name": entry.name or effective_path.stem,
         "icon": entry.icon or "application-x-executable",
         "categories": ";".join(entry.categories),
         "diagnostic": entry.diagnostic,
@@ -783,9 +791,10 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
     basename = item["basename"]
     if default_only and basename not in CORE_NAMES:
         return False
-    if basename in apps_by_basename:
+    key = str(Path(item["path"]))
+    if key in apps_by_basename:
         return False
-    apps_by_basename[basename] = item
+    apps_by_basename[key] = item
     return True
 
 
@@ -802,7 +811,7 @@ def add_core_app(apps_by_basename, basename):
 
 
 def canonical_identity(app):
-    return CANONICAL_LAUNCHERS.get(app["basename"], app["basename"])
+    return layout_item_identity(app)
 
 
 def deduplicate_apps(apps):
@@ -811,7 +820,7 @@ def deduplicate_apps(apps):
         identity = canonical_identity(app)
         preferred = CANONICAL_PREFERENCE.get(identity)
         current = selected.get(identity)
-        if current is None or app["basename"] == preferred:
+        if current is None or app["basename"].casefold() == preferred:
             selected[identity] = app
     return list(selected.values())
 
@@ -859,6 +868,137 @@ def _item_id(item):
         return "folder-" + app_id(seed)
     path = item.get("path")
     return app_id(path) if path else None
+
+
+def layout_item_identity(item):
+    """Group only known core launchers; unrelated user entries stay distinct."""
+    path = str(item.get("path") or "")
+    effective_path = layout_effective_path(item)
+    if is_system_application_path(effective_path):
+        basename = effective_path.name.casefold()
+        family = CANONICAL_LAUNCHERS.get(basename)
+        if family:
+            return family
+    return "path:" + os.path.normpath(path)
+
+
+def is_system_application_path(path):
+    try:
+        target = Path(path)
+        return target.is_absolute() and target.parent == Path(SYSTEM_APPLICATION_DIR)
+    except (TypeError, ValueError):
+        return False
+
+
+def layout_effective_path(item):
+    path = Path(str(item.get("path") or ""))
+    resolver = globals().get("managed_desktop_source_path")
+    source = resolver(path) if callable(resolver) else None
+    return source or path
+
+
+def retired_layout_item(item):
+    """Identify launchers removed from Ming OS so backups cannot revive them."""
+    effective_path = layout_effective_path(item)
+    if not is_system_application_path(effective_path):
+        return False
+    stem = effective_path.stem.casefold()
+    tokens = set(filter(None, re.split(r"[^a-z0-9]+", stem)))
+    return (
+        "edge" in tokens and bool({"microsoft", "ming"} & tokens)
+    ) or (
+        "claw" in tokens and bool({"garlic", "open"} & tokens)
+    ) or (
+        stem == "open" + "claw"
+    )
+
+
+def deduplicate_layout_items(items):
+    """Prefer managed proxy placement, while storing the current system path."""
+    preferred_core = {}
+    source_resolver = globals().get("managed_desktop_source_path")
+
+    def consider(item, token):
+        if retired_layout_item(item):
+            return
+        identity = layout_item_identity(item)
+        if identity not in CANONICAL_PREFERENCE:
+            return
+        path = item.get("path")
+        managed_source = source_resolver(path) if path and callable(source_resolver) else None
+        priority = 1 if managed_source is not None else 0
+        current = preferred_core.get(identity)
+        if current is None or priority > current[0]:
+            preferred_core[identity] = (priority, token)
+
+    for item_index, item in enumerate(items):
+        if item.get("type") == "folder":
+            for child_index, child in enumerate(item.get("children", [])):
+                consider({"type": "app", "path": str(child)}, ("child", item_index, child_index))
+        else:
+            consider(item, ("item", item_index))
+
+    deduplicated = []
+    known_noncore = set()
+    for item_index, item in enumerate(items):
+        if item.get("type") == "folder":
+            folder = dict(item)
+            children = []
+            for child_index, child in enumerate(item.get("children", [])):
+                child_item = {"path": str(child)}
+                if retired_layout_item(child_item):
+                    continue
+                identity = layout_item_identity(child_item)
+                if identity in CANONICAL_PREFERENCE:
+                    if preferred_core.get(identity, (None, None))[1] != ("child", item_index, child_index):
+                        continue
+                    managed_source = source_resolver(child) if callable(source_resolver) else None
+                    children.append(str(managed_source or child))
+                else:
+                    if identity in known_noncore:
+                        continue
+                    known_noncore.add(identity)
+                    children.append(str(child))
+            folder["children"] = children
+            deduplicated.append(folder)
+            continue
+        if retired_layout_item(item):
+            continue
+        identity = layout_item_identity(item)
+        if identity in CANONICAL_PREFERENCE:
+            if preferred_core.get(identity, (None, None))[1] != ("item", item_index):
+                continue
+            normalized = dict(item)
+            path = item.get("path")
+            managed_source = source_resolver(path) if path and callable(source_resolver) else None
+            if managed_source is not None:
+                normalized["path"] = str(managed_source)
+            deduplicated.append(normalized)
+        else:
+            if identity in known_noncore:
+                continue
+            known_noncore.add(identity)
+            deduplicated.append(item)
+    return deduplicated
+
+
+def canonicalize_core_layout_item(item, canonical_by_identity, seen):
+    """Move a managed core proxy to its current system launcher and keep placement."""
+    if not isinstance(item, dict) or item.get("type") == "folder":
+        return dict(item) if isinstance(item, dict) else item
+    identity = layout_item_identity(item)
+    canonical = canonical_by_identity.get(identity)
+    if identity not in CANONICAL_PREFERENCE or not isinstance(canonical, dict):
+        return dict(item)
+    if identity in seen:
+        return None
+    seen.add(identity)
+    restored = dict(canonical)
+    restored["id"] = item.get("id") or restored.get("id") or app_id(restored.get("path"))
+    restored["x"] = item.get("x", PAD_X)
+    restored["y"] = item.get("y", PAD_Y)
+    restored["pinned"] = bool(item.get("pinned", False))
+    return restored
 
 
 def migrate_layout(layout):
@@ -912,7 +1052,7 @@ def migrate_layout(layout):
         else:
             item["pinned"] = bool(item.get("pinned", False))
         items.append(item)
-    migrated["items"] = items
+    migrated["items"] = deduplicate_layout_items(items)
     return migrated
 
 
@@ -1048,6 +1188,13 @@ def sync_layout(width=1366):
         if isinstance(path, (str, os.PathLike))
     } if catalog_is_initialized else set()
     apps_by_path = {str(app["path"]): app for app in apps}
+    canonical_core_apps = {
+        identity: app
+        for app in apps
+        for identity in (layout_item_identity(app),)
+        if identity in CANONICAL_PREFERENCE
+    }
+    core_seen = set()
     # First-run layouts should remain deliberately compact.  Subsequent
     # catalog changes append only newly installed applications, while all
     # existing app tiles keep their saved coordinates and folders.
@@ -1064,14 +1211,21 @@ def sync_layout(width=1366):
                 folder = dict(item)
                 children = []
                 for child_path in item.get("children", []):
-                    child = read_app(child_path)
+                    canonical_child = canonicalize_core_layout_item(
+                        {"type": "app", "path": child_path}, canonical_core_apps, core_seen)
+                    if canonical_child is None:
+                        continue
+                    child = read_app(canonical_child.get("path"))
                     if child:
                         children.append(child["path"])
                 folder["children"] = children
                 folder["pinned"] = True
                 items.append(folder)
-                known.update(children)
+                known.update(layout_item_identity({"path": child}) for child in children)
         elif item.get("path"):
+            item = canonicalize_core_layout_item(item, canonical_core_apps, core_seen)
+            if item is None:
+                continue
             path = str(item["path"])
             basename = Path(path).name
             fresh = apps_by_path.get(path)
@@ -1081,15 +1235,20 @@ def sync_layout(width=1366):
                 restored["x"] = item.get("x", PAD_X)
                 restored["y"] = item.get("y", PAD_Y)
                 restored["pinned"] = bool(item.get("pinned", False))
+                identity = layout_item_identity(restored)
+                if identity in known:
+                    continue
                 items.append(restored)
-                known.add(path)
+                known.add(identity)
     index = len(items)
     for app in visible_apps:
-        if app["path"] in known:
+        identity = layout_item_identity(app)
+        if identity in known:
             continue
         app["x"], app["y"] = next_position(index, width)
         app["pinned"] = False
         items.append(app)
+        known.add(identity)
         index += 1
     layout["version"] = LAYOUT_VERSION
     layout["items"] = items
@@ -1137,6 +1296,116 @@ def _mark_desktop_file(path):
     try:
         target.write_text(text, encoding="utf-8")
         target.chmod(0o755)
+        return True
+    except OSError:
+        return False
+
+
+def desktop_entry_identity_fields(path):
+    """Read launch-critical fields used to verify that a proxy is still unchanged."""
+    target = Path(path)
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        if target.stat().st_size > 256 * 1024:
+            return None
+        parser.read(target, encoding="utf-8")
+    except (OSError, UnicodeError, configparser.Error):
+        return None
+    if not parser.has_section("Desktop Entry"):
+        return None
+    section = parser["Desktop Entry"]
+    entry_type = section.get("Type", "Application").strip().casefold()
+    exec_line = section.get("Exec", "").strip()
+    try_exec = section.get("TryExec", "").strip()
+    if not exec_line:
+        return None
+    return entry_type, exec_line, try_exec
+
+
+def legacy_managed_source_path(path):
+    """Infer the source of an unchanged pre-source-marker Ming desktop copy."""
+    target = Path(path)
+    family = CANONICAL_LAUNCHERS.get(target.name.casefold())
+    canonical_basename = CANONICAL_PREFERENCE.get(family)
+    if not canonical_basename:
+        return None
+    source = Path(SYSTEM_APPLICATION_DIR) / canonical_basename
+    if not source.is_file():
+        return None
+    target_fields = desktop_entry_identity_fields(target)
+    source_fields = desktop_entry_identity_fields(source)
+    if target_fields is None or target_fields != source_fields:
+        return None
+    try:
+        resolved = source.resolve(strict=True)
+        resolved.relative_to(Path(SYSTEM_APPLICATION_DIR).resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def managed_desktop_source_path(path):
+    """Resolve only a Ming-managed Desktop proxy to a current system launcher."""
+    target = Path(path)
+    if not _desktop_has_marker(target):
+        return None
+    try:
+        target.resolve().relative_to(Path(DESKTOP_DIR).resolve())
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    match = re.search(
+        r"(?im)^\s*{}\s*=\s*(.*?)\s*$".format(re.escape(DESKTOP_SOURCE_MARKER)), text)
+    if match is None:
+        return legacy_managed_source_path(target)
+    value = match.group(1).strip()
+    if value and "\x00" not in value:
+        source = Path(value)
+        if is_system_application_path(source) and source.is_file():
+            try:
+                resolved = source.resolve(strict=True)
+                resolved.relative_to(Path(SYSTEM_APPLICATION_DIR).resolve())
+            except (OSError, ValueError):
+                return None
+            target_fields = desktop_entry_identity_fields(target)
+            source_fields = desktop_entry_identity_fields(resolved)
+            if target_fields is not None and target_fields == source_fields:
+                return resolved
+    return None
+
+
+def write_desktop_source_marker(path, source):
+    """Record the protected system launcher represented by a generated copy."""
+    target = Path(path)
+    source = Path(source)
+    if not is_system_application_path(source) or not source.is_file():
+        return False
+    try:
+        source = source.resolve(strict=True)
+        source.relative_to(Path(SYSTEM_APPLICATION_DIR).resolve())
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        return False
+    text = re.sub(
+        r"(?im)^\s*{}\s*=.*(?:\r?\n|$)".format(re.escape(DESKTOP_SOURCE_MARKER)),
+        "",
+        text,
+    )
+    match = re.search(r"(?im)^\s*\[Desktop Entry\]\s*$", text)
+    if not match:
+        return False
+    insert_at = match.end()
+    if text.startswith("\r\n", insert_at):
+        insert_at += 2
+    elif insert_at < len(text) and text[insert_at] == "\n":
+        insert_at += 1
+    else:
+        text = text[:insert_at] + "\n" + text[insert_at:]
+        insert_at += 1
+    text = text[:insert_at] + f"{DESKTOP_SOURCE_MARKER}={source}\n" + text[insert_at:]
+    try:
+        target.write_text(text, encoding="utf-8")
         return True
     except OSError:
         return False
@@ -1222,6 +1491,13 @@ def copy_desktop(path, target_dir, name=None, preserve_basename=False, managed=F
                 suffix += 1
             target = candidate
         shutil.copy2(src, target)
+        if managed and is_system_application_path(src):
+            if not write_desktop_source_marker(target, src):
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                return None
         if managed:
             _mark_desktop_file(target)
         target.chmod(0o755)

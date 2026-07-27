@@ -4298,19 +4298,22 @@ sync_apps() {
     done
 }
 
-    cat > "${desktop}/Ming 设置.desktop" << CONTROL
-[Desktop Entry]
-Name=Ming 设置
-Comment=不用记命令，点按钮完成常见电脑维护
-Exec=/usr/local/bin/ming-control-center
-Icon=ming-control-center
-Terminal=false
-Type=Application
-Categories=Settings;System;
-StartupNotify=true
-CONTROL
-
-chmod +x "${desktop}/Ming 设置.desktop" 2>/dev/null || true
+legacy_settings="${desktop}/Ming 设置.desktop"
+legacy_common_settings="${common_dir}/Ming 设置.desktop"
+legacy_settings_is_managed=false
+if [[ -f "${legacy_settings}" ]] \
+   && grep -qxF 'Exec=/usr/local/bin/ming-control-center' "${legacy_settings}" 2>/dev/null; then
+    legacy_settings_is_managed=true
+fi
+if [[ "${legacy_settings_is_managed}" == true && -L "${legacy_common_settings}" ]]; then
+    legacy_common_target="$(readlink -- "${legacy_common_settings}" 2>/dev/null || true)"
+    if [[ "${legacy_common_target}" == "${legacy_settings}" ]]; then
+        rm -f "${legacy_common_settings}" 2>/dev/null || true
+    fi
+fi
+if [[ "${legacy_settings_is_managed}" == true ]]; then
+    rm -f "${legacy_settings}" 2>/dev/null || true
+fi
 rm -f "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
 
 gio set "${apps_dir}" metadata::custom-icon-name application-x-executable 2>/dev/null || true
@@ -4327,11 +4330,6 @@ if command -v ming-phone-desktop >/dev/null 2>&1; then
 else
     sync_apps
 fi
-for item in "${desktop}/Ming 设置.desktop"; do
-    [[ -f "${item}" ]] || continue
-    ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
-done
-
 if [[ "${1:-}" == "--watch" ]]; then
     while true; do
         if command -v inotifywait >/dev/null 2>&1; then

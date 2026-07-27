@@ -24,8 +24,6 @@
 set -uo pipefail
 
 readonly USER_HOME="/home/${MING_USER}"
-readonly DEFAULT_DESKTOP_LAYOUT="${USER_HOME}/.config/ming-os/desktop-layout.json"
-
 readonly DESKTOP_LAUNCHERS=(
     "ming-settings.desktop"
     "ming-files.desktop"
@@ -106,8 +104,12 @@ reset_desktop_dir() {
 constrain_default_desktop() {
     echo "[07_finalize] constraining default desktop launchers ..."
 
-    rm -f "${DEFAULT_DESKTOP_LAYOUT}" \
-          "/etc/skel/.config/ming-os/desktop-layout.json" 2>/dev/null || true
+    rm -f "${USER_HOME}/.config/ming-os/desktop-layout.json" \
+          "${USER_HOME}/.config/ming-os/desktop-layout.last-good.json" \
+          "${USER_HOME}/.config/ming-os/desktop-generated-manifest.json" \
+          "/etc/skel/.config/ming-os/desktop-layout.json" \
+          "/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
+          "/etc/skel/.config/ming-os/desktop-generated-manifest.json" 2>/dev/null || true
 
     reset_desktop_dir "${USER_HOME}/Desktop" "${MING_USER}:${MING_USER}"
     reset_desktop_dir "/etc/skel/Desktop" "root:root"
