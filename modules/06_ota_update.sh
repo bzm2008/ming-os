@@ -7,7 +7,8 @@ set -uo pipefail
 
 readonly OTA_CONFIG_DIR="/etc/ming-update"
 readonly OTA_CACHE_DIR="/var/cache/ming-update"
-readonly OTA_UPDATE_SERVER="https://ming.scallion.uno"
+readonly OTA_UPDATE_SERVER="https://ming.sca-hub.cn"
+readonly OTA_LEGACY_UPDATE_SERVER="https://ming.scallion.uno"
 readonly OTA_API_ENDPOINT="/api/onion-update"
 
 install_ota_dependencies() {
@@ -25,6 +26,19 @@ deploy_ota_backup_engine() {
     fi
     install -m 0755 "${source}" /usr/local/sbin/ming-ota-backup
     bash -n /usr/local/sbin/ming-ota-backup
+}
+
+deploy_ota_ab_engine() {
+    local controller="/tmp/ming-build/assets/ming-ota-ab.py"
+    local stage="/tmp/ming-build/assets/ming-ota-ab-stage.sh"
+    if [[ ! -s "${controller}" || ! -s "${stage}" ]]; then
+        echo "[06_ota_update][ERROR] Missing OTA A/B engine assets" >&2
+        return 1
+    fi
+    install -m 0755 "${controller}" /usr/local/sbin/ming-ota-ab
+    install -m 0755 "${stage}" /usr/local/sbin/ming-ota-ab-stage
+    python3 -m py_compile /usr/local/sbin/ming-ota-ab
+    bash -n /usr/local/sbin/ming-ota-ab-stage
 }
 
 deploy_ota_cli() {
@@ -57,11 +71,13 @@ readonly STATE_FILE="${CONFIG_DIR}/state.json"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
 readonly STAGING_DIR="/var/lib/ming-update"
 readonly STAGING_RECORD="/var/lib/ming-update/staging.json"
+readonly AB_STAGING_DIR="/var/lib/ming-update/ab-staging"
 readonly USER_CONFIG_DIR="${HOME}/.config/ming-update"
 readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
 readonly USER_STATE_FILE="${USER_CONFIG_DIR}/state.json"
 readonly USER_CONFIG_FILE="${USER_CONFIG_DIR}/config.json"
-readonly UPDATE_SERVER="https://ming.scallion.uno"
+readonly UPDATE_SERVER="https://ming.sca-hub.cn"
+readonly LEGACY_UPDATE_SERVER="https://ming.scallion.uno"
 readonly API_ENDPOINT="/api/onion-update"
 readonly BACKGROUND_AVAILABILITY_FILE="${CACHE_DIR}/background-availability.json"
 readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"
@@ -245,6 +261,11 @@ ota_backup_destination() {
     printf '%s\n' "${destination}"
 }
 
+ota_ab_status_json() {
+    [[ -x /usr/local/sbin/ming-ota-ab && -f /etc/ming-update/slots.json ]] || return 1
+    /usr/local/sbin/ming-ota-ab status 2>/dev/null
+}
+
 home_preservation_status_json() {
     # This is presentation-only. The privileged major OTA path revalidates
     # every filesystem, UUID, capacity and checksum before staging GRUB.
@@ -252,6 +273,14 @@ home_preservation_status_json() {
     if [[ "${update_type}" != "major" ]]; then
         jq -n --arg message "此更新不会替换系统分区，无需准备用户文件备份。" \
             '{ready: true, strategy: "not_required", message: $message}'
+        return 0
+    fi
+
+    local ab_status
+    ab_status="$(ota_ab_status_json 2>/dev/null || true)"
+    if [[ "$(printf '%s' "${ab_status}" | jq -r '.ready // false' 2>/dev/null)" == "true" ]]; then
+        printf '%s' "${ab_status}" | jq \
+            '. + {message: "此设备已使用 A/B 系统槽；更新会写入非活动槽，/home 保持不变，失败会回到旧槽。"}'
         return 0
     fi
 
@@ -377,7 +406,10 @@ validate_staging_inputs() {
     actual_checksum="$(sha256sum -- "${iso_path}" | awk '{print $1}')"
     [[ "${actual_checksum}" == "${checksum,,}" ]] || { log_error "OTA ISO SHA256 mismatch"; return 1; }
 
-    authoritative="$(fetch_authoritative_major_manifest)" || return 1
+    authoritative="$(fetch_authoritative_major_manifest)" || {
+        rm -f "${trusted_tmp}"
+        return 1
+    }
     authoritative_available="$(printf '%s' "${authoritative}" | jq -r '.has_update // .update_available // false')"
     authoritative_ready="$(printf '%s' "${authoritative}" | jq -r '.ready // true')"
     authoritative_type="$(printf '%s' "${authoritative}" | jq -r '.update_type // "major"')"
@@ -545,13 +577,22 @@ api_url() {
     server=${server:-${UPDATE_SERVER}}
     endpoint=${endpoint:-${API_ENDPOINT}}
     if [[ "${server}" == "https://scallion.uno" || "${endpoint}" == "/api/ming-update" ]]; then
-        server="${UPDATE_SERVER}"
+        server="${LEGACY_UPDATE_SERVER}"
         endpoint="${API_ENDPOINT}"
-        set_config '.update_server' "${UPDATE_SERVER}" >/dev/null 2>&1 || true
+        set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
         set_config '.api_endpoint' "${API_ENDPOINT}" >/dev/null 2>&1 || true
     fi
     channel=${channel:-stable}
     printf '%s%s/check?version=%s&channel=%s\n' "${server}" "${endpoint}" "${version}" "${channel}"
+}
+
+candidate_api_url() {
+    local channel version
+    channel=$(get_config '.channel')
+    channel=${channel:-stable}
+    version=$(current_version)
+    printf '%s%s/check?version=%s&channel=%s\n' \
+        "${UPDATE_SERVER}" "${API_ENDPOINT}" "${version}" "${channel}"
 }
 
 legacy_api_url() {
@@ -568,6 +609,32 @@ legacy_api_url() {
 
 is_json_response() {
     printf '%s' "$1" | jq -e . >/dev/null 2>&1
+}
+
+validate_ota_manifest_schema() {
+    local manifest="$1"
+    jq -e '
+        (
+          ((.schema == "ming.update.discovery.v1") and
+           (.available | type == "boolean") and
+           (.delivery | type == "string") and
+           (.capability | type == "string"))
+          or
+          ((.has_update // .update_available) | type == "boolean")
+        ) and
+        ((.ready // true) | type == "boolean") and
+        ((.update_type // "major") | IN("patch", "minor", "major")) and
+        (if (.has_update // .update_available // .available // false) then
+            ((.version // .latest_version // "") |
+                type == "string" and test("^[0-9]+(\\.[0-9]+){1,3}[A-Za-z0-9._-]*$")) and
+            (if ((.update_type // "major") == "major") then
+                ((.checksum // .sha256 // "") |
+                    type == "string" and test("^[A-Fa-f0-9]{64}$")) and
+                ((.download_url // .url // "") |
+                    type == "string" and startswith("https://"))
+             else true end)
+         else true end)
+    ' "${manifest}" >/dev/null 2>&1
 }
 
 verify_signed_ota_manifest() {
@@ -606,6 +673,39 @@ verify_signed_ota_manifest() {
         return 1
     fi
     verified_json=true
+}
+
+maybe_migrate_update_server() {
+    local current candidate response temporary
+    current=$(get_config '.update_server')
+    case "${current}" in
+        ""|"${UPDATE_SERVER}"|"${LEGACY_UPDATE_SERVER}"|https://scallion.uno) ;;
+        *) return 0 ;;
+    esac
+    candidate=$(candidate_api_url)
+    response=$(curl -fsSL --proto '=https' --tlsv1.2 \
+        --retry 1 --connect-timeout 8 --max-time 20 "${candidate}") || {
+        if [[ -z "${current}" || "${current}" == "${UPDATE_SERVER}" ]]; then
+            set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
+        fi
+        log_warn "新 OTA 服务尚未通过 TLS 连通验证，继续使用现有服务。"
+        return 1
+    }
+    temporary=$(mktemp)
+    printf '%s\n' "${response}" > "${temporary}"
+    if ! validate_ota_manifest_schema "${temporary}" || \
+       ! verify_signed_ota_manifest "${temporary}"; then
+        rm -f "${temporary}"
+        if [[ -z "${current}" || "${current}" == "${UPDATE_SERVER}" ]]; then
+            set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
+        fi
+        log_warn "新 OTA 服务的清单结构或签名未通过验证，保留现有服务。"
+        return 1
+    fi
+    rm -f "${temporary}"
+    set_config '.update_server' "${UPDATE_SERVER}"
+    set_config '.api_endpoint' "${API_ENDPOINT}"
+    log_info "新 OTA 服务已通过 TLS、清单和 Minisign 验证，已安全迁移。"
 }
 
 check_network() {
@@ -682,6 +782,10 @@ check_update() {
     log_step "检查更新"
     init_config
 
+    # The preferred domain is intentionally not selected until its live TLS
+    # endpoint, response schema and system OTA Minisign signature all pass.
+    maybe_migrate_update_server || true
+
     local version response url cdir manifest
     cdir=$(cache_dir)
     manifest="${cdir}/update_info.json"
@@ -731,7 +835,7 @@ check_update() {
     fi
 
     ready=$(printf '%s' "${response}" | jq -r '.ready // true')
-    has_update=$(printf '%s' "${response}" | jq -r '.has_update // .update_available // false')
+    has_update=$(printf '%s' "${response}" | jq -r '.has_update // .update_available // .available // false')
     new_version=$(printf '%s' "${response}" | jq -r '.version // .latest_version // "unknown"')
     notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "暂无更新说明。"')
     update_type=$(printf '%s' "${response}" | jq -r '.update_type // "major"')
@@ -1505,11 +1609,115 @@ apply_manifest_apt_update() {
 # ======================== major ISO 升级（保留用户文件）========================
 # 核心承诺：用户数据和 Live ISO 都位于目标系统盘之外。
 # Calamares 在分区前再次比较目标根分区与保留介质的物理盘祖先。
+prepare_authoritative_ab_iso() {
+    local sfile="$1" authoritative temporary
+    local state_version state_checksum state_iso state_name
+    local authoritative_available authoritative_ready authoritative_type
+    local authoritative_version authoritative_checksum authoritative_filename
+    local trusted_iso trusted_tmp actual_checksum
+
+    [[ -f "${sfile}" && ! -L "${sfile}" ]] || {
+        log_error "A/B 下载状态不受信任。"
+        return 1
+    }
+    state_version="$(jq -r '.version // ""' "${sfile}")"
+    state_checksum="$(jq -r '.checksum // ""' "${sfile}")"
+    state_iso="$(jq -r '.iso_path // ""' "${sfile}")"
+    [[ "${state_version}" =~ ^[0-9]+(\.[0-9]+){1,3}([A-Za-z0-9._-]*)?$ ]] || return 1
+    [[ "${state_checksum}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+    [[ -f "${state_iso}" && ! -L "${state_iso}" ]] || return 1
+    state_iso="$(readlink -f -- "${state_iso}")" || return 1
+    state_name="$(basename -- "${state_iso}")"
+
+    install -d -o root -g root -m 0700 "${AB_STAGING_DIR}"
+    trusted_tmp="$(mktemp "${AB_STAGING_DIR}/.iso.XXXXXX")"
+    if ! install -o root -g root -m 0600 "${state_iso}" "${trusted_tmp}"; then
+        rm -f "${trusted_tmp}"
+        return 1
+    fi
+    sync -f "${trusted_tmp}"
+
+    authoritative="$(fetch_authoritative_major_manifest)" || {
+        rm -f "${trusted_tmp}"
+        return 1
+    }
+    temporary="$(mktemp)"
+    printf '%s\n' "${authoritative}" > "${temporary}"
+    if ! validate_ota_manifest_schema "${temporary}" || \
+       ! verify_signed_ota_manifest "${temporary}"; then
+        rm -f "${temporary}" "${trusted_tmp}"
+        log_error "A/B 权威更新清单结构或签名无效。"
+        return 1
+    fi
+    authoritative_available="$(jq -r '.has_update // .update_available // .available // false' "${temporary}")"
+    authoritative_ready="$(jq -r '.ready // true' "${temporary}")"
+    authoritative_type="$(jq -r '.update_type // "major"' "${temporary}")"
+    authoritative_version="$(jq -r '.version // .latest_version // ""' "${temporary}")"
+    authoritative_checksum="$(jq -r '.checksum // .sha256 // ""' "${temporary}")"
+    authoritative_filename="$(jq -r '.filename // .iso_name // empty' "${temporary}")"
+    rm -f "${temporary}"
+    authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
+    if [[ "${authoritative_available}" != true || "${authoritative_ready}" != true ||
+          "${authoritative_type}" != major || "${authoritative_version}" != "${state_version}" ||
+          "${authoritative_checksum,,}" != "${state_checksum,,}" ||
+          "${authoritative_filename}" != "$(basename -- "${authoritative_filename}")" ||
+          "${state_name}" != "${authoritative_filename}" ]]; then
+        log_error "A/B 权威清单与下载状态不匹配。"
+        rm -f "${trusted_tmp}"
+        return 1
+    fi
+    validate_update_route "$(current_version)" "${authoritative_version}" || {
+        rm -f "${trusted_tmp}"
+        return 1
+    }
+
+    trusted_iso="${AB_STAGING_DIR}/${authoritative_filename}"
+    actual_checksum="$(sha256sum -- "${trusted_tmp}" | awk '{print $1}')"
+    if [[ "${actual_checksum}" != "${authoritative_checksum,,}" ]]; then
+        rm -f "${trusted_tmp}"
+        log_error "A/B root 私有 ISO 副本校验失败。"
+        return 1
+    fi
+    mv -f -- "${trusted_tmp}" "${trusted_iso}"
+    sync -f "${AB_STAGING_DIR}"
+    jq -n --arg iso_path "${trusted_iso}" --arg version "${authoritative_version}" \
+        --arg checksum "${authoritative_checksum,,}" \
+        '{iso_path: $iso_path, version: $version, checksum: $checksum}'
+}
+
+major_install_to_inactive_slot() {
+    local sfile source_iso checksum version status trusted
+    sfile="$(find_download_state_file)" || {
+        log_error "未找到已下载的 major 更新。"
+        return 1
+    }
+    status="$(ota_ab_status_json)" || {
+        log_error "A/B 槽位清单与当前挂载状态不一致，拒绝写入。"
+        return 1
+    }
+    [[ "$(printf '%s' "${status}" | jq -r '.ready // false')" == "true" ]] || return 1
+    trusted="$(prepare_authoritative_ab_iso "${sfile}")" || return 1
+    source_iso="$(jq -r '.iso_path' <<<"${trusted}")"
+    checksum="$(jq -r '.checksum' <<<"${trusted}")"
+    version="$(jq -r '.version' <<<"${trusted}")"
+    /usr/local/sbin/ming-ota-ab-stage \
+        --iso "${source_iso}" --version "${version}" --checksum "${checksum}" || return 1
+    update_state_fields "${sfile}" \
+        '. + {status: "staged", home_preservation: {strategy: "ab_slot", prepared: true},
+              staged_time: $time}' --arg time "$(date -Iseconds)"
+    log_info "新系统已写入非活动槽；旧槽仍是失败回退目标。"
+}
+
 major_install_with_home_backup() {
     log_step "Ming OS major 大版本升级（保留用户文件）"
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
         log_error "major OTA 备份与启动项暂存需要管理员权限。"
         return 1
+    fi
+
+    if ota_ab_status_json >/dev/null 2>&1; then
+        major_install_to_inactive_slot
+        return $?
     fi
 
     local manifest sfile version
@@ -1894,6 +2102,110 @@ SuccessExitStatus=0 1
 WantedBy=graphical.target
 BOOTCHECK
 
+    cat > /usr/local/sbin/ming-ota-ab-health << 'ABHEALTH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+layout=/etc/ming-update/slots.json
+transaction=/home/.ming-ota/ab-transaction.json
+[[ -f "${layout}" && -f "${transaction}" ]] || exit 0
+transaction_status="$(jq -r '.status // ""' "${transaction}" 2>/dev/null)" || exit 1
+case "${transaction_status}" in pending|rollback_required) ;; *) exit 0 ;; esac
+previous="$(jq -r '.previous_slot // ""' "${transaction}" 2>/dev/null)" || exit 1
+previous_entry="$(jq -r '.previous_entry // ""' "${transaction}" 2>/dev/null)" || exit 1
+case "${previous}:${previous_entry}" in
+    "A:Ming OS slot A"|"B:Ming OS slot B") ;;
+    *) exit 1 ;;
+esac
+
+rollback_ab_boot() {
+    local reason="${1:-A/B health check failed}"
+    ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+        force-rollback --reason "${reason}" >/dev/null 2>&1 || true
+    if command -v grub-set-default >/dev/null 2>&1; then
+        grub-set-default "${previous_entry}" || true
+    fi
+    if command -v grub-reboot >/dev/null 2>&1; then
+        grub-reboot "${previous_entry}" || true
+    fi
+    sync
+    systemctl reboot --no-wall --message="${reason}; returning to the previous Ming OS slot." || true
+    return 1
+}
+
+status="$(ming-ota-ab --layout "${layout}" --transaction "${transaction}" status)" \
+    || { rollback_ab_boot "A/B slot identity check failed"; exit 1; }
+current="$(jq -r '.active_slot' <<<"${status}")" \
+    || { rollback_ab_boot "cannot read active A/B slot"; exit 1; }
+target="$(jq -r '.target_slot // ""' "${transaction}")" \
+    || { rollback_ab_boot "cannot read target A/B slot"; exit 1; }
+target_entry="$(jq -r '.target_entry // ""' "${transaction}")" \
+    || { rollback_ab_boot "cannot read target GRUB entry"; exit 1; }
+case "${target}:${target_entry}" in
+    "A:Ming OS slot A"|"B:Ming OS slot B") ;;
+    *) rollback_ab_boot "target A/B slot identity is invalid"; exit 1 ;;
+esac
+
+if [[ "${current}" == "${previous}" ]]; then
+    ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+        observe-boot --health healthy >/dev/null || {
+            ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+                force-rollback --reason "rollback confirmation failed" >/dev/null 2>&1 || true
+            exit 1
+        }
+    exit 0
+fi
+if [[ "${current}" != "${target}" ]]; then
+    rollback_ab_boot "booted slot is outside the pending A/B transaction"
+    exit 1
+fi
+if [[ "${transaction_status}" == rollback_required ]]; then
+    rollback_ab_boot "Ming OS A/B rollback is still pending"
+    exit 1
+fi
+
+healthy=true
+[[ "$(cat /etc/ming-version 2>/dev/null || true)" == "$(jq -r '.version' "${transaction}")" ]] || healthy=false
+[[ "$(findmnt -nro UUID -T /home 2>/dev/null || true)" == "$(jq -r '.home.uuid' "${layout}")" ]] || healthy=false
+system_state="$(systemctl is-system-running 2>/dev/null || true)"
+case "${system_state}" in running|degraded) ;; *) healthy=false ;; esac
+systemctl is-active --quiet display-manager.service || healthy=false
+
+if [[ "${healthy}" == true ]] && command -v grub-set-default >/dev/null 2>&1 \
+   && grub-set-default "${target_entry}" \
+    && grep -Fqx "saved_entry=${target_entry}" <<<"$(grub-editenv list 2>/dev/null || true)"; then
+    if ! ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+        observe-boot --health healthy >/dev/null; then
+        rollback_ab_boot "A/B health confirmation state write failed"
+        exit 1
+    fi
+    exit 0
+fi
+
+ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+    force-rollback --reason "Ming OS A/B health check failed" >/dev/null 2>&1 || true
+rollback_ab_boot "Ming OS A/B health check failed"
+exit 1
+ABHEALTH
+    chmod 0755 /usr/local/sbin/ming-ota-ab-health
+    bash -n /usr/local/sbin/ming-ota-ab-health
+
+    cat > /etc/systemd/system/ming-ota-ab-health.service << 'ABHEALTHSERVICE'
+[Unit]
+Description=Ming OS A/B OTA boot health confirmation
+After=multi-user.target graphical.target
+ConditionPathExists=/etc/ming-update/slots.json
+ConditionPathExists=/home/.ming-ota/ab-transaction.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-ota-ab-health
+TimeoutStartSec=120
+
+[Install]
+WantedBy=graphical.target
+ABHEALTHSERVICE
+
     # 自动检查通知脚本（用户级，有更新弹 zenity/notify-send）
     cat > /usr/local/bin/ming-boot-update-check << 'BOOTCHECKSCRIPT'
 #!/usr/bin/env bash
@@ -1946,6 +2258,7 @@ BOOTCHECKSCRIPT
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable ming-update-check.timer 2>/dev/null || true
     systemctl enable ming-update-boot-check.service 2>/dev/null || true
+    systemctl enable ming-ota-ab-health.service 2>/dev/null || true
     systemctl start ming-update-check.timer 2>/dev/null || true
 }
 
@@ -1999,6 +2312,7 @@ main() {
     echo "=====> [06_ota_update] Deploying OTA update system <====="
     install_ota_dependencies
     deploy_ota_backup_engine
+    deploy_ota_ab_engine
     deploy_ota_cli
     deploy_systemd_services
     deploy_gui_tool

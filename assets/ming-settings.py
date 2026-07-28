@@ -1209,11 +1209,16 @@ class MingSettings(Adw.ApplicationWindow):
     def build_security(self):
         sc, box = self.page_scroller()
         self.security_page = sc
+        self.security_admin_ready = False
         self.loading_security_state = True
         summary = Adw.PreferencesGroup(
             title="安全状态", description="显示防火墙、远程终端和安全更新的实际状态。")
         self.security_summary_row = Adw.ActionRow(
             title="正在检查", subtitle="正在读取系统保护状态...")
+        self.security_admin_button = Gtk.Button(label="设置本机管理员")
+        self.security_admin_button.set_valign(Gtk.Align.CENTER)
+        self.security_admin_button.connect("clicked", self.on_security_admin_setup)
+        self.security_summary_row.add_suffix(self.security_admin_button)
         summary.add(self.security_summary_row)
         box.append(summary)
 
@@ -1238,6 +1243,16 @@ class MingSettings(Adw.ApplicationWindow):
         return sc
 
     def refresh_security_status(self):
+        def admin_done(rc, output, _error):
+            try:
+                admin = json.loads(output or "{}") if rc == 0 else {}
+            except ValueError:
+                admin = {}
+            self.security_admin_ready = bool(admin.get("ready"))
+            self.security_admin_button.set_visible(not self.security_admin_ready)
+            load_security_status()
+            return False
+
         def done(rc, output, error):
             if self.security_page.get_root() is not self:
                 return False
@@ -1261,21 +1276,41 @@ class MingSettings(Adw.ApplicationWindow):
             self.loading_security_state = False
             for control in (self.firewall_switch, self.ssh_switch,
                             self.security_updates_switch, self.home_profile_switch):
-                control.set_sensitive(True)
-            self.security_summary_row.set_title("安全状态已更新")
-            self.security_summary_row.set_subtitle(
-                "防火墙%s · 远程终端%s · 安全更新%s" % (
-                    "已开启" if firewall.get("effective") else "未生效",
-                    "已开启" if ssh.get("active") else "已关闭",
-                    "已开启" if updates.get("effective") else "未生效"))
+                control.set_sensitive(self.security_admin_ready)
+            if self.security_admin_ready:
+                self.security_summary_row.set_title("安全状态已更新")
+                self.security_summary_row.set_subtitle(
+                    "防火墙%s · 远程终端%s · 安全更新%s" % (
+                        "已开启" if firewall.get("effective") else "未生效",
+                        "已开启" if ssh.get("active") else "已关闭",
+                        "已开启" if updates.get("effective") else "未生效"))
+            else:
+                self.security_summary_row.set_title("需要设置本机管理员")
+                self.security_summary_row.set_subtitle(
+                    "请先在账户页面设置本机管理员密码，再更改保护设置。")
             return False
 
+        def load_security_status():
+            run_capture_async(
+                ["/usr/local/sbin/ming-security-control", "status", "--json"],
+                timeout=10, on_done=done)
+
         run_capture_async(
-            ["/usr/local/sbin/ming-security-control", "status", "--json"],
-            timeout=10, on_done=done)
+            ["/usr/local/sbin/ming-admin-bootstrap", "status", "--user", USER, "--json"],
+            timeout=10, on_done=admin_done)
+
+    def on_security_admin_setup(self, _button):
+        def done(_rc, _output, _error):
+            self.refresh_security_status()
+        run_capture_async(
+            ["/usr/local/bin/ming-oobe-account"], timeout=300, on_done=done)
 
     def on_security_toggle(self, control, _prop, name):
         if self.loading_security_state:
+            return
+        if not self.security_admin_ready:
+            self.toast("请先在账户页面设置本机管理员密码。")
+            self.refresh_security_status()
             return
         value = ("home" if control.get_active() else "public") if name == "profile" else (
             "on" if control.get_active() else "off")

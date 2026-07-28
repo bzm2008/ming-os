@@ -262,8 +262,22 @@ class DeviceController:
     def _can_run(self, command):
         return bool(self.executable(command))
 
+    @staticmethod
+    def _wpctl_volume(output):
+        match = re.search(
+            r"Volume:\s*([0-9]+(?:[.,][0-9]+)?)", output or "", re.I)
+        try:
+            value = int(round(float(match.group(1).replace(",", ".")) * 100))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return max(0, min(100, value))
+
     def _read_volume(self, backend):
-        if backend == "pactl":
+        if backend == "wpctl":
+            rc, output, error = self._run(
+                ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+            value = self._wpctl_volume(output)
+        elif backend == "pactl":
             rc, output, error = self._run(
                 ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
             value = parse_percent(output)
@@ -426,6 +440,7 @@ class DeviceController:
     @staticmethod
     def _audio_status_result(
             available=False, state="unavailable", backend="", value=None, error="",
+            control_backend="",
             server_available=False, playback_ready=False, default_sink="",
             default_sink_present=False, playback_profile_valid=None,
             playback_devices=None, call_ready=False, default_source="",
@@ -435,6 +450,7 @@ class DeviceController:
             "available": bool(available),
             "state": state,
             "backend": backend,
+            "control_backend": control_backend or backend,
             "value": value,
             "error": error or "",
             "server_available": bool(server_available),
@@ -475,16 +491,52 @@ class DeviceController:
         }
 
     def audio_status(self):
+        wpctl_error = ""
+        wpctl_status = None
+        if self._can_run("wpctl"):
+            wpctl_rc, output, wpctl_error = self._run(
+                ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+            value = self._wpctl_volume(output)
+            if wpctl_rc == 0 and value is not None:
+                muted = bool(re.search(r"\[MUTED\]", output or "", re.I))
+                sink = "@DEFAULT_AUDIO_SINK@"
+                wpctl_status = self._audio_status_result(
+                    available=True, state="muted" if muted else "ready",
+                    backend="wpctl", value=value, server_available=True,
+                    playback_ready=not muted, default_sink=sink,
+                    default_sink_present=True, playback_profile_valid=True,
+                    playback_devices=[{
+                        "id": sink, "display_name": "默认 PipeWire 音频输出",
+                        "kind": "internal", "available": True, "active": True,
+                    }], output_muted=muted)
+
         if self._can_run("pactl"):
             info_rc, info, info_error = self._run(["pactl", "info"])
             if info_rc != 0:
+                if wpctl_status is not None:
+                    return wpctl_status
+                pactl_error = info_error or info or "PulseAudio 服务没有运行。"
+                if self._can_run("amixer"):
+                    alsa_ok, alsa_value, alsa_error = self._read_volume("amixer")
+                    if alsa_ok:
+                        return self._audio_status_result(
+                            available=True, state="ready", backend="amixer",
+                            value=alsa_value, server_available=True,
+                            playback_ready=True, default_sink="Master",
+                            default_sink_present=True, playback_profile_valid=True,
+                            output_muted=False)
+                    pactl_error = "%s；ALSA：%s" % (
+                        pactl_error, alsa_error or "默认混音器不可用")
                 return self._audio_status_result(
-                    state="no_server", backend="pactl", error=(
-                        info_error or info or "PulseAudio 服务没有运行。"))
+                    state="no_server", backend="pactl", error=pactl_error)
+            else:
+                pactl_error = ""
 
             defaults = self._pactl_info_defaults(info)
             default_sink = defaults["sink"]
             if not default_sink or default_sink.lower() == "auto_null":
+                if wpctl_status is not None:
+                    return wpctl_status
                 return self._audio_status_result(
                     state="no_default_sink", backend="pactl", server_available=True,
                     default_source=defaults["source"],
@@ -494,6 +546,8 @@ class DeviceController:
                 ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
             value = parse_percent(volume_output)
             if volume_rc != 0 or value is None:
+                if wpctl_status is not None:
+                    return wpctl_status
                 return self._audio_status_result(
                     state="no_default_sink", backend="pactl", server_available=True,
                     default_sink=default_sink, default_source=defaults["source"],
@@ -506,6 +560,8 @@ class DeviceController:
                 (item for item in playback_devices if item["id"] == default_sink), None)
             if default_device is None:
                 if _sinks_rc == 0:
+                    if wpctl_status is not None:
+                        return wpctl_status
                     return self._audio_status_result(
                         available=True, state="no_default_sink", backend="pactl",
                         server_available=True, default_sink=default_sink,
@@ -520,6 +576,8 @@ class DeviceController:
                 }
                 playback_devices.append(default_device)
             if not default_device.get("available"):
+                if wpctl_status is not None:
+                    return wpctl_status
                 return self._audio_status_result(
                     available=True, state="no_default_sink", backend="pactl", value=value,
                     server_available=True, default_sink=default_sink,
@@ -562,6 +620,7 @@ class DeviceController:
                 and input_muted is False and output_muted is False)
             return self._audio_status_result(
                 available=True, state=state, backend="pactl", value=value,
+                control_backend="wpctl" if wpctl_status is not None else "pactl",
                 server_available=True, playback_ready=playback_ready,
                 default_sink=default_sink, default_sink_present=True,
                 playback_profile_valid=playback_profile_valid,
@@ -571,13 +630,21 @@ class DeviceController:
                 output_muted=output_muted, duplex_profile_active=duplex_active,
                 cards=cards)
 
+        if wpctl_status is not None:
+            return wpctl_status
         if self._can_run("amixer"):
             ok, value, error = self._read_volume("amixer")
             if ok:
                 return self._audio_status_result(
                     available=True, state="ready", backend="amixer", value=value,
-                    playback_ready=True, playback_profile_valid=True)
+                    server_available=True, playback_ready=True, default_sink="Master",
+                    default_sink_present=True, playback_profile_valid=True,
+                    output_muted=False)
             return self._audio_status_result(error=error)
+        if wpctl_error:
+            return self._audio_status_result(
+                state="no_server", backend="wpctl",
+                error=wpctl_error or "PipeWire 服务没有运行。")
         return self._audio_status_result(error="未检测到音频输出设备")
 
     @staticmethod
@@ -692,6 +759,30 @@ class DeviceController:
     def audio_repair_playback(self):
         """Repair a missing output without replacing a valid user selection."""
         status = self.audio_status()
+        if status.get("backend") == "wpctl" and status.get("server_available"):
+            if status.get("output_muted") is not True:
+                return {
+                    "ok": bool(status.get("playback_ready")), "changed": False,
+                    "action": "preserved_pipewire_output", "error": status.get("error", ""),
+                    "status": status,
+                }
+            rc, output, error = self._run(
+                ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"])
+            if rc != 0:
+                return {
+                    "ok": False, "changed": False, "action": "unmute_failed",
+                    "error": error or output or "无法解除 PipeWire 输出静音。",
+                    "status": status,
+                }
+            repaired = self.audio_status()
+            ready = bool(
+                repaired.get("playback_ready")
+                and repaired.get("output_muted") is False)
+            return {
+                "ok": ready, "changed": True, "action": "unmuted_pipewire_output",
+                "error": "" if ready else "无法确认 PipeWire 输出静音状态。",
+                "status": repaired,
+            }
         if status.get("backend") != "pactl" or not status.get("server_available"):
             return {
                 "ok": False, "changed": False, "action": "unavailable",
@@ -966,6 +1057,7 @@ class DeviceController:
         write_succeeded = False
         last_backend = ""
         commands = (
+            ("wpctl", ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "%d%%" % value]),
             ("pactl", ["pactl", "set-sink-volume", "@DEFAULT_SINK@", "%d%%" % value]),
             ("amixer", ["amixer", "sset", "Master", "%d%%" % value]),
         )
@@ -978,7 +1070,13 @@ class DeviceController:
                 continue
             write_succeeded = True
             last_backend = backend
-            if backend == "pactl":
+            if backend == "wpctl":
+                mute_rc, mute_output, mute_error = self._run(
+                    ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"])
+                if mute_rc != 0:
+                    errors.append(mute_error or mute_output or "无法解除当前输出静音")
+                    continue
+            elif backend == "pactl":
                 mute_rc, mute_output, mute_error = self._run(
                     ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"])
                 if mute_rc != 0:
@@ -986,7 +1084,13 @@ class DeviceController:
                     continue
             ok, effective, read_error = self._read_volume(backend)
             if ok:
-                if backend == "pactl":
+                if backend == "wpctl":
+                    mute_rc, mute_output, mute_error = self._run(
+                        ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+                    if mute_rc != 0 or re.search(r"\[MUTED\]", mute_output or "", re.I):
+                        errors.append(mute_error or mute_output or "无法确认当前输出静音状态")
+                        continue
+                elif backend == "pactl":
                     mute_rc, mute_output, mute_error = self._run(
                         ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
                     if mute_rc != 0 or re.search(r"Mute:\s*yes", mute_output or "", re.I):
@@ -1144,10 +1248,15 @@ class DeviceController:
                 backend="brightnessctl", state="unavailable")
         rc, output, error = self._run(["brightnessctl", "set", "%d%%" % value])
         if rc != 0:
+            actual, _levels = self._physical_brightness_status()
+            write_error = error or output or "设置亮度失败"
+            if actual.get("error") and not actual.get("available"):
+                write_error = "%s；读回失败：%s" % (write_error, actual["error"])
             return self._control_result(
                 False, requested=value,
-                error=error or output or "设置亮度失败",
-                backend="brightnessctl", available=True, state="error")
+                value=actual.get("value"), error=write_error,
+                backend="brightnessctl", available=bool(actual.get("available")),
+                state="error")
         status, levels = self._physical_brightness_status()
         readback_matches_request = bool(
             status["available"]

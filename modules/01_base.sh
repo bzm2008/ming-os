@@ -806,6 +806,7 @@ configure_users() {
 
     install -d -m 0755 /usr/local/sbin /usr/share/polkit-1/actions
     install -m 0755 /tmp/ming-build/assets/ming-account-control.py /usr/local/sbin/ming-account-control
+    install -m 0755 /tmp/ming-build/assets/ming-admin-bootstrap.py /usr/local/sbin/ming-admin-bootstrap
     cat > /usr/share/polkit-1/actions/org.ming.account.control.policy << 'ACCOUNT_CONTROL_POLICY'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC
@@ -824,6 +825,26 @@ configure_users() {
   </action>
 </policyconfig>
 ACCOUNT_CONTROL_POLICY
+
+    cat > /usr/share/polkit-1/actions/org.ming.account.bootstrap.policy << 'ACCOUNT_BOOTSTRAP_POLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming.account.bootstrap">
+    <description>Initialize the first local Ming OS administrator</description>
+    <message>Create the local administrator password to continue.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-admin-bootstrap</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+ACCOUNT_BOOTSTRAP_POLICY
 
 
     cat > /usr/local/sbin/ming-timeshift-restore << 'TIMESHIFT_RESTORE_HELPER'
@@ -2127,6 +2148,56 @@ ensure_persistent_root_fstab() {
 /usr/local/sbin/ming-installer-verify boundary --target "${target}" || exit 30
 ensure_persistent_root_fstab || exit 30
 
+write_ota_ready_layout() {
+    local boot_device root_a_device root_b_device home_device
+    local boot_uuid root_a_uuid root_b_uuid home_uuid unique_count target_disk candidate_disk
+    physical_disk_for_device() {
+        lsblk -s -nrpo NAME,TYPE "$1" 2>/dev/null \
+            | awk '$2 == "disk" {print $1}' | sort -u
+    }
+    udevadm settle --timeout=10 2>/dev/null || true
+    boot_device="$(blkid -L MING-BOOT 2>/dev/null || true)"
+    root_a_device="$(blkid -L MING-ROOT-A 2>/dev/null || true)"
+    root_b_device="$(blkid -L MING-ROOT-B 2>/dev/null || true)"
+    home_device="$(blkid -L MING-HOME 2>/dev/null || true)"
+    for device in "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+        [[ "${device}" == /dev/* && -b "${device}" ]] || {
+            echo "ERROR: OTA-ready partition labels are incomplete" >&2; return 1;
+        }
+    done
+    target_disk="$(physical_disk_for_device "${root_source}")"
+    [[ -n "${target_disk}" && "${target_disk}" != *$'\n'* ]] || {
+        echo "ERROR: cannot identify one OTA-ready target disk" >&2; return 1;
+    }
+    for device in "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+        candidate_disk="$(physical_disk_for_device "${device}")"
+        [[ "${candidate_disk}" == "${target_disk}" ]] || {
+            echo "ERROR: OTA-ready labels resolve outside the selected target disk" >&2; return 1;
+        }
+    done
+    root_a_uuid="$(blkid -s UUID -o value "${root_a_device}")"
+    root_b_uuid="$(blkid -s UUID -o value "${root_b_device}")"
+    boot_uuid="$(blkid -s UUID -o value "${boot_device}")"
+    home_uuid="$(blkid -s UUID -o value "${home_device}")"
+    unique_count="$(printf '%s\n' "${root_a_uuid}" "${root_b_uuid}" "${boot_uuid}" "${home_uuid}" | sort -u | wc -l)"
+    [[ "${unique_count}" -eq 4 && "${root_uuid}" == "${root_a_uuid}" ]] || {
+        echo "ERROR: OTA-ready UUID readback failed" >&2; return 1;
+    }
+    mkdir -p "${target}/etc/ming-update"
+    cat > "${target}/etc/ming-update/slots.json" <<SLOTS
+{"schema":1,"layout":"ming-ab-v1","slots":{"A":{"device":"/dev/disk/by-uuid/${root_a_uuid}","uuid":"${root_a_uuid}","grub_entry":"Ming OS slot A"},"B":{"device":"/dev/disk/by-uuid/${root_b_uuid}","uuid":"${root_b_uuid}","grub_entry":"Ming OS slot B"}},"boot":{"device":"/dev/disk/by-uuid/${boot_uuid}","uuid":"${boot_uuid}"},"home":{"device":"/dev/disk/by-uuid/${home_uuid}","uuid":"${home_uuid}"}}
+SLOTS
+    printf 'A\n' > "${target}/etc/ming-ota-slot"
+    printf 'ming-ab-v1\n' > "${target}/etc/ming-update/ota-ready"
+    chmod 0600 "${target}/etc/ming-update/slots.json"
+    chmod 0644 "${target}/etc/ming-ota-slot" "${target}/etc/ming-update/ota-ready"
+    OTA_ROOT_A_UUID="${root_a_uuid}"
+    OTA_ROOT_B_UUID="${root_b_uuid}"
+    OTA_BOOT_UUID="${boot_uuid}"
+}
+
+write_ota_ready_layout || exit 30
+
 write_file() {
     local path="$1"
     shift
@@ -2366,12 +2437,30 @@ restore_ota_home || exit $?
 ensure_ming_user
 ensure_kernel_boot_links
 
+kernel="$(find "${target}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"
+initrd="$(find "${target}/boot" -maxdepth 1 -type f -name 'initrd.img-*' 2>/dev/null | sort -V | tail -n 1 || true)"
+[[ -s "${kernel}" && -s "${initrd}" ]] || { echo "ERROR: A/B boot payload is missing" >&2; exit 30; }
+install -d -m 0755 "${target}/boot/ming-slots/A"
+install -m 0644 "${kernel}" "${target}/boot/ming-slots/A/vmlinuz"
+install -m 0644 "${initrd}" "${target}/boot/ming-slots/A/initrd.img"
+# inactive slot B is intentionally not bootable until the first verified OTA
+
 mkdir -p "${target}/etc/grub.d"
 cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBENTRY'
 #!/bin/sh
 set -e
 
 cat <<'EOF'
+menuentry 'Ming OS slot A' --class ming --class gnu-linux --class os {
+    search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
+    linux /ming-slots/A/vmlinuz root=UUID=__MING_ROOT_A_UUID__ ro quiet loglevel=3 systemd.show_status=false
+    initrd /ming-slots/A/initrd.img
+}
+menuentry 'Ming OS slot B' --class ming --class gnu-linux --class os {
+    search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
+    linux /ming-slots/B/vmlinuz root=UUID=__MING_ROOT_B_UUID__ ro quiet loglevel=3 systemd.show_status=false
+    initrd /ming-slots/B/initrd.img
+}
 menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
     load_video
     insmod gzio
@@ -2439,6 +2528,14 @@ if ! sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_template}"; then
     echo "ERROR: failed to write the authoritative root UUID into the Ming GRUB template" >&2
     exit 30
 fi
+sed -i "s/__MING_ROOT_A_UUID__/${OTA_ROOT_A_UUID}/g; s/__MING_ROOT_B_UUID__/${OTA_ROOT_B_UUID}/g; s/__MING_BOOT_UUID__/${OTA_BOOT_UUID}/g" "${grub_template}" || exit 30
+sed -i \
+    -e "s|search --no-floppy --set=root --file /vmlinuz|search --no-floppy --fs-uuid --set=root ${OTA_BOOT_UUID}|g" \
+    -e "s|linux /vmlinuz root=UUID=${root_uuid}|linux /ming-slots/A/vmlinuz root=UUID=${root_uuid}|g" \
+    -e "s|initrd /initrd.img|initrd /ming-slots/A/initrd.img|g" \
+    "${grub_template}" || exit 30
+grep -Fq "root=UUID=${OTA_ROOT_A_UUID}" "${grub_template}" || exit 30
+grep -Fq "root=UUID=${OTA_ROOT_B_UUID}" "${grub_template}" || exit 30
 if grep -Fq '__MING_ROOT_UUID__' "${grub_template}"; then
     echo "ERROR: Ming GRUB template still contains __MING_ROOT_UUID__" >&2
     exit 30
@@ -2476,6 +2573,8 @@ mkdir -p "${target}/etc/default/grub.d"
 cat > "${target}/etc/default/grub.d/10-ming-os.cfg" <<GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
+GRUB_DEFAULT=saved
+GRUB_SAVEDEFAULT=false
 # 老旧硬件友好 + 隐藏内核日志：安静启动、低日志级别、隐藏 systemd 状态刷屏
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog"
 GRUB_TERMINAL_INPUT=console
@@ -2620,7 +2719,7 @@ current_root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || tr
     exit 20
 }
 if ! grep -Fq "root=UUID=${root_uuid}" "${root}/etc/grub.d/09_ming_os" \
-    || grep -Fq '__MING_ROOT_UUID__' "${root}/etc/grub.d/09_ming_os"; then
+    || grep -Eq '__MING_(ROOT|BOOT).*UUID__' "${root}/etc/grub.d/09_ming_os"; then
     echo "ERROR: target GRUB template does not contain the authoritative root UUID"
     exit 20
 fi
@@ -2797,10 +2896,17 @@ validate_final_grub_root_uuid() {
 }
 
 if [ ! -s "${root}/boot/grub/grub.cfg" ] \
-    || grep -Fq '__MING_ROOT_UUID__' "${root}/boot/grub/grub.cfg"; then
+    || grep -Eq '__MING_(ROOT|BOOT).*UUID__' "${root}/boot/grub/grub.cfg"; then
     echo "ERROR: final grub.cfg is missing, empty, or still contains a placeholder"
     exit 22
 fi
+for contract in \
+    "Ming OS slot A" "/ming-slots/A/vmlinuz" "/ming-slots/A/initrd.img" \
+    "Ming OS slot B" "/ming-slots/B/vmlinuz" "/ming-slots/B/initrd.img"; do
+    grep -Fq "${contract}" "${root}/boot/grub/grub.cfg" || {
+        echo "ERROR: final grub.cfg is missing A/B contract ${contract}"; exit 22;
+    }
+done
 if ! validate_final_grub_root_uuid "${root}/boot/grub/grub.cfg"; then
     echo "ERROR: all Ming linux stanzas must use the authoritative root UUID"
     exit 22
@@ -3023,9 +3129,30 @@ availableFileSystemTypes:
   - "ext4"
 initialPartitioningChoice: none
 initialSwapChoice: none
-requiredStorage: 12
+partitionLayout:
+  - name: "MING-BOOT"
+    filesystem: "ext4"
+    noEncrypt: true
+    mountPoint: "/boot"
+    size: 1G
+  - name: "MING-ROOT-A"
+    filesystem: "ext4"
+    mountPoint: "/"
+    size: 35%
+    minSize: 14G
+  - name: "MING-ROOT-B"
+    filesystem: "ext4"
+    noEncrypt: true
+    size: 35%
+    minSize: 14G
+  - name: "MING-HOME"
+    filesystem: "ext4"
+    mountPoint: "/home"
+    size: 100%
+    minSize: 8G
+requiredStorage: 48
 # 关闭手动分区入口——普通用户不需要也不会用，只显示"清空整个磁盘"
-allowManualPartitioning: true
+allowManualPartitioning: false
 PARTITIONCONF
 
     cat > /etc/calamares/modules/mount.conf << 'MOUNTCONF'

@@ -82,6 +82,45 @@ class AudioSessionTests(unittest.TestCase):
         self.assertIn(("pulseaudio", "--start"), [call[0] for call in runner.calls])
         self.assertTrue(all(timeout <= self.audio.COMMAND_TIMEOUT for _, timeout in runner.calls))
 
+    def test_ensure_starts_pipewire_stack_instead_of_pulseaudio_for_wpctl(self):
+        statuses = iter((
+            status(backend="wpctl", server_available=False, playback_ready=False,
+                   default_sink="", default_sink_present=False,
+                   playback_profile_valid=None, playback_devices=[], error="PipeWire 未运行。"),
+            status(backend="wpctl"),
+        ))
+        runner = RecordingRunner()
+        session = self.audio.AudioSession(
+            status_reader=lambda: next(statuses), runner=runner)
+
+        result = session.ensure()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("started_pipewire", result["action"])
+        calls = [call[0] for call in runner.calls]
+        self.assertIn(
+            ("systemctl", "--user", "start", "pipewire.service",
+             "pipewire-pulse.service", "wireplumber.service"), calls)
+        self.assertNotIn(("pulseaudio", "--start"), calls)
+
+    def test_ensure_repairs_a_muted_wpctl_output(self):
+        statuses = iter((
+            status(backend="wpctl", output_muted=True, playback_ready=False),
+            status(backend="wpctl", output_muted=False, playback_ready=True),
+        ))
+        repairs = []
+        session = self.audio.AudioSession(
+            status_reader=lambda: next(statuses),
+            repairer=lambda: repairs.append(True) or {
+                "ok": True, "changed": True, "action": "unmuted_pipewire_output"},
+        )
+
+        result = session.ensure()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual([True], repairs)
+
     def test_ensure_preserves_a_valid_manually_selected_hdmi_output(self):
         hdmi = "alsa_output.pci-0000_01_00.1.hdmi-stereo"
         runner = RecordingRunner()

@@ -448,12 +448,14 @@ class LaunchBroker:
     def __init__(
             self, spawn=None, animate=None, now=None, reduced_motion=None,
             workarea=None, probe=None, report_error=None, record_event=None,
-            trusted_verifier=None, desktop_activator=None, proxy_verifier=None):
+            trusted_verifier=None, desktop_activator=None, proxy_verifier=None,
+            static_feedback=None):
         self.spawn = spawn or (lambda argv: subprocess.Popen(list(argv), shell=False))
         self.trusted_verifier = trusted_verifier or verify_package_owned_system_desktop
         self.desktop_activator = desktop_activator or activate_desktop_app_info
         self.proxy_verifier = proxy_verifier or verify_desktop_proxy
         self.animate = animate or animate_launch
+        self.static_feedback = static_feedback or show_static_launch_feedback
         self.now = now or time.monotonic
         self.reduced_motion = reduced_motion or reduced_motion_enabled
         self.workarea = workarea or _default_workarea
@@ -487,6 +489,8 @@ class LaunchBroker:
                 return False
             self._recent[key] = moment
             self.record_event(request, "activated")
+            feedback = self.static_feedback if self.reduced_motion() else self.animate
+            feedback(request, self.workarea())
             return True
         if request.mode == "desktop_proxy" and not self.proxy_verifier(request.desktop_file):
             error = RuntimeError("desktop proxy verification failed")
@@ -503,10 +507,8 @@ class LaunchBroker:
         self._recent[key] = moment
         self.record_event(request, "spawned")
         finish = None
-        # The phone desktop owns its own launch feedback.  Showing another
-        # broker popup there causes two competing animations for one click.
-        if not self.reduced_motion() and request.source != "desktop":
-            finish = self.animate(request, self.workarea())
+        feedback = self.static_feedback if self.reduced_motion() else self.animate
+        finish = feedback(request, self.workarea())
 
         def ready():
             self.record_event(request, "ready")
@@ -544,7 +546,7 @@ class LaunchBroker:
         return True
 
 
-def animate_launch(request, workarea=None):
+def _launch_feedback_window(request, workarea=None, animated=True):
     try:
         import gi
         gi.require_version("Gtk", "3.0")
@@ -570,7 +572,7 @@ def animate_launch(request, workarea=None):
         int(workarea.x + (workarea.width - width) / 2.0),
         int(workarea.y + max(24, min(72, workarea.height * 0.10))),
     )
-    window.set_opacity(0.0)
+    window.set_opacity(0.0 if animated else 0.94)
 
     provider = Gtk.CssProvider()
     provider.load_from_data(
@@ -597,10 +599,16 @@ def animate_launch(request, workarea=None):
     text.set_hexpand(True)
     panel.pack_start(text, True, True, 0)
     spinner = Gtk.Spinner()
-    spinner.start()
+    if animated:
+        spinner.start()
+    else:
+        spinner.set_no_show_all(True)
+        spinner.hide()
     panel.pack_start(spinner, False, False, 0)
     window.add(panel)
     window.show_all()
+    if not animated:
+        spinner.hide()
     started = GLib.get_monotonic_time()
 
     state = {"destroyed": False}
@@ -614,14 +622,23 @@ def animate_launch(request, workarea=None):
     def finish():
         GLib.idle_add(destroy)
 
-    def step():
-        elapsed = (GLib.get_monotonic_time() - started) / 1000.0
-        progress = min(1.0, elapsed / ANIMATION_DURATION_MS)
-        window.set_opacity(0.94 * COMMON.ease_out_cubic(progress))
-        return progress < 1.0 and not state["destroyed"]
-    GLib.timeout_add(33, step)
+    if animated:
+        def step():
+            elapsed = (GLib.get_monotonic_time() - started) / 1000.0
+            progress = min(1.0, elapsed / ANIMATION_DURATION_MS)
+            window.set_opacity(0.94 * COMMON.ease_out_cubic(progress))
+            return progress < 1.0 and not state["destroyed"]
+        GLib.timeout_add(33, step)
     GLib.timeout_add(FEEDBACK_TIMEOUT_MS, destroy)
     return finish
+
+
+def animate_launch(request, workarea=None):
+    return _launch_feedback_window(request, workarea, animated=True)
+
+
+def show_static_launch_feedback(request, workarea=None):
+    return _launch_feedback_window(request, workarea, animated=False)
 
 
 def activate_desktop_app_info(desktop_file):

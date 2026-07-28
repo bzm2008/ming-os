@@ -60,7 +60,8 @@ seed_trusted_desktop_receipts() {
     install -d -m 0755 "${receipt_dir}"
     for launcher in \
         "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
-        "ming-firefox.desktop" "ming-terminal.desktop" "Install Ming OS.desktop"; do
+        "ming-firefox.desktop" "ming-terminal.desktop" "papyrus.desktop" \
+        "Install Ming OS.desktop"; do
         source="/usr/share/applications/${launcher}"
         [[ -f "${source}" ]] || continue
         printf '%s\n' "${source}" > "${receipt_dir}/${launcher}"
@@ -70,6 +71,28 @@ seed_trusted_desktop_receipts() {
 }
 
 # Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
+write_managed_launcher_copy() {
+    local source="$1"
+    local target="$2"
+    awk -v source="${source}" '
+        /^X-Ming-Managed=/ || /^X-Ming-Source-Desktop=/ { next }
+        /^\[/ && $0 != "[Desktop Entry]" && in_desktop {
+            print "X-Ming-Managed=true"
+            print "X-Ming-Source-Desktop=" source
+            in_desktop=0
+            marked=1
+        }
+        { print }
+        $0 == "[Desktop Entry]" { in_desktop=1 }
+        END {
+            if (in_desktop && !marked) {
+                print "X-Ming-Managed=true"
+                print "X-Ming-Source-Desktop=" source
+            }
+        }
+    ' "${source}" > "${target}"
+}
+
 copy_default_launcher() {
     local launcher="$1"
     local target_dir="$2"
@@ -90,7 +113,10 @@ copy_default_launcher() {
         return 0
     fi
 
-    cp -f "${source}" "${target_dir}/${launcher}" 2>/dev/null || true
+    write_managed_launcher_copy "${source}" "${target_dir}/${launcher}" || {
+        echo "[07_finalize][WARN] could not write managed launcher: ${launcher}"
+        return 0
+    }
     chmod 0755 "${target_dir}/${launcher}" 2>/dev/null || true
 }
 
@@ -141,6 +167,33 @@ repair_default_user_ownership() {
     chown -R "${MING_USER}:${MING_USER}" "${USER_HOME}" 2>/dev/null || true
     chmod 0700 "${USER_HOME}" 2>/dev/null || true
     chmod 0755 "${USER_HOME}/.cache" "${USER_HOME}/.cache/ming-os" 2>/dev/null || true
+}
+
+disable_phone_panel_restore() {
+    local xfconf_dir="${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
+    local autostart_dir="${USER_HOME}/.config/autostart"
+    mkdir -p "${xfconf_dir}" "${autostart_dir}"
+    cat > "${xfconf_dir}/xfce4-session.xml" << 'PHONESESSIONXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-session" version="1.0">
+  <property name="sessions" type="empty">
+    <property name="Failsafe" type="empty">
+      <property name="Client0_Command" type="array"><value type="string" value="xfwm4"/></property>
+      <property name="Client1_Command" type="array"><value type="string" value="xfsettingsd"/></property>
+      <property name="Client2_Command" type="array"><value type="string" value="xfdesktop"/></property>
+    </property>
+  </property>
+</channel>
+PHONESESSIONXML
+    cat > "${autostart_dir}/xfce4-panel.desktop" << 'PANELDISABLED'
+[Desktop Entry]
+Type=Application
+Name=Xfce Panel
+Exec=xfce4-panel
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+PANELDISABLED
 }
 
 # ======================== 同步用户配置到 /etc/skel ========================
@@ -219,6 +272,7 @@ main() {
 
     refresh_dock_launchers || return 1
     seed_trusted_desktop_receipts
+    disable_phone_panel_restore
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

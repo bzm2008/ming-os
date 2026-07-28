@@ -204,18 +204,14 @@ class DockLifecycleContracts(unittest.TestCase):
         final_condition = self.healthcheck.rsplit("\n", 3)[-3:]
         self.assertIn("dock_healthy", "\n".join(final_condition))
 
-    def test_oobe_repairs_session_after_all_user_completion_paths(self):
+    def test_oobe_repairs_session_only_after_required_admin_setup_completes(self):
         self.assertIn("repair_desktop_session()", self.oobe)
-        self.assertGreaterEqual(
-            self.oobe.count("repair_desktop_session"),
-            4,
-            "helper plus configured, dialog-cancel and skip completion paths",
+        self.assertNotIn('echo "skipped"', self.oobe)
+        marker = 'echo "configured"'
+        self.assertLess(
+            self.oobe.index(marker),
+            self.oobe.index("repair_desktop_session", self.oobe.index(marker)),
         )
-        for marker in ('echo "skipped"', 'echo "configured"'):
-            self.assertLess(
-                self.oobe.index(marker),
-                self.oobe.index("repair_desktop_session", self.oobe.index(marker)),
-            )
 
     def test_generated_runtime_scripts_are_valid_bash(self):
         for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):

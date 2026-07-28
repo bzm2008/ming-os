@@ -37,6 +37,44 @@ class LaunchResultTests(unittest.TestCase):
             self.assertEqual(request.desktop_file, event["desktop_file"])
             self.assertEqual("desktop", event["source"])
 
+    def test_every_successful_launch_path_starts_exactly_one_feedback(self):
+        feedback = []
+        requests = (
+            self.launch.LaunchRequest((), source="desktop", desktop_file="/usr/share/applications/papyrus.desktop", mode="desktop_app_info"),
+            self.launch.LaunchRequest(("papyrus",), source="dock"),
+            self.launch.LaunchRequest(("papyrus",), source="drawer"),
+        )
+        for request in requests:
+            broker = self.launch.LaunchBroker(
+                trusted_verifier=lambda _path: True,
+                desktop_activator=lambda _path: True,
+                animate=lambda current, _workarea: feedback.append(current.source),
+                proxy_verifier=lambda _path: True,
+                spawn=lambda _argv: object(),
+                reduced_motion=lambda: False,
+                workarea=lambda: (0, 0, 1280, 720),
+                probe=lambda *_args, **_kwargs: None,
+                report_error=lambda *_args: None,
+                record_event=lambda *_args: None,
+            )
+            self.assertTrue(broker.launch(request))
+        self.assertEqual(["desktop", "dock", "drawer"], feedback)
+
+    def test_reduced_motion_keeps_static_launch_feedback(self):
+        feedback = []
+        broker = self.launch.LaunchBroker(
+            spawn=lambda _argv: object(),
+            animate=lambda *_args: self.fail("motion feedback must stay disabled"),
+            static_feedback=lambda request, _workarea: feedback.append(request.source),
+            reduced_motion=lambda: True,
+            workarea=lambda: (0, 0, 1280, 720),
+            probe=lambda *_args, **_kwargs: None,
+            report_error=lambda *_args: None,
+            record_event=lambda *_args: None,
+        )
+        self.assertTrue(broker.launch(self.launch.LaunchRequest(("papyrus",), source="drawer")))
+        self.assertEqual(["drawer"], feedback)
+
     def test_broker_records_spawn_failure_and_allows_retry(self):
         events = []
 

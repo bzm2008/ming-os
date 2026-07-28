@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 import pathlib
 import shlex
@@ -7,6 +8,8 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import inspect
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -200,6 +203,136 @@ class AccountControlTests(unittest.TestCase):
         self.assertEqual(call_count, len(calls))
 
 
+class AdministratorBootstrapTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.api = load_asset(
+            "ming-admin-bootstrap.py", "ming_admin_bootstrap_contract")
+
+    def test_bootstrap_is_limited_to_the_active_local_user(self):
+        class Record:
+            pw_name = "alice"
+            pw_uid = 1000
+
+        lookup = lambda _uid: Record()
+        self.assertTrue(self.api.caller_matches_user(
+            "alice", {"PKEXEC_UID": "1000"}, lookup))
+        self.assertFalse(self.api.caller_matches_user(
+            "bob", {"PKEXEC_UID": "1000"}, lookup))
+        self.assertFalse(self.api.caller_matches_user(
+            "alice", {}, lookup))
+
+    def test_bootstrap_refuses_when_an_usable_administrator_exists(self):
+        calls = []
+
+        def runner(command, input_text=None):
+            calls.append((tuple(command), input_text))
+            if command == ["getent", "group", "sudo"]:
+                return 0, "sudo:x:27:admin", ""
+            if command == ["passwd", "-S", "admin"]:
+                return 0, "admin P 2026-07-28 0 99999 7 -1", ""
+            return 0, "", ""
+
+        prompts = []
+        result = self.api.bootstrap_administrator(
+            "alice", runner=runner,
+            password_reader=lambda: prompts.append(True) or "secret")
+        self.assertFalse(result["ok"])
+        self.assertIn("already exists", result["error"])
+        self.assertFalse(any(command == ("chpasswd",) for command, _ in calls))
+        self.assertEqual([], prompts)
+
+    def test_bootstrap_sets_password_and_admin_group_then_reads_back(self):
+        calls = []
+
+        def runner(command, input_text=None):
+            calls.append((tuple(command), input_text))
+            if command == ["getent", "group", "sudo"]:
+                return 0, "sudo:x:27:", ""
+            if command == ["passwd", "-S", "alice"]:
+                return 0, "alice P 2026-07-28 0 99999 7 -1", ""
+            if command == ["id", "-nG", "alice"]:
+                return 0, "alice sudo adm", ""
+            return 0, "", ""
+
+        result = self.api.bootstrap_administrator(
+            "alice", runner=runner, password_reader=lambda: "secret")
+        self.assertTrue(result["ok"])
+        self.assertIn((("chpasswd",), "alice:secret\n"), calls)
+        self.assertIn((("usermod", "-aG", "sudo", "alice"), None), calls)
+        self.assertNotIn("secret", " ".join(
+            argument for command, _ in calls for argument in command))
+
+    def test_privileged_helper_collects_and_confirms_password_in_a_visible_dialog(self):
+        calls = []
+        answers = iter(((0, "secret", ""), (0, "secret", "")))
+
+        def runner(command, input_text=None):
+            calls.append((tuple(command), input_text))
+            return next(answers)
+
+        password = self.api.collect_interactive_password(
+            runner=runner, environ={"DISPLAY": ":0"}, executable=lambda _path: True)
+
+        self.assertEqual("secret", password)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all(call[0][0] == "/usr/bin/zenity" for call in calls))
+        self.assertTrue(all("--password" in call[0] for call in calls))
+        self.assertTrue(all(call[1] is None for call in calls))
+
+    def test_bootstrap_entrypoint_no_longer_accepts_caller_stdin(self):
+        parameters = inspect.signature(self.api.main).parameters
+        self.assertNotIn("stdin", parameters)
+        source = pathlib.Path(self.api.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("sys.stdin", source)
+        self.assertNotIn("readline", source)
+
+    def test_main_holds_root_lock_while_bootstrap_runs(self):
+        events = []
+
+        class Lock:
+            def __enter__(self):
+                events.append("lock-enter")
+            def __exit__(self, *_args):
+                events.append("lock-exit")
+
+        def bootstrap(_user):
+            events.append("bootstrap")
+            return {"ok": True}
+
+        output = io.StringIO()
+        with mock.patch.object(self.api, "caller_matches_user", return_value=True), \
+                mock.patch.object(self.api, "primary_local_user", return_value=True), \
+                mock.patch.object(self.api, "bootstrap_administrator", side_effect=bootstrap):
+            rc = self.api.main(
+                ["--user", "alice"], stdout=output,
+                lock_factory=lambda: Lock(), effective_uid=0)
+
+        self.assertEqual(0, rc)
+        self.assertEqual(["lock-enter", "bootstrap", "lock-exit"], events)
+
+    def test_status_requires_password_and_sudo_membership(self):
+        def ready_runner(command, input_text=None):
+            if command == ["passwd", "-S", "alice"]:
+                return 0, "alice P 2026-07-28 0 99999 7 -1", ""
+            if command == ["id", "-nG", "alice"]:
+                return 0, "alice sudo", ""
+            return 1, "", "missing"
+
+        ready = self.api.administrator_status("alice", runner=ready_runner)
+        self.assertTrue(ready["ready"])
+
+        def passwordless_runner(command, input_text=None):
+            if command == ["passwd", "-S", "alice"]:
+                return 0, "alice NP 2026-07-28 0 99999 7 -1", ""
+            if command == ["id", "-nG", "alice"]:
+                return 0, "alice sudo", ""
+            return 1, "", "missing"
+
+        self.assertFalse(self.api.administrator_status(
+            "alice", runner=passwordless_runner)["ready"])
+
+
 class BuildContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -230,6 +363,21 @@ class BuildContractTests(unittest.TestCase):
                 "org.ming.account.control.policy"):
             self.assertIn(marker, self.base)
         self.assertIn("allow_active", self.base)
+        for marker in (
+                "ming-admin-bootstrap.py", "/usr/local/sbin/ming-admin-bootstrap",
+                "org.ming.account.bootstrap.policy"):
+            self.assertIn(marker, self.base)
+        bootstrap_policy = self.base.split(
+            "cat > /usr/share/polkit-1/actions/org.ming.account.bootstrap.policy", 1)[1].split(
+                "ACCOUNT_BOOTSTRAP_POLICY", 2)[1]
+        self.assertIn("<allow_active>yes</allow_active>", bootstrap_policy)
+        self.assertIn(
+            '<annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>',
+            bootstrap_policy)
+        account_policy = self.base.split(
+            "cat > /usr/share/polkit-1/actions/org.ming.account.control.policy", 1)[1].split(
+                "ACCOUNT_CONTROL_POLICY", 2)[1]
+        self.assertIn("<allow_active>auth_admin_keep</allow_active>", account_policy)
 
     def test_account_helper_install_command_has_one_source_and_one_destination(self):
         line = next(
@@ -264,13 +412,31 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn("/bin/bash", self.settings)
         self.assertNotIn("password],", self.settings)
 
-    def test_oobe_migrates_legacy_skipped_marker_before_exiting(self):
+    def test_oobe_does_not_accept_legacy_skipped_marker_as_complete(self):
         script = self.desktop.split("cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
             "OOBEACCOUNT", 1)[0]
-        self.assertIn("migrate-skipped", script)
-        self.assertIn("/usr/local/sbin/ming-account-control", script)
-        self.assertLess(script.index('grep -qwE "boot=live'), script.index("migrate-skipped"))
-        self.assertLess(script.index("migrate-skipped"), script.index("sleep 4"))
+        self.assertIn('== "configured"', script)
+        self.assertNotIn('== "skipped"', script)
+        self.assertIn("/usr/local/sbin/ming-admin-bootstrap", script)
+
+    def test_oobe_requires_local_administrator_bootstrap(self):
+        script = self.desktop.split(
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
+                "OOBEACCOUNT", 1)[0]
+        self.assertIn("/usr/local/sbin/ming-admin-bootstrap", script)
+        self.assertNotIn('button="跳过', script.lower())
+        self.assertNotIn('echo "skipped"', script)
+        self.assertGreaterEqual(
+            script.count("exec /usr/local/bin/ming-oobe-account"), 3)
+
+    def test_oobe_does_not_collect_or_pipe_the_bootstrap_password(self):
+        script = self.desktop.split(
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
+                "OOBEACCOUNT", 1)[0]
+        self.assertNotIn('PW1=', script)
+        self.assertNotIn('PW2=', script)
+        self.assertNotIn("| pkexec /usr/local/sbin/ming-admin-bootstrap", script)
+        self.assertIn("pkexec /usr/local/sbin/ming-admin-bootstrap", script)
 
     def test_settings_parses_structured_account_result(self):
         self.assertIn("def on_password_saved", self.settings)
@@ -278,6 +444,31 @@ class BuildContractTests(unittest.TestCase):
             "# ---- 2.", 1)[0]
         self.assertIn("json.loads", handler)
         self.assertIn('result.get("ok")', handler)
+
+    def test_security_page_blocks_mutations_until_administrator_is_ready(self):
+        self.assertIn(
+            '["/usr/local/sbin/ming-admin-bootstrap", "status", "--user", USER, "--json"]',
+            self.settings)
+        self.assertIn("security_admin_ready", self.settings)
+        self.assertIn("请先在账户页面设置本机管理员密码", self.settings)
+        refresh = self.settings.split("def refresh_security_status", 1)[1].split(
+            "def on_security_toggle", 1)[0]
+        admin_handler = refresh.split("def admin_done", 1)[1].split("def load_security_status", 1)[0]
+        self.assertIn("load_security_status()", admin_handler)
+        self.assertIn("self.security_admin_button", self.settings)
+        self.assertIn("设置本机管理员", self.settings)
+        self.assertIn("/usr/local/bin/ming-oobe-account", self.settings)
+        self.assertIn("self.security_admin_button.set_visible(not self.security_admin_ready)", self.settings)
+
+    def test_rootfs_gate_requires_bootstrap_helper_and_policy(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn('require_file("usr/local/sbin/ming-admin-bootstrap"', build)
+        self.assertIn(
+            'require_file("usr/share/polkit-1/actions/org.ming.account.bootstrap.policy"',
+            build)
+        self.assertIn(
+            'validate_generated_executable("usr/local/sbin/ming-admin-bootstrap", "python")',
+            build)
 
 
 if __name__ == "__main__":

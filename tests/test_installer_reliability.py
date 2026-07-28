@@ -610,6 +610,43 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn("ming-installer-target-receipt", desktop)
         self.assertIn('globalstorage.value("rootMountPoint")', desktop)
 
+    def test_fresh_erase_install_uses_native_ota_ready_partition_layout(self):
+        for source in (BASE_MODULE.read_text(encoding="utf-8"),
+                       DESKTOP_MODULE.read_text(encoding="utf-8")):
+            self.assertIn("partitionLayout:", source)
+            for label in ("MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME"):
+                self.assertIn('name: "%s"' % label, source)
+            self.assertIn('mountPoint: "/boot"', source)
+            self.assertIn('mountPoint: "/"', source)
+            self.assertIn('mountPoint: "/home"', source)
+            root_b = source.split('name: "MING-ROOT-B"', 1)[1].split("- name:", 1)[0]
+            self.assertNotIn("mountPoint:", root_b)
+            self.assertIn("requiredStorage: 48", source)
+            self.assertIn("initialPartitioningChoice: none", source)
+
+    def test_installed_identity_writes_fail_closed_ab_layout_and_grub_entries(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        identity = base.split("cat > /usr/local/sbin/ming-fix-installed-identity", 1)[1].split(
+            "\nMINGIDENTITY", 1)[0]
+        for marker in (
+            "MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME",
+            "/etc/ming-update/slots.json", "Ming OS slot A", "Ming OS slot B",
+            "/etc/ming-update/ota-ready", "ming-ota-slot",
+        ):
+            self.assertIn(marker, identity)
+        self.assertIn("sort -u | wc -l", identity)
+        self.assertIn("physical_disk_for_device", identity)
+        self.assertIn('"${candidate_disk}" == "${target_disk}"', identity)
+        self.assertIn("chmod 0600", identity)
+        self.assertIn("__MING_BOOT_UUID__", identity)
+        self.assertIn("search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__", identity)
+        self.assertIn("linux /ming-slots/A/vmlinuz root=UUID=__MING_ROOT_A_UUID__", identity)
+        self.assertIn("linux /ming-slots/B/vmlinuz root=UUID=__MING_ROOT_B_UUID__", identity)
+        self.assertIn("/boot/ming-slots/A", identity)
+        self.assertNotIn('"${target}/boot/ming-slots/B"', identity)
+        self.assertIn("insmod ext2", identity)
+        self.assertIn("inactive slot B is intentionally not bootable", identity)
+
 
 if __name__ == "__main__":
     unittest.main()

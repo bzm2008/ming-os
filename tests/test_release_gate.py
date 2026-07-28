@@ -181,6 +181,47 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn('readonly MING_OS_VERSION="26.4.1"', self.build)
         self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2641"', self.build)
 
+    def test_build_locks_clean_source_identity_until_packaging_finishes(self):
+        for marker in (
+            "capture_build_identity",
+            'git -C "${SCRIPT_DIR}" status --porcelain',
+            'git -C "${SCRIPT_DIR}" rev-parse HEAD',
+            "verify_build_identity",
+            'BUILD_SOURCE_COMMIT',
+        ):
+            self.assertIn(marker, self.build)
+        main = self.build.split("main() {", 1)[1]
+        self.assertLess(main.index("capture_build_identity"), main.index("run_debootstrap"))
+        self.assertLess(main.index("verify_build_identity"), main.index("build_iso"))
+        self.assertGreater(main.rindex("verify_build_identity"), main.index("build_iso"))
+
+    def test_rootfs_and_sidecar_share_verifiable_build_identity(self):
+        for marker in (
+            "/etc/ming-os-build.json", "build_id", "source_commit",
+            "build_time_utc", "source_tree_sha256_prefix", "iso_sha256",
+            "SHA256SUMS",
+        ):
+            self.assertIn(marker, self.build)
+        self.assertIn("git -C \"${SCRIPT_DIR}\" ls-tree -r --full-tree HEAD", self.build)
+        self.assertNotIn("xargs -0 sha256sum", self.build)
+
+    def test_windows_handoff_copies_iso_checksum_and_build_identity_together(self):
+        handoff = self.build[self.build.index('if [[ "${SCRIPT_DIR}" == /mnt/* ]]'):
+                             self.build.index("\n}", self.build.index('if [[ "${SCRIPT_DIR}" == /mnt/* ]]'))]
+        self.assertIn('"${OUTPUT_DIR}/SHA256SUMS"', handoff)
+        self.assertIn('"${build_sidecar}"', handoff)
+        self.assertIn("verify_build_identity", handoff)
+
+    def test_rootfs_gate_rejects_root_owned_default_user_state(self):
+        for marker in (
+            'root / "home/user/.config/ming-os"',
+            "must be owned by uid/gid 1000",
+            "state_root.rglob",
+        ):
+            self.assertIn(marker, self.build)
+        self.assertIn('root / "home/user"', self.build)
+        self.assertIn("home/user ownership mismatch", self.build)
+
     def test_runtime_release_handoff_does_not_advertise_2632(self):
         release_doc = self.desktop.split("deploy_release_readme() {", 1)[1].split("deploy_xfce_modern_style() {", 1)[0]
         self.assertIn("26.4.1", release_doc)

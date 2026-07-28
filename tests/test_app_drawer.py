@@ -236,7 +236,7 @@ class LaunchBrokerCoreTests(unittest.TestCase):
         self.assertTrue(broker.launch(request))
         self.assertEqual(2, len(calls))
 
-    def test_desktop_source_keeps_the_phone_desktop_as_the_only_feedback_owner(self):
+    def test_desktop_source_uses_the_same_single_broker_feedback_as_other_sources(self):
         events = []
         broker = self.launch.LaunchBroker(
             spawn=lambda _argv: events.append("spawn") or object(),
@@ -249,12 +249,12 @@ class LaunchBrokerCoreTests(unittest.TestCase):
         })
 
         self.assertTrue(broker.launch(request))
-        self.assertEqual(["spawn"], events)
+        self.assertEqual(["spawn", "animate"], events)
 
     def test_launch_feedback_is_a_fixed_short_fade_without_geometry_animation(self):
         source = LAUNCH_PATH.read_text(encoding="utf-8")
-        animation = source[source.index("def animate_launch"):source.index("def schedule_launch")]
-        step = animation[animation.index("    def step():"):]
+        animation = source[source.index("def _launch_feedback_window"):source.index("def schedule_launch")]
+        step = animation[animation.index("        def step():"):]
         self.assertIn("ANIMATION_DURATION_MS = 160", source)
         self.assertIn("GLib.timeout_add(33, step)", animation)
         self.assertNotIn("feedback_geometry", animation)

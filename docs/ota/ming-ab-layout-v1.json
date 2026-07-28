@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "layout": "ming-ab-v1",
+  "slots": {
+    "A": {
+      "device": "/dev/disk/by-uuid/REPLACE_ROOT_A_UUID",
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "grub_entry": "Ming OS slot A"
+    },
+    "B": {
+      "device": "/dev/disk/by-uuid/REPLACE_ROOT_B_UUID",
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "grub_entry": "Ming OS slot B"
+    }
+  },
+  "boot": {
+    "device": "/dev/disk/by-uuid/REPLACE_BOOT_UUID",
+    "uuid": "44444444-4444-4444-4444-444444444444"
+  },
+  "home": {
+    "device": "/dev/disk/by-uuid/REPLACE_HOME_UUID",
+    "uuid": "33333333-3333-3333-3333-333333333333"
+  }
+}

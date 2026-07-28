@@ -238,7 +238,8 @@ install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
     local asset
-    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
+    mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
+        "/home/${MING_USER}/.local/share/applications"
     for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
@@ -261,6 +262,7 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
+    install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
@@ -1888,14 +1890,44 @@ PANELXML
 </channel>
 PANELXML_DOCK_ONLY
 
+    # Remove xfce4-panel from the factory failsafe session itself. Killing the
+    # process after login is too late because the restored panel can flash.
+    cat > "${xfconf_dir}/xfce4-session.xml" << 'PHONESESSIONXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-session" version="1.0">
+  <property name="sessions" type="empty">
+    <property name="Failsafe" type="empty">
+      <property name="Client0_Command" type="array">
+        <value type="string" value="xfwm4"/>
+      </property>
+      <property name="Client1_Command" type="array">
+        <value type="string" value="xfsettingsd"/>
+      </property>
+      <property name="Client2_Command" type="array">
+        <value type="string" value="xfdesktop"/>
+      </property>
+    </property>
+  </property>
+</channel>
+PHONESESSIONXML
+
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
+    cat > "${autostart_dir}/xfce4-panel.desktop" << 'PANELDISABLED'
+[Desktop Entry]
+Type=Application
+Name=Xfce Panel
+Exec=xfce4-panel
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+PANELDISABLED
     cat > "${autostart_dir}/ming-dock-only.desktop" << 'DOCKONLY'
 [Desktop Entry]
 Type=Application
 Name=Ming Dock Only
 Comment=Hide the legacy Xfce top taskbar and keep Dock as the only launcher
-Exec=sh -c "mkdir -p ~/.cache/sessions; rm -f ~/.cache/sessions/xfce4-session-* 2>/dev/null || true"
+Exec=sh -c "mkdir -p ~/.cache/sessions; rm -f ~/.cache/sessions/xfce4-session-* 2>/dev/null || true; xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command -n -t string -s xfwm4 2>/dev/null || true"
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -1903,7 +1935,9 @@ X-GNOME-Autostart-Delay=2
 DOCKONLY
 
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4"
-    chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}/ming-dock-only.desktop"
+    chown -R "${MING_USER}:${MING_USER}" \
+        "${autostart_dir}/ming-dock-only.desktop" \
+        "${autostart_dir}/xfce4-panel.desktop"
 }
 
 # ======================== Plank macOS 风格 Dock ========================
@@ -3396,6 +3430,30 @@ process_count() {
     printf '%s\n' "${count}"
 }
 
+xfce_panel_running() {
+    probe_timeout pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1
+}
+
+xfce_panel_window_visible() {
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    x11_call wmctrl -lx 2>/dev/null |
+        awk 'tolower($3) ~ /xfce4-panel/ {found=1} END {exit !found}'
+}
+
+suppress_xfce_panel() {
+    if [[ "${MING_PHONE_DESKTOP:-1}" != "1" ]]; then
+        if ! xfce_panel_running && command -v xfce4-panel >/dev/null 2>&1; then
+            (nohup xfce4-panel >/dev/null 2>&1 &) || true
+        fi
+        return 0
+    fi
+    xfce_panel_running || xfce_panel_window_visible || return 0
+    probe_timeout xfce4-panel --quit >/dev/null 2>&1 || true
+    probe_timeout pkill -TERM -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 || true
+    sleep 0.1
+    ! xfce_panel_running && ! xfce_panel_window_visible
+}
+
 log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${health_log}" 2>/dev/null || true
 }
@@ -3629,7 +3687,7 @@ write_metrics() {
     local phase="$1"
     local phone_fallback="${2:-false}"
     local phone_enabled=false phone_running=false phone_ready=false
-    local xfdesktop=false dock=false dock_visible=false compositor=false
+    local xfdesktop=false dock=false dock_visible=false compositor=false panel_running=false
     local compositor_backend=none
     local phone_pid_count=0 plank_pid_count=0 picom_pid_count=0
     local phone_duplicates=0 plank_duplicates=0 picom_duplicates=0
@@ -3640,6 +3698,7 @@ write_metrics() {
     plank_running && dock=true
     plank_window_visible && dock_visible=true
     picom_running && compositor=true
+    if xfce_panel_running || xfce_panel_window_visible; then panel_running=true; fi
     phone_pid_count="$(process_count phone)"
     plank_pid_count="$(process_count plank)"
     picom_pid_count="$(process_count picom)"
@@ -3668,7 +3727,7 @@ write_metrics() {
     MING_PICOM_ELAPSED_MS="${picom_elapsed_ms}" MING_PHONE_RESTARTS="${phone_restarts}" \
     MING_PLANK_RESTARTS="${plank_restarts}" MING_PICOM_RESTARTS="${picom_restarts}" \
     MING_PHONE_RECOVERED="${phone_recovered}" MING_PLANK_RECOVERED="${plank_recovered}" \
-    MING_PICOM_RECOVERED="${picom_recovered}" \
+    MING_PICOM_RECOVERED="${picom_recovered}" MING_PANEL_RUNNING="${panel_running}" \
     MING_HEALTH_LOG="${health_log}" python3 - <<'PY'
 import json
 import os
@@ -3692,6 +3751,7 @@ payload = {
         "duplicates": integer("MING_PHONE_DUPLICATES"),
     },
     "xfdesktop": {"running": boolean("MING_XFDESKTOP")},
+    "xfce_panel": {"running": boolean("MING_PANEL_RUNNING")},
     "plank": {
         "running": boolean("MING_DOCK_RUNNING"),
         "visible": boolean("MING_DOCK_VISIBLE"),
@@ -3726,6 +3786,8 @@ payload["healthy"] = (
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
     and payload["plank"]["visible"]
     and payload["picom"]["running"]
+    and (not payload["phone_desktop"]["enabled"]
+         or not payload["xfce_panel"]["running"])
 )
 path = Path(os.environ["MING_METRICS_FILE"])
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3738,6 +3800,7 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
     start_picom || log 'Picom is not healthy after startup deadline'
@@ -3749,6 +3812,7 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
@@ -5119,10 +5183,10 @@ This is the version to use when producing:
 ## Public Links
 
 - Official website: `https://scallion.uno`
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.4.1-home-amd64.iso`
+- ISO download: `https://ming.sca-hub.cn/iso/ming-os-26.4.1-home-amd64.iso`
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.4.0&channel=stable`
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.4.0&channel=stable`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.4.1`
 
@@ -5194,10 +5258,10 @@ You are a senior product web designer and frontend implementer. Build a Scallion
 
 Required links:
 
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.4.1-home-amd64.iso`
+- ISO download: `https://ming.sca-hub.cn/iso/ming-os-26.4.1-home-amd64.iso`
 - GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.4.1`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.4.0&channel=stable`
+- OTA check: `https://ming.sca-hub.cn/api/onion-update/check?version=26.4.0&channel=stable`
 
 Page goals:
 
@@ -5604,8 +5668,8 @@ WELCOMEAUTO
 }
 
 # ======================== 首次开机账户向导 (OOBE) ========================
-# 极简用户名/密码设置 + 明显的"跳过"按钮。无论设置或跳过，都保持 lightdm
-# 免密自动登录开启，确保跳过后后续开机绝不出现密码框（修复历史恶性 Bug）。
+# 首次启动必须建立本机管理员密码。LightDM 仍保持自动登录，密码只用于
+# Polkit 管理操作和锁屏认证；root 账户保持锁定。
 setup_account_oobe() {
     cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'
 #!/usr/bin/env bash
@@ -5620,10 +5684,7 @@ if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null 
     exit 0
 fi
 
-if [[ -f "${MARKER}" ]]; then
-    if [[ "$(head -n 1 "${MARKER}" 2>/dev/null || true)" == "skipped" ]]; then
-        pkexec /usr/local/sbin/ming-account-control migrate-skipped --user "$(id -un)" >/dev/null 2>&1 || exit 1
-    fi
+if [[ -f "${MARKER}" ]] && [[ "$(head -n 1 "${MARKER}" 2>/dev/null || true)" == "configured" ]]; then
     exit 0
 fi
 
@@ -5648,47 +5709,22 @@ ensure_autologin() {
     return 0
 }
 
-# 欢迎 + 选择：设置账户 / 跳过
-CHOICE=$(dialog --title="欢迎使用 Ming OS" \
-    --text="<b>欢迎使用 Ming OS</b>\n\n您可以为本机设置一个登录密码（用于安装软件等需要授权的操作），\n也可以直接跳过——跳过后开机将自动进入桌面，无需输入任何密码。" \
-    --width=480 --height=200 \
-    --button="设置密码:0" \
-    --button="跳过 (Skip):2" 2>/dev/null)
-RC=$?
-
-if [[ "${RC}" != "0" ]]; then
-    # 跳过：保证免密自动登录，写标记，结束
-    ensure_autologin
-    mkdir -p "$(dirname "${MARKER}")"
-    echo "skipped" > "${MARKER}"
-    dialog --title="已跳过" --text="已为您启用免密自动登录。\n开机将直接进入桌面。" \
-        --width=380 --button="好的:0" 2>/dev/null || true
-    repair_desktop_session
-    exit 0
-fi
-
-# 设置密码流程（显示名 + 两次密码）
+# OOBE only collects the display name. The privileged helper owns the visible
+# password prompts so an untrusted session process cannot submit a password.
 FORM=$(dialog --form --title="设置账户" \
-    --text="为本机设置一个密码（留空则保持免密）。" \
+    --text="下一步将由系统安全窗口创建本机管理员密码。开机仍会自动进入桌面；安装软件或更改保护设置时需要输入此密码。" \
     --field="显示名称:" \
-    --field="密码:H" \
-    --field="确认密码:H" \
     --width=440 \
-    "Ming 用户" "" "" 2>/dev/null)
+    "Ming 用户" 2>/dev/null)
 FRC=$?
 
 if [[ "${FRC}" != "0" ]]; then
-    # 关闭表单也视为跳过，仍保证免密
-    ensure_autologin
-    mkdir -p "$(dirname "${MARKER}")"
-    echo "skipped" > "${MARKER}"
-    repair_desktop_session
-    exit 0
+    # 尚未建立管理员身份，不写完成标记；下次登录继续提示。
+    sleep 1
+    exec /usr/local/bin/ming-oobe-account
 fi
 
 FULLNAME=$(echo "${FORM}" | cut -d'|' -f1)
-PW1=$(echo "${FORM}" | cut -d'|' -f2)
-PW2=$(echo "${FORM}" | cut -d'|' -f3)
 
 ensure_autologin
 
@@ -5697,22 +5733,24 @@ if [[ -n "${FULLNAME}" ]]; then
     pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
 fi
 
-# 设置密码（用于 sudo/解锁；登录仍自动免密）
-if [[ -n "${PW1}" ]]; then
-    if [[ "${PW1}" != "${PW2}" ]]; then
-        dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
-            --width=380 --button="好的:0" 2>/dev/null || true
-    else
-        printf '%s\n' "${PW1}" | pkexec /usr/local/sbin/ming-account-control \
-            set-password --user "${CUR_USER}" >/dev/null 2>&1 || exit 1
-    fi
+# 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
+if ! pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" >/dev/null 2>&1; then
+    dialog --title="无法完成" --text="管理员初始化未成功，请重新设置。" \
+        --width=400 --button="重新设置:0" 2>/dev/null || true
+    exec /usr/local/bin/ming-oobe-account
+fi
+if ! /usr/local/sbin/ming-admin-bootstrap status --user "${CUR_USER}" --json \
+    | grep -Fq '"ready": true'; then
+    dialog --title="无法完成" --text="管理员状态回读失败，请重新设置。" \
+        --width=400 --button="重新设置:0" 2>/dev/null || true
+    exec /usr/local/bin/ming-oobe-account
 fi
 
 mkdir -p "$(dirname "${MARKER}")"
 echo "configured" > "${MARKER}"
 
 dialog --title="完成" \
-    --text="账户设置完成。\n开机仍会自动进入桌面，无需输入密码。" \
+    --text="本机管理员已建立。\n开机仍会自动进入桌面，管理操作会要求输入刚才的密码。" \
     --width=380 --button="开始使用:0" 2>/dev/null || true
 repair_desktop_session
 exit 0
@@ -6228,8 +6266,29 @@ availableFileSystemTypes:
   - "ext4"
 initialPartitioningChoice: none
 initialSwapChoice: none
-requiredStorage: 12
-allowManualPartitioning: true
+partitionLayout:
+  - name: "MING-BOOT"
+    filesystem: "ext4"
+    noEncrypt: true
+    mountPoint: "/boot"
+    size: 1G
+  - name: "MING-ROOT-A"
+    filesystem: "ext4"
+    mountPoint: "/"
+    size: 35%
+    minSize: 14G
+  - name: "MING-ROOT-B"
+    filesystem: "ext4"
+    noEncrypt: true
+    size: 35%
+    minSize: 14G
+  - name: "MING-HOME"
+    filesystem: "ext4"
+    mountPoint: "/home"
+    size: 100%
+    minSize: 8G
+requiredStorage: 48
+allowManualPartitioning: false
 STATICPARTCONF
 
     cat > /etc/calamares/modules/users.conf << 'STATICUSERSCONF'
@@ -6438,14 +6497,24 @@ LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
 
-    cat > /usr/local/bin/ming-live-notice << 'LIVENOTICE'
+cat > /usr/local/bin/ming-live-notice << 'LIVENOTICE'
 #!/usr/bin/env python3
+import json
+import pathlib
 import subprocess
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk
+
+
+def build_identity():
+    try:
+        payload = json.loads(pathlib.Path("/etc/ming-os-build.json").read_text(encoding="ascii"))
+        return str(payload.get("build_id") or "unknown")
+    except (OSError, ValueError, TypeError):
+        return "unknown"
 
 
 class LiveNotice(Gtk.Window):
@@ -6470,7 +6539,8 @@ class LiveNotice(Gtk.Window):
         title = Gtk.Label()
         title.set_markup(
             "<b>当前为 Live 模式，Ming OS 尚未安装。</b>\n"
-            "此环境中的设置和文件在重启后不会保留任何数据。"
+            "此环境中的设置和文件在重启后不会保留任何数据。\n"
+            "构建编号：%s" % build_identity()
         )
         title.set_xalign(0)
         title.set_line_wrap(True)
@@ -6505,11 +6575,53 @@ Gtk.main()
 LIVENOTICE
     chmod 0755 /usr/local/bin/ming-live-notice
 
+    cat > /usr/local/bin/ming-apply-wallpaper << 'APPLYWALLPAPER'
+#!/usr/bin/env bash
+set -u
+wallpaper="${1:-/usr/share/backgrounds/ming-os/default.png}"
+[[ -r "${wallpaper}" ]] || {
+    echo "wallpaper not readable: ${wallpaper}" >&2
+    exit 1
+}
+if command -v xfconf-query >/dev/null 2>&1; then
+    while IFS= read -r property; do
+        case "${property}" in
+            */last-image|*/image-path)
+                xfconf-query -c xfce4-desktop -p "${property}" -s "${wallpaper}" 2>/dev/null || true
+                ;;
+        esac
+    done < <(xfconf-query -c xfce4-desktop -l 2>/dev/null || true)
+    xfconf-query -c xfce4-desktop \
+        -p /backdrop/screen0/monitor0/workspace0/last-image \
+        -n -t string -s "${wallpaper}" 2>/dev/null || true
+    xfconf-query -c xfce4-desktop \
+        -p /backdrop/screen0/monitor0/workspace0/image-style \
+        -n -t int -s 5 2>/dev/null || true
+fi
+if pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1; then
+    xfdesktop --reload >/dev/null 2>&1 || true
+elif command -v xfdesktop >/dev/null 2>&1; then
+    (nohup xfdesktop >/tmp/ming-installer-xfdesktop.log 2>&1 &) || exit 1
+else
+    echo "xfdesktop is unavailable" >&2
+    exit 1
+fi
+APPLYWALLPAPER
+    chmod 0755 /usr/local/bin/ming-apply-wallpaper
+
     # Dedicated installer session with a minimal WM for reliable keyboard and
     # mouse focus. Calamares is maximized and automatically restarted on exit.
-    cat > /usr/local/bin/ming-installer-session << 'KIOSK'
+cat > /usr/local/bin/ming-installer-session << 'KIOSK'
 #!/usr/bin/env bash
-xsetroot -solid '#0c1f1c'
+if command -v ming-apply-wallpaper >/dev/null 2>&1; then
+    if ! ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png; then
+        echo "Live wallpaper failed; using light fallback" >&2
+        xsetroot -solid '#eff7f2' 2>/dev/null || true
+    fi
+else
+    echo "Live wallpaper failed; helper unavailable" >&2
+    xsetroot -solid '#eff7f2' 2>/dev/null || true
+fi
 if command -v xfwm4 >/dev/null 2>&1; then
     xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &
 fi

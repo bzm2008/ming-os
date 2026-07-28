@@ -28,7 +28,7 @@ set -euo pipefail
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
 readonly MING_OS_VERSION="26.4.1"
-readonly MING_OS_BUILD_SUFFIX=""
+readonly MING_OS_BUILD_SUFFIX="rc2"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2641"
@@ -45,6 +45,9 @@ readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly MING_USER="user"
 readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
+BUILD_SOURCE_COMMIT=""
+BUILD_TIME_UTC=""
+BUILD_ID=""
 # 日志颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -82,6 +85,50 @@ require_root() {
         log_error "此脚本必须以 root 身份运行 (使用 sudo)"
         exit 1
     fi
+}
+capture_build_identity() {
+    require_cmd git "apt install git"
+    if [[ -n "$(git -C "${SCRIPT_DIR}" status --porcelain)" ]]; then
+        log_error "构建要求干净工作树；请先提交本次 RC2 源码与测试。"
+        return 1
+    fi
+    BUILD_SOURCE_COMMIT="$(git -C "${SCRIPT_DIR}" rev-parse HEAD)"
+    BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    BUILD_ID="2641-rc2-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+    export BUILD_SOURCE_COMMIT BUILD_TIME_UTC BUILD_ID
+}
+
+verify_build_identity() {
+    local current_commit
+    current_commit="$(git -C "${SCRIPT_DIR}" rev-parse HEAD)"
+    if [[ "${current_commit}" != "${BUILD_SOURCE_COMMIT}" ]] \
+       || [[ -n "$(git -C "${SCRIPT_DIR}" status --porcelain)" ]]; then
+        log_error "源码在构建期间发生变化，拒绝生成无法追溯的 ISO。"
+        return 1
+    fi
+}
+
+write_rootfs_build_identity() {
+    local source_digest
+    source_digest="$(git -C "${SCRIPT_DIR}" ls-tree -r --full-tree HEAD \
+        | sha256sum | awk '{print $1}')"
+    install -d -m 0755 "${CHROOT_DIR}/etc"
+    python3 - "${CHROOT_DIR}/etc/ming-os-build.json" \
+        "${MING_OS_VERSION}" "${BUILD_ID}" "${BUILD_SOURCE_COMMIT}" \
+        "${BUILD_TIME_UTC}" "${source_digest:0:16}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = {
+    "version": sys.argv[2], "build_id": sys.argv[3],
+    "source_commit": sys.argv[4], "build_time_utc": sys.argv[5],
+    "source_tree_sha256_prefix": sys.argv[6], "iso_sha256": None,
+}
+path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n", encoding="ascii")
+PY
+    chmod 0644 "${CHROOT_DIR}/etc/ming-os-build.json"
 }
 # ======================== 环境检查 ========================
 check_host_environment() {
@@ -1093,6 +1140,21 @@ import zlib
 root = Path(sys.argv[1])
 errors = []
 
+build_identity_path = root / "etc/ming-os-build.json"
+try:
+    import json
+    build_identity = json.loads(build_identity_path.read_text(encoding="ascii"))
+    for field in ("version", "build_id", "source_commit", "build_time_utc",
+                  "source_tree_sha256_prefix", "iso_sha256"):
+        if field not in build_identity:
+            errors.append(f"ming-os-build.json missing {field}")
+    if build_identity.get("version") != "26.4.1":
+        errors.append("ming-os-build.json version mismatch")
+    if build_identity.get("iso_sha256") is not None:
+        errors.append("rootfs build identity must not claim a self-referential ISO hash")
+except (OSError, ValueError, TypeError) as error:
+    errors.append(f"invalid etc/ming-os-build.json: {error}")
+
 def require_file(relative_path, marker=None):
     path = root / relative_path
     if not path.is_file() or path.stat().st_size == 0:
@@ -1194,6 +1256,24 @@ require_file(
     "usr/share/polkit-1/actions/org.ming.security.control.policy",
     "/usr/local/sbin/ming-security-control")
 validate_generated_executable("usr/local/sbin/ming-security-control", "python")
+admin_bootstrap = require_file("usr/local/sbin/ming-admin-bootstrap", "administrator_status")
+for marker in ["bootstrap_administrator", "caller_matches_user", "usable_administrator_exists"]:
+    if marker not in admin_bootstrap:
+        errors.append(f"ming-admin-bootstrap missing boundary marker {marker}")
+require_file("usr/share/polkit-1/actions/org.ming.account.bootstrap.policy",
+             "/usr/local/sbin/ming-admin-bootstrap")
+validate_generated_executable("usr/local/sbin/ming-admin-bootstrap", "python")
+ota_ab = require_file("usr/local/sbin/ming-ota-ab", "layout_status")
+for marker in ["validate_layout", "observe_boot", "prepare_slot_root"]:
+    if marker not in ota_ab:
+        errors.append(f"ming-ota-ab missing contract marker {marker}")
+require_file("usr/local/sbin/ming-ota-ab-stage", "/boot/ming-slots/${target}")
+validate_generated_executable("usr/local/sbin/ming-ota-ab", "python")
+validate_generated_executable("usr/local/sbin/ming-ota-ab-stage", "bash")
+partition_config = require_file("etc/calamares/modules/partition.conf", "partitionLayout:")
+for marker in ["MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME", "requiredStorage: 48"]:
+    if marker not in partition_config:
+        errors.append(f"Calamares OTA-ready layout missing {marker}")
 
 storage_status = require_file("usr/local/bin/ming-storage-status", "LSBLK_FIELDS")
 for marker in ["partitions", "--json", "parse_lsblk", "timeout=3"]:
@@ -1430,6 +1510,28 @@ else:
     st = cache_dir.stat()
     if st.st_uid != 1000 or st.st_gid != 1000:
         errors.append(f"home/user/.cache/ming-os must be owned by uid/gid 1000, got {st.st_uid}/{st.st_gid}")
+
+state_root = root / "home/user/.config/ming-os"
+if not state_root.is_dir():
+    errors.append("home/user/.config/ming-os must exist for writable desktop state")
+else:
+    for state_path in [state_root, *state_root.rglob("*")]:
+        state = state_path.lstat()
+        if state.st_uid != 1000 or state.st_gid != 1000:
+            errors.append(
+                f"{state_path.relative_to(root)} must be owned by uid/gid 1000, "
+                f"got {state.st_uid}/{state.st_gid}")
+
+home_root = root / "home/user"
+if not home_root.is_dir():
+    errors.append("home/user ownership mismatch: directory is missing")
+else:
+    for home_path in [home_root, *home_root.rglob("*")]:
+        state = home_path.lstat()
+        if state.st_uid != 1000 or state.st_gid != 1000:
+            errors.append(
+                f"home/user ownership mismatch: {home_path.relative_to(root)} "
+                f"is uid/gid {state.st_uid}/{state.st_gid}")
 
 for helper in [
     "usr/local/bin/ming-network-repair",
@@ -1912,7 +2014,7 @@ for marker in ["psmouse synaptics_intertouch=0", "snd_hda_intel power_save=0"]:
     if marker not in old_hw_modprobe:
         errors.append(f"old hardware modprobe policy missing {marker}")
 
-ota_client = require_file("usr/local/bin/ming-update", "https://ming.scallion.uno")
+ota_client = require_file("usr/local/bin/ming-update", "https://ming.sca-hub.cn")
 for marker in [
     "resolve_home()",
     'HOME="${HOME:-$(resolve_home)}"',
@@ -2247,6 +2349,7 @@ build_iso() {
         exit 1
     }
     validate_linux_kernel "${ISO_DIR}/live/vmlinuz" "ISO workdir /live/vmlinuz"
+    require_cmd sha256sum "coreutils"
     validate_calamares_config
     validate_r4_compatibility
     log_info "使用内核 ${kernel_version}, SHA256=${kernel_sha}"
@@ -2290,6 +2393,21 @@ build_iso() {
         validate_iso_kernel "${OUTPUT_DIR}/${iso_name}" "${kernel_sha}"
         validate_iso_boot_layout "${OUTPUT_DIR}/${iso_name}"
         local iso_size
+        local iso_sha256 build_sidecar
+        iso_sha256="$(sha256sum "${OUTPUT_DIR}/${iso_name}" | awk '{print $1}')"
+        printf '%s  %s\n' "${iso_sha256}" "${iso_name}" > "${OUTPUT_DIR}/SHA256SUMS"
+        build_sidecar="${OUTPUT_DIR}/${iso_name%.iso}.build.json"
+        python3 - "${build_sidecar}" "${MING_OS_VERSION}" "${BUILD_ID}" \
+            "${BUILD_SOURCE_COMMIT}" "${BUILD_TIME_UTC}" "${iso_sha256}" <<'PY'
+import json
+import pathlib
+import sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "version": sys.argv[2], "build_id": sys.argv[3],
+    "source_commit": sys.argv[4], "build_time_utc": sys.argv[5],
+    "iso_sha256": sys.argv[6],
+}, ensure_ascii=True, sort_keys=True) + "\n", encoding="ascii")
+PY
         iso_size=$(du -sh "${OUTPUT_DIR}/${iso_name}" | cut -f1)
         log_info "ISO 镜像生成成功: ${OUTPUT_DIR}/${iso_name} (${iso_size})"
     else
@@ -2302,6 +2420,9 @@ build_iso() {
         local win_output_dir="${SCRIPT_DIR}/output"
         mkdir -p "${win_output_dir}"
         cp "${OUTPUT_DIR}/${iso_name}" "${win_output_dir}/${iso_name}"
+        cp "${OUTPUT_DIR}/SHA256SUMS" "${win_output_dir}/SHA256SUMS"
+        cp "${build_sidecar}" "${win_output_dir}/$(basename "${build_sidecar}")"
+        verify_build_identity
         log_info "ISO 已复制到 Windows 目录: ${win_output_dir}/${iso_name}"
     fi
 }
@@ -2551,6 +2672,7 @@ main() {
     echo -e "${NC}"
     local start_time
     start_time=$(date +%s)
+    capture_build_identity
     check_host_environment
     install_build_deps
     mkdir -p "${LINUX_WORKDIR}"
@@ -2558,11 +2680,14 @@ main() {
     mount_chroot
     trap 'umount_chroot' EXIT
     run_modules
+    write_rootfs_build_identity
     generate_initramfs
     clean_chroot
     umount_chroot
     trap - EXIT
+    verify_build_identity
     build_iso
+    verify_build_identity
     local end_time
     end_time=$(date +%s)
     local duration=$(( end_time - start_time ))

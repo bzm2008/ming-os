@@ -711,7 +711,6 @@ class DesktopSourceTests(unittest.TestCase):
             '"85:class_g = \'Microsoft-edge\'"',
             '"90:class_g = \'Thunar\'"',
             '"90:class_g = \'Xfce4-terminal\'"',
-            "xfce4-panel --quit",
         ]:
             self.assertNotIn(forbidden, self.desktop)
         for marker in [
@@ -721,6 +720,92 @@ class DesktopSourceTests(unittest.TestCase):
             'pkill -TERM -u "$(id -u)" -x xfce4-panel',
         ]:
             self.assertIn(marker, self.desktop)
+
+    def test_phone_desktop_session_continuously_suppresses_xfce_panel(self):
+        health = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-session-healthcheck"):
+            self.desktop.index("\nMINGSESSIONHEALTH", self.desktop.index("cat > /usr/local/bin/ming-session-healthcheck"))
+        ]
+        for marker in (
+            "xfce_panel_running()",
+            "xfce_panel_window_visible()",
+            "suppress_xfce_panel()",
+            "xfce4-panel --quit",
+            'pkill -TERM -u "$(id -u)" -x xfce4-panel',
+            "suppress_xfce_panel || log",
+            'MING_PANEL_RUNNING="${panel_running}"',
+            '"xfce_panel": {',
+        ):
+            self.assertIn(marker, health)
+        self.assertIn('or not payload["xfce_panel"]["running"]', health)
+
+    def test_phone_desktop_disables_xfce_panel_before_session_restore(self):
+        finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")
+        for source in (self.desktop, finalizer):
+            self.assertIn("xfce4-session.xml", source)
+            self.assertIn("xfce4-panel.desktop", source)
+            self.assertIn("Hidden=true", source)
+            self.assertIn("X-GNOME-Autostart-enabled=false", source)
+        dock_only = self.desktop[
+            self.desktop.index("cat > \"${autostart_dir}/ming-dock-only.desktop\""):
+            self.desktop.index("\nDOCKONLY", self.desktop.index("cat > \"${autostart_dir}/ming-dock-only.desktop\""))
+        ]
+        self.assertIn("xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command", dock_only)
+
+    def test_default_desktop_copies_record_managed_source_identity(self):
+        finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")
+        copier = finalizer[
+            finalizer.index("write_managed_launcher_copy()"):
+            finalizer.index("reset_desktop_dir()")
+        ]
+        self.assertIn("X-Ming-Managed=true", copier)
+        self.assertIn("X-Ming-Source-Desktop=", copier)
+        self.assertIn("write_managed_launcher_copy", copier)
+
+    def test_status_widget_geometry_is_logged_and_asserted_top_aligned(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        placement = self.phone[self.phone.index("    def place_overlays"):
+                              self.phone.index("    @staticmethod", self.phone.index("    def place_overlays"))]
+        for marker in (
+            "def geometry_snapshot(self):",
+            '"outer_y"',
+            '"content_y"',
+            "geometry top-alignment failed",
+        ):
+            self.assertIn(marker, status)
+        self.assertIn("GLib.idle_add(self.status.verify_top_alignment)", placement)
+
+    def test_status_widget_all_layers_reject_vertical_stretch_and_top_margin(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        for marker in (
+            "self.set_margin_top(0)",
+            "box.set_margin_top(0)",
+            "expanded.set_margin_top(0)",
+            "self.content_revealer.set_valign(Gtk.Align.START)",
+            "self.content_revealer.set_vexpand(False)",
+        ):
+            self.assertIn(marker, status)
+
+    def test_live_installer_session_uses_release_wallpaper_not_solid_fill(self):
+        installer = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        self.assertNotIn("xsetroot -solid '#0c1f1c'", installer)
+        self.assertIn("ming-apply-wallpaper", installer)
+        self.assertIn("xsetroot -solid '#eff7f2'", installer)
+        self.assertIn("Live wallpaper failed", installer)
+        self.assertNotIn("ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png || true", installer)
+
+    def test_live_notice_exposes_build_identity(self):
+        notice = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-live-notice"):
+            self.desktop.index("\nLIVENOTICE", self.desktop.index("cat > /usr/local/bin/ming-live-notice"))
+        ]
+        self.assertIn("/etc/ming-os-build.json", notice)
+        self.assertIn("build_id", notice)
 
 
 class DesktopPolishContractTests(unittest.TestCase):

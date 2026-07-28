@@ -2083,6 +2083,7 @@ class StatusWidget(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_valign(Gtk.Align.START)
         self.set_vexpand(False)
+        self.set_margin_top(0)
         widget_state = load_widget_state()
         self.collapsed = widget_state["collapsed"]
         self.metric_mode = widget_state["metric_mode"]
@@ -2117,6 +2118,7 @@ class StatusWidget(Gtk.Box):
         box.set_hexpand(True)
         box.set_valign(Gtk.Align.START)
         box.set_vexpand(False)
+        box.set_margin_top(0)
         self.widget_box = box
 
         self.compact_button = Gtk.Button()
@@ -2238,10 +2240,13 @@ class StatusWidget(Gtk.Box):
         expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
         expanded.set_valign(Gtk.Align.START)
         expanded.set_vexpand(False)
+        expanded.set_margin_top(0)
         expanded.pack_start(header, False, False, 0)
         expanded.pack_start(controls, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
         self.content_revealer = Gtk.Revealer()
+        self.content_revealer.set_valign(Gtk.Align.START)
+        self.content_revealer.set_vexpand(False)
         self.content_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.content_revealer.set_transition_duration(180)
         self.content_revealer.add(expanded)
@@ -2253,6 +2258,30 @@ class StatusWidget(Gtk.Box):
         self.refresh_resource_metric()
         GLib.timeout_add_seconds(15, self.refresh)
         GLib.timeout_add_seconds(5, self.refresh_resource_metric_timer)
+
+    def geometry_snapshot(self):
+        outer = self.get_allocation()
+        card = self.widget_box.get_allocation()
+        content = self.content_revealer.get_allocation()
+        return {
+            "outer_y": int(outer.y),
+            "outer_height": int(outer.height),
+            "card_y": int(card.y),
+            "card_height": int(card.height),
+            "content_y": int(content.y),
+            "content_height": int(content.height),
+            "collapsed": bool(self.collapsed),
+        }
+
+    def verify_top_alignment(self):
+        geometry = self.geometry_snapshot()
+        log("status widget geometry %s" % json.dumps(geometry, sort_keys=True))
+        expected_content_y = geometry["card_y"]
+        if (geometry["outer_y"] != CLOCK_MARGIN_Y
+                or geometry["card_y"] != 0
+                or geometry["content_y"] - expected_content_y > 16):
+            log("geometry top-alignment failed: %s" % json.dumps(geometry, sort_keys=True))
+        return False
 
     def preferred_height(self):
         return int(self._display_height)
@@ -3593,6 +3622,7 @@ class PhoneDesktop(Gtk.Window):
             self.fixed.put(self.status, x, y)
         else:
             self.fixed.move(self.status, x, y)
+        GLib.idle_add(self.status.verify_top_alignment)
         feedback_w = 340 if screen_w >= 900 else 250
         self.launch_feedback.set_size_request(feedback_w, 84)
         feedback_x = max(20, int((screen_w - feedback_w) / 2))
@@ -3682,7 +3712,6 @@ class PhoneDesktop(Gtk.Window):
         if item.get("type") == "folder":
             self.show_folder(item)
             return
-        self.launch_feedback.begin(item)
         origin_x, origin_y = self.window_origin
         source_rect = {
             "x": origin_x + int(item.get("x", PAD_X)),
@@ -3691,7 +3720,6 @@ class PhoneDesktop(Gtk.Window):
             "height": TILE_H,
         }
         if not launch_item(item, source_rect):
-            self.launch_feedback.finish()
             log(f"no launch method worked for {item.get('path')}")
             dialog = Gtk.MessageDialog(
                 transient_for=self,

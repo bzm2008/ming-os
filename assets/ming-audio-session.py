@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded PulseAudio playback session health helper for Ming OS.
+"""Bounded PipeWire/PulseAudio playback session health helper for Ming OS.
 
 It deliberately delegates output policy to ``ming-device-control``.  The
 session layer only starts a missing user daemon and asks the controller to
@@ -108,10 +108,12 @@ class AudioSession:
     @staticmethod
     def _requires_playback_repair(status):
         """Keep valid manual HDMI, Bluetooth and USB output selections intact."""
-        if (status or {}).get("backend") != "pactl":
+        if (status or {}).get("backend") not in {"pactl", "wpctl"}:
             return False
         if not (status or {}).get("server_available"):
             return False
+        if status.get("backend") == "wpctl":
+            return status.get("output_muted") is True
         return bool(
             not status.get("default_sink")
             or status.get("default_sink_present") is False
@@ -162,6 +164,19 @@ class AudioSession:
         self._log("启动 PulseAudio 失败：%s" % message)
         return False, message
 
+    def _start_pipewire(self):
+        command = [
+            "systemctl", "--user", "start", "pipewire.service",
+            "pipewire-pulse.service", "wireplumber.service",
+        ]
+        rc, output, error = self.runner(command, timeout=COMMAND_TIMEOUT)
+        if rc == 0:
+            self._log("已请求启动 PipeWire 和 WirePlumber 用户会话。")
+            return True, ""
+        message = error or output or "无法启动 PipeWire 用户会话。"
+        self._log("启动 PipeWire 失败：%s" % message)
+        return False, message
+
     def ensure(self):
         """Ensure a usable playback path without replacing valid user intent."""
         current = self._read_status()
@@ -169,12 +184,19 @@ class AudioSession:
         actions = []
 
         if not current.get("server_available"):
-            started, start_error = self._start_pulseaudio()
+            use_pipewire = current.get("backend") == "wpctl"
+            started, start_error = (
+                self._start_pipewire() if use_pipewire else self._start_pulseaudio())
             changed = started
-            actions.append("started_pulseaudio" if started else "start_failed")
+            actions.append(
+                ("started_pipewire" if use_pipewire else "started_pulseaudio")
+                if started else "start_failed")
             current = self._read_status()
             if not current.get("server_available"):
-                error = current.get("error") or start_error or "PulseAudio 用户会话仍不可用。"
+                fallback_error = (
+                    "PipeWire 用户会话仍不可用。" if use_pipewire
+                    else "PulseAudio 用户会话仍不可用。")
+                error = current.get("error") or start_error or fallback_error
                 result = {
                     "ok": False, "changed": changed, "action": actions[-1],
                     "state": "no_server", "status": current, "error": error,

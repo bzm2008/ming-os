@@ -232,6 +232,135 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual(63, result["requested"])
         self.assertTrue(0 <= result["value"] <= 100)
 
+    def test_volume_prefers_pipewire_wpctl_and_confirms_unmuted_readback(self):
+        runner = FakeRunner({
+            ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "63%"): (0, "", ""),
+            ("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"): (0, "", ""),
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (0, "Volume: 0.63", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl", "amixer"})
+
+        result = controller.set_volume(63)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("wpctl", result["backend"])
+        self.assertEqual(63, result["value"])
+        self.assertEqual(
+            ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "63%"),
+            runner.commands[0])
+        self.assertNotIn(
+            ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "63%"),
+            runner.commands)
+
+    def test_wpctl_muted_readback_falls_through_instead_of_claiming_success(self):
+        runner = FakeRunner({
+            ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "40%"): (0, "", ""),
+            ("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"): (0, "", ""),
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (0, "Volume: 0.40 [MUTED]", ""),
+            ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "40%"): (1, "", "no server"),
+            ("amixer", "sset", "Master", "40%"): (0, "", ""),
+            ("amixer", "sget", "Master"): (0, "Front Left: Playback 26 [40%] [on]", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl", "amixer"})
+
+        result = controller.set_volume(40)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("amixer", result["backend"])
+        self.assertLess(
+            runner.commands.index(("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "40%")),
+            runner.commands.index(("pactl", "set-sink-volume", "@DEFAULT_SINK@", "40%")))
+
+    def test_audio_status_keeps_wpctl_when_pactl_diagnostics_are_unavailable(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (0, "Volume: 0.52", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("wpctl", status["backend"])
+        self.assertEqual(52, status["value"])
+        self.assertTrue(status["server_available"])
+        self.assertTrue(status["playback_ready"])
+        self.assertFalse(status["output_muted"])
+        self.assertIn(("pactl", "info"), runner.commands)
+
+    def test_dual_pipewire_backends_keep_pactl_device_diagnostics(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (0, "Volume: 0.52", ""),
+            ("pactl", "info"): (0, "Default Sink: sink\nDefault Source: source", ""),
+            ("pactl", "get-sink-volume", "@DEFAULT_SINK@"): (0, "Volume: 52%", ""),
+            ("pactl", "list", "short", "sinks"): (0, "1\tsink\tmodule\tRUNNING", ""),
+            ("pactl", "list", "short", "sources"): (0, "2\tsource\tmodule\tRUNNING", ""),
+            ("pactl", "get-source-mute", "@DEFAULT_SOURCE@"): (0, "Mute: no", ""),
+            ("pactl", "get-sink-mute", "@DEFAULT_SINK@"): (0, "Mute: no", ""),
+            ("pactl", "list", "cards"): (0, "Card #1\nName: alsa_card.pci\nActive Profile: output:analog-stereo+input:analog-stereo", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("pactl", status["backend"])
+        self.assertEqual("wpctl", status["control_backend"])
+        self.assertTrue(status["physical_input_present"])
+        self.assertEqual("source", status["default_source"])
+
+    def test_ready_wpctl_survives_a_connected_but_broken_pactl_compatibility_layer(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (0, "Volume: 0.52", ""),
+            ("pactl", "info"): (0, "Default Sink: \nDefault Source: ", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("wpctl", status["backend"])
+        self.assertTrue(status["playback_ready"])
+        self.assertEqual(52, status["value"])
+
+    def test_wpctl_only_muted_playback_can_be_repaired_and_read_back(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): [
+                (0, "Volume: 0.40 [MUTED]", ""),
+                (0, "Volume: 0.40", ""),
+            ],
+            ("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"): (0, "", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "wpctl")
+
+        result = controller.audio_repair_playback()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual("unmuted_pipewire_output", result["action"])
+
+    def test_audio_status_falls_back_from_unavailable_wpctl_to_pactl_then_alsa(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (1, "", "not connected"),
+            ("pactl", "info"): (1, "", "Connection refused"),
+            ("amixer", "sget", "Master"): (0, "Front Left: Playback 26 [40%] [on]", ""),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name in {"wpctl", "pactl", "amixer"})
+
+        status = controller.audio_status()
+
+        self.assertEqual("amixer", status["backend"])
+        self.assertEqual(40, status["value"])
+        self.assertTrue(status["playback_ready"])
+        self.assertEqual([
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"),
+            ("pactl", "info"),
+            ("amixer", "sget", "Master"),
+        ], runner.commands)
+
     def test_volume_unmutes_the_current_sink_and_reads_back_its_mute_state(self):
         runner = FakeRunner({
             ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "63%"): (0, "", ""),
@@ -327,7 +456,7 @@ class DeviceControlTests(unittest.TestCase):
             cards[0]["profiles"],
         )
 
-    def test_audio_status_reports_missing_pulseaudio_server_without_amixer_fallback(self):
+    def test_audio_status_falls_back_to_alsa_when_pulseaudio_is_unavailable(self):
         runner = FakeRunner({
             ("pactl", "info"): (1, "", "Connection failure: Connection refused"),
             ("amixer", "sget", "Master"): (0, "Front Left: Playback 40 [50%] [on]", ""),
@@ -337,11 +466,25 @@ class DeviceControlTests(unittest.TestCase):
 
         status = controller.audio_status()
 
+        self.assertEqual("ready", status["state"])
+        self.assertTrue(status["server_available"])
+        self.assertTrue(status["playback_ready"])
+        self.assertEqual("amixer", status["backend"])
+        self.assertIn(("amixer", "sget", "Master"), runner.commands)
+
+    def test_audio_status_identifies_a_stopped_pipewire_session_without_other_backends(self):
+        runner = FakeRunner({
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): (1, "", "PipeWire not connected"),
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "wpctl")
+
+        status = controller.audio_status()
+
+        self.assertEqual("wpctl", status["backend"])
         self.assertEqual("no_server", status["state"])
         self.assertFalse(status["server_available"])
-        self.assertFalse(status["playback_ready"])
-        self.assertEqual("pactl", status["backend"])
-        self.assertNotIn(("amixer", "sget", "Master"), runner.commands)
+        self.assertIn("PipeWire", status["error"])
 
     def test_audio_status_reports_missing_default_sink(self):
         runner = FakeRunner({
@@ -842,6 +985,47 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual(72, result["requested"])
         self.assertIn("72%", result["error"])
         self.assertIn("100%", result["error"])
+
+    def test_hardware_brightness_write_failure_returns_actual_value_for_ui_rollback(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "72%"): (1, "", "Permission denied"),
+            ("brightnessctl", "-m"): (0, "intel_backlight,backlight,610,1000,61%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(72)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["available"])
+        self.assertEqual("error", result["state"])
+        self.assertEqual(72, result["requested"])
+        self.assertEqual(61, result["value"])
+        self.assertIn("Permission denied", result["error"])
+        self.assertIn(("brightnessctl", "-m"), runner.commands)
+
+    def test_hardware_brightness_write_and_read_failure_is_not_available(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "72%"): (1, "", "Permission denied"),
+            ("brightnessctl", "-m"): (1, "", "read denied"),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory))
+
+            result = controller.set_brightness(72)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["available"])
+        self.assertIsNone(result["value"])
+        self.assertEqual("error", result["state"])
 
     def test_brightness_readback_accepts_a_single_hardware_quantization_step(self):
         runner = FakeRunner({
