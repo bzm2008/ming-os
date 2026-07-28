@@ -7,7 +7,6 @@ defensive: every action writes a log and every failure is shown to the user.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -18,7 +17,6 @@ from pathlib import Path
 
 APP_NAME = "Ming 安全管家"
 MING_USER = os.environ.get("SUDO_USER") or os.environ.get("USER") or "ming"
-GARLIC_CLAW_PORT = 18789
 LOG_FILE = Path("/tmp/ming-master.log")
 CONFIG_DIR = Path.home() / ".config" / "ming-os"
 CONFIG_FILE = CONFIG_DIR / "ming-master.json"
@@ -154,27 +152,6 @@ def firewall_status() -> None:
         show_error("获取失败", f"无法读取防火墙规则。\n\n{(err or out)[-900:]}\n\n日志：{LOG_FILE}")
 
 
-def garlic_claw_status() -> None:
-    status_info: list[str] = []
-    code, out, _err = run_command(["systemctl", "--user", "is-active", "openclaw-gateway"])
-    status_info.append("Gateway 服务：" + ("运行中" if code == 0 and out.strip() == "active" else "未运行"))
-
-    code, out, _err = run_command(f"ss -tuln | grep ':{GARLIC_CLAW_PORT} '", shell=True)
-    status_info.append(f"端口 {GARLIC_CLAW_PORT}：" + ("正在监听" if code == 0 else "未监听"))
-
-    config_file = Path.home() / ".openclaw" / "config.json"
-    if config_file.exists():
-        try:
-            provider = json.loads(config_file.read_text(encoding="utf-8")).get("provider", "未设置")
-            status_info.append(f"AI 提供商：{provider}")
-        except Exception as exc:
-            status_info.append(f"AI 配置读取失败：{exc}")
-    else:
-        status_info.append("AI 提供商：未配置")
-
-    show_info("Garlic Claw 状态", "\n".join(status_info))
-
-
 def main_menu() -> None:
     tool = dialog_tool()
     if not tool:
@@ -195,8 +172,6 @@ def main_menu() -> None:
             "执行 Rootkit 检测和系统安全审计",
             "防火墙状态",
             "查看当前 nftables 防火墙规则",
-            "Garlic Claw 状态",
-            "查看 AI 助手服务运行状态",
             "--width=680",
             "--height=430",
             "--button=退出:1",
@@ -216,8 +191,6 @@ def main_menu() -> None:
             "执行 Rootkit 检测和系统安全审计",
             "防火墙状态",
             "查看当前 nftables 防火墙规则",
-            "Garlic Claw 状态",
-            "查看 AI 助手服务运行状态",
             "--width=680",
             "--height=430",
         ]
@@ -226,7 +199,6 @@ def main_menu() -> None:
         "快速清理": quick_clean,
         "安全检查": security_check,
         "防火墙状态": firewall_status,
-        "Garlic Claw 状态": garlic_claw_status,
     }
 
     while True:

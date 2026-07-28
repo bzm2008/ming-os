@@ -13,7 +13,8 @@ import tempfile
 import threading
 
 
-ANIMATION_DURATION_MS = 200
+ANIMATION_DURATION_MS = 160
+DRAWER_REVEAL_OFFSET = 32
 DRAWER_HEIGHT_RATIO = 0.72
 IPC_VERSION = 1
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
@@ -33,15 +34,17 @@ CANONICAL_LAUNCHERS = {
     "thunar.desktop": "files",
     "ming-terminal.desktop": "terminal",
     "xfce4-terminal.desktop": "terminal",
-    "ming-edge.desktop": "edge",
-    "microsoft-edge.desktop": "edge",
-    "microsoft-edge-stable.desktop": "edge",
+    "ming-firefox.desktop": "browser",
+    "firefox-esr.desktop": "browser",
+    "firefox.desktop": "browser",
+    "papyrus.desktop": "agent",
 }
 CANONICAL_PREFERENCE = {
     "settings": "ming-control-center.desktop",
     "files": "ming-files.desktop",
     "terminal": "ming-terminal.desktop",
-    "edge": "ming-edge.desktop",
+    "browser": "ming-firefox.desktop",
+    "agent": "papyrus.desktop",
 }
 
 
@@ -122,7 +125,7 @@ def reduced_motion_enabled(path=None):
 def drawer_transition(reduced_motion):
     return {
         "duration_ms": 0 if reduced_motion else ANIMATION_DURATION_MS,
-        "start_opacity": 1.0,
+        "start_opacity": 1.0 if reduced_motion else 0.0,
     }
 
 
@@ -284,25 +287,29 @@ class DrawerController:
         window.set_focus_on_map(True)
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
-        window#ming-app-drawer { background: #F8FBF9; }
+        window#ming-app-drawer {
+          background: #F8FBF9;
+          font-family: "Noto Sans CJK SC", sans-serif;
+          font-weight: 400;
+        }
         .drawer-root {
           background: #F8FBF9;
           border-top: 1px solid rgba(47, 138, 125, 0.16);
-          padding: 20px;
+          padding: 16px;
         }
-        .drawer-header { padding-bottom: 2px; }
-        .drawer-close { border-radius: 9px; padding: 7px 14px; }
-        .drawer-category { border-radius: 8px; padding: 6px 12px; }
+        .drawer-header { padding-bottom: 4px; }
+        .drawer-close { border-radius: 9px; padding: 6px 12px; }
+        .drawer-category { border-radius: 8px; padding: 8px 12px; }
         .drawer-category:checked { background: #2F8A7D; color: #ffffff; }
         .drawer-tile {
           border-radius: 10px;
-          padding: 10px 8px;
+          padding: 8px;
           background: transparent;
           border: 1px solid transparent;
         }
         .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
-        .drawer-label { color: #1D2924; font-weight: 700; font-size: 11px; }
-        .drawer-diagnostic { color: #A33A32; font-size: 9px; font-weight: 700; }
+        .drawer-label { color: #1D2924; font-weight: 500; font-size: 11px; }
+        .drawer-diagnostic { color: #A33A32; font-size: 10px; font-weight: 500; }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -311,7 +318,7 @@ class DrawerController:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         root.get_style_context().add_class("drawer-root")
         window.add(root)
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         header.get_style_context().add_class("drawer-header")
         self.search = Gtk.SearchEntry()
         self.search.set_placeholder_text("搜索应用")
@@ -323,13 +330,19 @@ class DrawerController:
         close.connect("clicked", lambda _button: self.hide())
         header.pack_start(close, False, False, 0)
         root.pack_start(header, False, False, 0)
-        categories = Gtk.Box(spacing=6)
+        categories = Gtk.FlowBox()
+        categories.set_selection_mode(Gtk.SelectionMode.NONE)
+        categories.set_homogeneous(True)
+        categories.set_min_children_per_line(2)
+        categories.set_max_children_per_line(8)
+        categories.set_row_spacing(4)
+        categories.set_column_spacing(8)
         for category in CATEGORIES:
             button = Gtk.ToggleButton(label=category)
             button.get_style_context().add_class("drawer-category")
             button.set_active(category == self.category)
             button.connect("clicked", self._select_category, category)
-            categories.pack_start(button, False, False, 0)
+            categories.add(button)
         root.pack_start(categories, False, False, 0)
         scroller = Gtk.ScrolledWindow()
         self.grid = Gtk.FlowBox()
@@ -365,11 +378,14 @@ class DrawerController:
         visible = filter_apps(self.apps, self.search.get_text(), self.category, self.recent.load())
         for app in visible:
             button = self.Gtk.Button()
-            button.set_size_request(116, 100)
+            button.set_size_request(116, 112)
             button.get_style_context().add_class("drawer-tile")
-            content = self.Gtk.Box(orientation=self.Gtk.Orientation.VERTICAL, spacing=7)
-            image = self.Gtk.Image.new_from_icon_name(app.icon or "application-x-executable", self.Gtk.IconSize.DIALOG)
-            image.set_pixel_size(42)
+            content = self.Gtk.Box(orientation=self.Gtk.Orientation.VERTICAL, spacing=4)
+            icon_path = COMMON.resolve_icon_path(app.icon, app.path)
+            image = (self.Gtk.Image.new_from_file(icon_path) if icon_path else
+                     self.Gtk.Image.new_from_icon_name(
+                         app.icon or "application-x-executable", self.Gtk.IconSize.DIALOG))
+            image.set_pixel_size(40)
             label = self.Gtk.Label(label=app.name)
             label.set_justify(self.Gtk.Justification.CENTER)
             label.set_line_wrap(True)
@@ -383,6 +399,8 @@ class DrawerController:
             if getattr(app, "diagnostic", ""):
                 diagnostic = self.Gtk.Label(label="启动器需修复")
                 diagnostic.set_ellipsize(3)
+                diagnostic.set_lines(1)
+                diagnostic.set_max_width_chars(11)
                 diagnostic.get_style_context().add_class("drawer-diagnostic")
                 content.pack_start(diagnostic, False, False, 0)
             button.add(content)
@@ -465,16 +483,17 @@ class DrawerController:
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:
             self.window.move(int(geometry.x), int(geometry.y))
+            self.window.set_opacity(1.0)
             self.window.show_all()
             self.window.present()
             self.search.grab_focus()
             return
         self._animation_geometry = geometry
         if not self.window.get_visible():
-            self.window.move(int(geometry.x), int(geometry.y + geometry.height))
+            self.window.move(int(geometry.x), int(geometry.y + DRAWER_REVEAL_OFFSET))
+            self.window.set_opacity(transition["start_opacity"])
             self.window.show_all()
             self.window.present()
-        self.window.set_opacity(transition["start_opacity"])
         self._animate_to(1.0, geometry)
         self.search.grab_focus()
 
@@ -496,11 +515,12 @@ class DrawerController:
         def step():
             current = self._animation.advance(self.GLib.get_monotonic_time() / 1000.0)
             active_geometry = self._animation_geometry or geometry
-            # Ease the physical motion but preserve linear progress internally,
-            # allowing a second toggle to reverse from the exact current point.
+            # Keep the reveal bounded so old GPUs do not move a full-screen
+            # surface on every frame.  Progress stays reversible for toggles.
             eased = COMMON.ease_out_cubic(current)
-            y = active_geometry.y + active_geometry.height * (1.0 - eased)
+            y = active_geometry.y + DRAWER_REVEAL_OFFSET * (1.0 - eased)
             self.window.move(int(active_geometry.x), int(y))
+            self.window.set_opacity(0.98 * eased)
             if self._animation.active:
                 return True
             self._animation_source = 0
@@ -508,7 +528,7 @@ class DrawerController:
                 self.window.hide()
             return False
 
-        self._animation_source = self.GLib.timeout_add(16, step)
+        self._animation_source = self.GLib.timeout_add(33, step)
 
     def toggle(self):
         if self.window.get_visible() and self._animation.target > 0.0:

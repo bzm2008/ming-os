@@ -185,12 +185,12 @@ class StatusWidgetStatePureTests(unittest.TestCase):
         exec(prefix, namespace)
         with tempfile.TemporaryDirectory() as temporary:
             state_path = pathlib.Path(temporary) / "status-widget.json"
-            self.assertEqual({"collapsed": False}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
             state_path.write_text("not json", encoding="utf-8")
-            self.assertEqual({"collapsed": False}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
             namespace["save_widget_state"](True, state_path)
-            self.assertEqual({"collapsed": True}, json.loads(state_path.read_text(encoding="utf-8")))
-            self.assertEqual({"collapsed": True}, namespace["load_widget_state"](state_path))
+            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, json.loads(state_path.read_text(encoding="utf-8")))
+            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
 
 
 class ApplicationCatalogRefreshTests(unittest.TestCase):
@@ -566,6 +566,17 @@ fi
         self.assertIn("animate_collapsed_state", PHONE)
         self.assertIn("content_revealer.set_reveal_child", PHONE)
         self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
+
+    def test_status_widget_uses_the_final_264_named_height_contract(self):
+        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT = 58", PHONE)
+        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 248", PHONE)
+        status = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
+        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed", status)
+        self.assertIn("else STATUS_WIDGET_EXPANDED_HEIGHT", status)
+        self.assertIn(
+            "self.status.set_size_request(widget_w, self.status.preferred_height())",
+            PHONE,
+        )
 
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):
         for marker in (

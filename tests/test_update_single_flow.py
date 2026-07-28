@@ -3,6 +3,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import types
 import unittest
 
 
@@ -10,10 +11,42 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / "assets" / "ming-settings.py"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 OTA = ROOT / "modules" / "06_ota_update.sh"
+DESKTOP = ROOT / "modules" / "03_desktop.sh"
+FINALIZE = ROOT / "modules" / "07_finalize.sh"
 
 
 def method_block(source, start, end):
     return source[source.index(start):source.index(end, source.index(start))]
+
+
+def load_status_probe(phone_source, subprocess_module):
+    namespace = {
+        "json": json,
+        "log": lambda _message: None,
+        "subprocess": subprocess_module,
+    }
+    block = method_block(
+        phone_source,
+        "    def background_update_status",
+        "    def background_update_available",
+    )
+    exec("class Probe:\n" + block, namespace)
+    return namespace["Probe"]()
+
+
+class FakeStatusSubprocess:
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, result=None, exc=None):
+        self.result = result
+        self.exc = exc
+        self.calls = []
+
+    def run(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if self.exc is not None:
+            raise self.exc
+        return self.result
 
 
 class UpdateSingleFlowContractTests(unittest.TestCase):
@@ -22,6 +55,8 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.phone = PHONE.read_text(encoding="utf-8")
         cls.ota = OTA.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP.read_text(encoding="utf-8")
+        cls.finalizer = FINALIZE.read_text(encoding="utf-8")
 
     def test_settings_starts_with_one_check_action_and_promotes_it_after_detection(self):
         update = method_block(self.settings, "    def build_update(self):", "    def build_display(self):")
@@ -44,6 +79,21 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn('"--manifest", self.update_manifest_path', apply)
         self.assertIn('"--sha256", self.update_manifest_sha256', apply)
 
+    def test_settings_explains_major_ota_data_preservation_before_enabling_update(self):
+        update = method_block(self.settings, "    def apply_update_status(self, status):", "    def on_update_action(self, _btn):")
+
+        self.assertIn('status.get("home_preservation")', update)
+        self.assertIn('update_type == "major"', update)
+        self.assertIn("preservation_ready", update)
+        self.assertIn("升级准备", update)
+        self.assertIn("连接备份盘后重新检查", update)
+
+    def test_settings_one_click_apply_requests_restart_after_a_successful_stage(self):
+        apply = method_block(self.settings, "    def on_update_apply(self):", "    # ---- 5. 显示与无障碍")
+
+        self.assertIn('"--restart-after-stage"', apply)
+        self.assertIn("完成后会自动重启", apply)
+
     def test_cli_exposes_machine_readable_status_and_a_single_type_aware_apply(self):
         self.assertIn("show_status_json()", self.ota)
         self.assertIn("apply_update()", self.ota)
@@ -56,21 +106,178 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("download_update", apply)
         self.assertIn("major_install_with_home_backup", apply)
 
-    def test_power_menu_only_offers_update_shutdown_after_a_background_confirmation(self):
+    def test_cli_status_exposes_major_ota_preservation_preflight(self):
+        status = method_block(self.ota, "show_status_json() {", "show_status() {")
+
+        self.assertIn("home_preservation_status_json", self.ota)
+        self.assertIn("home_preservation", status)
+        self.assertIn("preservation_ready", status)
+        self.assertIn("backup_required", self.ota)
+
+    def test_cli_help_advertises_the_one_click_restart_command_and_legacy_alias(self):
+        help_block = method_block(self.ota, "show_help() {", "validate_staging_record_local() {")
+
+        self.assertIn("auto-restart", help_block)
+        self.assertIn("兼容别名", help_block)
+        self.assertIn("auto-shutdown", help_block)
+
+    def test_power_menu_only_offers_update_restart_after_a_background_confirmation(self):
         self.assertIn("def background_update_available", self.phone)
         self.assertIn('status.get("background_available")', self.phone)
         power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
         entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
         self.assertIn("background_update_available()", entry)
-        self.assertIn("更新并关机", power)
-        self.assertIn('["pkexec", "ming-update", "auto-shutdown"]', self.phone)
+        self.assertIn("更新并重启", power)
+        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
         self.assertIn("MING_UPDATE_BACKGROUND_CHECK", self.ota)
         self.assertIn("BACKGROUND_AVAILABILITY_FILE", self.ota)
 
+    def test_power_menu_uses_update_restart_for_a_fully_automatic_major_upgrade(self):
+        power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
+
+        self.assertIn("更新并重启", power)
+        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
+        self.assertNotIn("auto-shutdown", power)
+
+    def test_power_menu_keeps_update_progress_and_failure_reason_visible(self):
+        update = method_block(
+            self.phone,
+            "    def open_update_and_restart_dialog",
+            "    def open_update_and_shutdown_dialog",
+        )
+
+        self.assertIn("start_update_restart_progress", update)
+        self.assertIn("stdout=subprocess.PIPE", self.phone)
+        self.assertIn("stderr=subprocess.STDOUT", self.phone)
+        self.assertIn("Gtk.Spinner", self.phone)
+        self.assertIn("更新未完成", self.phone)
+        self.assertNotIn("stdout=subprocess.DEVNULL", update)
+        self.assertNotIn("stderr=subprocess.DEVNULL", update)
+
+    def test_power_menu_blocks_major_ota_when_user_data_preflight_is_not_ready(self):
+        update = method_block(
+            self.phone,
+            "    def open_update_and_restart_dialog",
+            "    def open_update_and_shutdown_dialog",
+        )
+
+        self.assertIn('home_preservation.get("ready")', update)
+        self.assertIn("前往系统更新", update)
+        self.assertIn('self.open_command(["ming-control-center", "--page", "update"])', update)
+
+    def test_power_menu_fails_closed_when_it_cannot_refresh_update_status(self):
+        update = method_block(
+            self.phone,
+            "    def open_update_and_restart_dialog",
+            "    def open_update_and_shutdown_dialog",
+        )
+
+        self.assertIn("if not isinstance(status, dict)", update)
+        self.assertIn("无法确认更新状态", update)
+        self.assertIn("前往系统更新", update)
+
+    def test_power_menu_treats_a_nonzero_status_command_as_unavailable(self):
+        status = method_block(
+            self.phone,
+            "    def background_update_status",
+            "    def background_update_available",
+        )
+
+        self.assertIn("if result.returncode != 0", status)
+        self.assertIn("return None", status)
+
+    def test_background_update_status_returns_none_for_untrusted_status_output(self):
+        cases = [
+            FakeStatusSubprocess(types.SimpleNamespace(returncode=1, stdout='{\"background_available\": true}')),
+            FakeStatusSubprocess(types.SimpleNamespace(returncode=0, stdout="{not json")),
+            FakeStatusSubprocess(exc=OSError("missing ming-update")),
+        ]
+
+        for fake_subprocess in cases:
+            with self.subTest(fake_subprocess=fake_subprocess):
+                probe = load_status_probe(self.phone, fake_subprocess)
+                self.assertIsNone(probe.background_update_status())
+                self.assertEqual(["ming-update", "status", "--json"], fake_subprocess.calls[0][0])
+
+    def test_background_update_status_returns_successful_dict_unchanged(self):
+        fake_subprocess = FakeStatusSubprocess(
+            types.SimpleNamespace(
+                returncode=0,
+                stdout='{\"background_available\": true, \"update_type\": \"minor\"}',
+            )
+        )
+        probe = load_status_probe(self.phone, fake_subprocess)
+
+        self.assertEqual(
+            {"background_available": True, "update_type": "minor"},
+            probe.background_update_status(),
+        )
+
+    def test_power_menu_distinguishes_no_update_from_a_staged_reboot(self):
+        automatic = method_block(self.ota, "auto_shutdown_update() {", 'case "${1:-help}" in')
+
+        self.assertIn("MING_UPDATE_RESULT=no_update", automatic)
+        self.assertIn("MING_UPDATE_RESULT=staged", automatic)
+        self.assertIn('state["result"]', self.phone)
+        self.assertIn("当前已是最新版本，不会重启。", self.phone)
+
+    def test_settings_keeps_the_last_unbracketed_authorization_error(self):
+        update = method_block(self.settings, "    def on_update_check(self):", "    def on_update_apply(self):")
+
+        self.assertIn("self.update_last_output", update)
+        self.assertIn("authorization", update.lower())
+
+    def test_default_power_button_shows_ming_menu_before_session_action(self):
+        entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
+
+        self.assertIn("show_basic_power_menu", entry)
+        self.assertNotIn('["xfce4-session-logout"]', entry)
+        self.assertNotIn('["gnome-session-quit", "--logout"]', entry)
+        self.assertNotIn('["mate-session-save", "--logout-dialog"]', entry)
+
     def test_legacy_update_launcher_redirects_to_the_settings_page(self):
-        self.assertIn('exec /usr/local/bin/ming-control-center --page update "$@"', self.ota)
-        desktop = self.ota[self.ota.index("cat > /usr/share/applications/ming-update.desktop") :]
-        self.assertIn("NoDisplay=true", desktop)
+        self.assertEqual(1, self.ota.count("cat > /usr/local/bin/ming-update-gui"))
+        redirect = method_block(
+            self.ota,
+            "cat > /usr/local/bin/ming-update-gui << 'OTAGUIREDIRECT'",
+            "    chmod +x /usr/local/bin/ming-update-gui",
+        )
+        self.assertIn('exec /usr/local/bin/ming-control-center --page update "$@"', redirect)
+        self.assertNotIn("zenity", redirect)
+        self.assertNotIn("ming-update.desktop", redirect)
+
+    def test_standalone_update_launcher_is_removed_from_new_and_existing_users(self):
+        self.assertNotIn("cat > /usr/share/applications/ming-update.desktop", self.ota)
+        self.assertNotIn("ming-update.dockitem", self.desktop)
+        self.assertNotIn("ming-update.desktop", self.finalizer)
+        for retired in (
+            "rm -f /usr/share/applications/ming-update.desktop",
+            'rm -f "/home/${MING_USER}/Desktop/ming-update.desktop"',
+            'rm -f /home/*/Desktop/ming-update.desktop',
+            'rm -f /home/*/.config/plank/dock1/launchers/ming-update.dockitem',
+        ):
+            self.assertIn(retired, self.ota)
+
+    def test_control_center_final_writer_is_ming_settings_wrapper(self):
+        main = self.desktop.split("main() {", 1)[1].split("\n}\n\nmain", 1)[0]
+        self.assertLess(main.index("install_ming_shell_components"), main.index("install_ming_settings"))
+
+        wrapper_writer = method_block(
+            self.desktop,
+            "install_ming_settings() {",
+            "cleanup_retired_ming_entries() {",
+        )
+        legacy_writer = method_block(
+            self.desktop,
+            "install_ming_shell_components() {",
+            "ensure_wps_office() {",
+        )
+        self.assertIn("cat > /usr/local/bin/ming-control-center", wrapper_writer)
+        self.assertIn("MINGCONTROLWRAPPER", wrapper_writer)
+        self.assertIn('exec /usr/local/bin/ming-settings "$@"', wrapper_writer)
+        self.assertNotIn("TASKS = [", wrapper_writer)
+        self.assertIn("TASKS = [", legacy_writer)
+        self.assertIn("('检查系统更新', 'ming-update-icon'", legacy_writer)
 
     def test_boot_check_reads_the_same_root_cache_used_by_the_cli(self):
         boot = self.ota[self.ota.index("cat > /usr/local/bin/ming-boot-update-check") :]
@@ -91,6 +298,49 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("stage_selected_manifest", apply)
         self.assertIn("check_update", apply)
         self.assertIn("clear_applied_update_cache", apply)
+
+    def test_apply_restart_after_stage_is_explicit_and_runs_only_after_successful_stage(self):
+        apply = method_block(self.ota, "apply_update() {", "auto_shutdown_update() {")
+        automatic = method_block(self.ota, "auto_shutdown_update() {", 'case "${1:-help}" in')
+
+        self.assertIn("--restart-after-stage)", apply)
+        self.assertIn("restart_after_stage=false", apply)
+        self.assertIn("schedule_update_restart", apply)
+        self.assertIn("apply_update --checked --restart-after-stage", automatic)
+        self.assertIn("systemctl reboot", self.ota)
+
+    def test_major_stage_sets_and_verifies_a_one_shot_grub_entry_before_restart(self):
+        install = method_block(
+            self.ota,
+            "install_update() {",
+            "manifest_apply_identity() {",
+        )
+        self.assertIn("configure_ota_next_boot() {", self.ota)
+        helper = method_block(
+            self.ota,
+            "configure_ota_next_boot() {",
+            "manifest_apply_identity() {",
+        )
+
+        self.assertIn('configure_ota_next_boot "Ming OS ${version} OTA Installer"', install)
+        self.assertIn("grub-reboot", helper)
+        self.assertIn("grub-editenv", helper)
+        self.assertIn("next_entry", helper)
+        self.assertIn("return 1", helper)
+
+    def test_online_ota_requires_a_distinct_signed_release_manifest(self):
+        check = method_block(self.ota, "check_update() {", "download_update() {")
+        self.assertIn("verify_signed_ota_manifest() {", self.ota)
+        verifier = method_block(
+            self.ota,
+            "verify_signed_ota_manifest() {",
+            "download_update() {",
+        )
+
+        self.assertIn("OTA_RELEASE_PUBLIC_KEY", verifier)
+        self.assertIn("minisign", verifier)
+        self.assertIn("signature", verifier)
+        self.assertIn("verify_signed_ota_manifest", check)
 
     def test_status_exposes_a_fingerprint_only_for_an_actionable_manifest(self):
         status = method_block(self.ota, "show_status_json() {", "show_status() {")
@@ -155,6 +405,92 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertTrue(status["manifest_path"].replace("\\", "/").endswith("/cache/update_info.json"))
         self.assertRegex(status["manifest_sha256"], r"^[0-9a-f]{64}$")
         self.assertTrue(status["background_available"])
+
+    def test_generated_cli_blocks_a_major_update_until_user_data_can_be_preserved(self):
+        git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not git_bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+        marker = "cat > /usr/local/bin/ming-update << 'OTACLI'\n"
+        cli = self.ota.split(marker, 1)[1].split("\nOTACLI\n", 1)[0]
+
+        def git_path(path):
+            value = str(path.resolve()).replace("\\", "/")
+            return "/%s%s" % (value[0].lower(), value[2:])
+
+        with tempfile.TemporaryDirectory(prefix="ming-update-major-preflight-") as tempdir:
+            root = pathlib.Path(tempdir)
+            root_posix = git_path(root)
+            cli = cli.replace('readonly CONFIG_DIR="/etc/ming-update"',
+                              'readonly CONFIG_DIR="%s/config"' % root_posix)
+            cli = cli.replace('readonly CACHE_DIR="/var/cache/ming-update"',
+                              'readonly CACHE_DIR="%s/cache"' % root_posix)
+            cli = cli.replace(
+                'current_version() {\n    cat /etc/ming-version 2>/dev/null || echo "unknown"\n}',
+                'current_version() { printf "%s\\n" "26.4.0"; }')
+            injected = r'''
+home_is_independent_device() { return 1; }
+ota_backup_destination() { return 1; }
+'''
+            cli = cli.replace('case "${1:-help}" in', injected + '\ncase "${1:-help}" in')
+            script = root / "ming-update"
+            script.write_text(cli, encoding="utf-8")
+            cache = root / "cache"
+            cache.mkdir()
+            (root / "config").mkdir()
+            (cache / "update_info.json").write_text(json.dumps({
+                "has_update": True, "ready": True, "version": "26.4.1",
+                "release_notes": "重要更新", "update_type": "major",
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [str(git_bash), git_path(script), "status", "--json"],
+                capture_output=True, timeout=20,
+                env={**os.environ, "HOME": root_posix},
+            )
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", errors="replace"))
+        status = json.loads(result.stdout.decode("utf-8", errors="replace"))
+        self.assertEqual("major", status["update_type"])
+        self.assertFalse(status["preservation_ready"])
+        self.assertEqual("backup_required", status["home_preservation"]["strategy"])
+        self.assertIn("备份盘", status["home_preservation"]["message"])
+
+    def test_generated_auto_restart_reports_no_update_without_claiming_a_reboot(self):
+        git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not git_bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+        marker = "cat > /usr/local/bin/ming-update << 'OTACLI'\n"
+        cli = self.ota.split(marker, 1)[1].split("\nOTACLI\n", 1)[0]
+
+        def git_path(path):
+            value = str(path.resolve()).replace("\\", "/")
+            return "/%s%s" % (value[0].lower(), value[2:])
+
+        with tempfile.TemporaryDirectory(prefix="ming-update-no-update-") as tempdir:
+            root = pathlib.Path(tempdir)
+            root_posix = git_path(root)
+            cli = cli.replace('readonly CONFIG_DIR="/etc/ming-update"',
+                              'readonly CONFIG_DIR="%s/config"' % root_posix)
+            cli = cli.replace('readonly CACHE_DIR="/var/cache/ming-update"',
+                              'readonly CACHE_DIR="%s/cache"' % root_posix)
+            injected = r'''
+check_update() {
+    rm -f -- "${CACHE_DIR}/update_info.json"
+    return 0
+}
+'''
+            cli = cli.replace('case "${1:-help}" in', injected + '\ncase "${1:-help}" in')
+            script = root / "ming-update"
+            script.write_text(cli, encoding="utf-8")
+            (root / "cache").mkdir()
+            (root / "config").mkdir()
+            result = subprocess.run(
+                [str(git_bash), git_path(script), "auto-restart"],
+                capture_output=True, timeout=20,
+                env={**os.environ, "HOME": root_posix},
+            )
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", errors="replace"))
+        output = result.stdout.decode("utf-8", errors="replace")
+        self.assertIn("MING_UPDATE_RESULT=no_update", output)
+        self.assertIn("无需更新", output)
 
     def test_generated_cli_prefers_a_newer_manual_no_update_over_root_cache(self):
         git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")

@@ -10,6 +10,8 @@ PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 FINALIZE = ROOT / "modules" / "07_finalize.sh"
 SMOKE = ROOT / "scratch" / "ming-release-smoke.sh"
 RESUME = ROOT / "resume_build.sh"
+SETTINGS_HUB = ROOT / "modules" / "08_settings_hub.sh"
+WALLPAPER_2640 = ROOT / "assets" / "wallpaper-ming-2640-abstract.png"
 
 
 class ReleaseGateContracts(unittest.TestCase):
@@ -54,10 +56,9 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_dock_proxies_use_real_window_classes(self):
         expected_fallbacks = {
             "ming-terminal": "Xfce4-terminal",
-            "ming-update": "Zenity",
             "ming-settings": "uno.scallion.MingSettings",
             "ming-files": "org.mingos.Files",
-            "ming-edge": "microsoft-edge",
+            "ming-firefox": "Firefox-esr",
         }
         for launcher, wm_class in expected_fallbacks.items():
             self.assertIn(
@@ -78,6 +79,20 @@ class ReleaseGateContracts(unittest.TestCase):
         launcher_block = finalizer.split("readonly DESKTOP_LAUNCHERS=(", 1)[1].split(")", 1)[0]
         self.assertNotIn("ming-app-library.desktop", launcher_block)
         self.assertNotIn("ming-disk-hub.desktop", launcher_block)
+        self.assertNotIn("ming-edge.desktop", launcher_block)
+        self.assertNotIn("garlic-claw.desktop", launcher_block)
+        self.assertNotIn("ming-update.desktop", launcher_block)
+        self.assertIn("papyrus.desktop", launcher_block)
+
+    def test_update_is_only_exposed_inside_settings(self):
+        self.assertNotIn("ming-update.dockitem", self.desktop)
+        self.assertNotIn("('ming-update.desktop'", self.desktop)
+        self.assertNotIn("favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-update.desktop", self.desktop)
+        self.assertIn("def build_update(self):", (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8"))
+        self.assertIn(
+            'require_file("usr/local/bin/ming-update-gui", "exec /usr/local/bin/ming-control-center --page update")',
+            self.build,
+        )
 
     def test_control_center_executes_ming_settings(self):
         self.assertIn("exec /usr/local/bin/ming-settings", self.desktop)
@@ -93,6 +108,15 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.phone)
 
+    def test_live_installer_session_warns_that_live_data_is_temporary(self):
+        for marker in (
+            "Live 模式",
+            "尚未安装",
+            "不会保留任何数据",
+            "继续安装 Ming OS",
+        ):
+            self.assertIn(marker, self.desktop)
+
     def test_build_validates_new_release_surface(self):
         for marker in [
             "ming-app-drawer",
@@ -102,6 +126,66 @@ class ReleaseGateContracts(unittest.TestCase):
             "boot/grub/themes/ming/theme.txt",
         ]:
             self.assertIn(marker, self.build)
+
+    def test_final_2640_wallpaper_is_packaged_and_cached_at_supported_sizes(self):
+        self.assertTrue(WALLPAPER_2640.is_file())
+        self.assertGreater(WALLPAPER_2640.stat().st_size, 0)
+        for marker in (
+            'asset_2640="/tmp/ming-build/assets/wallpaper-ming-2640-abstract.png"',
+            '/usr/share/backgrounds/ming-os/default-2640.png',
+            '/usr/share/backgrounds/ming-os/default.png',
+            'for geometry in 3840x2160 1920x1080 1366x768',
+            'output="/usr/share/backgrounds/ming-os/default-${geometry}.png"',
+        ):
+            self.assertIn(marker, self.desktop)
+
+    def test_wallpaper_cache_generation_fails_instead_of_copying_wrong_dimensions(self):
+        wallpaper = self.desktop.split("setup_wallpaper() {", 1)[1].split(
+            "# ======================== Xfce", 1
+        )[0]
+        self.assertIn('command -v convert >/dev/null 2>&1 || {', wallpaper)
+        self.assertIn('if ! convert /usr/share/backgrounds/ming-os/default.png', wallpaper)
+        self.assertIn('return 1', wallpaper)
+        self.assertNotIn('2>/dev/null || \\\n                cp /usr/share/backgrounds/ming-os/default.png "${output}"', wallpaper)
+        self.assertNotIn('cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1920x1080.png', wallpaper)
+
+        main = self.desktop.split("main() {", 1)[1].split("\n}\n\nmain", 1)[0]
+        self.assertIn("setup_wallpaper || return 1", main)
+
+    def test_build_gate_requires_source_and_every_installed_wallpaper_variant(self):
+        for marker in (
+            'assets/wallpaper-ming-2640-abstract.png',
+            'usr/share/backgrounds/ming-os/default-2640.png',
+            'usr/share/backgrounds/ming-os/default.png',
+            'usr/share/backgrounds/ming-os/default-3840x2160.png',
+            'usr/share/backgrounds/ming-os/default-1920x1080.png',
+            'usr/share/backgrounds/ming-os/default-1366x768.png',
+        ):
+            self.assertIn(marker, self.build)
+        for marker in (
+            "import struct",
+            'data[:8] != b"\\x89PNG\\r\\n\\x1a\\n"',
+            'data[12:16] != b"IHDR"',
+            'struct.unpack(">II", data[16:24])',
+            'expected_wallpaper_sizes = {',
+            'wallpaper dimensions mismatch',
+        ):
+            self.assertIn(marker, self.build)
+
+    def test_settings_hub_never_overwrites_the_control_center_wrapper(self):
+        settings_hub = SETTINGS_HUB.read_text(encoding="utf-8")
+        self.assertNotIn("cat > /usr/local/bin/ming-control-center", settings_hub)
+        self.assertNotIn("install -m 0755 ${src} /usr/local/bin/ming-control-center", settings_hub)
+
+    def test_build_identity_targets_2641(self):
+        self.assertIn('readonly MING_OS_VERSION="26.4.1"', self.build)
+        self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2641"', self.build)
+
+    def test_runtime_release_handoff_does_not_advertise_2632(self):
+        release_doc = self.desktop.split("deploy_release_readme() {", 1)[1].split("deploy_xfce_modern_style() {", 1)[0]
+        self.assertIn("26.4.1", release_doc)
+        self.assertNotIn("26.3.2", release_doc)
+        self.assertNotIn("MING_OS_2632", release_doc)
 
     def test_rootfs_recovery_gate_validates_generated_helpers_and_units(self):
         """A completed image must reject malformed recovery helpers before release."""
@@ -115,6 +199,34 @@ class ReleaseGateContracts(unittest.TestCase):
             "legacy Intel DDX",
         ]:
             self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_classifies_generated_helpers_by_interpreter(self):
+        """Shell helpers must not be sent through Python bytecode validation."""
+        for marker in [
+            "bash_generated_helpers = [",
+            '"usr/local/sbin/ming-oom-policy"',
+            '"usr/local/sbin/ming-timer-policy"',
+            '"usr/local/bin/ming-ota-run"',
+            "for relative_path in bash_generated_helpers:",
+            "python_generated_helpers = [",
+            "for relative_path in python_generated_helpers:",
+        ]:
+            self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_validates_slice_units_with_slice_schema(self):
+        """A systemd slice has a [Slice] section, not a service ExecStart."""
+        for marker in [
+            'if relative_path.endswith(".slice"):',
+            '"[Slice]" not in text',
+            "has no slice directive",
+        ]:
+            self.assertIn(marker, self.build)
+
+    def test_rootfs_gate_matches_the_shipped_dock_theme_indicator_size(self):
+        self.assertIn(
+            'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
+            self.build,
+        )
 
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
@@ -249,8 +361,8 @@ class ReleaseGateContracts(unittest.TestCase):
         refresh = finalizer.index("refresh_dock_launchers", final_main)
         seed = finalizer.index("seed_skel", final_main)
         self.assertLess(refresh, seed)
-        for launcher in ("ming-update", "ming-settings"):
-            self.assertIn('"%s:%s.desktop"' % (launcher, launcher), self.desktop)
+        self.assertIn('"ming-settings:ming-settings.desktop"', self.desktop)
+        self.assertNotIn('"ming-update:ming-update.desktop"', self.desktop)
 
 
 if __name__ == "__main__":

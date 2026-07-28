@@ -198,6 +198,24 @@ MINGMIGRATEDISKS
     rm -f /usr/share/applications/ming-disk-hub.desktop
     rm -f /usr/local/bin/ming-disk-hub
     rm -f "/home/${MING_USER}/.config/plank/dock1/launchers/ming-disk-hub.dockitem"
+    for retired_root in /usr/local/bin /usr/local/sbin /usr/share/applications \
+        /usr/share/icons /etc/systemd/system /usr/lib/systemd/system; do
+        [[ -d "${retired_root}" ]] || continue
+        find "${retired_root}" -maxdepth 2 -type f \
+            \( -iname '*claw*' -o -iname 'open*claw*' \) \
+            -delete 2>/dev/null || true
+        find "${retired_root}" -maxdepth 2 -type l \
+            \( -iname '*claw*' -o -iname 'open*claw*' \) \
+            -delete 2>/dev/null || true
+    done
+    find "/home/${MING_USER}" -maxdepth 4 -type f \
+        \( -iname '*claw*' -o -iname 'open*claw*' \) \
+        -delete 2>/dev/null || true
+    find /usr/share/applications \
+         "/home/${MING_USER}/Desktop" \
+         "/home/${MING_USER}/.config/plank/dock1/launchers" \
+         -maxdepth 1 \( -iname '*claw*.desktop' -o -iname '*claw*.dockitem' \) \
+         -delete 2>/dev/null || true
     rm -f "/home/${MING_USER}/Desktop/Ming 应用库.desktop" \
           "/home/${MING_USER}/Desktop/所有磁盘.desktop" \
           "/home/${MING_USER}/Desktop/ming-app-library.desktop" \
@@ -221,7 +239,7 @@ install_ming_shell_components() {
     local lib_dir="/usr/local/lib/ming-os"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-app-drawer.py ming-launch.py ming-package-installer.py; do
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -237,9 +255,12 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
+    install -m 0755 "${asset_dir}/ming-storage-status.py" /usr/local/bin/ming-storage-status
+    install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
 
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
@@ -285,7 +306,9 @@ try:
     result = json.loads(raw)
 except (TypeError, ValueError):
     result = {}
-ok = bool(result.get("ok")) and return_code == 0
+installed = bool(result.get("installed"))
+launch_ready = bool(result.get("launch_ready"))
+ok = bool(result.get("ok")) and installed and launch_ready and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
 log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
@@ -300,6 +323,10 @@ if ok:
         warnings = [str(item.get("error") or "启动器不可用")
                     for item in launcher_warnings if isinstance(item, dict)]
         detail += "\n\n注意：" + "；".join(warnings[:3])
+elif installed and not launch_ready:
+    title = "软件已安装，但无法确认可启动"
+    reason = str(result.get("error") or "未找到可验证的图形启动器。")
+    detail = "%s\n日志：%s" % (reason[:1200], log_path)
 else:
     title = "软件安装失败"
     reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
@@ -324,6 +351,91 @@ fi
 exit 1
 MINGPACKAGEGUI
     chmod 0755 /usr/local/bin/ming-package-install-gui
+
+    cat > /usr/local/bin/ming-appimage-install-gui << 'MINGAPPIMAGEGUI'
+#!/usr/bin/env bash
+set -uo pipefail
+
+appimage_file="${1:-}"
+if [[ -z "${appimage_file}" || ! -f "${appimage_file}" ]]; then
+    notify-send -u critical "安装 AppImage" "找不到要安装的 AppImage 文件。" 2>/dev/null || true
+    exit 2
+fi
+result_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-appimage-result.XXXXXX" 2>/dev/null || true)"
+[[ -n "${result_file}" ]] || exit 1
+trap 'rm -f "${result_file}"' EXIT
+if /usr/local/bin/ming-appimage-installer "${appimage_file}" >"${result_file}"; then
+    rc=0
+else
+    rc=$?
+fi
+python3 - "${result_file}" "${rc}" << 'MINGAPPIMAGEUIPY'
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+try:
+    result = json.loads(raw)
+except (TypeError, ValueError):
+    result = {}
+ok = bool(result.get("ok")) and int(sys.argv[2]) == 0
+if ok:
+    title = "AppImage 安装完成"
+    text = "已添加到应用抽屉：%s" % result.get("desktop_file", "")
+else:
+    title = "AppImage 安装失败"
+    text = str(result.get("error") or "文件格式不受支持。")
+if shutil.which("zenity"):
+    subprocess.run(["zenity", "--info" if ok else "--error", "--title=" + title, "--text=" + text, "--width=520"], check=False)
+elif shutil.which("notify-send"):
+    subprocess.run(["notify-send", "-u", "normal" if ok else "critical", title, text], check=False)
+raise SystemExit(0 if ok else 1)
+MINGAPPIMAGEUIPY
+MINGAPPIMAGEGUI
+    chmod 0755 /usr/local/bin/ming-appimage-install-gui
+
+    cat > /usr/share/applications/ming-appimage-installer.desktop << 'MINGAPPIMAGEINSTALLERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=安装 AppImage
+Name[zh_CN]=安装 AppImage
+Comment=Install an AppImage for the current user
+Comment[zh_CN]=为当前用户安全安装 AppImage
+Exec=/usr/local/bin/ming-appimage-install-gui %f
+Icon=application-x-executable
+Terminal=false
+MimeType=application/x-appimage;application/x-executable;
+NoDisplay=true
+StartupNotify=true
+MINGAPPIMAGEINSTALLERDESKTOP
+    cp /usr/share/applications/ming-appimage-installer.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-appimage-installer.desktop"
+
+    # Both browser downloads and Ming Files resolve Debian packages through
+    # this unprivileged MIME handler.  Only the installer itself requests the
+    # narrowly scoped polkit privilege.
+    cat > /usr/share/applications/ming-package-installer.desktop << 'MINGPACKAGEINSTALLERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=安装 DEB 软件包
+Name[zh_CN]=安装 DEB 软件包
+Comment=验证并安装本地 Debian 软件包
+Comment[zh_CN]=验证并安装本地 Debian 软件包
+Exec=/usr/local/bin/ming-package-install-gui %f
+Icon=package-x-generic
+Terminal=false
+MimeType=application/vnd.debian.binary-package;
+NoDisplay=true
+StartupNotify=true
+MINGPACKAGEINSTALLERDESKTOP
+    cp /usr/share/applications/ming-package-installer.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-package-installer.desktop"
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-launch-broker.desktop" << 'MINGLAUNCHAUTO'
@@ -354,6 +466,19 @@ X-GNOME-Autostart-Delay=2
 MINGAUDIOAUTO
     chown "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.config/autostart/ming-audio-session.desktop"
+
+    cat > "/home/${MING_USER}/.config/autostart/ming-software-brightness.desktop" << 'MINGSOFTWAREBRIGHTNESSAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Software Brightness Restore
+Exec=/usr/local/bin/ming-device-control reapply-brightness --wait-seconds 10 --json
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+MINGSOFTWAREBRIGHTNESSAUTO
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.config/autostart/ming-software-brightness.desktop"
 
     cat > /usr/local/bin/ming-app-library << 'MINGDRAWERCOMPAT'
 #!/usr/bin/env bash
@@ -438,6 +563,7 @@ for section in ("Default Applications", "Added Associations"):
         config.add_section(section)
 config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
+config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
 existing = config["Added Associations"].get("inode/directory", "")
 items = [item for item in existing.split(";") if item]
 items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]
@@ -460,12 +586,14 @@ configure_hidpi_autoscale() {
 
 SCALE_CONFIG="${HOME}/.config/ming-os/scale-done"
 SCALE_PREFERENCE="${HOME}/.config/ming-os/scale-preference.json"
+SCALE_POLICY_VERSION=2
 if [[ -s "${SCALE_PREFERENCE}" ]]; then
     # Ming Settings wrote an explicit accessibility choice.  A repair or
     # resolution change must not silently replace it with an auto default.
     exit 0
 fi
-if [[ -f "${SCALE_CONFIG}" ]]; then
+if [[ -f "${SCALE_CONFIG}" ]] && \
+   grep -Fxq "font-policy=${SCALE_POLICY_VERSION}" "${SCALE_CONFIG}" 2>/dev/null; then
     exit 0
 fi
 mkdir -p "$(dirname "${SCALE_CONFIG}")"
@@ -511,9 +639,9 @@ elif [[ "${WIDTH}" -ge 1366 ]]; then
 elif [[ "${WIDTH}" -ge 1280 ]]; then
     DPI=96;    PANEL_SIZE=26; DOCK_ICON=38; CURSOR_SIZE=20; FONT_SIZE=10
 elif [[ "${WIDTH}" -ge 1024 ]]; then
-    DPI=96;    PANEL_SIZE=24; DOCK_ICON=34; CURSOR_SIZE=18; FONT_SIZE=9
+    DPI=96;    PANEL_SIZE=24; DOCK_ICON=34; CURSOR_SIZE=18; FONT_SIZE=10
 else
-    DPI=96;    PANEL_SIZE=24; DOCK_ICON=30; CURSOR_SIZE=18; FONT_SIZE=9
+    DPI=96;    PANEL_SIZE=24; DOCK_ICON=30; CURSOR_SIZE=18; FONT_SIZE=10
 fi
 
 # 纵向模式修正（如平板旋转）— 用 awk 做数值比较，避免字符串字典序误判
@@ -526,7 +654,7 @@ fi
 if [[ "${HEIGHT}" -lt 800 ]]; then
     PANEL_SIZE=$((PANEL_SIZE > 24 ? PANEL_SIZE - 2 : 22))
     DOCK_ICON=$((DOCK_ICON > 32 ? DOCK_ICON - 6 : 30))
-    FONT_SIZE=$((FONT_SIZE > 9 ? FONT_SIZE - 1 : 9))
+    FONT_SIZE=$((FONT_SIZE > 10 ? FONT_SIZE - 1 : 10))
 fi
 
 if [[ "${LOW_MEMORY}" -eq 1 ]]; then
@@ -550,8 +678,8 @@ PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ -f "${PLANK_SETTINGS}" ]]; then
     sed -i "s/^IconSize=.*/IconSize=${DOCK_ICON}/" "${PLANK_SETTINGS}" 2>/dev/null || true
     if [[ "${LOW_MEMORY}" -eq 1 ]]; then
-        sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
+        sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=100/" "${PLANK_SETTINGS}" 2>/dev/null || true
     fi
 fi
 
@@ -579,7 +707,7 @@ dock_zoom=true
 PROFILE
 fi
 
-echo "done" > "${SCALE_CONFIG}"
+printf "font-policy=%s\n" "${SCALE_POLICY_VERSION}" > "${SCALE_CONFIG}"
 MINGSCALE
 
     chmod +x /usr/local/bin/ming-scale
@@ -987,7 +1115,6 @@ APPLIBICON
             [store]="ming-app-store spark-store"
             [app-library]="ming-app-library"
             [wechat-mgr]="ming-wechat-manager wechat"
-            [garlic-claw]="garlic-claw"
         )
         for src_name in "${!png_map[@]}"; do
             local src_file="${assets}/${src_name}.png"
@@ -1180,6 +1307,22 @@ GTK2SETTINGS
   -GtkWidget-cursor-aspect-ratio: 0.05;
 }
 
+/* Text stays familiar on old displays: regular body copy, a calm title weight,
+ * and fixed 4/8/12/16px rhythm.  This is static GTK CSS, with no runtime work. */
+label,
+button,
+entry,
+menuitem,
+notebook tab {
+  font-family: "Noto Sans CJK SC", sans-serif;
+  font-weight: 400;
+}
+
+label.title,
+headerbar label {
+  font-weight: 600;
+}
+
 window {
   background-color: @theme_bg_color;
   color: @theme_fg_color;
@@ -1194,13 +1337,13 @@ window decoration {
 
 button {
   border-radius: 10px;
-  padding: 7px 15px;
+  padding: 6px 12px;
   border: 1px solid @borders;
   background-image: none;
   background-color: rgba(255, 255, 255, 0.90);
   color: @theme_fg_color;
   transition: background-color 160ms ease-out, border-color 160ms ease-out, box-shadow 180ms ease-out;
-  min-height: 30px;
+  min-height: 32px;
 }
 
 button:hover {
@@ -1238,11 +1381,11 @@ button.destructive-action {
 
 entry {
   border-radius: 10px;
-  padding: 7px 12px;
+  padding: 6px 12px;
   border: 1px solid @borders;
   background-color: rgba(255, 255, 255, 0.95);
   color: @theme_fg_color;
-  min-height: 30px;
+  min-height: 32px;
 }
 
 entry:focus {
@@ -1257,7 +1400,7 @@ notebook header {
 
 notebook tab {
   border-radius: 10px 10px 0 0;
-  padding: 7px 16px;
+  padding: 6px 12px;
   background-color: rgba(238, 243, 240, 0.92);
   color: @unfocused_fg_color;
   border: 1px solid transparent;
@@ -1287,7 +1430,7 @@ tooltip {
   background-color: rgba(28, 39, 35, 0.94);
   color: #FFFFFF;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 7px 11px;
+  padding: 8px 12px;
 }
 
 menu, .menu {
@@ -1300,7 +1443,7 @@ menu, .menu {
 
 menuitem {
   border-radius: 8px;
-  padding: 7px 12px;
+  padding: 8px 12px;
   min-height: 24px;
   color: @theme_fg_color;
 }
@@ -1314,8 +1457,8 @@ headerbar {
   border: none;
   border-bottom: 1px solid rgba(47, 138, 125, 0.08);
   border-radius: 12px 12px 0 0;
-  padding: 5px 10px;
-  min-height: 38px;
+  padding: 6px 12px;
+  min-height: 40px;
 }
 
 toolbar {
@@ -1408,8 +1551,8 @@ placessidebar row,
 .sidebar row,
 stacksidebar row {
   border-radius: 10px;
-  margin: 2px 6px;
-  padding: 6px 9px;
+  margin: 4px 8px;
+  padding: 8px;
 }
 
 placessidebar row:selected,
@@ -1491,7 +1634,7 @@ XFWMMING
 [Desktop Entry]
 Type=X-GNOME-Metatheme
 Name=Ming Glass
-Comment=Ming OS 26.3.2 Light Paper Theme
+Comment=Ming OS 26.4.1 Light Paper Theme
 Encoding=UTF-8
 
 [X-GNOME-Metatheme]
@@ -1506,7 +1649,12 @@ THEMEINDEX
 
 setup_wallpaper() {
     mkdir -p /usr/share/backgrounds/ming-os
+    command -v convert >/dev/null 2>&1 || {
+        echo "[03_desktop][ERROR] ImageMagick convert is required to generate wallpaper caches" >&2
+        return 1
+    }
 
+    local asset_2640="/tmp/ming-build/assets/wallpaper-ming-2640-abstract.png"
     local asset_dark="/tmp/ming-build/assets/wallpaper-ming-dark.png"
     local asset_light="/tmp/ming-build/assets/wallpaper-ming-light.png"
     local asset_macos="/tmp/ming-build/assets/wallpaper-ming-macos.png"
@@ -1517,9 +1665,13 @@ setup_wallpaper() {
     # macOS 风格壁纸（绿山）
     [[ -f "${asset_macos}" ]] && cp "${asset_macos}" /usr/share/backgrounds/ming-os/default-macos.png
 
-    # 默认壁纸：优先 Ming 浅色纸感壁纸，风景壁纸保留为可选资产。
+    # 26.4.0 final wallpaper is the canonical default; older assets are fallback.
     local primary=""
-    if [[ -f "${asset_light}" ]]; then
+    if [[ -s "${asset_2640}" ]]; then
+        primary="${asset_2640}"
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default-2640.png
+        cp "${asset_2640}" /usr/share/backgrounds/ming-os/default.png
+    elif [[ -f "${asset_light}" ]]; then
         primary="${asset_light}"
         cp "${asset_light}" /usr/share/backgrounds/ming-os/default.png
         [[ -f "${asset_dark}" ]] && cp "${asset_dark}" /usr/share/backgrounds/ming-os/default-dark.png
@@ -1538,16 +1690,18 @@ setup_wallpaper() {
 
     if [[ -n "${primary}" ]]; then
         cp "${primary}" /usr/share/backgrounds/ming-os/default.png
-        if command -v convert &>/dev/null; then
-            convert /usr/share/backgrounds/ming-os/default.png \
-                -resize 1366x768^ \
+        local geometry output
+        for geometry in 3840x2160 1920x1080 1366x768; do
+            output="/usr/share/backgrounds/ming-os/default-${geometry}.png"
+            if ! convert /usr/share/backgrounds/ming-os/default.png \
+                -resize "${geometry}^" \
                 -gravity center \
-                -extent 1366x768 \
-                /usr/share/backgrounds/ming-os/default-1366x768.png 2>/dev/null || \
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        else
-            cp /usr/share/backgrounds/ming-os/default.png /usr/share/backgrounds/ming-os/default-1366x768.png
-        fi
+                -extent "${geometry}" \
+                "${output}" 2>/dev/null; then
+                echo "[03_desktop][ERROR] failed to generate wallpaper cache ${geometry}" >&2
+                return 1
+            fi
+        done
     fi
 
     cat > /usr/share/backgrounds/ming-os/default.svg << 'WALLPAPERSVG'
@@ -1761,18 +1915,19 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、浅色半透明；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
+# MingDockProfile=2641-compact-rail-1
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=40
+IconSize=38
 #悬停放大开关
 ZoomEnabled=true
-#放大倍率：保持轻巧，避免图标跳动和低端显卡压力
-ZoomPercent=148
+#放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
+ZoomPercent=112
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
 #自动隐藏延迟
@@ -1816,9 +1971,8 @@ _plank_launcher() {
         local proxy_path="/usr/share/applications/ming-dock-${name}.desktop"
         local display_name icon wm_class exec_line
         case "${name}" in
-            ming-edge)
-                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/microsoft-edge.desktop
-                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/microsoft-edge-stable.desktop
+            ming-firefox)
+                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/firefox-esr.desktop
                 ;;
             spark-store)
                 [[ -f "${target_path}" ]] || target_path=/usr/share/applications/ming-install-spark-store.desktop
@@ -1834,9 +1988,8 @@ _plank_launcher() {
         case "${name}" in
             ming-settings) wm_class="${wm_class:-uno.scallion.MingSettings}" ;;
             ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
-            ming-edge) wm_class="${wm_class:-microsoft-edge}" ;;
+            ming-firefox) wm_class="${wm_class:-Firefox-esr}" ;;
             ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
-            ming-update) wm_class="${wm_class:-Zenity}" ;;
         esac
         exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
         cat > "${proxy_path}" << DOCKPROXY
@@ -1861,11 +2014,10 @@ cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
 Launcher=file:///usr/share/applications/ming-app-library.desktop
 DRAWERDOCKITEM
 for launcher in \
-    "ming-edge:ming-edge.desktop" \
+    "ming-firefox:ming-firefox.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
-    "garlic-claw:garlic-claw.desktop" \
-    "ming-update:ming-update.desktop" \
+    "papyrus:papyrus.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
@@ -1885,8 +2037,8 @@ MINGREFRESHDOCK
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=14
-BottomRoundness=0
+TopRoundness=6
+BottomRoundness=6
 LineWidth=1
 OuterStrokeColor=31;98;84;54
 FillStartColor=255;255;255;226
@@ -1894,27 +2046,27 @@ FillEndColor=242;250;247;238
 InnerStrokeColor=255;255;255;176
 
 [PlankDockTheme]
-HorizPadding=16
-TopPadding=-8
-BottomPadding=8
-ItemPadding=6
+HorizPadding=8
+TopPadding=-4
+BottomPadding=5
+ItemPadding=3
 IndicatorSize=4
-IconShadowSize=3
-UrgentBounceHeight=1.50
-LaunchBounceHeight=1.05
+IconShadowSize=1
+UrgentBounceHeight=1.20
+LaunchBounceHeight=0.20
 FadeOpacity=1.0
-ClickTime=220
-UrgentBounceTime=600
-LaunchBounceTime=520
-ActiveTime=220
-SlideTime=240
-FadeTime=150
-HideTime=150
-GlowSize=14
+ClickTime=160
+UrgentBounceTime=420
+LaunchBounceTime=150
+ActiveTime=160
+SlideTime=160
+FadeTime=120
+HideTime=120
+GlowSize=0
 GlowTime=10000
 GlowPulseTime=1600
 UrgentHueShift=86
-ItemMoveTime=260
+ItemMoveTime=130
 CascadeHide=false
 PLANKTHEME
 
@@ -1933,10 +2085,9 @@ APPS = [
     ('ming-settings.desktop', 'ming-control-center', 'Ming 设置'),
     ('ming-app-library.desktop', 'ming-app-library', '应用库'),
     ('ming-files.desktop', 'files-icon', '文件'),
-    ('ming-edge.desktop', 'microsoft-edge', 'Edge'),
+    ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
-    ('garlic-claw.desktop', 'utilities-terminal', 'Garlic Claw'),
-    ('ming-update.desktop', 'ming-update-icon', '系统更新'),
+    ('papyrus.desktop', 'papyrus', 'Papyrus'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -2449,15 +2600,15 @@ window_manager_snapshot() {
         return 0
     fi
     status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
-    if grep -Fq '"xfwm":{"running":true' <<<"${status}"; then
+    if grep -Eq '"xfwm"[[:space:]]*:[[:space:]]*\{[[:space:]]*"running"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_running=true
         window_manager_visible=true
     fi
-    if grep -Fq '"ewmh":true' <<<"${status}"; then
+    if grep -Eq '"ewmh"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_ewmh=true
         window_manager_stacking="ewmh"
     fi
-    if grep -Fq '"healthy":true' <<<"${status}"; then
+    if grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_healthy=true
     fi
 }
@@ -2868,12 +3019,13 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-edge.dockitem;;spark-store.dockitem;;garlic-claw.dockitem;;ming-update.dockitem;;ming-terminal.dockitem
+# MingDockProfile=2641-compact-rail-1
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
-IconSize=40
+IconSize=38
 ZoomEnabled=true
-ZoomPercent=148
+ZoomPercent=112
 HideMode=0
 UnhideDelay=0
 HideDelay=0
@@ -2885,6 +3037,36 @@ ShowDockItem=true
 ItemsAlignment=3
 FadeOpacity=1.0
 PLANKRUNTIMESETTINGS
+}
+
+migrate_compact_rail_profile() {
+    local settings="$1"
+    grep -q '^# MingDockProfile=2641-compact-rail-1$' "${settings}" 2>/dev/null && return 0
+
+    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
+    if grep -q '^DockItems=' "${settings}"; then
+        sed -i "s|^DockItems=.*|DockItems=${dock_items}|" "${settings}" 2>/dev/null || true
+    else
+        printf 'DockItems=%s\n' "${dock_items}" >>"${settings}"
+    fi
+    if grep -q '^IconSize=' "${settings}"; then
+        sed -i "s/^IconSize=.*/IconSize=38/" "${settings}" 2>/dev/null || true
+    else
+        printf 'IconSize=38\n' >>"${settings}"
+    fi
+    if grep -q '^ZoomPercent=' "${settings}"; then
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=112/" "${settings}" 2>/dev/null || true
+    else
+        printf 'ZoomPercent=112\n' >>"${settings}"
+    fi
+    if grep -q '^ZoomEnabled=' "${settings}"; then
+        sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${settings}" 2>/dev/null || true
+    else
+        printf 'ZoomEnabled=true\n' >>"${settings}"
+    fi
+    printf '# MingDockProfile=2641-compact-rail-1\n' >>"${settings}"
+    find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
+    log "migrated Dock to 26.4.1 compact rail profile"
 }
 
 ensure_plank_settings() {
@@ -2901,6 +3083,7 @@ ensure_plank_settings() {
         restored=true
         log "restored complete Plank settings profile"
     fi
+    migrate_compact_rail_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
         sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
     else
@@ -4125,19 +4308,22 @@ sync_apps() {
     done
 }
 
-    cat > "${desktop}/Ming 设置.desktop" << CONTROL
-[Desktop Entry]
-Name=Ming 设置
-Comment=不用记命令，点按钮完成常见电脑维护
-Exec=/usr/local/bin/ming-control-center
-Icon=ming-control-center
-Terminal=false
-Type=Application
-Categories=Settings;System;
-StartupNotify=true
-CONTROL
-
-chmod +x "${desktop}/Ming 设置.desktop" 2>/dev/null || true
+legacy_settings="${desktop}/Ming 设置.desktop"
+legacy_common_settings="${common_dir}/Ming 设置.desktop"
+legacy_settings_is_managed=false
+if [[ -f "${legacy_settings}" ]] \
+   && grep -qxF 'Exec=/usr/local/bin/ming-control-center' "${legacy_settings}" 2>/dev/null; then
+    legacy_settings_is_managed=true
+fi
+if [[ "${legacy_settings_is_managed}" == true && -L "${legacy_common_settings}" ]]; then
+    legacy_common_target="$(readlink -- "${legacy_common_settings}" 2>/dev/null || true)"
+    if [[ "${legacy_common_target}" == "${legacy_settings}" ]]; then
+        rm -f "${legacy_common_settings}" 2>/dev/null || true
+    fi
+fi
+if [[ "${legacy_settings_is_managed}" == true ]]; then
+    rm -f "${legacy_settings}" 2>/dev/null || true
+fi
 rm -f "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
 
 gio set "${apps_dir}" metadata::custom-icon-name application-x-executable 2>/dev/null || true
@@ -4154,11 +4340,6 @@ if command -v ming-phone-desktop >/dev/null 2>&1; then
 else
     sync_apps
 fi
-for item in "${desktop}/Ming 设置.desktop"; do
-    [[ -f "${item}" ]] || continue
-    ln -sfn "${item}" "${common_dir}/$(basename "${item}")" 2>/dev/null || true
-done
-
 if [[ "${1:-}" == "--watch" ]]; then
     while true; do
         if command -v inotifywait >/dev/null 2>&1; then
@@ -4349,7 +4530,7 @@ TASKS = [
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('AI 助手', 'utilities-terminal', '打开 Garlic Claw', 'xfce4-terminal --hide-menubar --title="Garlic Claw" -e garlic-claw'),
+    ('AI 助手', 'papyrus', '打开 Papyrus', '/usr/bin/papyrus'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -4441,7 +4622,7 @@ class ControlCenter(Gtk.ApplicationWindow):
         for label, icon, desc, command in TASKS:
             flow.add(self.make_tile(label, icon, desc, command))
 
-        footer = Gtk.Label(label='Ming OS 26.3.2 · Debian Trixie')
+        footer = Gtk.Label(label='Ming OS 26.4.1 · Debian Trixie')
         footer.set_halign(Gtk.Align.END)
         footer.get_style_context().add_class('footer')
         root.pack_start(footer, False, False, 0)
@@ -4568,7 +4749,7 @@ ensure_wps_office() {
     mkdir -p "/home/${MING_USER}/Desktop" "/usr/share/applications"
     rm -f "/home/${MING_USER}/Desktop/wps-office.desktop" \
           /usr/share/applications/wps-office.desktop 2>/dev/null || true
-    # WPS is optional in 26.3.2. Keep ming-install-wps.desktop in App Library,
+    # WPS is optional in 26.4.1. Keep ming-install-wps.desktop in App Library,
     # but do not create a desktop or Dock launcher for it.
 }
 
@@ -4577,7 +4758,7 @@ ensure_wps_office() {
 configure_picom() {
     mkdir -p /home/${MING_USER}/.config/picom
     cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'
-# Ming OS 26.3.2 Picom 配置 - 老显卡/虚拟机稳定路径
+# Ming OS 26.4.1 Picom 配置 - 老显卡/虚拟机稳定路径
 # 普通应用窗口保持不透明；透明度只留给 Dock 与通知等独立界面。
 backend = "glx";
 vsync = false;
@@ -4592,7 +4773,7 @@ blur-background = false;
 blur-background-frame = false;
 blur-background-fixed = false;
 blur-background-exclude = [
-  "class_g = 'Microsoft-edge'",
+  "class_g = 'Firefox'",
   "class_g = 'Chromium'",
   "class_g = 'Code'",
   "window_type = 'dock'",
@@ -4611,7 +4792,7 @@ shadow-exclude = [
   "class_g = 'Conky'",
   "class_g ?= 'Notify-osd'",
   "class_g = 'Cairo-clock'",
-  "class_g = 'Microsoft-edge'",
+  "class_g = 'Firefox'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
@@ -4619,7 +4800,7 @@ shadow-exclude = [
 # ---- 圆角窗口 ----
 corner-radius = 12;
 rounded-corners-exclude = [
-  "class_g = 'Microsoft-edge'",
+  "class_g = 'Firefox'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
   "window_type = 'notification'",
@@ -4668,13 +4849,11 @@ shadow-opacity = 0;
 shadow-offset-x = -4;
 shadow-offset-y = -4;
 shadow-exclude = [
-  "class_g = 'Microsoft-edge'",
+  "class_g = 'Firefox'",
   "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
-fading = true;
-fade-in-step = 0.06;
-fade-out-step = 0.06;
+fading = false;
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
@@ -4814,7 +4993,7 @@ configure_notification_filter() {
     <value type="string" value="network-manager-applet"/>
     <value type="string" value="xfce4-power-manager"/>
     <value type="string" value="pulseaudio"/>
-    <value type="string" value="garlic-claw"/>
+    <value type="string" value="papyrus"/>
     <value type="string" value="xfce4-power-manager-settings"/>
   </property>
 </channel>
@@ -4855,16 +5034,6 @@ configure_thunar_uca() {
     <patterns>*</patterns>
     <directories/>
 </action>
-<action>
-    <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
-    <unique-id>4</unique-id>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析此文件</description>
-    <patterns>*</patterns>
-    <text-files/>
-    <other-files/>
-</action>
 </actions>
 UCACFG
 }
@@ -4889,18 +5058,18 @@ Categories=System;FileManager;
 StartupNotify=true
 THUNARDESKTOP
 
-    cat > "${desktop_dir}/ming-edge.desktop" << EDGEDESKTOP
+    cat > "${desktop_dir}/ming-firefox.desktop" << FIREFOXDESKTOP
 [Desktop Entry]
 Name=浏览器
-Name[zh_CN]=Microsoft Edge 浏览器
+Name[zh_CN]=Firefox ESR 浏览器
 Comment=浏览互联网
-Exec=/usr/local/bin/ming-edge
-Icon=microsoft-edge
+Exec=/usr/local/bin/ming-firefox
+Icon=firefox-esr
 Terminal=false
 Type=Application
 Categories=Network;WebBrowser;
 StartupNotify=true
-EDGEDESKTOP
+FIREFOXDESKTOP
 
     cat > "${desktop_dir}/ming-app-library.desktop" << APPLIBDESKTOP
 [Desktop Entry]
@@ -4915,18 +5084,9 @@ Categories=Utility;System;
 StartupNotify=true
 APPLIBDESKTOP
 
-    cat > "${desktop_dir}/garlic-claw.desktop" << GCDESKTOP
-[Desktop Entry]
-Name=AI 助手
-Name[zh_CN]=Garlic Claw
-Comment=Ming OS AI 助手
-Exec=xfce4-terminal --title="Garlic Claw" -e "garlic-claw"
-Icon=utilities-terminal
-Terminal=false
-Type=Application
-Categories=System;AI;
-StartupNotify=true
-GCDESKTOP
+    if [[ -s /usr/share/applications/papyrus.desktop ]]; then
+        cp -f /usr/share/applications/papyrus.desktop "${desktop_dir}/papyrus.desktop"
+    fi
 
     chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
     chmod +x "${desktop_dir}"/*.desktop
@@ -4938,14 +5098,14 @@ deploy_release_readme() {
     local doc_dir="/usr/share/doc/ming-os"
     mkdir -p "${doc_dir}"
 
-    cat > "${doc_dir}/MING_OS_26.2_RELEASE_README.md" << 'RELEASEREADME'
-# Ming OS 26.3.2 Release And Website Handoff
+    cat > "${doc_dir}/MING_OS_26.4.1_RELEASE_README.md" << 'RELEASEREADME'
+# Ming OS 26.4.1 Release And Website Handoff
 
-This document is the current website and AI handoff source for Ming OS. Use `26.3.2` as the public version. Do not point users to 26.2.0 or 26.2.5 as the recommended release.
+This document is the current website and AI handoff source for Ming OS. Use `26.4.1` as the public version. Do not point users to older 26.3.x or failed preview builds as the recommended release.
 
 ## Positioning
 
-Ming OS 26.3.2 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It fixes the 26.2.5 boot regression, improves Live desktop polish, and corrects the installer so the installed system presents itself as Ming OS rather than Debian.
+Ming OS 26.4.1 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It focuses on daily usability: local app installation, Spark Store launch behavior, Wi-Fi/Ethernet controls, audio, brightness, Bluetooth diagnostics, time sync, Live installation, and safe OTA upgrades from the 26.3 and 26.4 families.
 
 This is the version to use when producing:
 
@@ -4959,18 +5119,18 @@ This is the version to use when producing:
 ## Public Links
 
 - Official website: `https://scallion.uno`
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.4.1-home-amd64.iso`
 - ISO SHA256: see `SHA256SUMS` on the GitHub release page
 - ISO size: see the current release asset metadata
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.4.0&channel=stable`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.4.1`
 
 ## Feature Summary
 
 - Debian 13 / Trixie base.
-- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2632`.
-- Fixes the 26.2.5 `invalid magic number` / `you need to load the kernel first` class of failures.
+- Rebuilt BIOS/UEFI boot chain with stable label `MING_OS_2641`.
+- Preserves the 26.3-era boot reliability work while improving daily app, network, audio, brightness, Bluetooth, and OTA behavior.
 - Live/Ventoy auto-login as `ming`.
 - Ming wallpaper applies by default.
 - Main Ming icons no longer use white-background AI PNG overrides.
@@ -5008,41 +5168,41 @@ It should not be sold as a minimal Linux demo. It is a complete desktop with:
 The complete ISO is available on the official website. GitHub Release uses split assets:
 
 ```text
-ming-os-26.3.2-home-amd64.iso.part01
-ming-os-26.3.2-home-amd64.iso.part02
-ming-os-26.3.2-home-amd64.iso.sha256
+ming-os-26.4.1-home-amd64.iso.part01
+ming-os-26.4.1-home-amd64.iso.part02
+ming-os-26.4.1-home-amd64.iso.sha256
 SHA256SUMS
 ```
 
 Merge on Linux/macOS/WSL:
 
 ```bash
-cat ming-os-26.3.2-home-amd64.iso.part01 ming-os-26.3.2-home-amd64.iso.part02 > ming-os-26.3.2-home-amd64.iso
-sha256sum -c ming-os-26.3.2-home-amd64.iso.sha256
+cat ming-os-26.4.1-home-amd64.iso.part01 ming-os-26.4.1-home-amd64.iso.part02 > ming-os-26.4.1-home-amd64.iso
+sha256sum -c ming-os-26.4.1-home-amd64.iso.sha256
 ```
 
 Merge on Windows PowerShell:
 
 ```powershell
-cmd /c copy /b ming-os-26.3.2-home-amd64.iso.part01+ming-os-26.3.2-home-amd64.iso.part02 ming-os-26.3.2-home-amd64.iso
-Get-FileHash ming-os-26.3.2-home-amd64.iso -Algorithm SHA256
+cmd /c copy /b ming-os-26.4.1-home-amd64.iso.part01+ming-os-26.4.1-home-amd64.iso.part02 ming-os-26.4.1-home-amd64.iso
+Get-FileHash ming-os-26.4.1-home-amd64.iso -Algorithm SHA256
 ```
 
 ## Prompt For Another AI Building The Scallion Product Page
 
-You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.3.2`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
+You are a senior product web designer and frontend implementer. Build a Scallion website product page for `Ming OS 26.4.1`. The page should speak to ordinary Chinese users, older-PC users, and users who dislike terminal commands. Do not make it a generic Linux technical page.
 
 Required links:
 
-- ISO download: `https://ming.scallion.uno/iso/ming-os-26.3.2-home-amd64.iso`
-- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.3.2`
+- ISO download: `https://ming.scallion.uno/iso/ming-os-26.4.1-home-amd64.iso`
+- GitHub release: `https://github.com/bzm2008/ming-os/releases/tag/v26.4.1`
 - GitHub repo: `https://github.com/bzm2008/ming-os`
-- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.2.0&channel=stable`
+- OTA check: `https://ming.scallion.uno/api/onion-update/check?version=26.4.0&channel=stable`
 
 Page goals:
 
 - Explain that Ming OS is a Debian 13 / Trixie based Chinese desktop system.
-- Make `Ming OS 26.3.2` the visible product name in the first viewport.
+- Make `Ming OS 26.4.1` the visible product name in the first viewport.
 - Highlight boot reliability, Live auto-login, optional WeChat/WPS installers, graphical update button, Ming Settings, Android-like app folders, All Disks, and the Ming-branded installer.
 - Tell users clearly that 2GB RAM can run the OS, but optional WeChat/WPS installs may still be heavy.
 - Provide a clear ISO download button, GitHub button, and OTA status area.
@@ -5056,7 +5216,7 @@ Suggested message hierarchy:
 
 Suggested structure:
 
-- Hero: title `Ming OS 26.3.2`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
+- Hero: title `Ming OS 26.4.1`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
 - Feature section: optional WeChat/WPS installers, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
@@ -5162,17 +5322,8 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 POLKITAUTO
 
-    # 首次启动配置向导
-    cat > "${autostart_dir}/ming-first-run.desktop" << FIRSTRUN
-[Desktop Entry]
-Type=Application
-Name=Ming First Setup
-Comment=首次启动配置
-Exec=/usr/local/bin/ming-first-run.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-FIRSTRUN
+    # 旧的首次配置入口已退役；只保留后面的账户向导与欢迎页。
+    rm -f "${autostart_dir}/ming-first-run.desktop"
 
     # Calamares Live 安装器
     cat > "${autostart_dir}/calamares-live.desktop" << CALAMARES
@@ -5248,7 +5399,7 @@ SESSIONHEALTHAUTO
 setup_welcome_wizard() {
     cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'
 #!/usr/bin/env python3
-# Ming OS 26.3.2 首次启动欢迎引导
+# Ming OS 26.4.1 首次启动欢迎引导
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -5462,11 +5613,17 @@ setup_account_oobe() {
 set -uo pipefail
 
 MARKER="${HOME}/.config/ming-os/oobe-account-done"
-[[ -f "${MARKER}" ]] && exit 0
 
 # 仅在已安装系统的首次开机运行；Live/安装器会话中不弹出（那里只跑 Calamares）
 if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null \
    || [ -f /.disk/info ] || [ -d /lib/live/mount/medium ]; then
+    exit 0
+fi
+
+if [[ -f "${MARKER}" ]]; then
+    if [[ "$(head -n 1 "${MARKER}" 2>/dev/null || true)" == "skipped" ]]; then
+        pkexec /usr/local/sbin/ming-account-control migrate-skipped --user "$(id -un)" >/dev/null 2>&1 || exit 1
+    fi
     exit 0
 fi
 
@@ -5487,24 +5644,8 @@ repair_desktop_session() {
 
 # 始终先确保免密自动登录已就位（双保险，独立于用户选择）
 ensure_autologin() {
-    # 入 autologin / nopasswdlogin 组
-    pkexec /bin/bash -c "
-        for g in autologin nopasswdlogin; do
-            getent group \$g >/dev/null 2>&1 || groupadd -r \$g 2>/dev/null || true
-            usermod -aG \$g '${CUR_USER}' 2>/dev/null || true
-        done
-        mkdir -p /etc/lightdm/lightdm.conf.d
-        cat > /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf <<EOF
-[Seat:*]
-autologin-user=${CUR_USER}
-autologin-user-timeout=0
-autologin-session=xfce
-user-session=xfce
-greeter-session=lightdm-gtk-greeter
-allow-guest=false
-EOF
-        chmod 0644 /etc/lightdm/lightdm.conf.d/50-ming-autologin.conf
-    " 2>/dev/null || true
+    # Groups and LightDM autologin are installed by the base module.
+    return 0
 }
 
 # 欢迎 + 选择：设置账户 / 跳过
@@ -5562,8 +5703,8 @@ if [[ -n "${PW1}" ]]; then
         dialog --title="提示" --text="两次密码不一致，已保持免密登录。\n可稍后在「设置中心」修改。" \
             --width=380 --button="好的:0" 2>/dev/null || true
     else
-        echo -e "${PW1}\n${PW1}" | pkexec passwd "${CUR_USER}" 2>/dev/null \
-            || pkexec /bin/bash -c "echo '${CUR_USER}:${PW1}' | chpasswd" 2>/dev/null || true
+        printf '%s\n' "${PW1}" | pkexec /usr/local/sbin/ming-account-control \
+            set-password --user "${CUR_USER}" >/dev/null 2>&1 || exit 1
     fi
 fi
 
@@ -5578,7 +5719,7 @@ exit 0
 OOBEACCOUNT
     chmod +x /usr/local/bin/ming-oobe-account
 
-    # 自启动：在 Garlic Claw 欢迎之前运行（账户优先）
+    # 账户设置在欢迎页之前运行，避免两个窗口争抢焦点。
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
     cat > "${autostart_dir}/ming-oobe-account.desktop" << OOBEAUTO
@@ -5651,17 +5792,6 @@ configure_simplified_menus() {
     <directories/>
 </action>
 <action>
-    <icon>utilities-terminal</icon>
-    <name>询问 Garlic Claw</name>
-    <submenu></submenu>
-    <command>xfce4-terminal --title="Garlic Claw" -e "garlic-claw ask \"请分析这个文件: %f\""</command>
-    <description>使用 Garlic Claw AI 助手分析文件</description>
-    <range>*</range>
-    <patterns>*</patterns>
-    <text-files/>
-    <other-files/>
-</action>
-<action>
     <icon>document-properties</icon>
     <name>属性</name>
     <submenu></submenu>
@@ -5687,6 +5817,65 @@ UCACFG
 # ======================== Live 安装器脚本 ========================
 
 deploy_live_installer() {
+    local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
+    local receipt_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt
+    if [[ ! -s "${verifier_source}" ]]; then
+        echo "ERROR: missing installer verification asset" >&2
+        return 1
+    fi
+    install -d -m 0755 /usr/local/sbin "${receipt_module}" /etc/calamares/modules
+    install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+    cat > "${receipt_module}/module.desc" << 'TARGETRECEIPTDESC'
+---
+type: "job"
+name: "ming-installer-target-receipt"
+interface: "python"
+script: "main.py"
+TARGETRECEIPTDESC
+    cat > "${receipt_module}/main.py" << 'TARGETRECEIPTPY'
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import pathlib
+
+import libcalamares
+
+
+VERIFIER_PATH = pathlib.Path("/usr/local/sbin/ming-installer-verify")
+LOADER = importlib.machinery.SourceFileLoader("ming_installer_verify", str(VERIFIER_PATH))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+VERIFIER = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(VERIFIER)
+
+
+def run():
+    root_mount_point = libcalamares.globalstorage.value("rootMountPoint")
+    try:
+        VERIFIER.capture_target_receipt(root_mount_point)
+    except VERIFIER.TargetReceiptError as exc:
+        return "Ming installer target receipt failed", str(exc)
+    return None
+TARGETRECEIPTPY
+    chmod 0644 "${receipt_module}/main.py"
+
+    cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
+---
+TARGETRECEIPTCONF
+    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+---
+dontChroot: true
+timeout: 10
+script:
+  - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
+TARGETRECEIPTRESETCONF
+    cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'INSTALLEDDESKTOPGATECONF'
+---
+dontChroot: true
+timeout: 30
+script:
+  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+INSTALLEDDESKTOPGATECONF
+
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
 #!/usr/bin/env bash
 set -u
@@ -5711,7 +5900,7 @@ timeout 5 timedatectl set-timezone Asia/Shanghai >> "${LOG}" 2>&1 || true
 
 mkdir -p /etc/calamares/modules
 
-cat > /etc/calamares/settings.conf <<'SETTINGS'
+    cat > /etc/calamares/settings.conf <<'SETTINGS'
 ---
 modules-search: [ local, /usr/lib/x86_64-linux-gnu/calamares/modules, /usr/lib/calamares/modules ]
 instances:
@@ -5721,9 +5910,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -5744,7 +5942,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -5753,6 +5953,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -5915,6 +6116,11 @@ unpack:
     destination: ""
 UNPACKFSCONF
 
+if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
+    log "ERROR: Live Calamares verification failed"
+    exit 2
+fi
+
 log "unpackfs_source=${squash}"
 log "unpackfs_stable_source=${squash_link}"
 log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
@@ -5946,7 +6152,7 @@ CALAMARESPREFLIGHT
     chmod +x /usr/local/sbin/ming-calamares-preflight
 
     # 静态兜底：确保无论 preflight 是否成功执行，
-    # settings.conf/users.conf/partition.conf are the 26.3.2 safe-partition installer defaults.
+    # settings.conf/users.conf/partition.conf are the 26.4.1 safe-partition installer defaults.
     # 这一步由 03_desktop.sh 负责写入，resume_build 也会执行到这里。
     mkdir -p /etc/calamares/modules
     cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'
@@ -5959,9 +6165,18 @@ instances:
 - id: ming-ota-target-guard
   module: ming-ota-target-guard
   config: ming-ota-target-guard.conf
+- id: ming-installer-target-receipt
+  module: ming-installer-target-receipt
+  config: ming-installer-target-receipt.conf
+- id: ming-installer-target-receipt-reset
+  module: shellprocess
+  config: ming-installer-target-receipt-reset.conf
 - id: ming-identity
   module: shellprocess
   config: ming-identity.conf
+- id: ming-installed-desktop-gate
+  module: shellprocess
+  config: ming-installed-desktop-gate.conf
 - id: ming-bootloader
   module: shellprocess
   config: ming-bootloader.conf
@@ -5981,7 +6196,9 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-installer-target-receipt-reset
   - mount
+  - ming-installer-target-receipt@ming-installer-target-receipt
   - unpackfs
   - machineid
   - fstab
@@ -5990,6 +6207,7 @@ sequence:
   - initramfs
   - grubcfg
   - shellprocess@ming-identity
+  - shellprocess@ming-installed-desktop-gate
   - shellprocess@ming-bootloader
   - umount
 - show:
@@ -6220,6 +6438,73 @@ LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
 
+    cat > /usr/local/bin/ming-live-notice << 'LIVENOTICE'
+#!/usr/bin/env python3
+import subprocess
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk
+
+
+class LiveNotice(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Ming OS Live 模式")
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.stick()
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+
+        screen = Gdk.Screen.get_default()
+        width = min(820, max(480, screen.get_width() - 32))
+        self.set_size_request(width, 92)
+        self.move(max(16, (screen.get_width() - width) // 2), 16)
+
+        frame = Gtk.Frame()
+        frame.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        row.set_border_width(14)
+        title = Gtk.Label()
+        title.set_markup(
+            "<b>当前为 Live 模式，Ming OS 尚未安装。</b>\n"
+            "此环境中的设置和文件在重启后不会保留任何数据。"
+        )
+        title.set_xalign(0)
+        title.set_line_wrap(True)
+        button = Gtk.Button(label="继续安装 Ming OS")
+        button.set_size_request(170, 48)
+        button.connect("clicked", self.activate_installer)
+        row.pack_start(title, True, True, 0)
+        row.pack_end(button, False, False, 0)
+        frame.add(row)
+        self.add(frame)
+
+    @staticmethod
+    def activate_installer(_button):
+        activated = subprocess.run(
+            ["wmctrl", "-x", "-a", "calamares.calamares"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+        if not activated:
+            subprocess.Popen(
+                ["/usr/local/bin/ming-calamares-launcher"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
+window = LiveNotice()
+window.connect("destroy", Gtk.main_quit)
+window.show_all()
+Gtk.main()
+LIVENOTICE
+    chmod 0755 /usr/local/bin/ming-live-notice
+
     # Dedicated installer session with a minimal WM for reliable keyboard and
     # mouse focus. Calamares is maximized and automatically restarted on exit.
     cat > /usr/local/bin/ming-installer-session << 'KIOSK'
@@ -6228,6 +6513,7 @@ xsetroot -solid '#0c1f1c'
 if command -v xfwm4 >/dev/null 2>&1; then
     xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &
 fi
+/usr/local/bin/ming-live-notice >/tmp/ming-installer-live-notice.log 2>&1 &
 
 focus_installer() {
     command -v wmctrl >/dev/null 2>&1 || return 0
@@ -6386,7 +6672,7 @@ configure_xfce_settings() {
 	    <property name="theme" type="string" value="Ming-Glass"/>
     <property name="tile_on_move" type="bool" value="true"/>
     <property name="title_alignment" type="string" value="center"/>
-    <property name="title_font" type="string" value="Noto Sans CJK SC Bold 11"/>
+    <property name="title_font" type="string" value="Noto Sans CJK SC Medium 11"/>
     <property name="title_horizontal_offset" type="int" value="0"/>
     <property name="titleless_maximize" type="bool" value="false"/>
     <property name="title_shadow_active" type="string" value="false"/>
@@ -6611,7 +6897,7 @@ XSETTINGSCFG
 </channel>
 SCREENSAVERCFG
 
-    # Whisker Menu 配置（26.3.0 玻璃主题版）
+    # Whisker Menu 配置（26.4.1 玻璃主题版）
     mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
     cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
 button-title=Ming OS
@@ -6623,7 +6909,7 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-edge.desktop,spark-store.desktop,garlic-claw.desktop,ming-update.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-terminal.desktop
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter
@@ -6656,6 +6942,14 @@ configure_appearance_enforcer() {
     cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
 #!/usr/bin/env bash
 # Ming OS 外观强制应用 - 每次登录运行，确保美化生效
+set -u
+appearance_log="${HOME}/.cache/ming-os/appearance.log"
+mkdir -p "$(dirname "${appearance_log}")" 2>/dev/null || true
+if command -v ming-appearance-control >/dev/null 2>&1; then
+    timeout --foreground 8s ming-appearance-control reapply --json \
+        >>"${appearance_log}" 2>&1 || true
+    exit 0
+fi
 WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
 WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
 
@@ -6730,8 +7024,8 @@ MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
     sed -i "s/^IconSize=.*/IconSize=36/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomPercent=.*/ZoomPercent=126/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^ZoomPercent=.*/ZoomPercent=100/" "${PLANK_SETTINGS}" 2>/dev/null || true
 fi
 
 # Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
@@ -6954,16 +7248,16 @@ TOUCHEGGAUTO
 # ======================== 主流程 ========================
 
 main() {
-    echo "=====> [03_desktop] 开始 Ming OS 26.3.2 Dock 桌面定制 <====="
+    echo "=====> [03_desktop] 开始 Ming OS 26.4.1 Dock 桌面定制 <====="
 
     generate_ming_icons
     configure_hidpi_autoscale
     install_themes
-    setup_wallpaper
+    setup_wallpaper || return 1
     configure_ming_shell
+    install_ming_shell_components
     install_ming_settings
     cleanup_retired_ming_entries
-    install_ming_shell_components
     install_ota_target_guard
     install_ming_files
     ensure_wps_office
@@ -6982,7 +7276,7 @@ main() {
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.3.2 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.4.1 Dock 桌面定制完成 <====="
 }
 
 main

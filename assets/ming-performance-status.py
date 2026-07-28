@@ -318,6 +318,105 @@ class PerformanceStatus:
             "source": "lm-sensors" if sensors.returncode == 0 and readings else "sysfs",
         }
 
+    def cgroup_status(self) -> dict[str, Any]:
+        """Report cgroup capability without assuming a particular manager layout."""
+        controllers_raw = self._read("/sys/fs/cgroup/cgroup.controllers")
+        if controllers_raw is not None:
+            version = 2
+            controllers = sorted(set(controllers_raw.split()))
+        else:
+            legacy_paths = self._paths("/sys/fs/cgroup/*/tasks")
+            version = 1 if legacy_paths else 0
+            controllers = []
+        available = version == 2
+        degraded = []
+        if version == 0:
+            degraded.append("cgroup-unavailable")
+        elif version == 1:
+            degraded.append("cgroup-v1-no-unified-policy")
+        for controller in ("cpu", "io", "memory"):
+            if controller not in controllers:
+                degraded.append("missing-%s-controller" % controller)
+        slice_state = "available" if available and not degraded else "degraded"
+        return {
+            "version": version,
+            "controllers": controllers,
+            "foreground": slice_state,
+            "background": slice_state,
+            "ota": slice_state,
+            "available": available,
+            "degraded": degraded,
+        }
+
+    def policy_status(self) -> dict[str, Any]:
+        """Read optional runtime policy state; absence is an explicit degradation."""
+        path = "/run/ming-os/resource-policy.json"
+        raw = self._read(path)
+        state: dict[str, Any] = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    state = parsed
+            except (TypeError, ValueError):
+                self.diagnostics.append("resource policy state: invalid JSON")
+        degraded = state.get("degraded") if isinstance(state.get("degraded"), list) else []
+        if not raw:
+            degraded = list(degraded) + ["resource-policy-inactive"]
+        return {
+            "mode": str(state.get("mode") or "safe-default"),
+            "active_leases": int(state.get("active_leases") or 0),
+            "background_throttled": int(state.get("background_throttled") or 0),
+            "degraded": list(dict.fromkeys(str(item) for item in degraded)),
+        }
+
+    def timer_status(self) -> dict[str, Any]:
+        migration = (self._read("/proc/sys/kernel/timer_migration") or "").strip()
+        no_hz_idle = False
+        for config_path in self._paths("/boot/config-*"):
+            config = self._read(config_path) or ""
+            if re.search(r"^CONFIG_NO_HZ_IDLE=y(?:\s|$)", config, re.MULTILINE):
+                no_hz_idle = True
+                break
+        return {
+            "no_hz_idle": no_hz_idle,
+            "timer_migration": migration in {"1", "y", "yes", "true"},
+            "timer_migration_available": bool(migration),
+        }
+
+    def oom_status(self) -> dict[str, Any]:
+        state_path = "/run/ming-os/oom-policy"
+        values: dict[str, str] = {}
+        raw = self._read(state_path) or ""
+        for line in raw.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"backend", "foreground_protected"}:
+                values[key] = value.strip()
+
+        active_backends = []
+        if values.get("backend") in {"earlyoom", "systemd-oomd"}:
+            active_backends = [values["backend"]]
+        else:
+            for backend, unit in (
+                ("systemd-oomd", "systemd-oomd.service"),
+                ("earlyoom", "earlyoom.service"),
+            ):
+                result = self._probe(("systemctl", "is-active", unit))
+                if result.returncode == 0 and result.stdout.strip() == "active":
+                    active_backends.append(backend)
+        if len(active_backends) > 1:
+            backend = "conflict"
+            self.diagnostics.append("OOM backends are active simultaneously")
+        else:
+            backend = active_backends[0] if active_backends else "none"
+        protected = values.get("foreground_protected", "false").lower() in {"1", "yes", "true"}
+        return {
+            "backend": backend,
+            "foreground_protected": protected,
+            "state_file": state_path if raw else None,
+            "mutually_exclusive": len(active_backends) <= 1,
+        }
+
     def _service(self, label: str, unit: str) -> dict[str, Any]:
         result = self._probe(("systemctl", "is-active", unit))
         state = result.stdout.strip() or (
@@ -391,6 +490,10 @@ class PerformanceStatus:
             "temperatures": self.temperatures_status(),
             "services": self.service_status(),
             "graphics": self.graphics_status(),
+            "cgroup": self.cgroup_status(),
+            "policy": self.policy_status(),
+            "timers": self.timer_status(),
+            "oom": self.oom_status(),
         }
         payload["diagnostics"] = list(dict.fromkeys(self.diagnostics))
         return payload

@@ -2,17 +2,22 @@
 """Ming OS user-session device status and control backend."""
 
 import argparse
+import base64
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
 RFKILL = "/usr/sbin/rfkill"
 BACKLIGHT_ROOT = Path("/sys/class/backlight")
+MING_DISPLAY_CONTROL = "/usr/local/bin/ming-display-control"
 BLUETOOTH_MODULES = {"btusb", "btintel", "btrtl", "btbcm", "ath3k"}
 BLUETOOTH_USB_VENDOR_IDS = {
     "8087",  # Intel
@@ -26,6 +31,11 @@ FIRMWARE_QUERY = (
 C_LOCALE_PREFIX = ("env", "LC_ALL=C")
 BSSID_PATTERN = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\Z")
 IFNAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}\Z")
+NETWORK_ID_PATTERN = re.compile(r"[a-f0-9]{32}\Z")
+WIFI_SCAN_CACHE_MAX_AGE = 180
+NET_ROOT = Path("/sys/class/net")
+ETHERNET_CONNECTIVITY_URL = "https://connectivitycheck.gstatic.com/generate_204"
+POWER_PROFILE_PATH = Path("/run/ming-os/power-profile")
 
 
 def run_command(command, timeout=8):
@@ -70,6 +80,32 @@ def parse_percent(output):
     if not matches:
         return None
     return max(0, min(100, int(matches[-1])))
+
+
+def brightnessctl_levels(output):
+    """Return the current and maximum raw levels from brightnessctl -m."""
+    for line in (output or "").splitlines():
+        fields = line.rsplit(",", 4)
+        if len(fields) != 5:
+            continue
+        try:
+            current = int(fields[-3])
+            maximum = int(fields[-2])
+        except ValueError:
+            continue
+        if maximum > 0 and 0 <= current <= maximum:
+            return current, maximum
+    return None
+
+
+def brightnessctl_readback_matches_request(requested, actual_percent, levels):
+    """Accept only raw levels reachable by rounding the requested percentage."""
+    if levels is None:
+        return actual_percent == requested
+    current, maximum = levels
+    lower = requested * maximum // 100
+    upper = (requested * maximum + 99) // 100
+    return lower <= current <= upper
 
 
 def split_nmcli_terse(line):
@@ -132,6 +168,11 @@ def classify_wifi(
     hardware_found = bool(wifi_devices or pci_output.strip() or usb_output.strip())
     blocked = bool(re.search(
         r"(?:Soft|Hard) blocked:\s*yes", rfkill_output or "", re.I))
+    firmware_policy = "redistributable_or_unknown"
+    action = "none"
+    if re.search(r'\bb43(?:-open)?/ucode\d+[^"\s]*\.fw\b', firmware_output or "", re.I):
+        firmware_policy = "unredistributable_b43"
+        action = "show_b43_help"
 
     if not hardware_found:
         if not hardware_probes_ok:
@@ -159,6 +200,14 @@ def classify_wifi(
         state = "firmware_missing"
         title = "无线硬件缺少固件"
         detail = firmware_output.strip()
+        if firmware_policy == "unredistributable_b43":
+            state = "firmware_external_required"
+            title = "Broadcom b43 固件需手动处理"
+            detail = (
+                "%s\n\n检测到 Broadcom b43 固件缺失。该固件不属于 Ming OS "
+                "可随公开 ISO 再分发的固件集合，因此不可内置或伪装为一键修复；"
+                "请查看兼容说明，按硬件型号选择官方固件、有线联网或 USB 网卡等方案。"
+            ) % detail
     else:
         state = "driver_missing"
         title = "无线硬件未绑定可用驱动"
@@ -173,19 +222,33 @@ def classify_wifi(
         "title": title,
         "detail": detail,
         "devices": [name for name, _state in wifi_devices],
+        "action": action,
+        "firmware_policy": firmware_policy,
+        "redistributable_firmware": firmware_policy != "unredistributable_b43",
     }
 
 
 class DeviceController:
     def __init__(self, runner=run_command, executable=shutil.which,
                  backlight_root=BACKLIGHT_ROOT, input_runner=run_command_with_input,
-                 settings_path=None):
+                 settings_path=None, software_brightness_path=None, environment=None,
+                 wifi_scan_cache_path=None, net_root=NET_ROOT,
+                 power_profile_path=None, display_control=MING_DISPLAY_CONTROL):
         self.runner = runner
         self.input_runner = input_runner
         self.executable = executable
         self.backlight_root = Path(backlight_root)
         self.settings_path = Path(settings_path) if settings_path else (
             Path.home() / ".config" / "ming-os" / "settings.json")
+        # software_brightness_path/environment remain constructor-only
+        # compatibility arguments; the user-session display helper owns them.
+        self.display_control = str(display_control)
+        self.wifi_scan_cache_path = (
+            Path(wifi_scan_cache_path) if wifi_scan_cache_path else
+            Path.home() / ".cache" / "ming-os" / "wifi-scan.json")
+        self.net_root = Path(net_root)
+        self.power_profile_path = (
+            Path(power_profile_path) if power_profile_path else POWER_PROFILE_PATH)
 
     def _run(self, command, timeout=8):
         return self.runner(command, timeout=timeout)
@@ -915,8 +978,20 @@ class DeviceController:
                 continue
             write_succeeded = True
             last_backend = backend
+            if backend == "pactl":
+                mute_rc, mute_output, mute_error = self._run(
+                    ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"])
+                if mute_rc != 0:
+                    errors.append(mute_error or mute_output or "无法解除当前输出静音")
+                    continue
             ok, effective, read_error = self._read_volume(backend)
             if ok:
+                if backend == "pactl":
+                    mute_rc, mute_output, mute_error = self._run(
+                        ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
+                    if mute_rc != 0 or re.search(r"Mute:\s*yes", mute_output or "", re.I):
+                        errors.append(mute_error or mute_output or "无法确认当前输出静音状态")
+                        continue
                 return self._control_result(
                     True, requested=value, value=effective, backend=backend,
                     available=True)
@@ -936,15 +1011,99 @@ class DeviceController:
         except OSError:
             return False
 
-    def brightness_status(self):
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+    def _software_brightness(self, action, value=None, wait_seconds=0):
+        """Delegate software brightness to the X11 user-session helper."""
+        if not self._can_run(self.display_control):
+            return self._control_result(
+                False, requested=value, error="ming-display-control 不可用。",
+                backend="xrandr-software", state="unavailable")
+        try:
+            wait_seconds = max(0.0, min(12.0, float(wait_seconds)))
+        except (TypeError, ValueError):
+            return self._control_result(
+                False, requested=value, error="等待时间必须是 0 到 12 秒。",
+                backend="xrandr-software", state="invalid")
+        command = [self.display_control, action]
+        if value is not None and action == "software-set":
+            command.append(str(int(value)))
+        if action == "software-reapply" and wait_seconds:
+            command.extend(["--wait-seconds", "%g" % float(wait_seconds)])
+        command.append("--json")
+        process_timeout = max(8.0, wait_seconds + 2.0)
+        rc, output, error = self._run(command, timeout=process_timeout)
+        try:
+            payload = json.loads(output or "")
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            return self._control_result(
+                False, requested=value,
+                error=error or output or "软件亮度助手返回了无效结果。",
+                backend="xrandr-software", state="unavailable")
+        readback = payload.get("value")
+        value_is_valid = (
+            isinstance(readback, (int, float)) and not isinstance(readback, bool)
+            and 0 <= float(readback) <= 100
+        )
+        success = (
+            rc == 0
+            and payload.get("ok") is True
+            and payload.get("available") is True
+            and payload.get("state") == "ready"
+            and isinstance(payload.get("error"), str)
+            and value_is_valid
+        )
+        if success:
+            payload["value"] = int(round(float(readback)))
+            payload["backend"] = "xrandr-software"
+            payload.setdefault("requested", value)
+            return payload
+
+        declared_failure = payload.get("ok") is False
+        trusted_failure = (
+            declared_failure
+            and payload.get("available") is False
+            and payload.get("state") in {"invalid", "unavailable", "error"}
+            and isinstance(payload.get("error"), str)
+            and (readback is None or value_is_valid)
+        )
+        untrusted_payload = not trusted_failure
+        failure_state = payload.get("state") if (
+            declared_failure and payload.get("state") in {"invalid", "unavailable", "error"}
+        ) else "error"
+        if rc != 0 and payload.get("ok") is True:
+            failure_error = "软件亮度助手退出码 %d 与成功结果冲突。" % rc
+        elif not declared_failure and rc == 0:
+            failure_error = "软件亮度助手成功结果字段无效。"
+        else:
+            failure_error = payload.get("error") if isinstance(payload.get("error"), str) else ""
+            failure_error = failure_error or error or "软件亮度助手执行失败。"
+        payload.update({
+            "ok": False,
+            "available": False,
+            "state": failure_state,
+            "backend": "xrandr-software",
+            "requested": payload.get("requested", value),
+            "value": (
+                int(round(float(readback)))
+                if value_is_valid and not untrusted_payload else None),
+            "error": failure_error,
+        })
+        if untrusted_payload:
+            payload["output_values"] = {}
+        return payload
+
+    def _physical_brightness_status(self):
+        if not self._has_backlight():
+            return self._software_brightness("software-status"), None
+        if not self._can_run("brightnessctl"):
             return {
                 "available": False,
                 "value": None,
-                "error": "unavailable",
-                "backend": "",
+                "error": "物理背光控制不可用。",
+                "backend": "brightnessctl",
                 "state": "unavailable",
-            }
+            }, None
         rc, output, error = self._run(["brightnessctl", "-m"])
         value = parse_percent(output)
         if rc == 0 and value is not None:
@@ -954,14 +1113,18 @@ class DeviceController:
                 "error": "",
                 "backend": "brightnessctl",
                 "state": "ready",
-            }
+            }, brightnessctl_levels(output)
         return {
             "available": False,
             "value": None,
             "error": error or "读取亮度失败",
             "backend": "brightnessctl",
             "state": "error",
-        }
+        }, None
+
+    def brightness_status(self):
+        status, _step = self._physical_brightness_status()
+        return status
 
     def set_brightness(self, value):
         try:
@@ -973,26 +1136,47 @@ class DeviceController:
                 requested = None
             return self._control_result(
                 False, requested=requested, error=str(exc), state="invalid")
-        if not self._can_run("brightnessctl") or not self._has_backlight():
+        if not self._has_backlight():
+            return self._software_brightness("software-set", value=value)
+        if not self._can_run("brightnessctl"):
             return self._control_result(
-                False, requested=value, error="unavailable", state="unavailable")
+                False, requested=value, error="物理背光控制不可用。",
+                backend="brightnessctl", state="unavailable")
         rc, output, error = self._run(["brightnessctl", "set", "%d%%" % value])
         if rc != 0:
             return self._control_result(
                 False, requested=value,
                 error=error or output or "设置亮度失败",
                 backend="brightnessctl", available=True, state="error")
-        status = self.brightness_status()
+        status, levels = self._physical_brightness_status()
+        readback_matches_request = bool(
+            status["available"]
+            and status["value"] is not None
+            and brightnessctl_readback_matches_request(value, status["value"], levels)
+        )
+        readback_error = status["error"]
+        if status["available"] and status["value"] is not None and not readback_matches_request:
+            readback_error = "物理亮度读回与请求不一致：请求 %d%%，实际 %d%%。" % (
+                value, status["value"])
         return self._control_result(
-            bool(status["available"] and status["value"] is not None),
+            readback_matches_request,
             requested=value,
             value=status["value"],
-            error=status["error"],
+            error=readback_error,
             backend="brightnessctl",
             available=bool(status["available"]),
-            state=("ready" if status["available"] and status["value"] is not None
-                   else "error"),
+            state=("ready" if readback_matches_request else "error"),
         )
+
+    def reapply_brightness(self, wait_seconds=0):
+        if self._has_backlight():
+            return self.brightness_status()
+        return self._software_brightness(
+            "software-reapply", wait_seconds=wait_seconds)
+
+    def restore_software_brightness(self):
+        """Compatibility alias for older autostart entries."""
+        return self.reapply_brightness()
 
     @staticmethod
     def _wireless_pci(output):
@@ -1095,10 +1279,19 @@ class DeviceController:
             if len(fields) != 8:
                 continue
             frequency = frequency_mhz(fields[4])
+            ssid = fields[2]
+            ssid_bytes = ssid.encode("utf-8", errors="surrogateescape")
+            encoding = "unknown" if "\ufffd" in ssid else "utf-8"
+            bssid = fields[1].upper()
+            ifname = fields[7]
+            network_id = self._wifi_network_id(ssid_bytes, bssid, ifname)
             networks.append({
+                "network_id": network_id,
                 "ifname": fields[7],
-                "bssid": fields[1],
-                "ssid": fields[2],
+                "bssid": bssid,
+                "ssid": ssid,
+                "ssid_bytes_b64": base64.b64encode(ssid_bytes).decode("ascii"),
+                "encoding": encoding,
                 "channel": parse_integer(fields[3]),
                 "frequency_mhz": frequency,
                 "band": wifi_band(frequency),
@@ -1112,6 +1305,7 @@ class DeviceController:
             network["bssid"],
             network["ifname"],
         ))
+        self._write_wifi_scan_cache(networks)
         if not networks:
             status = self.wifi_status()
             if status["state"] in {"no_hardware", "diagnostic_unavailable"}:
@@ -1122,6 +1316,52 @@ class DeviceController:
                     "networks": [],
                 }
         return {"ok": True, "error": "", "networks": networks}
+
+    @staticmethod
+    def _wifi_network_id(ssid_bytes, bssid, ifname):
+        identity = b"ming-wifi-v1\0" + ssid_bytes + b"\0" + bssid.lower().encode("ascii")
+        identity += b"\0" + ifname.encode("ascii")
+        return hashlib.sha256(identity).hexdigest()[:32]
+
+    def _write_wifi_scan_cache(self, networks):
+        payload = {
+            "schema": 1,
+            "generated_at": int(time.time()),
+            "networks": [{
+                "network_id": network.get("network_id", ""),
+                "ssid_bytes_b64": network.get("ssid_bytes_b64", ""),
+                "encoding": network.get("encoding", ""),
+                "bssid": network.get("bssid", ""),
+                "ifname": network.get("ifname", ""),
+            } for network in networks],
+        }
+        temporary = None
+        try:
+            self.wifi_scan_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".wifi-scan-", dir=str(self.wifi_scan_cache_path.parent))
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                os.chmod(temporary, 0o600)
+                json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.wifi_scan_cache_path)
+            return ""
+        except OSError as exc:
+            return str(exc)
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def _read_wifi_scan_cache(self):
+        try:
+            payload = json.loads(self.wifi_scan_cache_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     def _wifi_connect_error(ssid, bssid, ifname):
@@ -1135,33 +1375,278 @@ class DeviceController:
             return "网络接口名称格式无效。"
         return ""
 
-    def wifi_connect(self, ssid, bssid, ifname, password=None):
+    @staticmethod
+    def _wifi_failure_reason(output, error):
+        detail = "%s %s" % (output or "", error or "")
+        normalized = detail.lower()
+        if "rfkill" in normalized or "radio" in normalized and "disabled" in normalized:
+            return "E_WIFI_RFKILL", "无线电被禁用，请检查 WLAN 开关或 rfkill。", True
+        if ("secret" in normalized or "password" in normalized or
+                "authentication" in normalized):
+            return "E_WIFI_AUTH_REQUIRED", "需要正确的无线网络密码或认证信息。", True
+        if "not found" in normalized or "no network" in normalized:
+            return "E_WIFI_NETWORK_GONE", "该无线热点已消失，请重新扫描。", True
+        if "timeout" in normalized:
+            return "E_WIFI_TIMEOUT", "连接超时，请靠近热点后重试。", True
+        if "permission" in normalized or "not authorized" in normalized:
+            return "E_WIFI_PERMISSION", "NetworkManager 拒绝了本次连接请求。", False
+        return "E_WIFI_CONNECT_FAILED", "NetworkManager 未能完成无线连接。", True
+
+    @staticmethod
+    def _wifi_result(ok, state, reason_code, reason_text, retryable, *, ssid="",
+                     bssid="", ifname="", network_id=""):
+        return {
+            "ok": bool(ok),
+            "state": state,
+            "reason_code": reason_code,
+            "reason_text": reason_text,
+            "retryable": bool(retryable),
+            "ssid": ssid,
+            "bssid": bssid,
+            "ifname": ifname,
+            "network_id": network_id,
+            "error": "" if ok else "NetworkManager：%s" % reason_text,
+        }
+
+    def _wifi_readback_connected(self, ifname):
+        rc, output, _error = self._run_c(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"])
+        if rc != 0:
+            return False
+        for line in output.splitlines():
+            fields = split_nmcli_terse(line)
+            if len(fields) >= 3 and fields[0] == ifname and fields[1] == "wifi":
+                return fields[2].strip().lower() in {"connected", "connected (externally)"}
+        return False
+
+    def _wifi_connect_record(self, ssid, bssid, ifname, password=None, network_id="",
+                             verify=False, use_c_locale=False):
         validation_error = self._wifi_connect_error(ssid, bssid, ifname)
         if validation_error:
-            return {
-                "ok": False,
-                "ssid": ssid,
-                "bssid": bssid,
-                "ifname": ifname,
-                "error": validation_error,
-            }
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_INVALID_TARGET", validation_error, False,
+                ssid=ssid, bssid=bssid, ifname=ifname, network_id=network_id)
         command = [
             "nmcli", "--wait", "30", "device", "wifi", "connect", ssid,
             "bssid", bssid, "ifname", ifname,
         ]
         if password is not None:
             command.insert(1, "--ask")
+        if use_c_locale:
+            command = c_locale_command(command)
+        if password is not None:
             rc, output, error = self._run_with_input(command, password + "\n", timeout=35)
         else:
             rc, output, error = self._run(command, timeout=35)
+        if rc != 0:
+            code, text, retryable = self._wifi_failure_reason(output, error)
+            return self._wifi_result(
+                False, "failed", code, text, retryable, ssid=ssid, bssid=bssid,
+                ifname=ifname, network_id=network_id)
+        if verify and not self._wifi_readback_connected(ifname):
+            return self._wifi_result(
+                False, "verification_pending", "E_WIFI_READBACK_PENDING",
+                "连接请求已提交，但尚未确认指定无线接口已连接。", True,
+                ssid=ssid, bssid=bssid, ifname=ifname, network_id=network_id)
+        return self._wifi_result(
+            True, "connected", "OK", "已连接。", False, ssid=ssid, bssid=bssid,
+            ifname=ifname, network_id=network_id)
+
+    def wifi_connect(self, ssid, bssid, ifname, password=None):
+        """Compatibility path for callers that already hold a validated scan record."""
+        return self._wifi_connect_record(ssid, bssid, ifname, password=password)
+
+    def wifi_connect_network_id(self, network_id, ifname, password=None):
+        if not isinstance(network_id, str) or not NETWORK_ID_PATTERN.fullmatch(network_id):
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_NETWORK_ID_INVALID", "无线网络标识无效。", False,
+                ifname=ifname, network_id=network_id or "")
+        if not isinstance(ifname, str) or not IFNAME_PATTERN.fullmatch(ifname):
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_INTERFACE_INVALID", "网络接口名称格式无效。", False,
+                ifname=ifname or "", network_id=network_id)
+        cache = self._read_wifi_scan_cache()
+        generated_at = cache.get("generated_at") if cache else None
+        if (not cache or cache.get("schema") != 1 or not isinstance(generated_at, int) or
+                generated_at < 1 or time.time() - generated_at > WIFI_SCAN_CACHE_MAX_AGE):
+            self.wifi_scan()
+            cache = self._read_wifi_scan_cache()
+            generated_at = cache.get("generated_at") if cache else None
+            if (not cache or cache.get("schema") != 1 or not isinstance(generated_at, int) or
+                    generated_at < 1 or time.time() - generated_at > WIFI_SCAN_CACHE_MAX_AGE):
+                return self._wifi_result(
+                    False, "stale", "E_WIFI_NETWORK_STALE", "扫描结果已过期，请重新扫描。", True,
+                    ifname=ifname, network_id=network_id)
+        record = next((item for item in cache.get("networks", [])
+                       if isinstance(item, dict) and item.get("network_id") == network_id), None)
+        if not record:
+            return self._wifi_result(
+                False, "stale", "E_WIFI_NETWORK_UNKNOWN", "未找到该无线网络，请重新扫描。", True,
+                ifname=ifname, network_id=network_id)
+        if record.get("ifname") != ifname:
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_INTERFACE_MISMATCH", "无线接口已变化，请重新扫描。", True,
+                ifname=ifname, network_id=network_id)
+        if record.get("encoding") != "utf-8":
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_SSID_ENCODING", "该无线网络名称编码无法安全使用。", False,
+                ifname=ifname, network_id=network_id)
+        try:
+            ssid_bytes = base64.b64decode(record.get("ssid_bytes_b64", ""), validate=True)
+            ssid = ssid_bytes.decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return self._wifi_result(
+                False, "invalid", "E_WIFI_SSID_ENCODING", "该无线网络名称编码无法安全使用。", False,
+                ifname=ifname, network_id=network_id)
+        return self._wifi_connect_record(
+            ssid, str(record.get("bssid") or ""), ifname, password=password,
+            network_id=network_id, verify=True, use_c_locale=True)
+
+    @staticmethod
+    def _nmcli_device_rows(output):
+        rows = []
+        for line in (output or "").splitlines():
+            fields = split_nmcli_terse(line)
+            if len(fields) < 4:
+                continue
+            rows.append({
+                "ifname": fields[0], "type": fields[1], "state": fields[2],
+                "connection": fields[3],
+            })
+        return rows
+
+    @staticmethod
+    def _nmcli_key_values(output):
+        values = {}
+        for line in (output or "").splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            values[key.strip()] = value.strip()
+        return values
+
+    def _net_sysfs_value(self, ifname, name):
+        try:
+            return (self.net_root / ifname / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _net_driver(self, ifname):
+        path = self.net_root / ifname / "device" / "driver"
+        try:
+            resolved = os.path.realpath(path)
+        except OSError:
+            return ""
+        return os.path.basename(resolved) if resolved and os.path.exists(resolved) else ""
+
+    def _ethernet_internet(self, ifname, state, carrier, probe=True):
+        base = {"interface": ifname, "state": "pending", "reason_code": "E_ETHERNET_PENDING",
+                "reason_text": "正在等待有线网络完成配置。"}
+        if carrier is False:
+            base.update(state="offline", reason_code="E_ETHERNET_CARRIER_DOWN",
+                        reason_text="未检测到网线连接。")
+            return base
+        if state.lower() not in {"connected", "connected (externally)"}:
+            base.update(state="offline", reason_code="E_ETHERNET_NOT_CONNECTED",
+                        reason_text="网卡尚未通过 NetworkManager 连接。")
+            return base
+        route_command = ["ip", "-4", "route", "get", "1.1.1.1", "oif", ifname]
+        route_rc, route_output, _route_error = self._run_c(route_command)
+        if route_rc != 0 or not re.search(r"\bdev\s+%s\b" % re.escape(ifname), route_output):
+            base.update(reason_code="E_ETHERNET_ROUTE_UNCONFIRMED",
+                        reason_text="未确认到该有线接口的 IPv4 默认路由。")
+            return base
+        if not probe:
+            base.update(reason_code="E_ETHERNET_ROUTE_CONFIRMED",
+                        reason_text="已确认该有线接口路由；未执行互联网探测。")
+            return base
+        if not self._can_run("curl"):
+            base.update(reason_code="E_ETHERNET_PROBE_UNAVAILABLE",
+                        reason_text="已确认路由，等待联网探测工具可用。")
+            return base
+        probe = [
+            "curl", "--interface", ifname, "--connect-timeout", "2", "--max-time", "5",
+            "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
+            ETHERNET_CONNECTIVITY_URL,
+        ]
+        rc, output, _error = self._run(probe, timeout=7)
+        if rc == 0 and re.fullmatch(r"2\d\d", (output or "").strip()):
+            base.update(state="online", reason_code="OK", reason_text="有线网络已连接互联网。")
+        else:
+            base.update(state="offline", reason_code="E_ETHERNET_INTERNET_UNREACHABLE",
+                        reason_text="该有线接口无法访问互联网，请检查路由器、DHCP 或 DNS。")
+        return base
+
+    def ethernet_status(self, probe_internet=True):
+        command = ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]
+        rc, output, _error = self._run_c(command)
+        if rc != 0:
+            return {
+                "ok": False, "state": "diagnostic_unavailable", "devices": [],
+                "reason_code": "E_ETHERNET_NM_UNAVAILABLE",
+                "reason_text": "NetworkManager 有线网络状态不可用。",
+            }
+        devices = []
+        for row in self._nmcli_device_rows(output):
+            if row["type"] != "ethernet" or not IFNAME_PATTERN.fullmatch(row["ifname"]):
+                continue
+            ifname = row["ifname"]
+            detail_command = [
+                "nmcli", "-t", "-f",
+                "GENERAL.DEVICE,GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER,"
+                "WIRED-PROPERTIES.SPEED,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS,IP6.GATEWAY",
+                "device", "show", ifname,
+            ]
+            _detail_rc, detail_output, _detail_error = self._run_c(detail_command)
+            details = self._nmcli_key_values(detail_output)
+            carrier_text = self._net_sysfs_value(ifname, "carrier")
+            if carrier_text in {"0", "1"}:
+                carrier = carrier_text == "1"
+            elif "WIRED-PROPERTIES.CARRIER" in details:
+                carrier = details["WIRED-PROPERTIES.CARRIER"].lower() in {"on", "yes", "1"}
+            else:
+                carrier = None
+            addresses = [value for key, value in details.items() if key.startswith("IP4.ADDRESS")]
+            ipv6_addresses = [value for key, value in details.items() if key.startswith("IP6.ADDRESS")]
+            dns = [value for key, value in details.items() if key.startswith("IP4.DNS")]
+            devices.append({
+                "ifname": ifname,
+                "state": row["state"],
+                "connection": row["connection"],
+                "carrier": carrier,
+                "speed_mbps": parse_integer(self._net_sysfs_value(ifname, "speed") or
+                                            details.get("WIRED-PROPERTIES.SPEED", "")),
+                "driver": self._net_driver(ifname),
+                "ipv4": {"addresses": addresses, "gateway": details.get("IP4.GATEWAY", ""), "dns": dns},
+                "ipv6": {"addresses": ipv6_addresses, "gateway": details.get("IP6.GATEWAY", "")},
+                "internet": self._ethernet_internet(ifname, row["state"], carrier, probe=probe_internet),
+            })
         return {
-            "ok": rc == 0,
-            "ssid": ssid,
-            "bssid": bssid,
-            "ifname": ifname,
-            "error": "" if rc == 0 else (
-                "连接失败；如需密码，请通过 NetworkManager 密钥管理界面提供。"),
+            "ok": True, "state": "ready" if devices else "no_ethernet", "devices": devices,
+            "reason_code": "OK" if devices else "E_ETHERNET_NOT_FOUND",
+            "reason_text": "已检测到有线网卡。" if devices else "未检测到有线网卡。",
         }
+
+    def ethernet_repair(self, ifname):
+        if not isinstance(ifname, str) or not IFNAME_PATTERN.fullmatch(ifname):
+            return {"ok": False, "ifname": ifname or "", "state": "invalid",
+                    "reason_code": "E_ETHERNET_INTERFACE_INVALID",
+                    "reason_text": "有线网络接口名称格式无效。"}
+        command = ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]
+        rc, output, _error = self._run_c(command)
+        rows = self._nmcli_device_rows(output) if rc == 0 else []
+        if not any(row["ifname"] == ifname and row["type"] == "ethernet" for row in rows):
+            return {"ok": False, "ifname": ifname, "state": "not_found",
+                    "reason_code": "E_ETHERNET_NOT_FOUND",
+                    "reason_text": "未找到指定的有线网络接口。"}
+        rc, _output, error = self._run_c(["nmcli", "device", "connect", ifname], timeout=20)
+        if rc != 0:
+            return {"ok": False, "ifname": ifname, "state": "failed",
+                    "reason_code": "E_ETHERNET_RECONNECT_FAILED",
+                    "reason_text": "无法重新连接指定有线接口。" if not error else
+                    "无法重新连接指定有线接口，请检查网线、DHCP 或 802.1X 配置。"}
+        return {"ok": True, "ifname": ifname, "state": "reconnect_requested",
+                "reason_code": "OK", "reason_text": "已请求重新连接指定有线接口。"}
 
     @staticmethod
     def _bluetooth_usb_records(output):
@@ -1362,12 +1847,39 @@ class DeviceController:
                 "已关闭" if state in {"rfkill_blocked", "controller_off"} else "不可用"),
         }
 
+    def _portable_host_from_profile(self):
+        """Return the root-owned portable classification, or None when absent."""
+        try:
+            lines = self.power_profile_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in lines:
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "portable":
+                normalized = value.strip().lower()
+                if normalized == "true":
+                    return True
+                if normalized == "false":
+                    return False
+        return None
+
     def battery_status(self):
+        portable_from_profile = self._portable_host_from_profile()
         if not self._can_run("upower"):
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         rc, output, _error = self._run(["upower", "-e"])
         if rc != 0:
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         devices = [line.strip() for line in output.splitlines() if line.strip()]
         display_devices = [line for line in devices if line.rsplit("/", 1)[-1] == "DisplayDevice"]
         native_batteries = [
@@ -1376,7 +1888,12 @@ class DeviceController:
         ]
         candidates = display_devices + native_batteries
         if not candidates:
-            return {"available": False, "value": None, "text": ""}
+            return {
+                "available": False,
+                "portable": bool(portable_from_profile),
+                "value": None,
+                "text": "",
+            }
         value = None
         for battery in candidates:
             rc, info, _error = self._run(["upower", "-i", battery])
@@ -1386,6 +1903,12 @@ class DeviceController:
                 break
         return {
             "available": value is not None,
+            # The profile is authoritative when available.  The BAT-name
+            # fallback keeps the indicator useful during early boot or live
+            # sessions before the profile service has written its state.
+            "portable": (
+                portable_from_profile if portable_from_profile is not None
+                else bool(native_batteries)),
             "value": value,
             "text": "%d%%" % value if value is not None else "--",
         }
@@ -1395,6 +1918,7 @@ class DeviceController:
             "audio": self.audio_status(),
             "brightness": self.brightness_status(),
             "wifi": self.wifi_status(),
+            "ethernet": self.ethernet_status(probe_internet=False),
             "bluetooth": self.bluetooth_status(),
             "battery": self.battery_status(),
         }
@@ -1408,10 +1932,16 @@ def build_parser():
     wifi_scan = subparsers.add_parser("wifi-scan")
     wifi_scan.add_argument("--json", action="store_true")
     wifi_connect = subparsers.add_parser("wifi-connect")
-    wifi_connect.add_argument("--ssid", required=True)
-    wifi_connect.add_argument("--bssid", required=True)
+    wifi_connect.add_argument("--network-id")
+    wifi_connect.add_argument("--ssid")
+    wifi_connect.add_argument("--bssid")
     wifi_connect.add_argument("--ifname", required=True)
     wifi_connect.add_argument("--password-stdin", action="store_true")
+    ethernet_status = subparsers.add_parser("ethernet-status")
+    ethernet_status.add_argument("--json", action="store_true")
+    ethernet_repair = subparsers.add_parser("ethernet-repair")
+    ethernet_repair.add_argument("--ifname", required=True)
+    ethernet_repair.add_argument("--json", action="store_true")
     bluetooth_status = subparsers.add_parser("bluetooth-status")
     bluetooth_status.add_argument("--json", action="store_true")
     audio_status = subparsers.add_parser("audio-status")
@@ -1425,6 +1955,12 @@ def build_parser():
     volume.add_argument("value", type=int)
     brightness = subparsers.add_parser("set-brightness")
     brightness.add_argument("value", type=int)
+    reapply_brightness = subparsers.add_parser("reapply-brightness")
+    reapply_brightness.add_argument("--wait-seconds", type=float, default=0)
+    reapply_brightness.add_argument("--json", action="store_true")
+    restore_brightness = subparsers.add_parser("restore-brightness")
+    restore_brightness.add_argument("--wait-seconds", type=float, default=0)
+    restore_brightness.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1450,7 +1986,20 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
             password = source.readline(257).rstrip("\r\n")
             if not password:
                 password = None
-        result = controller.wifi_connect(args.ssid, args.bssid, args.ifname, password=password)
+        if args.network_id and not args.ssid and not args.bssid:
+            result = controller.wifi_connect_network_id(
+                args.network_id, args.ifname, password=password)
+        elif not args.network_id and args.ssid and args.bssid:
+            result = controller.wifi_connect(args.ssid, args.bssid, args.ifname, password=password)
+        else:
+            result = DeviceController._wifi_result(
+                False, "invalid", "E_WIFI_TARGET_AMBIGUOUS",
+                "请提供扫描得到的网络标识，或同时提供 SSID 与 BSSID。", False,
+                ifname=args.ifname, network_id=args.network_id or "")
+    elif args.action == "ethernet-status":
+        result = controller.ethernet_status()
+    elif args.action == "ethernet-repair":
+        result = controller.ethernet_repair(args.ifname)
     elif args.action == "bluetooth-status":
         result = controller.bluetooth_status()
     elif args.action == "audio-status":
@@ -1465,10 +2014,14 @@ def main(argv=None, controller=None, stdout=None, stdin=None):
         result = controller.audio_select_output(args.output_id)
     elif args.action == "set-volume":
         result = controller.set_volume(args.value)
+    elif args.action in {"restore-brightness", "reapply-brightness"}:
+        result = controller.reapply_brightness(wait_seconds=args.wait_seconds)
     else:
         result = controller.set_brightness(args.value)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=stdout)
-    return 0 if args.action in {"status", "bluetooth-status", "audio-status"} or result.get("ok") else 2
+    return 0 if args.action in {
+        "status", "bluetooth-status", "audio-status", "ethernet-status",
+    } or result.get("ok") else 2
 
 
 if __name__ == "__main__":

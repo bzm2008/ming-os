@@ -31,6 +31,9 @@ SAFE_OUTPUT = re.compile(r"^[A-Za-z0-9._-]+$")
 SAFE_MODE = re.compile(r"^[1-9][0-9]{1,4}x[1-9][0-9]{1,4}$")
 SAFE_RATE = re.compile(r"^[0-9]{1,3}(?:\.[0-9]{1,3})?$")
 SAFE_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+SOFTWARE_BRIGHTNESS_MIN = 20
+SOFTWARE_BRIGHTNESS_MAX = 100
+SOFTWARE_BRIGHTNESS_BACKEND = "xrandr-software"
 
 
 def _state_dir():
@@ -101,6 +104,35 @@ def parse_xrandr_snapshot(text):
     return {"outputs": outputs}
 
 
+def parse_xrandr_brightness(text):
+    """Read brightness for connected, active outputs from xrandr --verbose."""
+    snapshot = parse_xrandr_snapshot(text)
+    active = {
+        item["name"]: item
+        for item in snapshot.get("outputs", [])
+        if item.get("connected") and item.get("mode")
+        and SAFE_OUTPUT.fullmatch(str(item.get("name", "")))
+    }
+    current = None
+    for raw_line in (text or "").splitlines():
+        header = re.match(r"^(\S+)\s+(connected|disconnected)\b", raw_line)
+        if header:
+            current = header.group(1) if header.group(1) in active else None
+            continue
+        if not current:
+            continue
+        match = re.match(r"^\s*Brightness:\s*([0-9]+(?:[.,][0-9]+)?)\s*$", raw_line)
+        if not match:
+            continue
+        try:
+            value = float(match.group(1).replace(",", "."))
+        except ValueError:
+            continue
+        if 0.0 <= value <= 1.0:
+            active[current]["brightness"] = value
+    return list(active.values())
+
+
 def request_is_supported(snapshot, output, mode, rate, rotation):
     """Validate a request against one freshly parsed, connected xrandr output."""
     if not (
@@ -134,16 +166,24 @@ def request_is_active(snapshot, request):
 class DisplayController:
     """Stateful controller with injectable command and timer operations."""
 
-    def __init__(self, runner=None, state_dir=None, timer_factory=None, timer_canceller=None):
+    def __init__(self, runner=None, state_dir=None, timer_factory=None, timer_canceller=None,
+                 software_state_path=None, sleeper=None, monotonic=None):
         self.runner = runner or self._default_runner
         self.state_dir = Path(state_dir) if state_dir else _state_dir()
         self.timer_factory = timer_factory or self._start_timer
         self.timer_canceller = timer_canceller or self._cancel_timer
+        self.software_state_path = Path(software_state_path) if software_state_path else None
+        self.sleeper = sleeper or time.sleep
+        self.monotonic = monotonic or time.monotonic
 
     @staticmethod
     def _default_runner(argv):
         try:
-            return subprocess.run(argv, text=True, capture_output=True, timeout=8, check=False)
+            environment = os.environ.copy()
+            environment["LC_ALL"] = "C"
+            return subprocess.run(
+                argv, text=True, capture_output=True, timeout=8, check=False,
+                env=environment)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
@@ -237,6 +277,254 @@ class DisplayController:
         result = self.snapshot()
         result["confirm_seconds"] = CONFIRM_SECONDS
         return result
+
+    def _software_preference_path(self):
+        if self.software_state_path:
+            return self.software_state_path
+        config_home = os.environ.get("XDG_CONFIG_HOME")
+        base = Path(config_home) if config_home else Path.home() / ".config"
+        return base / "ming-os" / "software-brightness.json"
+
+    def _read_software_preference(self):
+        try:
+            payload = json.loads(self._software_preference_path().read_text(encoding="utf-8"))
+            value = int(payload.get("value")) if isinstance(payload, dict) else None
+        except (OSError, TypeError, ValueError):
+            return None
+        if value is None or not SOFTWARE_BRIGHTNESS_MIN <= value <= SOFTWARE_BRIGHTNESS_MAX:
+            return None
+        return value
+
+    def _write_software_preference(self, value):
+        path = self._software_preference_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        temporary = path.with_name(".%s.%s.tmp" % (path.name, os.getpid()))
+        descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "version": 1,
+                    "backend": SOFTWARE_BRIGHTNESS_BACKEND,
+                    "value": int(value),
+                }, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            path.chmod(0o600)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _software_result(ok, requested=None, value=None, error="", state=None,
+                         outputs=None, output_values=None, mixed=False,
+                         preference=None):
+        result = {
+            "ok": bool(ok),
+            "available": bool(ok),
+            "state": state or ("ready" if ok else "unavailable"),
+            "backend": SOFTWARE_BRIGHTNESS_BACKEND,
+            "requested": requested,
+            "value": value,
+            "error": error or "",
+            "outputs": list(outputs or []),
+            "mixed": bool(mixed),
+            "output_values": dict(output_values or {}),
+        }
+        if preference is not None:
+            result["preference"] = preference
+        return result
+
+    def _software_snapshot(self):
+        if not os.environ.get("DISPLAY"):
+            return self._software_result(
+                False, error="没有可用的 X11 DISPLAY，软件亮度仅支持 X11 会话。",
+                state="unavailable")
+        rc, output, error = self._run(["xrandr", "--verbose"])
+        if rc != 0:
+            return self._software_result(
+                False, error="无法读取 X11 显示器状态：%s" %
+                (error.strip() or "xrandr 失败"), state="unavailable")
+        outputs = parse_xrandr_brightness(output)
+        if not outputs:
+            return self._software_result(
+                False, error="没有检测到可调暗的已连接活动显示器。", state="unavailable")
+        missing = [item.get("name", "unknown") for item in outputs if "brightness" not in item]
+        if missing:
+            return self._software_result(
+                False, error="无法读取显示器亮度：%s" % ", ".join(missing), state="error")
+        return {
+            "ok": True,
+            "available": True,
+            "state": "ready",
+            "backend": SOFTWARE_BRIGHTNESS_BACKEND,
+            "outputs": outputs,
+        }
+
+    @staticmethod
+    def _software_percent(value):
+        return int(round(float(value) * 100.0))
+
+    @staticmethod
+    def _software_factor(value):
+        return ("%.3f" % (float(value) / 100.0)).rstrip("0").rstrip(".")
+
+    @classmethod
+    def _software_readback_fields(cls, outputs):
+        values = {
+            item["name"]: cls._software_percent(item["brightness"])
+            for item in outputs
+        }
+        percentages = list(values.values())
+        return {
+            "value": min(percentages) if percentages else None,
+            "mixed": bool(percentages) and any(value != percentages[0] for value in percentages),
+            "output_values": values,
+        }
+
+    def software_status(self):
+        result = self._software_snapshot()
+        if not result.get("ok"):
+            result["preference"] = self._read_software_preference()
+            return result
+        fields = self._software_readback_fields(result["outputs"])
+        result.update(fields)
+        result["preference"] = self._read_software_preference()
+        result["outputs"] = [item["name"] for item in result["outputs"]]
+        return result
+
+    def _rollback_software_outputs(self, outputs):
+        failures = []
+        for name, brightness in reversed(list(outputs.items())):
+            if not SAFE_OUTPUT.fullmatch(str(name)):
+                failures.append(name)
+                continue
+            rc, _output, _error = self._run([
+                "xrandr", "--output", name, "--brightness",
+                self._software_factor(brightness * 100),
+            ])
+            if rc != 0:
+                failures.append(name)
+        return failures
+
+    def _rollback_software_outputs_and_confirm(self, previous, before_outputs):
+        """Restore every active output, then return confirmed or safe values."""
+        rollback_failures = self._rollback_software_outputs(previous)
+        restored = self._software_snapshot()
+        restored_outputs = restored.get("outputs", [])
+        restored_by_name = {
+            item.get("name"): item for item in restored_outputs
+            if isinstance(item, dict) and item.get("name")
+        }
+        confirmed = (
+            restored.get("ok")
+            and set(restored_by_name) == set(previous)
+            and all("brightness" in item for item in restored_by_name.values())
+        )
+        details = []
+        if rollback_failures:
+            details.append("恢复命令失败：%s" % ", ".join(rollback_failures))
+        if confirmed:
+            fields = self._software_readback_fields(restored_outputs)
+        else:
+            fields = self._software_readback_fields(before_outputs)
+            details.append("无法确认回滚后的实际亮度，已返回回滚前安全值")
+        return fields, "；".join(details)
+
+    def software_set(self, value):
+        try:
+            requested = int(value)
+        except (TypeError, ValueError):
+            return self._software_result(
+                False, error="亮度必须是整数百分比。", state="invalid")
+        if requested < 1 or requested > 100:
+            return self._software_result(
+                False, requested=requested, error="亮度必须在 1 到 100 之间。",
+                state="invalid")
+        target = max(SOFTWARE_BRIGHTNESS_MIN, min(SOFTWARE_BRIGHTNESS_MAX, requested))
+        before = self._software_snapshot()
+        if not before.get("ok"):
+            before["requested"] = requested
+            return before
+        previous = {item["name"]: float(item["brightness"]) for item in before["outputs"]}
+        factor = self._software_factor(target)
+        for name in previous:
+            rc, output, error = self._run(
+                ["xrandr", "--output", name, "--brightness", factor])
+            if rc != 0:
+                message = "设置显示器 %s 失败：%s" % (
+                    name, error.strip() or output or "xrandr 失败")
+                fields, rollback_detail = self._rollback_software_outputs_and_confirm(
+                    previous, before["outputs"])
+                if rollback_detail:
+                    message += "；" + rollback_detail
+                return self._software_result(
+                    False, requested=requested, error=message,
+                    state="error", outputs=list(previous), **fields)
+        after = self._software_snapshot()
+        after_outputs = after.get("outputs", [])
+        after_by_name = {
+            item.get("name"): item for item in after_outputs
+            if isinstance(item, dict) and item.get("name")
+        }
+        readback_ok = after.get("ok") and set(after_by_name) == set(previous)
+        if readback_ok:
+            readback_ok = all(
+                "brightness" in after_by_name[name]
+                and abs(float(after_by_name[name]["brightness"]) - target / 100.0) <= 0.02
+                for name in previous)
+        if not readback_ok:
+            message = after.get("error") or "显示器亮度读回与请求不一致。"
+            fields, rollback_detail = self._rollback_software_outputs_and_confirm(
+                previous, before["outputs"])
+            if rollback_detail:
+                message += "；" + rollback_detail
+            return self._software_result(
+                False, requested=requested, error=message,
+                state="error", outputs=list(previous), **fields)
+        try:
+            self._write_software_preference(target)
+        except (OSError, ValueError) as exc:
+            message = "保存软件亮度偏好失败：%s" % exc
+            fields, rollback_detail = self._rollback_software_outputs_and_confirm(
+                previous, before["outputs"])
+            if rollback_detail:
+                message += "；" + rollback_detail
+            return self._software_result(
+                False, requested=requested, error=message,
+                state="error", outputs=list(previous), **fields)
+        fields = self._software_readback_fields(after_outputs)
+        return self._software_result(
+            True, requested=requested, state="ready",
+            outputs=list(previous), **fields)
+
+    def software_reapply(self, wait_seconds=0):
+        value = self._read_software_preference()
+        if value is None:
+            return self._software_result(
+                False, error="没有保存的软件亮度偏好。", state="unavailable")
+        try:
+            wait_seconds = max(0.0, min(12.0, float(wait_seconds)))
+        except (TypeError, ValueError):
+            return self._software_result(
+                False, error="等待时间必须是 0 到 12 秒。", state="invalid")
+        deadline = self.monotonic() + wait_seconds
+        while True:
+            result = self.software_set(value)
+            if result.get("ok") or result.get("state") != "unavailable":
+                return result
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                result["error"] = (result.get("error") or "X11 尚未就绪") + (
+                    "；等待 X11 就绪超时（%.1f 秒）" % wait_seconds)
+                return result
+            self.sleeper(min(0.5, remaining))
 
     def _start_timer(self, token):
         command = [
@@ -379,6 +667,15 @@ def main(argv=None, controller=None, stdout=None):
     subcommands = parser.add_subparsers(dest="command", required=True)
     status = subcommands.add_parser("status")
     status.add_argument("--json", action="store_true")
+    software_status = subcommands.add_parser("software-status")
+    software_status.add_argument("--json", action="store_true")
+    software_set = subcommands.add_parser("software-set")
+    software_set.add_argument("value", type=int, nargs="?")
+    software_set.add_argument("--value", dest="value_option", type=int)
+    software_set.add_argument("--json", action="store_true")
+    software_reapply = subcommands.add_parser("software-reapply")
+    software_reapply.add_argument("--wait-seconds", type=float, default=0)
+    software_reapply.add_argument("--json", action="store_true")
     apply = subcommands.add_parser("apply")
     apply.add_argument("--output", required=True)
     apply.add_argument("--mode", required=True)
@@ -401,6 +698,14 @@ def main(argv=None, controller=None, stdout=None):
         state_dir=Path(args.state_dir) if args.command == "_timeout-rollback" else None)
     if args.command == "status":
         result = control.status()
+    elif args.command == "software-status":
+        result = control.software_status()
+    elif args.command == "software-set":
+        value = args.value_option if args.value_option is not None else args.value
+        result = (control.software_set(value) if value is not None else
+                  {"ok": False, "error": "缺少亮度百分比。"})
+    elif args.command == "software-reapply":
+        result = control.software_reapply(wait_seconds=args.wait_seconds)
     elif args.command == "apply":
         result = control.apply(args.output, args.mode, args.rate, args.rotation)
     elif args.command == "confirm":

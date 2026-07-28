@@ -147,7 +147,51 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
 
 class PackageInstallerInstallTests(unittest.TestCase):
-    def test_install_reports_a_readable_launcher_warning_when_exec_is_missing(self):
+    def test_apt_commands_have_a_bounded_dpkg_lock_wait(self):
+        installer = load_installer()
+        expected = "Dpkg::Lock::Timeout=30"
+        self.assertIn(expected, installer.PackageInstaller._apt_install_command("sample.deb"))
+        self.assertIn(expected, installer.PackageInstaller._apt_fix_command())
+        self.assertIn(expected, installer.PackageInstaller._apt_reinstall_command("sample-app"))
+
+    def test_install_does_not_leak_apt_output_when_the_package_manager_is_busy(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
+            )
+            repair = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "-f", "install",
+            )
+            sensitive_error = (
+                "Could not get lock /var/lib/dpkg/lock-frontend while using "
+                "https://name:secret@example.invalid/?token=private"
+            )
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                apt_install: (100, "", sensitive_error),
+                repair: (100, "", sensitive_error),
+            })
+            result = installer.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("package_busy", result["state"])
+        self.assertEqual("E_PACKAGE_BUSY", result["error_code"])
+        self.assertNotIn("secret", result["error"])
+        self.assertNotIn("example.invalid", result["error"])
+    def test_install_keeps_transaction_result_but_rejects_a_missing_gui_launcher(self):
+        """A browser-downloaded desktop application is not ready until it can launch."""
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
@@ -163,7 +207,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
@@ -183,8 +228,53 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 log_path=pathlib.Path(directory) / "installer.log",
             ).install(package)
 
-        self.assertTrue(result["ok"])
-        self.assertEqual("installed_with_launch_warning", result["state"])
+        self.assertTrue(result["installed"])
+        self.assertFalse(result["launch_ready"])
+        self.assertFalse(result["ok"])
+        self.assertEqual("E_LAUNCH_NOT_READY", result["error_code"])
+
+    def test_install_reports_a_readable_launcher_warning_when_exec_is_missing(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            desktop = pathlib.Path(directory) / "sample-app.desktop"
+            package.write_bytes(b"local package")
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\nName=Sample App\n"
+                "Exec=/opt/sample-app/bin/sample-app\n",
+                encoding="utf-8",
+            )
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_desktops = ("update-desktop-database", "/usr/share/applications")
+            refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                apt_install: (0, "", ""),
+                verify: (0, "ii ", ""),
+                refresh_desktops: (0, "", ""),
+                refresh_icons: (0, "", ""),
+                list_files: (0, str(desktop) + "\n", ""),
+            })
+
+            result = installer.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertTrue(result["installed"])
+        self.assertFalse(result["launch_ready"])
+        self.assertFalse(result["ok"])
+        self.assertEqual("installed_without_launcher", result["state"])
+        self.assertEqual("E_LAUNCH_NOT_READY", result["error_code"])
         self.assertEqual(1, len(result["launcher_warnings"]))
         self.assertIn("找不到启动程序", result["launcher_warnings"][0]["error"])
 
@@ -198,10 +288,12 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
             )
             fix_dependencies = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-f", "install",
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "-f", "install",
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
@@ -263,7 +355,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 "Package", "Version", "Architecture",
             )
             apt_install = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "install", str(package),
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             runner = FakeRunner({
@@ -289,7 +382,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             reinstall = (
                 "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
-                "install", "sample-app",
+                "-o", "Dpkg::Lock::Timeout=30", "install", "sample-app",
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")

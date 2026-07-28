@@ -78,15 +78,35 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertNotIn("systemd-udev-settle.service", service)
         self.assertNotIn("Wants=systemd-udev-settle.service", service)
 
-    def test_spark_readiness_is_delayed_by_timer_without_network_online(self):
-        service = APPS.split(
-            "cat > /etc/systemd/system/ming-appstore-ready.service << 'SVCUNIT'",
-            1,
-        )[1].split("SVCUNIT", 1)[0]
-        self.assertNotIn("network-online.target", service)
-        self.assertIn("ming-appstore-ready.timer", APPS)
-        self.assertIn("OnBootSec=90s", APPS)
-        self.assertIn("After=graphical.target", service)
+    def test_cpu_tuning_waits_for_the_hardware_power_profile(self):
+        service = BASE.split(
+            "cat > /etc/systemd/system/ming-device-tune.service << DEVICETUNESVC", 1
+        )[1].split("DEVICETUNESVC", 1)[0]
+        self.assertIn("Wants=ming-power-profile.service", service)
+        self.assertIn("After=local-fs.target ming-power-profile.service", service)
+
+    def test_memory_profile_applies_after_system_sysctl_and_oom_does_not_wait_for_udev(self):
+        memory = BASE.split(
+            "cat > /etc/systemd/system/ming-memory-profile.service << MEMSVC", 1
+        )[1].split("MEMSVC", 1)[0]
+        oom = BASE.split(
+            "cat > /etc/systemd/system/ming-oom-policy.service << 'MINGOOMPOLICYSVC'", 1
+        )[1].split("MINGOOMPOLICYSVC", 1)[0]
+        self.assertIn("After=local-fs.target systemd-sysctl.service", memory)
+        self.assertNotIn("systemd-udev-settle.service", oom)
+        self.assertIn("After=local-fs.target", oom)
+
+    def test_runtime_memory_profile_is_the_only_owner_of_dynamic_memory_keys(self):
+        static = BASE.split(
+            "cat > /etc/sysctl.d/99-ming-performance.conf << 'SYSCTLCONF'", 1
+        )[1].split("SYSCTLCONF", 1)[0]
+        for key in ("vm.swappiness=", "vm.vfs_cache_pressure=", "vm.page-cluster="):
+            self.assertNotIn(key, static)
+
+    def test_spark_is_not_installed_or_refreshed_by_a_login_timer(self):
+        self.assertNotIn("ming-appstore-ready.service", APPS)
+        self.assertNotIn("ming-appstore-ready.timer", APPS)
+        self.assertNotIn("OnBootSec=90s", APPS)
 
     def test_modem_manager_is_disabled_by_default_but_has_explicit_opt_in(self):
         network = BASE.split("configure_network() {", 1)[1].split(
@@ -154,19 +174,44 @@ class PowerProfileContracts(unittest.TestCase):
         self.assertNotIn("USB_EXCLUDE_HID", tlp)
         self.assertNotIn("USB_BLACKLIST_BTUSB", tlp)
 
-    def test_seamless_storage_is_not_a_default_boot_or_udev_mutator(self):
+    def test_volume_automount_mounts_safe_data_partitions_without_fstab_or_formatting(self):
         storage = BASE.split("configure_seamless_storage() {", 1)[1].split(
             "# ======================== Live / 已安装系统共同兜底", 1
         )[0]
-        self.assertIn("EUID", storage)
-        self.assertNotIn("systemctl enable ming-storage.service", storage)
+        self.assertIn("ming-volume-automount", storage)
+        self.assertIn("--monitor", storage)
+        helper = storage.split(
+            "cat > /usr/local/bin/ming-volume-automount << 'VOLUMEAUTOMOUNT'", 1
+        )[1].split("VOLUMEAUTOMOUNT", 1)[0]
+        for marker in (
+            "--json",
+            "lsblk --json",
+            "findmnt -R",
+            "/media/${MING_TARGET_USER}",
+            "ntfs",
+            "exfat",
+            "vfat",
+            "ext4",
+            "crypto_LUKS",
+            "linux_raid_member",
+            "LVM2_member",
+            "MING_INSTALL",
+            "MING_OTA",
+            "not_formatted",
+            "already_mounted",
+        ):
+            self.assertIn(marker, helper)
+        self.assertNotIn("mkfs", helper)
+        self.assertNotIn("mount --bind", helper)
+        self.assertNotIn("eval ", helper)
         self.assertIn("systemctl disable --now ming-storage.service", storage)
         self.assertIn("multi-user.target.wants/ming-storage.service", storage)
         self.assertIn("udev/rules.d/99-ming-storage.rules", storage)
+        self.assertNotIn("systemctl enable ming-storage.service", storage)
+        self.assertNotIn("systemctl enable ming-volume-automount.service", storage)
+        self.assertNotIn("99-ming-volume-automount.rules", storage)
         self.assertNotIn("cat > /etc/udev/rules.d/99-ming-storage.rules", storage)
-        self.assertNotIn("ACTION==\"add\", SUBSYSTEM==\"block\"", storage)
         self.assertNotIn("Before=lightdm.service display-manager.service", storage)
-        self.assertIn("explicit authorization", storage)
 
     def test_sysctl_application_ignores_unsupported_keys_and_avoids_legacy_tuning(self):
         for marker in (

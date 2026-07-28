@@ -1,0 +1,22 @@
+{
+  "name": "Papyrus",
+  "version": "1.1.0",
+  "platform": "debian13-amd64",
+  "release_tag": "v1.1.0",
+  "source_repo": "https://github.com/bzm2008/papyrus",
+  "integration_asset": "Papyrus-Debian13-Integration_1.1.0.tar.gz",
+  "integration_sha256": "c03ea2fed4fb81f54465623a4753ecfdea76343b0bb964abbfd9ab836ad47fe9",
+  "deb_asset": "Papyrus_1.1.0_amd64.deb",
+  "deb_sha256": "e6e8a2ae7f023d0f8bfc9d1da2c3d6b279ea0982e74b3f77d4ddb1027b573972",
+  "deb_signature_asset": "Papyrus_1.1.0_amd64.deb.sig",
+  "deb_signature_sha256": "c58a167ee96f2ed7b4831d4bf21b8ea8ef86821186ce5c49294f57e3c30803d9",
+  "sha256sums_asset": "SHA256SUMS",
+  "sha256sums_sha256": "9b434e24771c622f47d0575316134d4d21bd16844248c8f1d3ecf9f177d33677",
+  "install_method": "Debian rootfs preinstall via os-integration/debian13/install-papyrus.sh",
+  "installed_paths": [
+    "/opt/papyrus",
+    "/usr/bin/papyrus",
+    "/usr/share/applications/papyrus.desktop",
+    "/usr/share/icons/hicolor/128x128/apps/papyrus.png"
+  ]
+}

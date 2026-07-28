@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ming OS 26.3.0 Home Edition - 主构建脚本
+# Ming OS 26.4.1 Home Edition - 主构建脚本
 # ============================================================================
 # 设计意图：
 #   在 Debian 13 (Trixie) 宿主系统上，通过 debootstrap 构建一个完整的
@@ -27,11 +27,11 @@ set -euo pipefail
 
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
-readonly MING_OS_VERSION="26.3.2"
+readonly MING_OS_VERSION="26.4.1"
 readonly MING_OS_BUILD_SUFFIX=""
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
-readonly ISO_VOLUME_ID="MING_OS_2632"
+readonly ISO_VOLUME_ID="MING_OS_2641"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
 readonly ARCH="amd64"
@@ -43,8 +43,8 @@ readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly MING_USER="user"
-readonly MING_USER_PASS="user"
-readonly ROOT_PASS="root"
+readonly MING_USER_PASS="${MING_USER_PASS:-}"
+readonly ROOT_PASS="${ROOT_PASS:-}"
 # 日志颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -236,6 +236,14 @@ settle_chroot_dpkg() {
 # 将模块脚本和配置文件复制到 chroot 中
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
+    if [[ ! -s "${SCRIPT_DIR}/assets/wallpaper-ming-2640-abstract.png" ]]; then
+        log_error "missing required build asset: assets/wallpaper-ming-2640-abstract.png"
+        return 1
+    fi
+    if [[ ! -s "${SCRIPT_DIR}/assets/ming-installer-verify.py" ]]; then
+        log_error "missing required build asset: assets/ming-installer-verify.py"
+        return 1
+    fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
@@ -277,7 +285,7 @@ run_modules() {
         "01_base.sh"
         "02_apps.sh"
         "03_desktop.sh"
-        "04_garlic_claw.sh"
+        "05_security_tools.sh"
         "06_ota_update.sh"
         "08_settings_hub.sh"
         "07_finalize.sh"
@@ -440,12 +448,13 @@ validate_iso_boot_layout() {
 
 validate_calamares_config() {
     log_info "Validating Calamares installer configuration..."
-    python3 - "${CHROOT_DIR}" <<'PY'
+    python3 - "${CHROOT_DIR}" "${SCRIPT_DIR}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
 root = Path(sys.argv[1])
+source_root = Path(sys.argv[2])
 errors = []
 
 def load_yaml(relative_path):
@@ -474,8 +483,10 @@ for phase in settings.get("sequence", []) or []:
         exec_steps = phase.get("exec") or []
 expected_steps = [
     "shellprocess@ming-ota-preflight", "ming-ota-target-guard@ming-ota-target-guard",
-    "partition", "mount", "unpackfs", "machineid", "fstab", "networkcfg",
-    "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity", "shellprocess@ming-bootloader",
+    "partition", "shellprocess@ming-installer-target-receipt-reset", "mount",
+    "ming-installer-target-receipt@ming-installer-target-receipt", "unpackfs", "machineid",
+    "fstab", "networkcfg", "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity",
+    "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader",
     "umount",
 ]
 for step in expected_steps:
@@ -487,9 +498,29 @@ if all(step in exec_steps for step in ["shellprocess@ming-ota-preflight", "parti
 if all(step in exec_steps for step in ["ming-ota-target-guard@ming-ota-target-guard", "partition"]):
     if exec_steps.index("ming-ota-target-guard@ming-ota-target-guard") > exec_steps.index("partition"):
         errors.append("OTA target disk guard must run before the destructive partition step")
-if all(step in exec_steps for step in ["shellprocess@ming-identity", "shellprocess@ming-bootloader"]):
+receipt_order = [
+    "partition",
+    "shellprocess@ming-installer-target-receipt-reset",
+    "mount",
+    "ming-installer-target-receipt@ming-installer-target-receipt",
+    "unpackfs",
+]
+if all(step in exec_steps for step in receipt_order):
+    if [exec_steps.index(step) for step in receipt_order] != sorted(
+        exec_steps.index(step) for step in receipt_order
+    ):
+        errors.append("fresh receipt reset must run before mount and capture immediately after mount")
+if all(step in exec_steps for step in [
+    "shellprocess@ming-identity",
+    "shellprocess@ming-installed-desktop-gate",
+    "shellprocess@ming-bootloader",
+]):
     if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-bootloader"):
         errors.append("installed identity and root UUID must be finalized before GRUB installation")
+    if exec_steps.index("shellprocess@ming-identity") > exec_steps.index("shellprocess@ming-installed-desktop-gate"):
+        errors.append("installed desktop gate must run after identity repair")
+    if exec_steps.index("shellprocess@ming-installed-desktop-gate") > exec_steps.index("shellprocess@ming-bootloader"):
+        errors.append("installed desktop gate must run before bootloader installation")
 blocked_show_steps = {"locale", "keyboard", "users"}
 for step in blocked_show_steps.intersection(show_steps):
     errors.append(f"settings.conf visible sequence must not show {step}")
@@ -514,8 +545,14 @@ if not any(isinstance(item, dict) and item.get("id") == "ming-ota-preflight" for
     errors.append("settings.conf missing ming-ota-preflight instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-ota-target-guard" for item in instances):
     errors.append("settings.conf missing ming-ota-target-guard instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt-reset" for item in instances):
+    errors.append("settings.conf missing ming-installer-target-receipt-reset instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
     errors.append("settings.conf missing ming-identity instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-installed-desktop-gate" for item in instances):
+    errors.append("settings.conf missing ming-installed-desktop-gate instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-bootloader" for item in instances):
     errors.append("settings.conf missing ming-bootloader instance")
 
@@ -537,6 +574,68 @@ if partition.get("initialPartitioningChoice") != "none":
     errors.append("partition.conf must not force one-click erase; initialPartitioningChoice must be none")
 if partition.get("allowManualPartitioning") is not True:
     errors.append("partition.conf must allow manual partitioning")
+
+desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
+if desktop_gate.get("dontChroot") is not True or \
+        "/usr/local/sbin/ming-installer-verify installed --receipt" not in (desktop_gate.get("script") or []):
+    errors.append("installed desktop gate must use the authoritative target receipt")
+receipt_reset = load_yaml("etc/calamares/modules/ming-installer-target-receipt-reset.conf")
+if receipt_reset.get("dontChroot") is not True or \
+        "/usr/local/sbin/ming-installer-verify receipt --begin-attempt" not in (receipt_reset.get("script") or []):
+    errors.append("authoritative target receipt reset must clear stale state before mount")
+receipt_module = root / "usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt"
+if not (receipt_module / "module.desc").is_file() or not (receipt_module / "main.py").is_file():
+    errors.append("authoritative Calamares target receipt module is missing")
+else:
+    receipt_job = (receipt_module / "main.py").read_text(encoding="utf-8", errors="replace")
+    if 'globalstorage.value("rootMountPoint")' not in receipt_job:
+        errors.append("receipt module must capture Calamares globalstorage.rootMountPoint")
+    if "calamares-root" in receipt_job or "glob(" in receipt_job:
+        errors.append("receipt module must not scan candidate target directories")
+
+def source_settings_block(path, opener, marker):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if opener not in text:
+        errors.append(f"missing generated settings path in {path.name}: {opener}")
+        return {}
+    block = text.split(opener, 1)[1]
+    if marker not in block:
+        errors.append(f"unterminated generated settings path in {path.name}: {marker}")
+        return {}
+    try:
+        return yaml.safe_load(block.split(marker, 1)[0]) or {}
+    except Exception as exc:
+        errors.append(f"generated settings YAML parse failed in {path.name}: {exc}")
+        return {}
+
+generated_settings = [
+    source_settings_block(
+        source_root / "modules/01_base.sh",
+        "cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'\n",
+        "\nCALAMARESSETTINGS",
+    ),
+    source_settings_block(
+        source_root / "modules/03_desktop.sh",
+        "cat > /etc/calamares/settings.conf <<'SETTINGS'\n",
+        "\nSETTINGS",
+    ),
+    source_settings_block(
+        source_root / "modules/03_desktop.sh",
+        "cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'\n",
+        "\nSTATICCALASETTINGS",
+    ),
+]
+for generated in generated_settings:
+    generated_exec = []
+    for phase in generated.get("sequence", []) or []:
+        if isinstance(phase, dict) and "exec" in phase:
+            generated_exec = phase.get("exec") or []
+    if any(step not in generated_exec for step in expected_steps):
+        errors.append("generated Calamares settings path is missing receipt or desktop gate steps")
+    elif [generated_exec.index(step) for step in receipt_order] != sorted(
+        generated_exec.index(step) for step in receipt_order
+    ):
+        errors.append("generated Calamares settings path has unsafe receipt ordering")
 
 locale = load_yaml("etc/calamares/modules/locale.conf")
 if locale.get("region") != "Asia" or locale.get("zone") != "Shanghai":
@@ -575,6 +674,7 @@ if not grub_install.is_file():
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
     "usr/local/sbin/ming-install-bootloader",
+    "usr/local/sbin/ming-installer-verify",
     "usr/local/sbin/ming-finish-install-reboot",
     "usr/local/bin/ming-calamares-launcher",
     "usr/local/bin/ming-live-installer.sh",
@@ -902,8 +1002,9 @@ desktop_names = [
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-terminal.desktop",
-    "ming-edge.desktop",
+    "ming-firefox.desktop",
     "spark-store.desktop",
+    "papyrus.desktop",
 ]
 search_path = ":".join(str(root / item) for item in (
     "usr/local/bin", "usr/bin", "bin", "usr/local/sbin", "usr/sbin", "sbin"
@@ -937,13 +1038,12 @@ for name in desktop_names:
     if not found:
         errors.append(f"unresolved Exec target in {name}: {command}")
 
-edge_backends = [
-    root / "usr/bin/microsoft-edge-stable",
-    root / "usr/bin/microsoft-edge",
-    root / "opt/microsoft/msedge/microsoft-edge",
+firefox_backends = [
+    root / "usr/bin/firefox-esr",
+    root / "usr/bin/firefox",
 ]
-if not any(path.is_file() and os.access(path, os.X_OK) for path in edge_backends):
-    errors.append("missing Microsoft Edge browser backend behind ming-edge wrapper")
+if not any(path.is_file() and os.access(path, os.X_OK) for path in firefox_backends):
+    errors.append("missing Firefox ESR browser backend behind ming-firefox wrapper")
 
 spark_backends = [
     root / "usr/bin/spark-store",
@@ -951,13 +1051,13 @@ spark_backends = [
 ]
 if not any(path.is_file() and os.access(path, os.X_OK) for path in spark_backends):
     spark_wrapper = root / "usr/local/bin/ming-spark-store"
-    spark_installer = root / "usr/local/bin/ming-install-spark-store"
+    spark_gui = root / "usr/local/bin/ming-package-install-gui"
     wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
     has_repair_fallback = (
         desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
-        and spark_installer.is_file()
-        and os.access(spark_installer, os.X_OK)
-        and 'exec pkexec /usr/local/bin/ming-install-spark-store "$@"' in wrapper_text
+        and spark_gui.is_file()
+        and os.access(spark_gui, os.X_OK)
+        and "exec /usr/local/bin/ming-package-install-gui" in wrapper_text
     )
     if not has_repair_fallback:
         errors.append("Spark Store repair fallback is missing or not executable")
@@ -982,9 +1082,13 @@ validate_r4_compatibility() {
 from pathlib import Path
 import os
 import re
+import stat
 import subprocess
+import struct
 import sys
 import tempfile
+import hashlib
+import zlib
 
 root = Path(sys.argv[1])
 errors = []
@@ -1042,6 +1146,12 @@ def validate_systemd_unit(relative_path):
     text = require_file(relative_path)
     if not text:
         return
+    if relative_path.endswith(".slice"):
+        if "[Unit]" not in text or "[Slice]" not in text:
+            errors.append(f"{relative_path} is not a complete systemd slice unit")
+        if not re.search(r"^(CPUWeight|IOWeight|MemoryMax|TasksMax|StartupCPUWeight|StartupIOWeight)=.+$", text, flags=re.MULTILINE):
+            errors.append(f"{relative_path} has no slice directive")
+        return
     if "[Timer]" in text:
         if "[Unit]" not in text or "[Timer]" not in text:
             errors.append(f"{relative_path} is not a complete systemd timer unit")
@@ -1075,9 +1185,43 @@ for marker in [
     if marker not in settings:
         errors.append(f"ming-settings does not expose {marker}")
 
+security_control = require_file(
+    "usr/local/sbin/ming-security-control", "apply_firewall_atomic")
+for marker in ["status", "quick-check", "firewall", "profile", "ssh", "security-updates"]:
+    if marker not in security_control:
+        errors.append(f"ming-security-control missing interface marker {marker}")
+require_file(
+    "usr/share/polkit-1/actions/org.ming.security.control.policy",
+    "/usr/local/sbin/ming-security-control")
+validate_generated_executable("usr/local/sbin/ming-security-control", "python")
+
+storage_status = require_file("usr/local/bin/ming-storage-status", "LSBLK_FIELDS")
+for marker in ["partitions", "--json", "parse_lsblk", "timeout=3"]:
+    if marker not in storage_status:
+        errors.append(f"ming-storage-status missing read-only marker {marker}")
+validate_generated_executable("usr/local/bin/ming-storage-status", "python")
+
+appearance_control = require_file(
+    "usr/local/bin/ming-appearance-control", "apply_and_commit")
+for marker in ["status", "apply", "reset", "reapply", "appearance.last-good.json"]:
+    if marker not in appearance_control:
+        errors.append(f"ming-appearance-control missing interface marker {marker}")
+validate_generated_executable("usr/local/bin/ming-appearance-control", "python")
+
 settings_desktop = require_file("usr/share/applications/ming-settings.desktop", "Exec=/usr/local/bin/ming-control-center")
 if "Exec=/usr/local/bin/ming-settings" in settings_desktop:
     errors.append("ming-settings.desktop must use the stable ming-control-center launcher")
+
+trusted_receipts = root / "var/lib/ming-os/trusted-desktops"
+if not trusted_receipts.is_dir():
+    errors.append("trusted desktop receipt directory is missing")
+for launcher in [
+    "ming-settings.desktop", "ming-files.desktop", "ming-app-library.desktop",
+    "ming-firefox.desktop", "ming-terminal.desktop", "Install Ming OS.desktop",
+]:
+    launcher_path = root / "usr/share/applications" / launcher
+    if launcher_path.is_file() and not (trusted_receipts / launcher).is_file():
+        errors.append(f"missing trusted desktop receipt for {launcher}")
 
 desktop_organizer = require_file("usr/local/bin/ming-desktop-organizer", "sync_apps")
 if "ming-phone-desktop --sync" not in desktop_organizer:
@@ -1122,23 +1266,26 @@ if "X-GNOME-Autostart-enabled=true" not in phone_autostart or "Hidden=false" not
     errors.append("phone desktop autostart must be enabled")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
+for marker in ["IconSize=38", "ZoomEnabled=true", "ZoomPercent=112", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
     errors.append("Plank settings must contain exactly one application drawer item")
 if "ming-disk-hub.dockitem" in plank_settings:
     errors.append("Plank settings must not include the retired All Disks item")
-if "ming-edge.dockitem" not in plank_settings:
-    errors.append("Plank settings must include ming-edge.dockitem as the default browser")
-if "firefox-esr.dockitem" in plank_settings or "firefox.dockitem" in plank_settings:
-    errors.append("Plank settings must not include Firefox dock items")
+if "ming-firefox.dockitem" not in plank_settings:
+    errors.append("Plank settings must include ming-firefox.dockitem as the default browser")
+if "papyrus.dockitem" not in plank_settings:
+    errors.append("Plank settings must include papyrus.dockitem as the default agent")
 for forbidden_dock in ["wechat.dockitem", "wps-office.dockitem"]:
     if forbidden_dock in plank_settings:
         errors.append(f"Plank settings must not include retired dock item {forbidden_dock}")
+for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split(";;"):
+    if "claw" in dock_item.casefold():
+        errors.append(f"Plank settings contains a retired agent item: {dock_item}")
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
-for marker in ["UrgentBounceTime=600", "LaunchBounceTime=520", "ItemMoveTime=260"]:
+for marker in ["UrgentBounceTime=420", "LaunchBounceTime=150", "ItemMoveTime=130"]:
     if marker not in plank_theme:
         errors.append(f"Plank theme missing animation marker {marker}")
 
@@ -1159,6 +1306,56 @@ for path, marker in [
 ]:
     require_file(path, marker)
 
+package_installer = require_file(
+    "usr/local/sbin/ming-package-installer", "sync_opt_app_proxies")
+launch_broker = require_file("usr/local/bin/ming-launch", "verify_desktop_proxy")
+for marker in ["manifest-v1.json", "manifest_sha256", "source_sha256", "proxy_sha256"]:
+    if marker not in package_installer or marker not in launch_broker:
+        errors.append(f"managed /opt/apps proxy contract missing {marker}")
+
+spark_asset = root / "usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+spark_expected_sha256 = "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
+if not spark_asset.is_file() or spark_asset.stat().st_size == 0:
+    errors.append("missing or empty verified Spark Store asset")
+else:
+    spark_hasher = hashlib.sha256()
+    with spark_asset.open("rb") as spark_handle:
+        for spark_chunk in iter(lambda: spark_handle.read(1024 * 1024), b""):
+            spark_hasher.update(spark_chunk)
+    spark_actual_sha256 = spark_hasher.hexdigest().upper()
+    if spark_actual_sha256 != spark_expected_sha256:
+        errors.append("verified Spark Store asset SHA256 mismatch")
+
+papyrus_launcher = require_file("opt/papyrus/launch-papyrus", "APP_ROOT=/opt/papyrus")
+papyrus_command = root / "usr/bin/papyrus"
+if not papyrus_command.is_symlink():
+    errors.append("Papyrus command must be a symlink to the normalized launcher")
+else:
+    link_target = os.readlink(papyrus_command)
+    target = (
+        root / link_target.lstrip("/")
+        if os.path.isabs(link_target)
+        else papyrus_command.parent / link_target
+    )
+    expected_target = root / "opt/papyrus/launch-papyrus"
+    if os.path.normpath(str(target)) != os.path.normpath(str(expected_target)):
+        errors.append(f"Papyrus command symlink points to unexpected target: {link_target}")
+papyrus_root = root / "opt/papyrus"
+if not papyrus_root.is_dir():
+    errors.append("missing Papyrus install directory: opt/papyrus")
+elif stat.S_IMODE(papyrus_root.stat().st_mode) & 0o055 != 0o055:
+    errors.append("Papyrus install directory is not readable by desktop users")
+papyrus_launcher_path = root / "opt/papyrus/launch-papyrus"
+if papyrus_launcher_path.is_file() and stat.S_IMODE(papyrus_launcher_path.stat().st_mode) & 0o055 != 0o055:
+    errors.append("Papyrus launcher is not executable by desktop users")
+papyrus_desktop = require_file("usr/share/applications/papyrus.desktop", "StartupWMClass=uno.scallion.papyrus")
+for marker in ["Exec=/usr/bin/papyrus", "Icon=papyrus", "StartupWMClass=uno.scallion.papyrus"]:
+    if marker not in papyrus_desktop:
+        errors.append(f"Papyrus desktop entry missing {marker}")
+papyrus_icon = root / "usr/share/icons/hicolor/128x128/apps/papyrus.png"
+if not papyrus_icon.is_file() or papyrus_icon.stat().st_size == 0:
+    errors.append("missing Papyrus app icon: usr/share/icons/hicolor/128x128/apps/papyrus.png")
+
 ota_backup = require_file("usr/local/sbin/ming-ota-backup", "--system-target")
 for marker in ["sha256", "readlink", "headroom", "verify_command"]:
     if marker not in ota_backup:
@@ -1171,6 +1368,9 @@ for retired_path in [
     "home/user/Desktop/所有磁盘.desktop",
     "home/user/Desktop/ming-app-library.desktop",
     "home/user/Desktop/ming-disk-hub.desktop",
+    "usr/share/applications/ming-update.desktop",
+    "home/user/Desktop/ming-update.desktop",
+    "home/user/.config/plank/dock1/launchers/ming-update.dockitem",
 ]:
     require_absent(retired_path, "retired Ming shell surface")
 
@@ -1178,11 +1378,43 @@ drawer_desktop = require_file("usr/share/applications/ming-app-library.desktop",
 if "NoDisplay=true" not in drawer_desktop:
     errors.append("application drawer desktop entry must stay hidden outside the Dock")
 
-update_gui = require_file("usr/local/bin/ming-update-gui", "Ming OS 更新管理器")
-if "Ming OS Update Manager" in update_gui or "Check updates" in update_gui or "System Update" in update_gui:
-    errors.append("ming-update-gui must keep user-facing update UI in Chinese")
+update_gui = require_file("usr/local/bin/ming-update-gui", "exec /usr/local/bin/ming-control-center --page update")
+for forbidden in ["zenity", "ming-update.desktop", "/usr/local/bin/ming-update check"]:
+    if forbidden in update_gui:
+        errors.append(f"ming-update-gui must only redirect to Ming Settings, found {forbidden}")
 
-require_path("usr/share/backgrounds/ming-os/default.png")
+expected_wallpaper_sizes = {
+    "usr/share/backgrounds/ming-os/default-2640.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default-3840x2160.png": (3840, 2160),
+    "usr/share/backgrounds/ming-os/default-1920x1080.png": (1920, 1080),
+    "usr/share/backgrounds/ming-os/default-1366x768.png": (1366, 768),
+}
+for wallpaper_path, expected_size in expected_wallpaper_sizes.items():
+    wallpaper = root / wallpaper_path
+    if not wallpaper.is_file() or wallpaper.stat().st_size == 0:
+        errors.append(f"missing or empty wallpaper: {wallpaper_path}")
+        continue
+    try:
+        data = wallpaper.read_bytes()
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("invalid PNG signature or truncated header")
+        if struct.unpack(">I", data[8:12])[0] != 13 or data[12:16] != b"IHDR":
+            raise ValueError("missing initial PNG IHDR chunk")
+        stored_crc = struct.unpack(">I", data[29:33])[0]
+        if stored_crc != (zlib.crc32(data[12:29]) & 0xFFFFFFFF):
+            raise ValueError("invalid PNG IHDR checksum")
+        if not data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+            raise ValueError("missing PNG IEND chunk")
+        dimensions = struct.unpack(">II", data[16:24])
+    except (OSError, ValueError, struct.error) as error:
+        errors.append(f"invalid wallpaper PNG {wallpaper_path}: {error}")
+        continue
+    if dimensions != expected_size:
+        errors.append(
+            f"wallpaper dimensions mismatch for {wallpaper_path}: "
+            f"expected {expected_size[0]}x{expected_size[1]}, got {dimensions[0]}x{dimensions[1]}"
+        )
 appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
 for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog", "ming-plank-watchdog"]:
     if marker not in appearance:
@@ -1211,9 +1443,10 @@ for helper in [
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-window-control",
     "usr/local/bin/ming-window-manager-watchdog",
+    "usr/local/bin/ming-volume-automount",
     "usr/local/bin/ming-input-healthcheck",
     "usr/local/bin/ming-phone-desktop-watchdog",
-    "usr/local/bin/ming-edge",
+    "usr/local/bin/ming-firefox",
     "usr/local/bin/ming-spark-store",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
@@ -1251,7 +1484,6 @@ for relative_path in [
 for relative_path in [
     "etc/systemd/system/ming-service-profile.service",
     "etc/systemd/system/ming-power-profile.service",
-    "etc/systemd/system/ming-appstore-ready.timer",
 ]:
     validate_systemd_unit(relative_path)
 for relative_path, marker in [
@@ -1306,10 +1538,11 @@ for marker in [
     "systemd-analyze", "/proc/meminfo", "scaling_governor",
     "discard_max_bytes", "fstrim.timer", "sensors", "ModemManager",
     "bluetooth.service", "pgrep", "vainfo", "probe_timeout_seconds",
+    "cgroup.controllers", "timer_migration", "systemd-oomd", "earlyoom",
 ]:
     if marker not in performance_status:
         errors.append(f"ming-performance-status missing diagnostic marker {marker}")
-for relative_path in [
+bash_generated_helpers = [
     "usr/local/sbin/ming-time-sync",
     "etc/NetworkManager/dispatcher.d/90-ming-time-sync",
     "usr/local/sbin/ming-intel-xorg-setup",
@@ -1317,29 +1550,46 @@ for relative_path in [
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-window-manager-watchdog",
-]:
+    "usr/local/sbin/ming-oom-policy",
+    "usr/local/sbin/ming-timer-policy",
+    "usr/local/bin/ming-ota-run",
+]
+for relative_path in bash_generated_helpers:
     validate_generated_executable(relative_path, "bash")
-for relative_path in [
+
+python_generated_helpers = [
     "usr/local/bin/ming-display-control",
     "usr/local/bin/ming-hardware-status",
     "usr/local/sbin/ming-performance-status",
+    "usr/local/sbin/ming-performance-policy",
+    "usr/local/sbin/ming-interaction-boost",
+    "usr/local/sbin/ming-background-policy",
+    "usr/local/bin/ming-prefetch",
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-settings",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
-]:
+]
+for relative_path in python_generated_helpers:
     validate_generated_executable(relative_path, "python")
 for relative_path in [
     "etc/systemd/system/ming-intel-xorg-migration.service",
     "etc/systemd/system/ming-regdom.service",
     "etc/systemd/system/ming-hardware-preload.service",
+    "etc/systemd/system/ming-oom-policy.service",
+    "etc/systemd/system/ming-timer-policy.service",
+    "etc/systemd/system/ming-ota.slice",
 ]:
     validate_systemd_unit(relative_path)
 if (root / "etc/systemd/system/NetworkManager-wait-online.service.d").exists():
     errors.append("NetworkManager-wait-online drop-ins must not gate graphical boot")
 
 display_control = require_file("usr/local/bin/ming-display-control", "parse_xrandr_snapshot")
-for marker in ["status", "apply", "confirm", "rollback", "CONFIRM_SECONDS = 15", "request_is_supported"]:
+for marker in [
+    "status", "apply", "confirm", "rollback", "CONFIRM_SECONDS = 15",
+    "request_is_supported", "parse_xrandr_brightness", "software-status",
+    "software-set", "software-reapply", "--wait-seconds",
+]:
     if marker not in display_control:
         errors.append(f"ming-display-control missing confirmed-display marker {marker}")
 display_control_path = root / "usr/local/bin/ming-display-control"
@@ -1405,7 +1655,7 @@ for retired_path in [
     "home/user/Desktop/wechat.desktop",
     "home/user/Desktop/wps-office.desktop",
 ]:
-    require_absent(retired_path, "WeChat and WPS are optional installs in Ming OS 26.3.2")
+    require_absent(retired_path, "WeChat and WPS are optional installs in Ming OS 26.4.1")
 
 for binary in [
     "usr/bin/wmctrl",
@@ -1424,11 +1674,10 @@ for binary in [
     require_path(binary)
 
 if not any(((root / candidate).is_file() or (root / candidate).is_symlink()) for candidate in [
-    "usr/bin/microsoft-edge-stable",
-    "usr/bin/microsoft-edge",
-    "opt/microsoft/msedge/microsoft-edge",
+    "usr/bin/firefox-esr",
+    "usr/bin/firefox",
 ]):
-    errors.append("missing Microsoft Edge browser binary")
+    errors.append("missing Firefox ESR browser binary")
 
 if not any((root / candidate).is_file() for candidate in [
     "usr/libexec/bluetooth/bluetoothd",
@@ -1437,15 +1686,14 @@ if not any((root / candidate).is_file() for candidate in [
 ]):
     errors.append("missing bluetoothd daemon")
 
-require_file("usr/share/applications/ming-edge.desktop", "Exec=/usr/local/bin/ming-edge")
-edge_wrapper = require_file("usr/local/bin/ming-edge", "homepage=/usr/share/ming-os/homepage/index.html")
-for marker in ["--ozone-platform=x11", "--disable-gpu"]:
-    if marker not in edge_wrapper:
-        errors.append(f"ming-edge missing VM graphics marker {marker}")
+require_file("usr/share/applications/ming-firefox.desktop", "Exec=/usr/local/bin/ming-firefox")
+firefox_wrapper = require_file("usr/local/bin/ming-firefox", "homepage=/usr/share/ming-os/homepage/index.html")
+if "firefox-esr" not in firefox_wrapper:
+    errors.append("ming-firefox wrapper does not launch Firefox ESR")
 require_file("usr/share/ming-os/homepage/index.html", "Ming OS")
-edge_policy = require_file("etc/opt/edge/policies/managed/ming-os.json", "HomepageLocation")
-if "RestoreOnStartupURLs" not in edge_policy:
-    errors.append("Edge policy must restore the Ming OS homepage")
+firefox_policy = require_file("etc/firefox-esr/policies/policies.json", "Homepage")
+if "file:///usr/share/ming-os/homepage/index.html" not in firefox_policy:
+    errors.append("Firefox policy must restore the Ming OS homepage")
 
 require_path("usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so")
 require_path("usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so")
@@ -1604,6 +1852,10 @@ input_control = require_file("usr/local/sbin/ming-input-control", "set-engine")
 for marker in ["RIME_SCHEMA", "rime_addon_available"]:
     if marker not in input_control:
         errors.append(f"ming-input-control missing {marker} readiness check")
+input_repair = require_file("usr/local/sbin/ming-input-repair", "DefaultIM=pinyin")
+for marker in ["--user", ".xinputrc.ming-legacy-backup", "run_im fcitx5"]:
+    if marker not in input_repair:
+        errors.append(f"ming-input-repair missing {marker} migration guard")
 
 bt_conf = require_file("etc/bluetooth/main.conf", "AutoEnable=true")
 if "ControllerMode = dual" not in bt_conf:
@@ -1637,15 +1889,21 @@ for marker in [
 if not os.access(root / "usr/local/sbin/ming-radio-repair", os.X_OK):
     errors.append("ming-radio-repair must be executable")
 
-hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "iwlwifi")
+hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "btusb")
 for marker in [
-    "r8169", "btusb", "btintel", "btrtl", "btbcm", "ath3k",
+    "btusb", "btintel", "btrtl", "btbcm", "ath3k",
     "hid_multitouch", "bcm5974", "hid_apple", "applespi",
     "spi_pxa2xx_platform", "spi_pxa2xx_pci", "thinkpad_acpi", "ideapad_laptop",
     "huawei_wmi", "surface_aggregator", "surface_hid_core",
 ]:
     if marker not in hardware_modules:
         errors.append(f"hardware modules preload missing {marker}")
+for forbidden in [
+    "r8169", "r8168", "iwlwifi", "iwlmvm", "ath9k", "ath10k_pci",
+    "rtl8192ee", "rtl8188ee", "e1000e",
+]:
+    if f"\n{forbidden}\n" in f"\n{hardware_modules}\n":
+        errors.append(f"network driver must be selected by modalias/udev, not forced by ming-hardware-preload: {forbidden}")
 require_file("etc/systemd/system/ming-hardware-preload.service", "Before=NetworkManager.service bluetooth.service display-manager.service")
 require_file("etc/modules-load.d/ming-hardware.conf", "loop")
 

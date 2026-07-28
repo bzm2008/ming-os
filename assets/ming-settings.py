@@ -21,6 +21,18 @@ HOME = os.path.expanduser("~")
 SETTINGS_BACKEND = "/usr/local/lib/ming-os/ming-settings-backend"
 TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
+STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
+APPEARANCE_CONTROL_HELPER = "/usr/local/bin/ming-appearance-control"
+APPEARANCE_THEMES = ["system", "light", "dark"]
+APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
+APPEARANCE_WALLPAPERS = ["default", "light", "dark"]
+LIBINPUT_PROPERTIES = {
+    "left_handed": ("libinput Left Handed Enabled",),
+    "natural_scroll": ("libinput Natural Scrolling Enabled",),
+    "tap": ("libinput Tapping Enabled",),
+    "disable_while_typing": ("libinput Disable While Typing Enabled",),
+}
+MAX_ACCOUNT_PASSWORD_BYTES = 1024
 SCALE_PREFERENCE_PATH = os.path.join(HOME, ".config", "ming-os", "scale-preference.json")
 DEVICE_CONTROL_PATHS = [
     "/usr/local/lib/ming-os/ming-device-control.py",
@@ -141,6 +153,30 @@ def run_capture_stdin_async(cmd, input_text, timeout=20, on_done=None):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def validate_account_password(password):
+    """Keep account-password input structurally safe before it reaches Polkit."""
+    if not isinstance(password, str):
+        return False, "密码格式无效。"
+    try:
+        encoded = password.encode("utf-8")
+    except UnicodeEncodeError:
+        return False, "密码包含无法保存的字符。"
+    if not encoded:
+        return False, "密码不能为空。"
+    if len(encoded) > MAX_ACCOUNT_PASSWORD_BYTES:
+        return False, "密码过长。"
+    if any(character in password for character in ("\r", "\n", "\x00", ":")):
+        return False, "密码不能包含换行、冒号或空字符。"
+    return True, ""
+
+
+def account_password_command(user, clear=False):
+    command = ["pkexec", "/usr/local/sbin/ming-account-control"]
+    command.append("clear-password" if clear else "set-password")
+    command.extend(["--user", user])
+    return command
+
+
 def run_task_async(task, on_done=None):
     """Run a Python probe off the GTK thread and marshal its result to GTK."""
     def worker():
@@ -151,6 +187,68 @@ def run_task_async(task, on_done=None):
         if on_done:
             GLib.idle_add(on_done, value, error)
     threading.Thread(target=worker, daemon=True).start()
+
+
+def storage_partition_snapshot():
+    """Read local disk state without mounting or changing storage."""
+    rc, output, error = run(
+        [STORAGE_STATUS_HELPER, "partitions", "--json"], timeout=5)
+    try:
+        payload = json.loads(output or "{}")
+    except (TypeError, ValueError):
+        return {"ok": False, "partitions": [], "error": error or "存储清单返回了无效数据。"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "partitions": [], "error": "存储清单格式无效。"}
+    if rc != 0 or not payload.get("ok"):
+        payload.setdefault("error", error or "无法读取本机分区。")
+    return payload
+
+
+def pointer_device_snapshot():
+    rc, output, error = run(["xinput", "list", "--short"], timeout=5)
+    if rc != 0:
+        return {"ok": False, "devices": [], "error": error or output or "xinput 不可用"}
+    devices = []
+    for line in output.splitlines():
+        match = re.search(r"(?:↳\s*)?(.*?)\s+id=(\d+)", line)
+        if not match or "Virtual core" in match.group(1):
+            continue
+        device_id = match.group(2)
+        prop_rc, props, prop_error = run(["xinput", "list-props", device_id], timeout=5)
+        if prop_rc == 0 and "libinput" in props:
+            devices.append({"id": device_id, "name": match.group(1).strip(), "properties": props})
+        elif prop_error:
+            error = prop_error
+    return {"ok": bool(devices), "devices": devices,
+            "error": "" if devices else (error or "未检测到 libinput 指针设备")}
+
+
+def pointer_property_value(properties, setting):
+    for name in LIBINPUT_PROPERTIES.get(setting, ()):
+        match = re.search(r"(?m)^\s*%s\s*\([^)]*\):\s*([01])\s*$" % re.escape(name),
+                          properties or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def set_pointer_property(device_id, setting, value):
+    snapshot = pointer_device_snapshot()
+    device = next((item for item in snapshot["devices"] if item["id"] == str(device_id)), None)
+    if not device:
+        return {"ok": False, "error": "指针设备已断开。"}
+    name = next((candidate for candidate in LIBINPUT_PROPERTIES.get(setting, ())
+                 if candidate in device["properties"]), None)
+    if not name:
+        return {"ok": False, "error": "设备不支持此设置。"}
+    rc, output, error = run(
+        ["xinput", "set-prop", str(device_id), name, str(int(value))], timeout=5)
+    verify_rc, verify, verify_error = run(
+        ["xinput", "list-props", str(device_id)], timeout=5)
+    actual = pointer_property_value(verify, setting)
+    return {"ok": rc == 0 and verify_rc == 0 and actual == int(value),
+            "error": error or verify_error or output or (
+                "写入后读回不一致。" if actual != int(value) else "")}
 
 
 def read_text_file(path, fallback="未知"):
@@ -260,12 +358,27 @@ def audio_output_label(device):
     return label
 
 
-def wifi_connect_command(ssid, bssid, ifname, with_secret=False):
+def wifi_connect_command(network_id, ifname, with_secret=False):
     command = device_control_cli_command(
-        "wifi-connect", "--ssid", ssid, "--bssid", bssid, "--ifname", ifname)
+        "wifi-connect", "--network-id", network_id, "--ifname", ifname)
     if with_secret:
         command.append("--password-stdin")
     return command
+
+
+def ethernet_status_snapshot():
+    command = device_control_cli_command("ethernet-status", "--json")
+    rc, output, error = run(command, timeout=12)
+    if rc != 0:
+        return {"ok": False, "state": "diagnostic_unavailable", "devices": [],
+                "reason_code": "E_ETHERNET_STATUS_FAILED",
+                "reason_text": error or output or "有线网络状态读取失败。"}
+    try:
+        return json.loads(output)
+    except (TypeError, ValueError):
+        return {"ok": False, "state": "diagnostic_unavailable", "devices": [],
+                "reason_code": "E_ETHERNET_STATUS_JSON",
+                "reason_text": "有线网络状态返回了无效数据。"}
 
 
 def bluetooth_status_snapshot():
@@ -437,6 +550,28 @@ class GenerationState:
         self.generation += 1
 
 
+class PointerMutationSerial:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.states = {}
+
+    def begin(self, key):
+        with self.lock:
+            generation, mutation_lock = self.states.get(key, (0, threading.Lock()))
+            self.states[key] = (generation + 1, mutation_lock)
+            return generation + 1
+
+    def apply(self, key, generation, operation):
+        with self.lock:
+            _current, mutation_lock = self.states.setdefault(key, (0, threading.Lock()))
+        with mutation_lock:
+            with self.lock:
+                current, _lock = self.states[key]
+                if generation != current:
+                    return None
+            return operation()
+
+
 def read_broadcom_status_snapshot():
     manager = "/usr/local/sbin/ming-broadcom-driver"
     rc, output, error = run([manager, "status", "--json"], timeout=8)
@@ -478,6 +613,7 @@ PAGE_ALIASES = {
     "account": "账户",
     "network": "网络与蓝牙",
     "storage": "存储",
+    "appearance": "外观与指针",
     "update": "系统更新",
     "display": "显示与无障碍",
     "advanced": "高级设置",
@@ -498,10 +634,13 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_probe_state = GenerationState()
         self.wifi_probe_state = GenerationState()
         self.wifi_connect_state = GenerationState()
+        self.ethernet_probe_state = GenerationState()
         self.bluetooth_probe_state = GenerationState()
         self.audio_probe_state = GenerationState()
         self.playback_audio_probe_state = GenerationState()
         self.time_sync_probe_state = GenerationState()
+        self.pointer_probe_state = GenerationState()
+        self.pointer_mutations = PointerMutationSerial()
         self.connect("close-request", self.on_close_request)
         self.install_css()
 
@@ -545,8 +684,10 @@ class MingSettings(Adw.ApplicationWindow):
         # 注册分类页（图标, 标题, 构建函数）
         self.pages = [
             ("avatar-default-symbolic", "账户", self.build_account),
+            ("security-high-symbolic", "安全", self.build_security),
             ("network-wireless-symbolic", "网络与蓝牙", self.build_network),
             ("drive-harddisk-symbolic", "存储", self.build_storage),
+            ("preferences-desktop-theme-symbolic", "外观与指针", self.build_appearance_pointer),
             ("software-update-available-symbolic", "系统更新", self.build_update),
             ("preferences-desktop-display-symbolic", "显示与无障碍", self.build_display),
             ("preferences-other-symbolic", "高级设置", self.build_advanced),
@@ -557,7 +698,7 @@ class MingSettings(Adw.ApplicationWindow):
             row = Gtk.ListBoxRow()
             row.add_css_class("ming-nav-row")
             hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            hb.set_margin_top(9); hb.set_margin_bottom(9)
+            hb.set_margin_top(8); hb.set_margin_bottom(8)
             hb.set_margin_start(12); hb.set_margin_end(12)
             img = Gtk.Image.new_from_icon_name(icon)
             lbl = Gtk.Label(label=title, xalign=0)
@@ -583,6 +724,13 @@ class MingSettings(Adw.ApplicationWindow):
         window.ming-settings-window {
             background: #F4F7F3;
             color: #1B2320;
+            font-family: "Noto Sans CJK SC", sans-serif;
+            font-weight: 400;
+        }
+
+        .ming-settings-window .title,
+        .ming-settings-window .heading {
+            font-weight: 600;
         }
 
         .ming-settings-sidebar {
@@ -602,13 +750,13 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window list.navigation-sidebar {
             background: transparent;
-            margin: 10px;
+            margin: 12px;
         }
 
         .ming-settings-window row.ming-nav-row {
             border-radius: 12px;
-            margin: 3px 0;
-            min-height: 46px;
+            margin: 4px 0;
+            min-height: 48px;
         }
 
         .ming-settings-window row.ming-nav-row:hover {
@@ -646,21 +794,20 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup {
-            margin-bottom: 6px;
+            margin-bottom: 8px;
         }
 
         .ming-settings-window preferencesgroup > box {
             background: alpha(#FFFFFF, 0.94);
             border-radius: 14px;
             border: 1px solid alpha(#2F8A7D, 0.06);
-            padding: 4px;
+            padding: 8px;
         }
 
         .ming-settings-window button {
             border-radius: 10px;
-            min-height: 38px;
-            padding-left: 15px;
-            padding-right: 15px;
+            min-height: 36px;
+            padding: 6px 12px;
         }
 
         .ming-settings-window button.suggested-action {
@@ -675,6 +822,8 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
             border-radius: 10px;
+            min-height: 36px;
+            padding: 6px 12px;
         }
 
         .ming-settings-window progressbar trough {
@@ -748,10 +897,12 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_probe_state.invalidate()
         self.wifi_probe_state.invalidate()
         self.wifi_connect_state.invalidate()
+        self.ethernet_probe_state.invalidate()
         self.bluetooth_probe_state.invalidate()
         self.audio_probe_state.invalidate()
         self.playback_audio_probe_state.invalidate()
         self.time_sync_probe_state.invalidate()
+        self.pointer_probe_state.invalidate()
         return False
 
     # ---- 通用 UI 助手 ----
@@ -1030,22 +1181,122 @@ class MingSettings(Adw.ApplicationWindow):
             return
         if not p1:
             # 清空密码 = 保持免密
-            run(["pkexec", "passwd", "-d", USER])
-            self.toast("已设为免密登录。")
+            run_capture_async(
+                account_password_command(USER, clear=True),
+                timeout=30,
+                on_done=self.on_password_saved)
             return
-        # 通过 pkexec chpasswd 设置
+        valid, error = validate_account_password(p1)
+        if not valid:
+            self.toast(error)
+            return
+
+        run_capture_stdin_async(
+            account_password_command(USER), p1, timeout=30, on_done=self.on_password_saved)
+
+    def on_password_saved(self, rc, output, error):
         try:
-            proc = subprocess.run(
-                ["pkexec", "bash", "-c", "chpasswd"],
-                input="%s:%s\n" % (USER, p1), text=True,
-                capture_output=True, timeout=20)
-            if proc.returncode == 0:
-                self.toast("密码已更新。开机仍自动进入桌面。")
-                self.pw1.set_text(""); self.pw2.set_text("")
-            else:
-                self.toast("设置失败：%s" % (proc.stderr or "权限被拒绝"))
-        except Exception as e:
-            self.toast("设置失败：%s" % e)
+            result = json.loads(output or "{}")
+        except (TypeError, ValueError):
+            result = {}
+        if rc == 0 and result.get("ok"):
+            self.pw1.set_text("")
+            self.pw2.set_text("")
+            self.toast("账户密码状态已更新并确认。")
+        else:
+            self.toast("设置失败：%s" % (result.get("error") or error or "授权被取消"))
+
+    def build_security(self):
+        sc, box = self.page_scroller()
+        self.security_page = sc
+        self.loading_security_state = True
+        summary = Adw.PreferencesGroup(
+            title="安全状态", description="显示防火墙、远程终端和安全更新的实际状态。")
+        self.security_summary_row = Adw.ActionRow(
+            title="正在检查", subtitle="正在读取系统保护状态...")
+        summary.add(self.security_summary_row)
+        box.append(summary)
+
+        controls = Adw.PreferencesGroup(
+            title="保护设置", description="更改后会再次读取确认；失败会恢复原设置。")
+        self.firewall_switch = Adw.SwitchRow(title="防火墙", subtitle="阻止未经请求的外部连接")
+        self.ssh_switch = Adw.SwitchRow(
+            title="远程终端", subtitle="开启后仍只允许局域网通过防火墙访问")
+        self.security_updates_switch = Adw.SwitchRow(
+            title="自动安全更新", subtitle="自动安装 Debian 安全修复")
+        self.home_profile_switch = Adw.SwitchRow(
+            title="家庭网络模式", subtitle="允许局域网发现；关闭时使用公共网络规则")
+        for name, control in (
+                ("firewall", self.firewall_switch), ("ssh", self.ssh_switch),
+                ("security-updates", self.security_updates_switch),
+                ("profile", self.home_profile_switch)):
+            control.set_sensitive(False)
+            control.connect("notify::active", self.on_security_toggle, name)
+            controls.add(control)
+        box.append(controls)
+        GLib.idle_add(self.refresh_security_status)
+        return sc
+
+    def refresh_security_status(self):
+        def done(rc, output, error):
+            if self.security_page.get_root() is not self:
+                return False
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except ValueError:
+                status = {}
+            if not status.get("ok"):
+                self.security_summary_row.set_title("安全状态暂不可用")
+                self.security_summary_row.set_subtitle(error or "无法读取系统保护状态。")
+                return False
+            firewall = status.get("firewall") or {}
+            profile = status.get("profile") or {}
+            updates = status.get("security_updates") or {}
+            ssh = status.get("ssh") or {}
+            self.loading_security_state = True
+            self.firewall_switch.set_active(bool(firewall.get("configured")))
+            self.ssh_switch.set_active(bool(ssh.get("active") and ssh.get("firewall_allowed")))
+            self.security_updates_switch.set_active(bool(updates.get("configured")))
+            self.home_profile_switch.set_active(profile.get("configured") == "home")
+            self.loading_security_state = False
+            for control in (self.firewall_switch, self.ssh_switch,
+                            self.security_updates_switch, self.home_profile_switch):
+                control.set_sensitive(True)
+            self.security_summary_row.set_title("安全状态已更新")
+            self.security_summary_row.set_subtitle(
+                "防火墙%s · 远程终端%s · 安全更新%s" % (
+                    "已开启" if firewall.get("effective") else "未生效",
+                    "已开启" if ssh.get("active") else "已关闭",
+                    "已开启" if updates.get("effective") else "未生效"))
+            return False
+
+        run_capture_async(
+            ["/usr/local/sbin/ming-security-control", "status", "--json"],
+            timeout=10, on_done=done)
+
+    def on_security_toggle(self, control, _prop, name):
+        if self.loading_security_state:
+            return
+        value = ("home" if control.get_active() else "public") if name == "profile" else (
+            "on" if control.get_active() else "off")
+        for item in (self.firewall_switch, self.ssh_switch,
+                     self.security_updates_switch, self.home_profile_switch):
+            item.set_sensitive(False)
+
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except ValueError:
+                result = {}
+            if rc != 0 or not result.get("ok"):
+                self.toast("安全设置未能应用：%s" % (
+                    result.get("error") or error or "授权被取消"))
+            self.refresh_security_status()
+            return False
+
+        run_capture_async(
+            ["pkexec", "/usr/local/sbin/ming-security-control", name, value],
+            timeout=40, on_done=done)
 
     # ---- 2. 网络与蓝牙 ----
     def build_network(self):
@@ -1063,13 +1314,26 @@ class MingSettings(Adw.ApplicationWindow):
         time_grp.add(self.time_sync_row)
         box.append(time_grp)
 
+        ethernet_grp = Adw.PreferencesGroup(
+            title="有线网络", description="只检测和修复指定有线接口，不重启整个 NetworkManager。")
+        self.ethernet_status_row = Adw.ActionRow(
+            title="正在检测有线网络", subtitle="正在读取网线、DHCP、路由、DNS 与互联网状态...")
+        refresh_ethernet = Gtk.Button(label="刷新状态")
+        refresh_ethernet.set_valign(Gtk.Align.CENTER)
+        refresh_ethernet.connect("clicked", lambda _button: self.refresh_ethernet_status())
+        self.ethernet_status_row.add_suffix(refresh_ethernet)
+        ethernet_grp.add(self.ethernet_status_row)
+        self.ethernet_detail_grp = ethernet_grp
+        self.ethernet_rows = []
+        box.append(ethernet_grp)
+
         # WLAN 开关
         self.wifi_diagnostic = {
             "state": "checking", "present": False, "available": False,
             "title": "正在检测无线网络", "detail": "正在读取硬件与驱动状态..."}
         wifi_grp = Adw.PreferencesGroup(
             title="无线网络 (WLAN)",
-            description="没有可用网络时会同时显示硬件、驱动、rfkill 与固件状态。")
+            description="没有可用网络时会同时显示硬件、驱动、rfkill 与固件状态；b43 私有固件不可内置时只显示兼容说明。")
         self.wifi_diagnostic_row = Adw.ActionRow(
             title=self.wifi_diagnostic["title"],
             subtitle=self.wifi_diagnostic["detail"])
@@ -1130,6 +1394,7 @@ class MingSettings(Adw.ApplicationWindow):
         bt_grp.add(open_blueman)
         box.append(bt_grp)
         GLib.idle_add(self.on_wifi_status_refresh, None)
+        GLib.idle_add(self.refresh_ethernet_status)
         GLib.idle_add(self.refresh_bluetooth_status)
         GLib.idle_add(self.refresh_time_sync_status)
 
@@ -1138,7 +1403,7 @@ class MingSettings(Adw.ApplicationWindow):
                 self.wifi_switch.set_active(output.strip() == "enabled")
             self.loading_wifi_state = False
 
-        run_capture_async(["nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
+        run_capture_async(["env", "LC_ALL=C", "nmcli", "radio", "wifi"], timeout=6, on_done=wifi_radio_done)
         return sc
 
     def apply_time_sync_status(self, status):
@@ -1195,12 +1460,94 @@ class MingSettings(Adw.ApplicationWindow):
 
         run_capture_async(["pkexec", TIME_SYNC_HELPER, "sync"], timeout=80, on_done=done)
 
+    def refresh_ethernet_status(self):
+        generation = self.ethernet_probe_state.begin()
+        self.ethernet_status_row.set_title("正在检测有线网络")
+        self.ethernet_status_row.set_subtitle("正在读取网线、DHCP、路由、DNS 与互联网状态...")
+
+        def done(snapshot, error):
+            if not self.ethernet_probe_state.accept(generation):
+                return False
+            if self.network_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {"ok": False, "devices": [], "reason_text": error or "无法读取有线网络。"}
+            devices = snapshot.get("devices") or []
+            for row in getattr(self, "ethernet_rows", []):
+                self.ethernet_detail_grp.remove(row)
+            self.ethernet_rows = []
+            if not devices:
+                self.ethernet_status_row.set_title("未检测到有线网络")
+                self.ethernet_status_row.set_subtitle(
+                    snapshot.get("reason_text") or "当前没有 NetworkManager 管理的有线网卡。")
+                return False
+            best = devices[0]
+            internet = best.get("internet") or {}
+            self.ethernet_status_row.set_title(
+                "有线网络%s" % ("已联网" if internet.get("state") == "online" else "需要检查"))
+            self.ethernet_status_row.set_subtitle(
+                internet.get("reason_text") or "已检测到有线网卡。")
+            for device in devices:
+                internet = device.get("internet") or {}
+                ipv4 = device.get("ipv4") or {}
+                title = "%s · %s" % (device.get("ifname") or "有线接口",
+                                      device.get("state") or "unknown")
+                subtitle = (
+                    "网线：%s · 速率：%sMbps · IP：%s · DNS：%s · 联网：%s" % (
+                        "已连接" if device.get("carrier") else "未确认",
+                        device.get("speed_mbps") or "未知",
+                        ", ".join(ipv4.get("addresses") or []) or "未获取",
+                        ", ".join(ipv4.get("dns") or []) or "未获取",
+                        internet.get("reason_text") or internet.get("state") or "待验证"))
+                row = Adw.ActionRow(title=title, subtitle=subtitle)
+                repair = Gtk.Button(label="重连此接口")
+                repair.set_valign(Gtk.Align.CENTER)
+                repair.connect("clicked", self.on_ethernet_repair, device.get("ifname") or "")
+                row.add_suffix(repair)
+                self.ethernet_detail_grp.add(row)
+                self.ethernet_rows.append(row)
+            return False
+
+        run_task_async(ethernet_status_snapshot, done)
+
+    def on_ethernet_repair(self, button, ifname):
+        if not ifname:
+            self.toast("有线修复未执行：接口名称为空。", "warning")
+            return
+        generation = self.ethernet_probe_state.begin()
+        button.set_sensitive(False)
+        button.set_label("正在重连...")
+
+        def done(rc, output, error):
+            if not self.ethernet_probe_state.accept(generation):
+                return False
+            if self.network_page.get_root() is not self:
+                return False
+            button.set_sensitive(True)
+            button.set_label("重连此接口")
+            try:
+                result = json.loads(output) if output else {}
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.toast("已请求重连有线接口 %s。" % ifname, "info")
+            else:
+                self.toast(
+                    "有线重连失败：%s" % (
+                        result.get("reason_text") or error or "NetworkManager 未返回可读原因。"),
+                    "error")
+            self.refresh_ethernet_status()
+            return False
+
+        run_capture_async(
+            device_control_cli_command("ethernet-repair", "--ifname", ifname, "--json"),
+            timeout=30, on_done=done)
+
     def on_wifi_toggle(self, sw, _p):
         if self.loading_wifi_state:
             return
         state = "on" if sw.get_active() else "off"
         run_capture_async(
-            ["nmcli", "radio", "wifi", state], timeout=8,
+            ["env", "LC_ALL=C", "nmcli", "radio", "wifi", state], timeout=8,
             on_done=lambda rc, _output, error: (
                 self.toast("无线网络切换失败：%s" % (error or "NetworkManager 不可用"))
                 if rc != 0 else None))
@@ -1221,10 +1568,20 @@ class MingSettings(Adw.ApplicationWindow):
             self.wifi_diagnostic = snapshot or {
                 "state": "no_hardware", "present": False, "available": False,
                 "title": "无线网络检测失败", "detail": error or "未知错误"}
+            if self.wifi_diagnostic.get("firmware_policy") == "unredistributable_b43":
+                if self.wifi_diagnostic.get("state") == "firmware_external_required":
+                    pass
+                self.wifi_diagnostic["title"] = "Broadcom b43 需要兼容说明"
+                self.wifi_diagnostic["detail"] = (
+                    self.wifi_diagnostic.get("detail") or
+                    "检测到 b43 固件缺失；该固件不可内置到公开 ISO。")
+                self.wifi_scan_btn.set_label("查看兼容说明")
             self.wifi_diagnostic_row.set_title(self.wifi_diagnostic["title"])
             self.wifi_diagnostic_row.set_subtitle(self.wifi_diagnostic["detail"])
             self.wifi_switch.set_sensitive(self.wifi_diagnostic["present"])
-            self.wifi_scan_btn.set_sensitive(self.wifi_diagnostic["available"])
+            self.wifi_scan_btn.set_sensitive(
+                self.wifi_diagnostic["available"] or
+                self.wifi_diagnostic.get("action") in {"compatibility_help", "show_b43_help"})
             if self.wifi_list_state_row:
                 self.wifi_list_state_row.set_title(self.wifi_diagnostic["title"])
                 self.wifi_list_state_row.set_subtitle(self.wifi_diagnostic["detail"])
@@ -1385,6 +1742,7 @@ class MingSettings(Adw.ApplicationWindow):
         run_task_async(wifi_scan_snapshot, done)
 
     def on_wifi_connect(self, _btn, network):
+        network_id = network["network_id"]
         ssid = network["ssid"]
         bssid = network["bssid"]
         ifname = network["ifname"]
@@ -1402,8 +1760,11 @@ class MingSettings(Adw.ApplicationWindow):
                 generation = self.wifi_connect_state.begin()
                 secret = entry.get_text()
                 entry.set_text("")
+                if _btn:
+                    _btn.set_sensitive(False)
+                    _btn.set_label("正在连接...")
                 def connected(result, error):
-                    self.apply_wifi_connect_result(generation, ssid, bssid, result, error)
+                    self.apply_wifi_connect_result(generation, ssid, bssid, result, error, _btn)
 
                 def parse_connected(rc, output, error):
                     try:
@@ -1412,7 +1773,7 @@ class MingSettings(Adw.ApplicationWindow):
                         result = None
                     connected(result, error if rc != 0 else "")
 
-                command = wifi_connect_command(ssid, bssid, ifname, with_secret=bool(secret))
+                command = wifi_connect_command(network_id, ifname, with_secret=bool(secret))
                 if secret:
                     run_capture_stdin_async(command, secret + "\n", timeout=40, on_done=parse_connected)
                 else:
@@ -1420,18 +1781,170 @@ class MingSettings(Adw.ApplicationWindow):
         dlg.connect("response", on_resp)
         dlg.present()
 
-    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error):
+    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error, button=None):
         if not self.wifi_connect_state.accept(generation):
             return False
         if self.network_page.get_root() is not self:
             return False
+        if button:
+            button.set_sensitive(True)
+            button.set_label("连接")
         result = result or {"ok": False, "error": error or "无线连接失败。"}
         self.toast(
             "已连接 %s（%s）。" % (ssid, bssid) if result.get("ok")
             else "连接失败：%s" % (
-                result.get("error") or "NetworkManager 未返回可读原因。"),
+                result.get("reason_text") or result.get("error") or "NetworkManager 未返回可读原因。"),
             "info" if result.get("ok") else "error")
+        if result.get("ok"):
+            self.on_wifi_scan(self.wifi_scan_btn)
         return False
+
+    def appearance_command(self, *arguments):
+        if os.path.isfile(APPEARANCE_CONTROL_HELPER):
+            return [APPEARANCE_CONTROL_HELPER] + list(arguments)
+        return [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              "ming-appearance-control.py")] + list(arguments)
+
+    def build_appearance_pointer(self):
+        sc, box = self.page_scroller()
+        self.appearance_loading = True
+        self.appearance_controls = []
+        appearance = Adw.PreferencesGroup(
+            title="外观与桌面", description="设置会保存到当前用户，并在写入后读取确认。")
+        box.append(appearance)
+
+        def choice(title, values, labels, argument):
+            row = Adw.ActionRow(title=title)
+            dropdown = Gtk.DropDown.new_from_strings(labels)
+            dropdown.connect("notify::selected", self.on_appearance_choice,
+                             values, argument)
+            row.add_suffix(dropdown)
+            appearance.add(row)
+            self.appearance_controls.append(dropdown)
+
+        choice("主题", APPEARANCE_THEMES, ["跟随系统", "浅色", "深色"], "--theme")
+        choice("字体大小", APPEARANCE_FONT_SIZES,
+               [str(value) for value in APPEARANCE_FONT_SIZES], "--font-size")
+        choice("内置壁纸", APPEARANCE_WALLPAPERS, ["默认", "浅色", "深色"], "--wallpaper")
+        restore = Gtk.Button(label="恢复默认壁纸")
+        restore.connect("clicked", lambda _button: self.apply_appearance(["--wallpaper", "default"]))
+        appearance.add(self.button_row("壁纸", "恢复当前 26.4.0 兼容的默认壁纸。", restore))
+
+        pointer = Adw.PreferencesGroup(
+            title="鼠标与触控板", description="直接读取并应用设备支持的 libinput 设置；虚拟机没有指针设备时会明确提示。")
+        box.append(pointer)
+        self.pointer_page = sc
+        self.pointer_status = Adw.ActionRow(title="指针设备", subtitle="正在读取…")
+        pointer.add(self.pointer_status)
+        self.pointer_switches = {}
+        for title, setting in (("左手主键", "left_handed"),
+                               ("自然滚动", "natural_scroll"),
+                               ("轻触点击", "tap"),
+                               ("打字时禁用触控板", "disable_while_typing")):
+            switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            switch.set_sensitive(False)
+            switch.connect("notify::active", self.on_pointer_toggle, setting)
+            row = Adw.ActionRow(title=title)
+            row.add_suffix(switch)
+            pointer.add(row)
+            self.pointer_switches[setting] = switch
+        GLib.idle_add(self.refresh_appearance_status)
+        GLib.idle_add(self.refresh_pointer_status)
+        return sc
+
+    def refresh_appearance_status(self):
+        def done(rc, output, error):
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except (TypeError, ValueError):
+                status = {}
+            if not isinstance(status, dict):
+                status = {}
+            values = [status.get("theme", "system"), status.get("font_size", 11),
+                      status.get("wallpaper", "default")]
+            for control, value, choices in zip(
+                    self.appearance_controls, values,
+                    (APPEARANCE_THEMES, APPEARANCE_FONT_SIZES, APPEARANCE_WALLPAPERS)):
+                self.appearance_loading = True
+                control.set_selected(choices.index(value) if value in choices else 0)
+            self.appearance_loading = False
+            if rc != 0:
+                self.toast(error or "无法读取外观设置。", "warning")
+            return False
+        run_capture_async(self.appearance_command("status", "--json"), timeout=8, on_done=done)
+        return False
+
+    def on_appearance_choice(self, widget, _param, values, argument):
+        if self.appearance_loading:
+            return
+        selected = min(widget.get_selected(), len(values) - 1)
+        self.apply_appearance([argument, str(values[selected])])
+
+    def apply_appearance(self, arguments):
+        self.appearance_loading = True
+        def done(rc, output, error):
+            if rc != 0:
+                self.toast(error or output or "外观设置未能应用，已恢复上次有效配置。", "warning")
+            self.refresh_appearance_status()
+            return False
+        run_capture_async(self.appearance_command("apply", *arguments, "--json"),
+                          timeout=15, on_done=done)
+
+    def refresh_pointer_status(self):
+        generation = self.pointer_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.pointer_probe_state.accept(generation):
+                return False
+            if self.pointer_page.get_root() is not self:
+                return False
+            snapshot = snapshot or {"devices": [], "error": error or "指针设备读取失败。"}
+            devices = snapshot.get("devices") or []
+            self.pointer_status.set_subtitle(
+                " · ".join(item.get("name", "未知设备") for item in devices)
+                or snapshot.get("error") or "未检测到指针设备。")
+            self.pointer_snapshot = snapshot
+            for setting, switch in self.pointer_switches.items():
+                values = [pointer_property_value(item.get("properties"), setting)
+                          for item in devices]
+                values = [value for value in values if value is not None]
+                switch.set_sensitive(bool(values))
+                self.pointer_loading = True
+                if values:
+                    switch.set_active(all(value == 1 for value in values))
+                self.pointer_loading = False
+            return False
+
+        run_task_async(pointer_device_snapshot, done)
+        return False
+
+    def on_pointer_toggle(self, switch, _param, setting):
+        if getattr(self, "pointer_loading", False):
+            return
+        devices = list(getattr(self, "pointer_snapshot", {}).get("devices", []))
+        value = int(switch.get_active())
+        generations = {(device["id"], setting): self.pointer_mutations.begin(
+            (device["id"], setting)) for device in devices}
+
+        def apply_all():
+            results = []
+            for device in devices:
+                key = (device["id"], setting)
+                result = self.pointer_mutations.apply(
+                    key, generations[key],
+                    lambda target=device: set_pointer_property(target["id"], setting, value))
+                if result is not None:
+                    results.append(result)
+            return results
+
+        def done(results, error):
+            failure = next((result for result in (results or []) if not result.get("ok")), None)
+            if failure or error:
+                self.toast((failure or {}).get("error") or error, "warning")
+            self.refresh_pointer_status()
+            return False
+
+        run_task_async(apply_all, done)
 
     # ---- 3. 存储可视化（合并后空间使用率） ----
     def build_storage(self):
@@ -1477,9 +1990,56 @@ class MingSettings(Adw.ApplicationWindow):
 
         refresh = Gtk.Button(label="刷新")
         refresh.set_margin_top(12)
-        refresh.connect("clicked", lambda _b: self.toast("已是最新空间使用情况。"))
+        refresh.connect("clicked", lambda _b: self.refresh_storage_partitions())
         box.append(refresh)
+
+        partition_group = Adw.PreferencesGroup(
+            title="本机分区", description="只读显示磁盘和分区状态，不会自动挂载、格式化或修改启动配置。")
+        self.storage_partition_group = partition_group
+        self.storage_partition_status = Adw.ActionRow(
+            title="正在读取", subtitle="正在读取本机磁盘清单…")
+        partition_group.add(self.storage_partition_status)
+        self.storage_partition_rows = []
+        self.storage_partition_probe_state = GenerationState()
+        box.append(partition_group)
+        self.refresh_storage_partitions()
         return sc
+
+    def refresh_storage_partitions(self):
+        generation = self.storage_partition_probe_state.begin()
+
+        def done(snapshot, error):
+            if not self.storage_partition_probe_state.accept(generation):
+                return False
+            if self.storage_partition_group.get_root() is not self:
+                return False
+            for row in self.storage_partition_rows:
+                self.storage_partition_group.remove(row)
+            self.storage_partition_rows = []
+            snapshot = snapshot or {"ok": False, "error": error or "无法读取本机分区。"}
+            if not snapshot.get("ok"):
+                self.storage_partition_status.set_title("分区清单不可用")
+                self.storage_partition_status.set_subtitle(snapshot.get("error") or "无法读取本机分区。")
+                return False
+            partitions = snapshot.get("partitions") or []
+            self.storage_partition_status.set_title("已读取 %d 个本机设备" % len(partitions))
+            self.storage_partition_status.set_subtitle(
+                "仅显示本地磁盘与分区；虚拟、光盘和压缩设备已隐藏。")
+            for item in partitions:
+                path = str(item.get("path") or "未知设备")
+                state = "已挂载" if item.get("state") == "mounted" else "未挂载"
+                mountpoints = ", ".join(item.get("mountpoints") or []) or "无挂载点"
+                fstype = str(item.get("fstype") or "未知文件系统")
+                size = self._hsize(int(item.get("size") or 0))
+                row = Adw.ActionRow(
+                    title="%s · %s" % (path, state),
+                    subtitle="%s · %s · %s" % (fstype, size, mountpoints))
+                self.storage_partition_group.add(row)
+                self.storage_partition_rows.append(row)
+            return False
+
+        run_task_async(storage_partition_snapshot, done)
+        return False
 
     def _hsize(self, n):
         for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -1560,9 +2120,14 @@ class MingSettings(Adw.ApplicationWindow):
         ready = bool(status.get("ready"))
         version = str(status.get("new_version") or "")
         notes = str(status.get("release_notes") or "")
+        update_type = str(status.get("update_type") or "")
         error = str(status.get("error") or "")
         manifest_path = str(status.get("manifest_path") or "")
         manifest_sha256 = str(status.get("manifest_sha256") or "")
+        home_preservation = status.get("home_preservation")
+        home_preservation = home_preservation if isinstance(home_preservation, dict) else {}
+        preservation_ready = bool(home_preservation.get("ready"))
+        preservation_message = str(home_preservation.get("message") or "")
 
         # A privileged process must apply the exact update that this page
         # presents.  Empty fields deliberately make the action unavailable:
@@ -1575,9 +2140,9 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_action_button.set_sensitive(True)
         if action == "reboot":
             self.update_action_state = "reboot"
-            self.update_action_button.set_label("已安排重启")
+            self.update_action_button.set_label("正在自动重启")
             self.update_action_button.set_sensitive(False)
-            self.update_status.set_label("新版本 %s 已准备完成，将在下一次重启时继续安装。" % (version or ""))
+            self.update_status.set_label("新版本 %s 已准备完成，系统将自动重启并继续安装。" % (version or ""))
             return
         if available and ready and action == "apply":
             if not manifest_path or not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest_sha256):
@@ -1587,11 +2152,27 @@ class MingSettings(Adw.ApplicationWindow):
                 return
             self.update_manifest_path = manifest_path
             self.update_manifest_sha256 = manifest_sha256.lower()
+            if update_type == "major":
+                self.update_detail.set_label(
+                    "更新说明：\n%s\n\n升级准备：%s" % (
+                        notes or "暂无更新说明。",
+                        preservation_message or "正在检查用户文件保留条件。",
+                    ))
+                self.update_detail.set_visible(True)
+                if not preservation_ready:
+                    self.update_manifest_path = ""
+                    self.update_manifest_sha256 = ""
+                    self.update_action_state = "check"
+                    self.update_action_button.set_label("连接备份盘后重新检查")
+                    self.update_status.set_label(
+                        "发现新版本，但还不能安全开始 major OTA。")
+                    return
             self.update_action_state = "apply"
             self.update_action_button.set_label("立即更新")
             self.update_status.set_label("发现新版本：Ming OS %s" % (version or "未知"))
-            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
-            self.update_detail.set_visible(True)
+            if update_type != "major":
+                self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
+                self.update_detail.set_visible(True)
             return
 
         self.update_action_state = "check"
@@ -1617,16 +2198,25 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_fraction(0.15)
         self.update_bar.set_text("正在检查…")
         self.update_status.set_label("正在检查更新…")
+        self.update_last_error = ""
+        self.update_last_output = ""
 
         def line(message):
             if message:
+                self.update_last_output = message.strip()
                 self.update_status.set_label(message)
+                lower = message.lower()
+                if "[ERROR]" in message:
+                    self.update_last_error = message.replace("[ERROR]", "").strip()
+                elif any(token in lower for token in ("authorization", "not authorized", "error", "错误")):
+                    self.update_last_error = message.strip()
 
         def done(rc):
             self.update_bar.set_visible(False)
             self.update_action_button.set_sensitive(True)
             if rc != 0:
-                self.update_status.set_label("检查更新失败，请确认网络后重试。")
+                detail = self.update_last_error or self.update_last_output or "请确认网络、签名和更新源后重试。"
+                self.update_status.set_label("检查更新失败：%s" % detail)
                 return
             self.update_status.set_label("检查完成，正在读取结果…")
             self.refresh_update_status()
@@ -1643,27 +2233,38 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_visible(True)
         self.update_bar.set_fraction(0.1)
         self.update_bar.set_text("正在更新…")
-        self.update_status.set_label("正在自动选择更新方式并执行…")
+        self.update_status.set_label("正在自动选择更新方式并执行；完成后会自动重启…")
+        self.update_last_error = ""
+        self.update_last_output = ""
 
         def line(message):
             if message:
+                self.update_last_output = message.strip()
                 self.update_status.set_label(message)
+                lower = message.lower()
+                if "[ERROR]" in message:
+                    self.update_last_error = message.replace("[ERROR]", "").strip()
+                elif any(token in lower for token in ("authorization", "not authorized", "error", "错误")):
+                    self.update_last_error = message.strip()
 
         def done(rc):
             self.update_bar.set_fraction(1.0)
             if rc == 0:
                 self.update_bar.set_text("完成")
-                self.update_status.set_label("更新操作已完成，正在刷新状态…")
-                self.refresh_update_status()
+                self.update_action_state = "reboot"
+                self.update_action_button.set_label("正在自动重启")
+                self.update_status.set_label("更新操作已完成，系统正在自动重启…")
             else:
                 self.update_bar.set_text("失败")
-                self.update_status.set_label("更新未完成，请查看系统更新日志后重试。")
+                detail = self.update_last_error or self.update_last_output or "更新程序没有返回可用的失败原因。"
+                self.update_status.set_label("更新未完成：%s" % detail)
                 self.update_action_button.set_sensitive(True)
 
         run_async([
             "pkexec", "ming-update", "apply",
             "--manifest", self.update_manifest_path,
             "--sha256", self.update_manifest_sha256,
+            "--restart-after-stage",
         ], on_line=line, on_done=done)
 
     # ---- 5. 显示与无障碍（真实 xrandr 模式 + 独立界面大小） ----
@@ -1848,8 +2449,8 @@ class MingSettings(Adw.ApplicationWindow):
         percent = min((100, 125, 150, 175, 200), key=lambda value: abs(value - int(percent)))
         size = int(round(11 * percent / 100.0))
         # 1) 系统字体
-        run(["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "Sans %d" % size])
-        run(["xfconf-query", "-c", "xfwm4", "-p", "/general/title_font", "-s", "Sans Bold %d" % size])
+        run(["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", "Noto Sans CJK SC %d" % size])
+        run(["xfconf-query", "-c", "xfwm4", "-p", "/general/title_font", "-s", "Noto Sans CJK SC Medium %d" % size])
         # 2) 桌面图标随字体等比（xfdesktop icon-size），基准 11→48px
         icon_px = int(round(48 * size / 11.0))
         run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/desktop-icons/icon-size",
@@ -1894,7 +2495,7 @@ class MingSettings(Adw.ApplicationWindow):
             "窗口自动置顶延迟", "仅在跟随鼠标模式下生效，单位毫秒。",
             "window_raise_delay", 0, 2000, 100, 250))
         window_grp.add(self.backend_switch_row(
-            "减少动态效果", "使用短淡入替代抽屉和应用展开动画。",
+            "减少动态效果", "关闭抽屉、应用启动和小组件的动态过渡。",
             "reduced_motion", False))
         window_grp.add(self.backend_combo_row(
             "合成器模式", "自动模式优先；老显卡或虚拟机可选择软件模式。",
@@ -2353,7 +2954,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         broadcom_grp = Adw.PreferencesGroup(
             title="Broadcom 无线兼容",
-            description="默认使用内核开源驱动；仅在官方支持的设备没有无线接口时提供离线 STA 备选。")
+            description="默认使用内核开源驱动；b43 私有固件不可内置到公开 ISO，仅显示兼容说明；只在官方支持设备没有无线接口时提供离线 STA 备选。")
         box.append(broadcom_grp)
         self.broadcom_row = Adw.ActionRow(title="Broadcom 无线驱动")
         self.broadcom_button = Gtk.Button()
@@ -2386,9 +2987,16 @@ class MingSettings(Adw.ApplicationWindow):
                 self.pkexec_cmd("/usr/local/bin/ming-disk-health"), "磁盘健康检查"))
         surface = Gtk.Button(label="安装 Surface 支持")
         surface.connect("clicked", lambda _b: self.run_helper(self.pkexec_cmd("ming-surface-support"), "Surface 支持"))
+        input_repair = Gtk.Button(label="修复输入法")
+        input_repair.connect(
+            "clicked",
+            lambda _b: self.run_helper(
+                self.pkexec_cmd("ming-input-repair", "--user", USER, "--json"),
+                "输入法修复"))
         diag_grp.add(self.button_row("问题诊断包", "把安装器、网络、驱动和启动日志打包到桌面。", bundle))
         diag_grp.add(self.button_row("经典轻量模式", "关闭模糊和重动画，更适合机械硬盘与老 CPU。", classic))
         diag_grp.add(self.button_row("磁盘健康", "按需读取 SATA、SAS 和 NVMe 磁盘的 SMART 状态，不开启常驻监控。", disk_health))
+        diag_grp.add(self.button_row("修复输入法", "备份旧 .xinputrc，恢复 Fcitx5 拼音/Rime 配置并避免 im-config 冲突。", input_repair))
         diag_grp.add(self.button_row("Surface 支持", "仅 Surface 设备需要；会添加 linux-surface 第三方源。", surface))
 
         raw_grp = Adw.PreferencesGroup(
@@ -2656,10 +3264,7 @@ class MingSettings(Adw.ApplicationWindow):
             else:
                 self.restore_status.set_label("回滚失败：未找到出厂快照或权限不足。")
         # timeshift 选择最早的 O(nboot/factory) 快照名
-        run_async(["pkexec", "bash", "-c",
-                   "snap=$(timeshift --list | awk '/ming-factory|O /{print $3; exit}'); "
-                   "[ -n \"$snap\" ] && timeshift --restore --snapshot \"$snap\" --yes "
-                   "|| timeshift --restore --yes"],
+        run_async(["pkexec", "/usr/local/sbin/ming-timeshift-restore"],
                   on_line=line, on_done=done)
 
     # __PAGE_BUILDERS__

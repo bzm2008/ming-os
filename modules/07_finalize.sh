@@ -24,15 +24,12 @@
 set -uo pipefail
 
 readonly USER_HOME="/home/${MING_USER}"
-readonly DEFAULT_DESKTOP_LAYOUT="${USER_HOME}/.config/ming-os/desktop-layout.json"
-
 readonly DESKTOP_LAUNCHERS=(
     "ming-settings.desktop"
     "ming-files.desktop"
-    "ming-edge.desktop"
+    "ming-firefox.desktop"
     "spark-store.desktop"
-    "ming-update.desktop"
-    "garlic-claw.desktop"
+    "papyrus.desktop"
     "ming-terminal.desktop"
 )
 
@@ -48,12 +45,27 @@ refresh_dock_launchers() {
     fi
 
     local name
-    for name in ming-update ming-settings; do
+    for name in ming-settings; do
         if [[ ! -s "/usr/share/applications/ming-dock-${name}.desktop" \
            || ! -s "${USER_HOME}/.config/plank/dock1/launchers/${name}.dockitem" ]]; then
             echo "[07_finalize][ERROR] final Dock launcher missing: ${name}" >&2
             return 1
         fi
+    done
+}
+
+seed_trusted_desktop_receipts() {
+    local receipt_dir="/var/lib/ming-os/trusted-desktops"
+    local launcher source
+    install -d -m 0755 "${receipt_dir}"
+    for launcher in \
+        "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "Install Ming OS.desktop"; do
+        source="/usr/share/applications/${launcher}"
+        [[ -f "${source}" ]] || continue
+        printf '%s\n' "${source}" > "${receipt_dir}/${launcher}"
+        chown root:root "${receipt_dir}/${launcher}" 2>/dev/null || true
+        chmod 0644 "${receipt_dir}/${launcher}"
     done
 }
 
@@ -64,9 +76,9 @@ copy_default_launcher() {
     local source="/usr/share/applications/${launcher}"
 
     case "${launcher}" in
-        ming-edge.desktop)
-            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge.desktop"
-            [[ -f "${source}" ]] || source="/usr/share/applications/microsoft-edge-stable.desktop"
+        ming-firefox.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/firefox-esr.desktop"
+            [[ -f "${source}" ]] || source="/usr/share/applications/firefox.desktop"
             ;;
         spark-store.desktop)
             [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-spark-store.desktop"
@@ -106,8 +118,12 @@ reset_desktop_dir() {
 constrain_default_desktop() {
     echo "[07_finalize] constraining default desktop launchers ..."
 
-    rm -f "${DEFAULT_DESKTOP_LAYOUT}" \
-          "/etc/skel/.config/ming-os/desktop-layout.json" 2>/dev/null || true
+    rm -f "${USER_HOME}/.config/ming-os/desktop-layout.json" \
+          "${USER_HOME}/.config/ming-os/desktop-layout.last-good.json" \
+          "${USER_HOME}/.config/ming-os/desktop-generated-manifest.json" \
+          "/etc/skel/.config/ming-os/desktop-layout.json" \
+          "/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
+          "/etc/skel/.config/ming-os/desktop-generated-manifest.json" 2>/dev/null || true
 
     reset_desktop_dir "${USER_HOME}/Desktop" "${MING_USER}:${MING_USER}"
     reset_desktop_dir "/etc/skel/Desktop" "root:root"
@@ -202,6 +218,7 @@ main() {
     echo "=====> [07_finalize] 开始收尾与配置固化 (${MING_OS_VERSION}) <====="
 
     refresh_dock_launchers || return 1
+    seed_trusted_desktop_receipts
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership
