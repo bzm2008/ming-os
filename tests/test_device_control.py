@@ -820,7 +820,70 @@ class DeviceControlTests(unittest.TestCase):
         self.assertEqual("brightnessctl", result["backend"])
         self.assertEqual(72, result["requested"])
 
-    def test_brightness_readback_is_bounded_and_result_shape_is_stable(self):
+    def test_brightness_readback_mismatch_reports_error_and_actual_value(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "72%"): (0, "", ""),
+            ("brightnessctl", "-m"): (0, "intel_backlight,backlight,1000,1000,100%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(72)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["available"])
+        self.assertEqual("error", result["state"])
+        self.assertEqual(100, result["value"])
+        self.assertEqual(72, result["requested"])
+        self.assertIn("72%", result["error"])
+        self.assertIn("100%", result["error"])
+
+    def test_brightness_readback_accepts_a_single_hardware_quantization_step(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "72%"): (0, "", ""),
+            ("brightnessctl", "-m"): (0, "intel_backlight,backlight,11,15,73%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(72)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["available"])
+        self.assertEqual("ready", result["state"])
+        self.assertEqual(73, result["value"])
+        self.assertEqual(72, result["requested"])
+
+    def test_brightness_readback_rejects_a_nonmatching_coarse_hardware_step(self):
+        runner = FakeRunner({
+            ("brightnessctl", "set", "50%"): (0, "", ""),
+            ("brightnessctl", "-m"): (0, "intel_backlight,backlight,2,2,100%", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "intel_backlight").mkdir()
+            controller = self.device.DeviceController(
+                runner=runner,
+                executable=lambda name: name == "brightnessctl",
+                backlight_root=pathlib.Path(directory),
+            )
+
+            result = controller.set_brightness(50)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("error", result["state"])
+        self.assertEqual(100, result["value"])
+
+    def test_brightness_invalid_readback_is_bounded_and_reports_error(self):
         runner = FakeRunner({
             ("brightnessctl", "set", "72%"): (0, "", ""),
             ("brightnessctl", "-m"): (
@@ -836,13 +899,15 @@ class DeviceControlTests(unittest.TestCase):
 
             result = controller.set_brightness(72)
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(100, result["value"])
         self.assertTrue(0 <= result["value"] <= 100)
         self.assertTrue(result["available"])
-        self.assertEqual("ready", result["state"])
+        self.assertEqual("error", result["state"])
         self.assertEqual("brightnessctl", result["backend"])
         self.assertEqual(72, result["requested"])
+        self.assertIn("72%", result["error"])
+        self.assertIn("100%", result["error"])
         self.assertEqual(
             {"ok", "available", "state", "backend", "requested", "value", "error"},
             set(result),

@@ -2671,27 +2671,180 @@ class StatusWidget(Gtk.Box):
         self.updating_dnd = False
         return False
 
-    def background_update_available(self):
-        """Trust only the root-owned result written by an automatic check."""
+    def background_update_status(self):
+        """Read the sole machine-readable OTA status contract for this menu."""
         try:
             result = subprocess.run(
                 ["ming-update", "status", "--json"],
                 capture_output=True, text=True, timeout=3,
             )
-            status = json.loads(result.stdout) if result.returncode == 0 else {}
+            if result.returncode != 0:
+                log("power menu update status exited rc=%s" % result.returncode)
+                return None
+            status = json.loads(result.stdout)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             log("power menu update status failed: %s" % exc)
-            return False
+            return None
+        return status if isinstance(status, dict) else None
+
+    def background_update_available(self):
+        """Trust only the root-owned result written by an automatic check."""
+        status = self.background_update_status()
         return bool(isinstance(status, dict) and status.get("background_available"))
 
+    @staticmethod
+    def update_progress_text(message):
+        text = str(message or "").strip()
+        if text.startswith("[") and "]" in text:
+            text = text.split("]", 1)[1].strip()
+        return text[:480]
+
+    def start_update_restart_progress(self):
+        dialog = Gtk.Dialog(
+            title="Ming OS 更新", transient_for=self.get_toplevel(),
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        dialog.set_default_size(440, -1)
+        content = dialog.get_content_area()
+        content.set_spacing(12)
+        content.set_margin_top(18)
+        content.set_margin_bottom(18)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        spinner = Gtk.Spinner()
+        message = Gtk.Label(label="正在等待管理员授权…", xalign=0)
+        message.set_line_wrap(True)
+        message.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        row.pack_start(spinner, False, False, 0)
+        row.pack_start(message, True, True, 0)
+        content.pack_start(row, True, True, 0)
+        close_button = dialog.add_button("正在更新…", Gtk.ResponseType.CLOSE)
+        close_button.set_sensitive(False)
+        state = {
+            "active": True,
+            "last": "正在等待管理员授权…",
+            "error": "",
+            "result": "",
+        }
+
+        def on_response(current, _response):
+            if not state["active"]:
+                current.destroy()
+
+        def on_delete(_current, _event):
+            # Package and disk operations cannot be safely cancelled mid-flight.
+            return state["active"]
+
+        def show_line(raw_line):
+            raw_line = str(raw_line or "")
+            if raw_line.startswith("MING_UPDATE_RESULT="):
+                state["result"] = raw_line.split("=", 1)[1].strip()
+                return False
+            line = self.update_progress_text(raw_line)
+            if line:
+                state["last"] = line
+                if "[ERROR]" in raw_line:
+                    state["error"] = line
+                message.set_text(line)
+            return False
+
+        def finish(rc, launch_error=""):
+            state["active"] = False
+            spinner.stop()
+            close_button.set_sensitive(True)
+            close_button.set_property("label", "关闭")
+            if rc == 0:
+                if state["result"] == "no_update":
+                    dialog.set_title("Ming OS 已是最新版本")
+                    message.set_text("当前已是最新版本，不会重启。")
+                elif state["result"] == "staged":
+                    dialog.set_title("Ming OS 更新已准备完成")
+                    message.set_text("更新已准备完成，系统正在自动重启。")
+                else:
+                    dialog.set_title("Ming OS 更新流程已结束")
+                    message.set_text("更新流程已结束，请检查系统更新状态。")
+            else:
+                detail = state["error"] or self.update_progress_text(launch_error) or state["last"]
+                dialog.set_title("Ming OS 更新未完成")
+                message.set_text("更新未完成：%s" % detail)
+            return False
+
+        def worker():
+            try:
+                process = subprocess.Popen(
+                    ["pkexec", "ming-update", "auto-restart"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                if process.stdout is not None:
+                    for raw_line in process.stdout:
+                        GLib.idle_add(show_line, raw_line.rstrip())
+                rc = process.wait()
+                GLib.idle_add(finish, rc)
+            except OSError as exc:
+                log("update and restart launch failed: %s" % exc)
+                GLib.idle_add(finish, 1, str(exc))
+
+        dialog.connect("response", on_response)
+        dialog.connect("delete-event", on_delete)
+        dialog.show_all()
+        spinner.start()
+        threading.Thread(target=worker, daemon=True).start()
+
     def open_update_and_restart_dialog(self, _item=None):
+        status = self.background_update_status()
+        if not isinstance(status, dict):
+            unavailable = Gtk.MessageDialog(
+                transient_for=self.get_toplevel(), flags=0,
+                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+                text="无法确认更新状态",
+            )
+            unavailable.format_secondary_text(
+                "为避免启动未验证的更新，请前往系统更新重新检查。")
+            unavailable.add_button("取消", Gtk.ResponseType.CANCEL)
+            unavailable.add_button("前往系统更新", Gtk.ResponseType.OK)
+
+            def open_update_page(current, response):
+                current.destroy()
+                if response == Gtk.ResponseType.OK:
+                    self.open_command(["ming-control-center", "--page", "update"])
+
+            unavailable.connect("response", open_update_page)
+            unavailable.show_all()
+            return
+        home_preservation = status.get("home_preservation")
+        home_preservation = home_preservation if isinstance(home_preservation, dict) else {}
+        preparation = str(home_preservation.get("message") or "")
+        major_update = status.get("update_type") == "major"
+        if major_update and not bool(home_preservation.get("ready")):
+            blocked = Gtk.MessageDialog(
+                transient_for=self.get_toplevel(), flags=0,
+                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+                text="major OTA 还不能安全开始",
+            )
+            blocked.format_secondary_text(
+                preparation or "请先连接独立备份盘，再重新检查系统更新。")
+            blocked.add_button("取消", Gtk.ResponseType.CANCEL)
+            blocked.add_button("前往系统更新", Gtk.ResponseType.OK)
+
+            def open_update_page(current, response):
+                current.destroy()
+                if response == Gtk.ResponseType.OK:
+                    self.open_command(["ming-control-center", "--page", "update"])
+
+            blocked.connect("response", open_update_page)
+            blocked.show_all()
+            return
+        secondary = "系统会自动完成已确认更新，完成后自动重启。没有可用更新时不会重启。"
+        if major_update and preparation:
+            secondary += "\n\n升级准备：%s" % preparation
         dialog = Gtk.MessageDialog(
             transient_for=self.get_toplevel(), flags=0,
             message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
             text="确认更新并重启？",
         )
-        dialog.format_secondary_text(
-            "系统会自动完成已确认更新，完成后自动重启。没有可用更新时不会重启。")
+        dialog.format_secondary_text(secondary)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
         dialog.add_button("更新并重启", Gtk.ResponseType.OK)
 
@@ -2699,13 +2852,7 @@ class StatusWidget(Gtk.Box):
             current.destroy()
             if response != Gtk.ResponseType.OK:
                 return
-            try:
-                subprocess.Popen(
-                    ["pkexec", "ming-update", "auto-restart"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except OSError as exc:
-                log("update and restart launch failed: %s" % exc)
+            self.start_update_restart_progress()
 
         dialog.connect("response", respond)
         dialog.show_all()

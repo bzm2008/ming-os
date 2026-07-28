@@ -82,6 +82,32 @@ def parse_percent(output):
     return max(0, min(100, int(matches[-1])))
 
 
+def brightnessctl_levels(output):
+    """Return the current and maximum raw levels from brightnessctl -m."""
+    for line in (output or "").splitlines():
+        fields = line.rsplit(",", 4)
+        if len(fields) != 5:
+            continue
+        try:
+            current = int(fields[-3])
+            maximum = int(fields[-2])
+        except ValueError:
+            continue
+        if maximum > 0 and 0 <= current <= maximum:
+            return current, maximum
+    return None
+
+
+def brightnessctl_readback_matches_request(requested, actual_percent, levels):
+    """Accept only raw levels reachable by rounding the requested percentage."""
+    if levels is None:
+        return actual_percent == requested
+    current, maximum = levels
+    lower = requested * maximum // 100
+    upper = (requested * maximum + 99) // 100
+    return lower <= current <= upper
+
+
 def split_nmcli_terse(line):
     """Split NetworkManager's colon-delimited output without losing escapes."""
     fields = []
@@ -1067,9 +1093,9 @@ class DeviceController:
             payload["output_values"] = {}
         return payload
 
-    def brightness_status(self):
+    def _physical_brightness_status(self):
         if not self._has_backlight():
-            return self._software_brightness("software-status")
+            return self._software_brightness("software-status"), None
         if not self._can_run("brightnessctl"):
             return {
                 "available": False,
@@ -1077,7 +1103,7 @@ class DeviceController:
                 "error": "物理背光控制不可用。",
                 "backend": "brightnessctl",
                 "state": "unavailable",
-            }
+            }, None
         rc, output, error = self._run(["brightnessctl", "-m"])
         value = parse_percent(output)
         if rc == 0 and value is not None:
@@ -1087,14 +1113,18 @@ class DeviceController:
                 "error": "",
                 "backend": "brightnessctl",
                 "state": "ready",
-            }
+            }, brightnessctl_levels(output)
         return {
             "available": False,
             "value": None,
             "error": error or "读取亮度失败",
             "backend": "brightnessctl",
             "state": "error",
-        }
+        }, None
+
+    def brightness_status(self):
+        status, _step = self._physical_brightness_status()
+        return status
 
     def set_brightness(self, value):
         try:
@@ -1118,16 +1148,24 @@ class DeviceController:
                 False, requested=value,
                 error=error or output or "设置亮度失败",
                 backend="brightnessctl", available=True, state="error")
-        status = self.brightness_status()
+        status, levels = self._physical_brightness_status()
+        readback_matches_request = bool(
+            status["available"]
+            and status["value"] is not None
+            and brightnessctl_readback_matches_request(value, status["value"], levels)
+        )
+        readback_error = status["error"]
+        if status["available"] and status["value"] is not None and not readback_matches_request:
+            readback_error = "物理亮度读回与请求不一致：请求 %d%%，实际 %d%%。" % (
+                value, status["value"])
         return self._control_result(
-            bool(status["available"] and status["value"] is not None),
+            readback_matches_request,
             requested=value,
             value=status["value"],
-            error=status["error"],
+            error=readback_error,
             backend="brightnessctl",
             available=bool(status["available"]),
-            state=("ready" if status["available"] and status["value"] is not None
-                   else "error"),
+            state=("ready" if readback_matches_request else "error"),
         )
 
     def reapply_brightness(self, wait_seconds=0):

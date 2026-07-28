@@ -234,6 +234,70 @@ home_is_independent_device() {
     fi
 }
 
+ota_backup_destination() {
+    local destination=""
+    if [[ -f /run/ming-os/storage-info ]]; then
+        destination="$(awk -F= '$1 == "data_mount" {print substr($0, index($0, "=") + 1); exit}' \
+            /run/ming-os/storage-info 2>/dev/null || true)"
+    fi
+    destination="${MING_OTA_BACKUP_DEST:-${destination}}"
+    [[ -n "${destination}" && -d "${destination}" ]] || return 1
+    printf '%s\n' "${destination}"
+}
+
+home_preservation_status_json() {
+    # This is presentation-only. The privileged major OTA path revalidates
+    # every filesystem, UUID, capacity and checksum before staging GRUB.
+    local update_type="$1" destination="" backup_uuid="" shared_status=0
+    if [[ "${update_type}" != "major" ]]; then
+        jq -n --arg message "此更新不会替换系统分区，无需准备用户文件备份。" \
+            '{ready: true, strategy: "not_required", message: $message}'
+        return 0
+    fi
+
+    if home_is_independent_device; then
+        jq -n --arg source "$(findmnt -nro SOURCE -T /home 2>/dev/null || true)" \
+            --arg message "/home 已位于独立物理设备，major OTA 会保留用户文件。" \
+            '{ready: true, strategy: "separate_home", source: $source, message: $message}'
+        return 0
+    fi
+
+    destination="$(ota_backup_destination 2>/dev/null || true)"
+    if [[ -z "${destination}" ]]; then
+        jq -n --arg message "major OTA 需要独立 /home 或另一块物理备份盘；请连接备份盘后重新检查。" \
+            '{ready: false, strategy: "backup_required", message: $message}'
+        return 0
+    fi
+
+    if paths_share_physical_disk / "${destination}"; then
+        jq -n --arg destination "${destination}" \
+            --arg message "检测到的备份位置与系统盘相同，不能用于 major OTA；请连接另一块物理备份盘。" \
+            '{ready: false, strategy: "backup_required", destination: $destination, message: $message}'
+        return 0
+    else
+        shared_status=$?
+        if [[ "${shared_status}" -ne 1 ]]; then
+            jq -n --arg destination "${destination}" \
+                --arg message "无法验证备份盘是否独立于系统盘；为保护用户文件，major OTA 不会开始。" \
+                '{ready: false, strategy: "backup_required", destination: $destination, message: $message}'
+            return 0
+        fi
+    fi
+
+    backup_uuid="$(findmnt -nro UUID -T "${destination}" 2>/dev/null || true)"
+    if [[ -z "${backup_uuid}" ]]; then
+        jq -n --arg destination "${destination}" \
+            --arg message "备份盘没有可验证 UUID；请使用正常挂载的本地磁盘后重新检查。" \
+            '{ready: false, strategy: "backup_required", destination: $destination, message: $message}'
+        return 0
+    fi
+
+    jq -n --arg destination "${destination}" --arg backup_uuid "${backup_uuid}" \
+        --arg message "已检测到独立备份盘；开始更新前会精确核验 /home 所需空间并创建可恢复备份。" \
+        '{ready: true, strategy: "completed_backup", destination: $destination,
+          backup_uuid: $backup_uuid, message: $message}'
+}
+
 fetch_authoritative_major_manifest() {
     local url response
     url="$(api_url)"
@@ -1047,6 +1111,7 @@ show_status_json() {
     local action="check" background_available=false background_version=""
     local manual_result_present=false manual_available=false manual_ready=false manual_version="" manual_notes="" manual_update_type=""
     local manual_checked_at_epoch=0 background_checked_at_epoch=0
+    local home_preservation="" preservation_ready=false
     current="$(current_version)"
     manifest="$(find_cached_manifest 2>/dev/null || true)"
 
@@ -1135,6 +1200,10 @@ show_status_json() {
         fi
     fi
 
+    home_preservation="$(home_preservation_status_json "${update_type}")"
+    preservation_ready="$(printf '%s' "${home_preservation}" | jq -r '.ready // false' 2>/dev/null || true)"
+    [[ "${preservation_ready}" == "true" ]] || preservation_ready=false
+
     jq -n \
         --arg current_version "${current}" \
         --arg new_version "${version}" \
@@ -1146,14 +1215,17 @@ show_status_json() {
         --arg state_status "${state_status}" \
         --arg error "${error}" \
         --arg last_check "$(get_config '.last_check')" \
+        --argjson home_preservation "${home_preservation}" \
         --argjson available "${available}" \
         --argjson ready "${ready}" \
         --argjson background_available "${background_available}" \
+        --argjson preservation_ready "${preservation_ready}" \
         '{current_version: $current_version, available: $available, ready: $ready,
           new_version: $new_version, release_notes: $release_notes,
           update_type: $update_type, action: $action, state_status: $state_status,
           manifest_path: $manifest_path, manifest_sha256: $manifest_sha256,
           background_available: $background_available, last_check: $last_check,
+          home_preservation: $home_preservation, preservation_ready: $preservation_ready,
           error: $error}'
 }
 
@@ -1216,7 +1288,7 @@ show_help() {
     cat << HELP
 Ming OS OTA client v${SCRIPT_VERSION}
 
-Usage: ming-update [check|apply|patch|download|install|auto-shutdown|status [--json]|doctor|config|help]
+Usage: ming-update [check|apply|patch|download|install|auto-restart|status [--json]|doctor|config|help]
 
 Commands:
   check             检查是否有可用更新（含分级：patch/minor/major）。
@@ -1224,7 +1296,8 @@ Commands:
   patch             执行 patch 级小修复（apt 补丁 + 配置脚本，无需重启）。
   download          下载并校验 major ISO 更新包。
   install           将已下载的 ISO 暂存为 GRUB 启动项（major 升级，保留用户文件）。
-  auto-shutdown     自动完成「检查→下载→安装→关机」全流程（major 升级，夜间维护）。
+  auto-restart      自动完成「检查→下载→安装→重启」全流程（适合一键更新）。
+  auto-shutdown     兼容别名；行为与 auto-restart 相同，完成后重启而不是关机。
   status            显示当前 OTA 状态。
   doctor            检查 APT、缓存、备份引擎和 major OTA 保留状态。
   config            配置更新源/频道。
@@ -1500,11 +1573,8 @@ major_install_with_home_backup() {
         log_info "/home 有独立分区（${home_src}），已建立 UUID 保留计划。"
     else
         # 同盘 /home 或单分区必须完整备份到另一块物理磁盘。
-        if [[ -f /run/ming-os/storage-info ]]; then
-            backup_disk=$(grep '^data_mount=' /run/ming-os/storage-info 2>/dev/null | cut -d= -f2)
-        fi
-        backup_disk="${MING_OTA_BACKUP_DEST:-${backup_disk}}"
-        if [[ -z "${backup_disk}" || ! -d "${backup_disk}" ]]; then
+        backup_disk="$(ota_backup_destination 2>/dev/null || true)"
+        if [[ -z "${backup_disk}" ]]; then
             log_error "未检测到独立物理备份盘；major OTA 不会继续。"
             return 1
         fi
@@ -1711,12 +1781,14 @@ auto_shutdown_update() {
     _notify "开始检查更新…"
     if ! MING_UPDATE_BACKGROUND_CHECK=1 check_update; then
         _notify "检查更新失败，已取消自动重启。"
+        printf 'MING_UPDATE_RESULT=failed\n'
         return 1
     fi
 
     local manifest; manifest="$(find_cached_manifest 2>/dev/null || true)"
     if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
         _notify "当前已是最新版本，无需更新。不执行重启。"
+        printf 'MING_UPDATE_RESULT=no_update\n'
         return 0
     fi
 
@@ -1724,6 +1796,7 @@ auto_shutdown_update() {
     has_update=$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null)
     if [[ "${has_update}" != "true" ]]; then
         _notify "当前已是最新版本，无需更新。不执行重启。"
+        printf 'MING_UPDATE_RESULT=no_update\n'
         return 0
     fi
 
@@ -1732,10 +1805,12 @@ auto_shutdown_update() {
     _notify "发现新版本 ${new_version}，开始自动更新…"
     if ! apply_update --checked --restart-after-stage; then
         _notify "更新未能完成，已取消自动重启。"
+        printf 'MING_UPDATE_RESULT=failed\n'
         return 1
     fi
 
     _notify "更新已准备完成，系统正在自动重启。"
+    printf 'MING_UPDATE_RESULT=staged\n'
 }
 
 auto_restart_update() {

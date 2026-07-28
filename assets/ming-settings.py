@@ -2120,9 +2120,14 @@ class MingSettings(Adw.ApplicationWindow):
         ready = bool(status.get("ready"))
         version = str(status.get("new_version") or "")
         notes = str(status.get("release_notes") or "")
+        update_type = str(status.get("update_type") or "")
         error = str(status.get("error") or "")
         manifest_path = str(status.get("manifest_path") or "")
         manifest_sha256 = str(status.get("manifest_sha256") or "")
+        home_preservation = status.get("home_preservation")
+        home_preservation = home_preservation if isinstance(home_preservation, dict) else {}
+        preservation_ready = bool(home_preservation.get("ready"))
+        preservation_message = str(home_preservation.get("message") or "")
 
         # A privileged process must apply the exact update that this page
         # presents.  Empty fields deliberately make the action unavailable:
@@ -2147,11 +2152,27 @@ class MingSettings(Adw.ApplicationWindow):
                 return
             self.update_manifest_path = manifest_path
             self.update_manifest_sha256 = manifest_sha256.lower()
+            if update_type == "major":
+                self.update_detail.set_label(
+                    "更新说明：\n%s\n\n升级准备：%s" % (
+                        notes or "暂无更新说明。",
+                        preservation_message or "正在检查用户文件保留条件。",
+                    ))
+                self.update_detail.set_visible(True)
+                if not preservation_ready:
+                    self.update_manifest_path = ""
+                    self.update_manifest_sha256 = ""
+                    self.update_action_state = "check"
+                    self.update_action_button.set_label("连接备份盘后重新检查")
+                    self.update_status.set_label(
+                        "发现新版本，但还不能安全开始 major OTA。")
+                    return
             self.update_action_state = "apply"
             self.update_action_button.set_label("立即更新")
             self.update_status.set_label("发现新版本：Ming OS %s" % (version or "未知"))
-            self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
-            self.update_detail.set_visible(True)
+            if update_type != "major":
+                self.update_detail.set_label("更新说明：\n%s" % (notes or "暂无更新说明。"))
+                self.update_detail.set_visible(True)
             return
 
         self.update_action_state = "check"
@@ -2177,16 +2198,25 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_fraction(0.15)
         self.update_bar.set_text("正在检查…")
         self.update_status.set_label("正在检查更新…")
+        self.update_last_error = ""
+        self.update_last_output = ""
 
         def line(message):
             if message:
+                self.update_last_output = message.strip()
                 self.update_status.set_label(message)
+                lower = message.lower()
+                if "[ERROR]" in message:
+                    self.update_last_error = message.replace("[ERROR]", "").strip()
+                elif any(token in lower for token in ("authorization", "not authorized", "error", "错误")):
+                    self.update_last_error = message.strip()
 
         def done(rc):
             self.update_bar.set_visible(False)
             self.update_action_button.set_sensitive(True)
             if rc != 0:
-                self.update_status.set_label("检查更新失败，请确认网络后重试。")
+                detail = self.update_last_error or self.update_last_output or "请确认网络、签名和更新源后重试。"
+                self.update_status.set_label("检查更新失败：%s" % detail)
                 return
             self.update_status.set_label("检查完成，正在读取结果…")
             self.refresh_update_status()
@@ -2204,10 +2234,18 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_fraction(0.1)
         self.update_bar.set_text("正在更新…")
         self.update_status.set_label("正在自动选择更新方式并执行；完成后会自动重启…")
+        self.update_last_error = ""
+        self.update_last_output = ""
 
         def line(message):
             if message:
+                self.update_last_output = message.strip()
                 self.update_status.set_label(message)
+                lower = message.lower()
+                if "[ERROR]" in message:
+                    self.update_last_error = message.replace("[ERROR]", "").strip()
+                elif any(token in lower for token in ("authorization", "not authorized", "error", "错误")):
+                    self.update_last_error = message.strip()
 
         def done(rc):
             self.update_bar.set_fraction(1.0)
@@ -2218,7 +2256,8 @@ class MingSettings(Adw.ApplicationWindow):
                 self.update_status.set_label("更新操作已完成，系统正在自动重启…")
             else:
                 self.update_bar.set_text("失败")
-                self.update_status.set_label("更新未完成，请查看系统更新日志后重试。")
+                detail = self.update_last_error or self.update_last_output or "更新程序没有返回可用的失败原因。"
+                self.update_status.set_label("更新未完成：%s" % detail)
                 self.update_action_button.set_sensitive(True)
 
         run_async([
