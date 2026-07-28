@@ -630,8 +630,8 @@ else:
 partition = load_yaml("etc/calamares/modules/partition.conf")
 if partition.get("initialPartitioningChoice") != "none":
     errors.append("partition.conf must not force one-click erase; initialPartitioningChoice must be none")
-if partition.get("allowManualPartitioning") is not True:
-    errors.append("partition.conf must allow manual partitioning")
+if partition.get("allowManualPartitioning") is not False:
+    errors.append("partition.conf must disable manual partitioning for the OTA-ready layout")
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True or \

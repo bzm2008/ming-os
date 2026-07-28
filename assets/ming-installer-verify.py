@@ -131,9 +131,9 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
     initial_choice = _yaml_scalar(partition, "initialPartitioningChoice")
     manual_enabled = _yaml_bool(partition, "allowManualPartitioning")
     if initial_choice != "none":
-        errors.append("Calamares must keep both full-disk and manual install choices visible")
-    if manual_enabled is not True:
-        errors.append("Calamares manual partitioning is disabled")
+        errors.append("Calamares must keep the full-disk install choice visible")
+    if manual_enabled is not False:
+        errors.append("Calamares manual partitioning must be disabled")
     unpack_source = _yaml_scalar(unpackfs, "source")
     source_path = Path(source) if source is not None else Path(unpack_source or "")
     if not unpack_source:

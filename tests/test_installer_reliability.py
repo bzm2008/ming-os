@@ -611,6 +611,12 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn('globalstorage.value("rootMountPoint")', desktop)
 
     def test_fresh_erase_install_uses_native_ota_ready_partition_layout(self):
+        build = BUILD.read_text(encoding="utf-8")
+        self.assertIn('partition.get("allowManualPartitioning") is not False', build)
+        self.assertIn(
+            "partition.conf must disable manual partitioning for the OTA-ready layout",
+            build,
+        )
         for source in (BASE_MODULE.read_text(encoding="utf-8"),
                        DESKTOP_MODULE.read_text(encoding="utf-8")):
             self.assertIn("partitionLayout:", source)
@@ -623,6 +629,46 @@ class InstallerReceiptContracts(unittest.TestCase):
             self.assertNotIn("mountPoint:", root_b)
             self.assertIn("requiredStorage: 48", source)
             self.assertIn("initialPartitioningChoice: none", source)
+            self.assertIn("allowManualPartitioning: false", source)
+
+    def test_live_verifier_accepts_only_the_one_click_ota_ready_partition_mode(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = write(root, "run/ming-installer/filesystem.squashfs", "rootfs")
+            write(
+                root,
+                "etc/calamares/settings.conf",
+                "sequence:\n  - show:\n      - partition\n",
+            )
+            write(
+                root,
+                "etc/calamares/modules/partition.conf",
+                "initialPartitioningChoice: none\n"
+                "allowManualPartitioning: false\n",
+            )
+            write(
+                root,
+                "etc/calamares/modules/unpackfs.conf",
+                "source: /run/ming-installer/filesystem.squashfs\n",
+            )
+
+            accepted = verifier.verify_live(root=root, source=source)
+            self.assertTrue(accepted["ok"], accepted)
+            self.assertEqual("disabled", accepted["manual_partitioning"])
+
+            write(
+                root,
+                "etc/calamares/modules/partition.conf",
+                "initialPartitioningChoice: none\n"
+                "allowManualPartitioning: true\n",
+            )
+            rejected = verifier.verify_live(root=root, source=source)
+            self.assertFalse(rejected["ok"], rejected)
+            self.assertIn(
+                "Calamares manual partitioning must be disabled",
+                rejected["errors"],
+            )
 
     def test_installed_identity_writes_fail_closed_ab_layout_and_grub_entries(self):
         base = BASE_MODULE.read_text(encoding="utf-8")
