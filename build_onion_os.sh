@@ -34,6 +34,7 @@ readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2641"
 readonly DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian/"
 readonly DEBIAN_SUITE="trixie"
+readonly DEBIAN_ARCHIVE_KEYRING="${MING_DEBIAN_ARCHIVE_KEYRING:-/usr/share/keyrings/debian-archive-keyring.gpg}"
 readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
@@ -162,7 +163,7 @@ install_build_deps() {
             missing_bins+=("${bin}")
         fi
     done
-    if [[ ${#missing_bins[@]} -eq 0 ]]; then
+    if [[ ${#missing_bins[@]} -eq 0 && -s "${DEBIAN_ARCHIVE_KEYRING}" ]]; then
         log_info "构建依赖已存在，跳过在线安装"
         return 0
     fi
@@ -177,7 +178,7 @@ install_build_deps() {
         if ! apt-get install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools dosfstools; then
+            mtools dosfstools debian-archive-keyring; then
             if [[ "${apt_ok}" -eq 0 ]]; then
                 log_error "apt 依赖安装失败且缓存不可用"
                 exit 1
@@ -198,6 +199,15 @@ install_build_deps() {
     fi
     log_info "构建依赖安装完成"
 }
+
+verify_debootstrap_keyring() {
+    if [[ ! -s "${DEBIAN_ARCHIVE_KEYRING}" ]]; then
+        log_error "缺少 Debian archive keyring，拒绝执行无法验证 Release 签名的 debootstrap。"
+        log_error "需要安装 debian-archive-keyring，或设置 MING_DEBIAN_ARCHIVE_KEYRING。"
+        return 1
+    fi
+    log_info "Debian Release keyring 已就绪: ${DEBIAN_ARCHIVE_KEYRING}"
+}
 # ======================== debootstrap 构建基础系统 ========================
 run_debootstrap() {
     log_step "执行 debootstrap 构建 ${DEBIAN_SUITE} 基础系统"
@@ -210,6 +220,7 @@ run_debootstrap() {
     debootstrap \
         --arch="${ARCH}" \
         --variant=minbase \
+        --keyring="${DEBIAN_ARCHIVE_KEYRING}" \
         --include=ca-certificates,gnupg2,apt-transport-https \
         "${DEBIAN_SUITE}" \
         "${CHROOT_DIR}" \
@@ -2675,6 +2686,7 @@ main() {
     capture_build_identity
     check_host_environment
     install_build_deps
+    verify_debootstrap_keyring
     mkdir -p "${LINUX_WORKDIR}"
     run_debootstrap
     mount_chroot

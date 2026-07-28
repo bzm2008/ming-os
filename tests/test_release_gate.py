@@ -181,6 +181,20 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn('readonly MING_OS_VERSION="26.4.1"', self.build)
         self.assertIn('readonly ISO_VOLUME_ID="MING_OS_2641"', self.build)
 
+    def test_debootstrap_requires_and_uses_debian_archive_keyring(self):
+        for marker in (
+            'DEBIAN_ARCHIVE_KEYRING',
+            'debian-archive-keyring',
+            'verify_debootstrap_keyring',
+            '--keyring="${DEBIAN_ARCHIVE_KEYRING}"',
+        ):
+            self.assertIn(marker, self.build)
+        main = self.build.split("main() {", 1)[1]
+        self.assertLess(main.index("install_build_deps"),
+                        main.index("verify_debootstrap_keyring"))
+        self.assertLess(main.index("verify_debootstrap_keyring"),
+                        main.index("run_debootstrap"))
+
     def test_build_locks_clean_source_identity_until_packaging_finishes(self):
         for marker in (
             "capture_build_identity",
