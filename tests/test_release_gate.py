@@ -255,6 +255,24 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
+    def test_spark_notifier_unit_is_normalized_and_release_gated(self):
+        """The vendor unit must not ship invalid retry directives or executable bits."""
+        finalizer = FINALIZE.read_text(encoding="utf-8")
+        for marker in (
+            "normalize_spark_update_notifier_unit",
+            "StartLimitIntervalSec=1h",
+            "StartLimitBurst=3",
+            "RestartSec=15",
+            'chmod 0644 "${unit}"',
+        ):
+            self.assertIn(marker, finalizer)
+        for marker in (
+            "spark-update-notifier.service",
+            "systemd-analyze verify",
+            "must not be executable",
+        ):
+            self.assertIn(marker, self.build)
+
     def test_rootfs_gate_classifies_generated_helpers_by_interpreter(self):
         """Shell helpers must not be sent through Python bytecode validation."""
         for marker in [

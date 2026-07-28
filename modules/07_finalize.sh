@@ -196,6 +196,31 @@ X-GNOME-Autostart-enabled=false
 PANELDISABLED
 }
 
+normalize_spark_update_notifier_unit() {
+    local unit="/usr/lib/systemd/system/spark-update-notifier.service"
+    [[ -f "${unit}" ]] || return 0
+
+    cat > "${unit}" << 'SPARKNOTIFIERUNIT'
+[Unit]
+Description=Spark Store update notifier
+After=apt-daily.service network.target network-online.target systemd-networkd.service NetworkManager.service connman.service
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+ExecStart=/opt/durapps/spark-store/bin/update-upgrade/ss-update-notifier.sh
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+SPARKNOTIFIERUNIT
+    chown root:root "${unit}"
+    chmod 0644 "${unit}"
+}
+
 # ======================== 同步用户配置到 /etc/skel ========================
 
 seed_skel() {
@@ -273,6 +298,7 @@ main() {
     refresh_dock_launchers || return 1
     seed_trusted_desktop_receipts
     disable_phone_panel_restore
+    normalize_spark_update_notifier_unit
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

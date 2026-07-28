@@ -902,6 +902,18 @@ validate_isolinux_fallback() {
 validate_required_desktop_runtime() {
     log_info "Validating required Ming desktop runtime..."
 
+    local spark_notifier="/usr/lib/systemd/system/spark-update-notifier.service"
+    if [[ -e "${CHROOT_DIR}${spark_notifier}" ]]; then
+        if [[ -x "${CHROOT_DIR}${spark_notifier}" ]]; then
+            log_error "${spark_notifier} must not be executable"
+            return 1
+        fi
+        if ! chroot_exec /usr/bin/systemd-analyze verify "${spark_notifier}"; then
+            log_error "systemd-analyze verify failed for ${spark_notifier}"
+            return 1
+        fi
+    fi
+
     if ! chroot_exec python3 -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); from gi.repository import Gtk, Adw, Gio"; then
         log_error "GTK4/libadwaita/Gio typelibs are unavailable in the target system"
         return 1
