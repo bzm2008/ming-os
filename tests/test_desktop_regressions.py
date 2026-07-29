@@ -180,9 +180,50 @@ class DesktopSourceTests(unittest.TestCase):
             '"ming-firefox.desktop": "browser"',
             '"firefox-esr.desktop": "browser"',
             '"papyrus.desktop": "agent"',
+            '"ming-dock-ming-settings.desktop": "settings"',
+            '"ming-dock-ming-files.desktop": "files"',
+            '"ming-dock-ming-terminal.desktop": "terminal"',
             "def deduplicate_apps(apps):",
         ):
             self.assertIn(marker, self.phone)
+
+    def test_phone_desktop_deduplicates_dock_proxy_application_families(self):
+        tree = ast.parse(self.phone)
+        wanted = {
+            "layout_effective_path", "is_system_application_path",
+            "layout_item_identity", "canonical_identity", "deduplicate_apps",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        )
+        namespace = {
+            "Path": pathlib.Path,
+            "os": os,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
+                     str(PHONE_DESKTOP), "exec"), namespace)
+        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
+        apps = []
+        for stem in ("settings", "files", "terminal"):
+            apps.extend([
+                {
+                    "path": f"C:/ming-test/applications/ming-{stem}.desktop",
+                    "basename": f"ming-{stem}.desktop",
+                },
+                {
+                    "path": f"C:/ming-test/applications/ming-dock-ming-{stem}.desktop",
+                    "basename": f"ming-dock-ming-{stem}.desktop",
+                },
+            ])
+        selected = namespace["deduplicate_apps"](apps)
+        self.assertEqual(
+            ["ming-settings.desktop", "ming-files.desktop", "ming-terminal.desktop"],
+            [item["basename"] for item in selected],
+        )
 
     def test_finalizer_clears_all_managed_desktop_state_for_live_and_skel_users(self):
         finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")

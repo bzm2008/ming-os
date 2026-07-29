@@ -263,10 +263,13 @@ CORE_FALLBACKS = {
 CANONICAL_LAUNCHERS = {
     "ming-settings.desktop": "settings",
     "ming-control-center.desktop": "settings",
+    "ming-dock-ming-settings.desktop": "settings",
     "xfce4-settings-manager.desktop": "settings",
     "ming-files.desktop": "files",
+    "ming-dock-ming-files.desktop": "files",
     "thunar.desktop": "files",
     "ming-terminal.desktop": "terminal",
+    "ming-dock-ming-terminal.desktop": "terminal",
     "xfce4-terminal.desktop": "terminal",
     "ming-firefox.desktop": "browser",
     "firefox-esr.desktop": "browser",
