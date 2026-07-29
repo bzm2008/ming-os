@@ -6497,6 +6497,29 @@ LIVEINSTALLER
 
     chmod +x /usr/local/bin/ming-live-installer.sh
 
+    # Keep the installer as a normal Live application so the phone desktop,
+    # app drawer and Plank can all reopen it after Calamares is minimized.
+    cat > "/usr/share/applications/Install Ming OS.desktop" << 'LIVEINSTALLERDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Install Ming OS
+Name[zh_CN]=安装 Ming OS
+Comment=Install Ming OS to this computer
+Comment[zh_CN]=将 Ming OS 安装到此计算机
+Exec=/usr/local/bin/ming-live-installer.sh
+Icon=system-software-install
+Terminal=false
+StartupNotify=true
+X-Ming-Live-Only=true
+LIVEINSTALLERDESKTOP
+    install -d -m 0755 "/home/${MING_USER}/Desktop" "/etc/skel/Desktop"
+    install -m 0644 "/usr/share/applications/Install Ming OS.desktop" \
+        "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+    install -m 0644 "/usr/share/applications/Install Ming OS.desktop" \
+        "/etc/skel/Desktop/Install Ming OS.desktop"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/Desktop/Install Ming OS.desktop"
+
 cat > /usr/local/bin/ming-live-notice << 'LIVENOTICE'
 #!/usr/bin/env python3
 import json

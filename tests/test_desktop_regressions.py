@@ -98,6 +98,20 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn('"Install Ming OS.desktop"', core)
         self.assertIn('"papyrus.desktop"', core)
 
+    def test_desktop_module_generates_the_live_installer_entry(self):
+        installer = self.desktop[
+            self.desktop.index("deploy_live_installer() {"):
+            self.desktop.index("\nKIOSK", self.desktop.index("deploy_live_installer() {"))
+        ]
+        for marker in (
+            '"/usr/share/applications/Install Ming OS.desktop"',
+            '"/home/${MING_USER}/Desktop/Install Ming OS.desktop"',
+            '"/etc/skel/Desktop/Install Ming OS.desktop"',
+            "Exec=/usr/local/bin/ming-live-installer.sh",
+            "X-Ming-Live-Only=true",
+        ):
+            self.assertIn(marker, installer)
+
     def test_gtk3_shell_entries_lock_gdk3_before_importing_gdk(self):
         for source in (self.phone, self.drawer):
             require = 'gi.require_version("Gdk", "3.0")'
