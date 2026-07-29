@@ -225,6 +225,42 @@ class DesktopSourceTests(unittest.TestCase):
             [item["basename"] for item in selected],
         )
 
+    def test_phone_desktop_deduplicates_managed_user_desktop_core_launchers(self):
+        tree = ast.parse(self.phone)
+        wanted = {
+            "layout_effective_path", "is_system_application_path",
+            "layout_item_identity", "canonical_identity", "deduplicate_apps",
+        }
+        body = [node for node in tree.body if isinstance(node, ast.Assign)]
+        body.extend(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        )
+        namespace = {
+            "Path": pathlib.Path,
+            "os": os,
+            "load_shell_common": lambda: None,
+            "__file__": str(PHONE_DESKTOP),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
+                     str(PHONE_DESKTOP), "exec"), namespace)
+        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
+        namespace["DESKTOP_DIR"] = pathlib.Path("C:/ming-test/home/user/Desktop")
+        apps = [
+            {
+                "path": "C:/ming-test/home/user/Desktop/ming-settings.desktop",
+                "basename": "ming-settings.desktop",
+            },
+            {
+                "path": "C:/ming-test/applications/ming-settings.desktop",
+                "basename": "ming-settings.desktop",
+            },
+        ]
+        self.assertEqual(
+            ["ming-settings.desktop"],
+            [item["basename"] for item in namespace["deduplicate_apps"](apps)],
+        )
+
     def test_finalizer_clears_all_managed_desktop_state_for_live_and_skel_users(self):
         finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")
         cleanup = finalizer[

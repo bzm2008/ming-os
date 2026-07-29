@@ -881,8 +881,17 @@ def layout_item_identity(item):
     """Group only known core launchers; unrelated user entries stay distinct."""
     path = str(item.get("path") or "")
     effective_path = layout_effective_path(item)
-    if is_system_application_path(effective_path):
-        basename = effective_path.name.casefold()
+    # Managed Desktop copies of core launchers intentionally live outside
+    # /usr/share/applications.  Their basename is still a closed allowlist,
+    # so recognize it before falling back to an individual path identity.
+    for candidate in (effective_path, Path(path)):
+        trusted_location = (
+            is_system_application_path(candidate)
+            or candidate.parent == DESKTOP_DIR
+        )
+        if not trusted_location:
+            continue
+        basename = candidate.name.casefold()
         family = CANONICAL_LAUNCHERS.get(basename)
         if family:
             return family
