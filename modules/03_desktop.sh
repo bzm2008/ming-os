@@ -6625,7 +6625,19 @@ fi
 if command -v xfwm4 >/dev/null 2>&1; then
     xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &
 fi
+if command -v ming-desktop-organizer >/dev/null 2>&1; then
+    ming-desktop-organizer >/tmp/ming-installer-desktop-organizer.log 2>&1 || true
+fi
+if command -v ming-session-healthcheck >/dev/null 2>&1; then
+    /usr/local/bin/ming-session-healthcheck --session \
+        >/tmp/ming-installer-session-health.log 2>&1 &
+fi
+if command -v ming-window-manager-watchdog >/dev/null 2>&1; then
+    /usr/local/bin/ming-window-manager-watchdog --session \
+        >/tmp/ming-installer-window-health.log 2>&1 &
+fi
 /usr/local/bin/ming-live-notice >/tmp/ming-installer-live-notice.log 2>&1 &
+notice_pid="$!"
 
 focus_installer() {
     command -v wmctrl >/dev/null 2>&1 || return 0
@@ -6633,6 +6645,8 @@ focus_installer() {
         if wmctrl -lx 2>/dev/null | grep -qi 'calamares\.calamares'; then
             wmctrl -x -r calamares.calamares -b add,maximized_vert,maximized_horz 2>/dev/null || true
             wmctrl -x -a calamares.calamares 2>/dev/null || true
+            kill "${notice_pid}" 2>/dev/null || true
+            wait "${notice_pid}" 2>/dev/null || true
             return 0
         fi
         sleep 0.25

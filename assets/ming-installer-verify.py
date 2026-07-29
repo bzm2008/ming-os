@@ -24,6 +24,9 @@ TARGET_RECEIPT_ATTEMPT_SCHEMA = "ming-installer-target-receipt-attempt/v1"
 TARGET_RECEIPT_VERSION = 1
 TARGET_RECEIPT_ATTEMPT_VERSION = 1
 UUID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+FILESYSTEM_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 TEMPORARY_ROOT_SOURCES = (
     "overlay",
@@ -767,24 +770,71 @@ def verify_installed(
     elif expected_root_uuid and not authoritative_root_entry_found:
         errors.append("Installed fstab root entry does not match the authoritative root UUID")
     if expected_root_uuid:
+        slot_a_expected = None
+        slot_b_expected = None
+        try:
+            slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
+            if slots.get("schema") != 1 or slots.get("layout") != "ming-ab-v1":
+                raise ValueError("invalid A/B layout")
+            if not isinstance(slots.get("slots"), dict) or set(slots["slots"]) != {"A", "B"}:
+                raise ValueError("invalid A/B slot set")
+            slot_a_uuid = slots["slots"]["A"]["uuid"]
+            slot_b_uuid = slots["slots"]["B"]["uuid"]
+            if (
+                not isinstance(slot_a_uuid, str)
+                or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_a_uuid)
+                or not isinstance(slot_b_uuid, str)
+                or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_b_uuid)
+            ):
+                raise ValueError("invalid A/B UUID")
+            if slot_a_uuid != expected_root_uuid:
+                errors.append("Installed A/B layout slot A root UUID does not match the authoritative receipt")
+            if slot_b_uuid == slot_a_uuid:
+                errors.append("Installed A/B layout slot UUIDs must be distinct")
+            slot_a_expected = f"root=UUID={slot_a_uuid}"
+            slot_b_expected = f"root=UUID={slot_b_uuid}"
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            errors.append("Installed system has no valid ming-ab-v1 layout")
+
         grub_template = _read_text(root_path / "etc/grub.d/09_ming_os")
         if not grub_template:
             errors.append("Installed Ming GRUB template is missing after identity repair")
-        elif "__MING_ROOT_UUID__" in grub_template:
-            errors.append("Installed Ming GRUB template still contains an unresolved root UUID")
+        elif re.search(r"__MING_(?:ROOT|BOOT)[A-Z_]*UUID__", grub_template):
+            errors.append("Installed Ming GRUB template still contains an unresolved UUID placeholder")
         else:
             linux_lines = [
-                line.split()
+                (line.split()[1], line.split())
                 for line in grub_template.splitlines()
-                if re.match(r"^\s*linux\s+/vmlinuz(?:\s|$)", line)
+                if re.match(
+                    r"^\s*linux\s+/(?:vmlinuz|ming-slots/[AB]/vmlinuz)(?:\s|$)",
+                    line,
+                )
             ]
             expected = f"root=UUID={expected_root_uuid}"
             if not linux_lines:
                 errors.append("Installed Ming GRUB template has no Ming linux stanza")
-            for fields in linux_lines:
+            slot_paths = {path for path, _fields in linux_lines if path.startswith("/ming-slots/")}
+            for required_path in ("/ming-slots/A/vmlinuz", "/ming-slots/B/vmlinuz"):
+                if required_path not in slot_paths:
+                    errors.append(f"Installed Ming GRUB template is missing {required_path}")
+            for path, fields in linux_lines:
                 roots = [field for field in fields if field.startswith("root=")]
-                if roots != [expected]:
-                    errors.append("Installed Ming GRUB template does not match the authoritative root UUID")
+                if len(roots) != 1:
+                    errors.append("Installed Ming GRUB template stanza must contain exactly one root UUID")
+                    break
+                if path == "/ming-slots/A/vmlinuz":
+                    stanza_expected = slot_a_expected
+                elif path == "/ming-slots/B/vmlinuz":
+                    stanza_expected = slot_b_expected
+                else:
+                    stanza_expected = expected
+                if stanza_expected is None or roots != [stanza_expected]:
+                    if path == "/ming-slots/B/vmlinuz":
+                        errors.append("Installed Ming GRUB template slot B root UUID does not match slots.json")
+                    elif path == "/ming-slots/A/vmlinuz":
+                        errors.append("Installed Ming GRUB template slot A root UUID does not match the authoritative receipt")
+                    else:
+                        errors.append("Installed Ming GRUB template does not match the authoritative root UUID")
                     break
     default_target = _system_target(root_path / "etc/systemd/system/default.target")
     if "graphical.target" not in default_target:

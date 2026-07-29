@@ -92,6 +92,12 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("Exec=/usr/bin/true", self.desktop)
         self.assertIn("ming-phone-desktop --sync", self.desktop)
 
+    def test_live_phone_desktop_keeps_a_reopenable_installer_entry(self):
+        core_start = self.phone.index("CORE_NAMES = {")
+        core = self.phone[core_start:self.phone.index("}\nDESKTOP_ORDER", core_start)]
+        self.assertIn('"Install Ming OS.desktop"', core)
+        self.assertIn('"papyrus.desktop"', core)
+
     def test_gtk3_shell_entries_lock_gdk3_before_importing_gdk(self):
         for source in (self.phone, self.drawer):
             require = 'gi.require_version("Gdk", "3.0")'
@@ -798,6 +804,32 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("xsetroot -solid '#eff7f2'", installer)
         self.assertIn("Live wallpaper failed", installer)
         self.assertNotIn("ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png || true", installer)
+
+    def test_live_installer_session_starts_the_complete_desktop_stack(self):
+        installer = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        for marker in (
+            "ming-desktop-organizer",
+            "ming-session-healthcheck --session",
+            "ming-window-manager-watchdog --session",
+            "ming-live-notice",
+            "notice_pid=",
+            "kill \"${notice_pid}\"",
+        ):
+            self.assertIn(marker, installer)
+        self.assertNotIn("pkill -f ming-live-notice", installer)
+
+    def test_live_installer_notice_closes_only_after_calamares_window_is_seen(self):
+        installer = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        self.assertIn("wmctrl -lx", installer)
+        self.assertIn("calamares\\.calamares", installer)
+        self.assertLess(installer.index("calamares\\.calamares"), installer.index('kill "${notice_pid}"'))
+        self.assertIn("notice_pid=", installer)
 
     def test_live_notice_exposes_build_identity(self):
         notice = self.desktop[

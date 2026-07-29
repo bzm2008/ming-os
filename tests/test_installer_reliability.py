@@ -135,6 +135,25 @@ def shell_executable():
 
 
 class InstallerReceiptContracts(unittest.TestCase):
+    def test_receipt_bound_installed_gate_rejects_missing_ab_layout(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "calamares-root-authoritative"
+            create_installed_root(target)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            expected = write_receipt(receipt, target)
+
+            result = verifier.verify_installed_from_receipt(
+                receipt,
+                mount_info_provider=lambda _path: expected,
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("ming-ab-v1 layout" in item for item in result["errors"]))
+
     def test_begin_target_receipt_attempt_replaces_stale_receipt_with_private_nonce(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
@@ -327,6 +346,218 @@ class InstallerReceiptContracts(unittest.TestCase):
             )
             self.assertFalse(result["ok"])
         self.assertTrue(any("GRUB template" in item for item in result["errors"]))
+
+    def test_receipt_bound_installed_gate_accepts_ota_slot_kernel_stanza(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "calamares-root-authoritative"
+            create_installed_root(target)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            expected = write_receipt(receipt, target)
+            slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+            write(
+                target,
+                "etc/ming-update/slots.json",
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "layout": "ming-ab-v1",
+                        "slots": {
+                            "A": {"uuid": expected["uuid"]},
+                            "B": {"uuid": slot_b_uuid},
+                        },
+                    }
+                ),
+            )
+            write(
+                target,
+                "etc/grub.d/09_ming_os",
+                "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                f"    linux /ming-slots/A/vmlinuz root=UUID={expected['uuid']} ro\n"
+                "}\nmenuentry 'Ming OS slot B' {\n"
+                f"    linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+                "}\n",
+                executable=True,
+            )
+
+            result = verifier.verify_installed_from_receipt(
+                receipt,
+                mount_info_provider=lambda _path: expected,
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+            )
+
+        self.assertTrue(result["ok"], result["errors"])
+
+    def test_receipt_bound_installed_gate_rejects_ota_slot_b_uuid_drift(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "calamares-root-authoritative"
+            create_installed_root(target)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            expected = write_receipt(receipt, target)
+            slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+            write(
+                target,
+                "etc/ming-update/slots.json",
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "layout": "ming-ab-v1",
+                        "slots": {
+                            "A": {"uuid": expected["uuid"]},
+                            "B": {"uuid": slot_b_uuid},
+                        },
+                    }
+                ),
+            )
+            write(
+                target,
+                "etc/grub.d/09_ming_os",
+                "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                f"    linux /ming-slots/A/vmlinuz root=UUID={expected['uuid']} ro\n"
+                "}\nmenuentry 'Ming OS slot B' {\n"
+                "    linux /ming-slots/B/vmlinuz root=UUID=stale-slot-b ro\n"
+                "}\n",
+                executable=True,
+            )
+
+            result = verifier.verify_installed_from_receipt(
+                receipt,
+                mount_info_provider=lambda _path: expected,
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("slot B root UUID" in item for item in result["errors"]))
+
+    def test_receipt_bound_installed_gate_rejects_non_uuid_slot_b_value(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "calamares-root-authoritative"
+            create_installed_root(target)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            expected = write_receipt(receipt, target)
+            invalid_slot_b = "not-a-real-filesystem-uuid"
+            write(
+                target,
+                "etc/ming-update/slots.json",
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "layout": "ming-ab-v1",
+                        "slots": {
+                            "A": {"uuid": expected["uuid"]},
+                            "B": {"uuid": invalid_slot_b},
+                        },
+                    }
+                ),
+            )
+            write(
+                target,
+                "etc/grub.d/09_ming_os",
+                "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                f"    linux /ming-slots/A/vmlinuz root=UUID={expected['uuid']} ro\n"
+                "}\nmenuentry 'Ming OS slot B' {\n"
+                f"    linux /ming-slots/B/vmlinuz root=UUID={invalid_slot_b} ro\n"
+                "}\n",
+                executable=True,
+            )
+
+            result = verifier.verify_installed_from_receipt(
+                receipt,
+                mount_info_provider=lambda _path: expected,
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("ming-ab-v1 layout" in item for item in result["errors"]))
+
+    def test_receipt_bound_installed_gate_rejects_invalid_ab_layout_contracts(self):
+        verifier = load_verifier()
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        cases = {
+            "wrong-layout": (
+                {"schema": 1, "layout": "legacy", "slots": {}},
+                None,
+                "layout",
+            ),
+            "slot-a-drift": (
+                {
+                    "schema": 1,
+                    "layout": "ming-ab-v1",
+                    "slots": {"A": {"uuid": "stale-slot-a"}, "B": {"uuid": slot_b_uuid}},
+                },
+                None,
+                "slot A root UUID",
+            ),
+            "duplicate-slot-uuid": (
+                None,
+                "same-as-a",
+                "distinct",
+            ),
+            "unresolved-placeholder": (
+                None,
+                "placeholder",
+                "placeholder",
+            ),
+            "duplicate-root-argument": (
+                None,
+                "duplicate-root",
+                "exactly one root UUID",
+            ),
+        }
+        for name, (slots_override, template_mode, expected_error) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                target = root / "calamares-root-authoritative"
+                create_installed_root(target)
+                receipt = root / "run/ming-installer/target-receipt.json"
+                expected = write_receipt(receipt, target)
+                slots = slots_override or {
+                    "schema": 1,
+                    "layout": "ming-ab-v1",
+                    "slots": {
+                        "A": {"uuid": expected["uuid"]},
+                        "B": {
+                            "uuid": expected["uuid"]
+                            if template_mode == "same-as-a"
+                            else slot_b_uuid
+                        },
+                    },
+                }
+                write(target, "etc/ming-update/slots.json", json.dumps(slots))
+                extra = ""
+                if template_mode == "duplicate-root":
+                    extra = " root=UUID=stale-root"
+                template = (
+                    "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                    f"    linux /ming-slots/A/vmlinuz root=UUID={expected['uuid']}{extra} ro\n"
+                    "}\nmenuentry 'Ming OS slot B' {\n"
+                    f"    linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+                    "}\n"
+                )
+                if template_mode == "placeholder":
+                    template = template.replace("ro\n", "__MING_BOOT_UUID__ ro\n", 1)
+                write(target, "etc/grub.d/09_ming_os", template, executable=True)
+
+                result = verifier.verify_installed_from_receipt(
+                    receipt,
+                    mount_info_provider=lambda _path: expected,
+                    lstat_func=receipt_stat(),
+                    fstat_func=receipt_stat(),
+                )
+
+                self.assertFalse(result["ok"])
+                self.assertTrue(
+                    any(expected_error in item for item in result["errors"]),
+                    result["errors"],
+                )
 
     @unittest.skipIf(os.name == "nt", "real symlink/FIFO boundary coverage runs on POSIX")
     def test_installed_gate_rejects_target_boundary_escape_paths(self):
@@ -559,12 +790,14 @@ class InstallerReceiptContracts(unittest.TestCase):
             )
         ]
         expected_uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
 
         def validate(grub_cfg):
             script = "\n".join(
                 (
                     "set -uo pipefail",
                     f"root_uuid={shlex.quote(expected_uuid)}",
+                    f"slot_b_uuid={shlex.quote(slot_b_uuid)}",
                     helper,
                     f"validate_final_grub_root_uuid {shlex.quote(grub_cfg.as_posix())}",
                 )
@@ -576,7 +809,8 @@ class InstallerReceiptContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             grub_cfg = pathlib.Path(directory) / "grub.cfg"
             valid_lines = (
-                f"linux /vmlinuz root=UUID={expected_uuid} ro\n"
+                f"linux /ming-slots/A/vmlinuz root=UUID={expected_uuid} ro\n"
+                f"linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
                 f"linux /boot/vmlinuz-6.12.0-ming root=UUID={expected_uuid} ro\n"
             )
             grub_cfg.write_text(valid_lines, encoding="utf-8")
@@ -590,11 +824,16 @@ class InstallerReceiptContracts(unittest.TestCase):
                     f"linux /boot/vmlinuz-6.12.0-ming root=UUID={expected_uuid} "
                     "root=UUID=stale-root ro\n"
                 ),
+                "slot-a-wrong": "linux /ming-slots/A/vmlinuz root=UUID=stale-slot-a ro\n",
+                "slot-b-wrong": "linux /ming-slots/B/vmlinuz root=UUID=stale-slot-b ro\n",
             }
             for name, invalid_line in invalid_cases.items():
                 with self.subTest(name=name):
                     grub_cfg.write_text(
-                        f"linux /vmlinuz root=UUID={expected_uuid} ro\n" + invalid_line,
+                        f"linux /ming-slots/A/vmlinuz root=UUID={expected_uuid} ro\n"
+                        f"linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+                        f"linux /vmlinuz root=UUID={expected_uuid} ro\n"
+                        + invalid_line,
                         encoding="utf-8",
                     )
                     rejected = validate(grub_cfg)
@@ -692,6 +931,15 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertNotIn('"${target}/boot/ming-slots/B"', identity)
         self.assertIn("insmod ext2", identity)
         self.assertIn("inactive slot B is intentionally not bootable", identity)
+
+    def test_installed_identity_removes_the_live_only_installer_entry(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        identity = base.split("cat > /usr/local/sbin/ming-fix-installed-identity", 1)[1].split(
+            "\nMINGIDENTITY", 1
+        )[0]
+        self.assertIn('"${target}/usr/share/applications/Install Ming OS.desktop"', identity)
+        self.assertIn('"${target}"/home/*/Desktop/"Install Ming OS.desktop"', identity)
+        self.assertIn('"${target}"/etc/skel/Desktop/"Install Ming OS.desktop"', identity)
 
 
 if __name__ == "__main__":

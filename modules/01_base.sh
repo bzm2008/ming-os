@@ -2633,6 +2633,7 @@ fi
 rm -f \
     "${target}/usr/share/applications/calamares.desktop" \
     "${target}/usr/share/applications/calamares-install-debian.desktop" \
+    "${target}/usr/share/applications/Install Ming OS.desktop" \
     "${target}/usr/share/xsessions/ming-installer.desktop" \
     "${target}/usr/local/sbin/sfdisk" \
     "${target}/etc/systemd/system/ming-live-installer.service" \
@@ -2644,11 +2645,13 @@ for installer_entry in \
     "${target}"/home/*/Desktop/calamares.desktop \
     "${target}"/home/*/Desktop/install-debian.desktop \
     "${target}"/home/*/Desktop/"Install Debian.desktop" \
+    "${target}"/home/*/Desktop/"Install Ming OS.desktop" \
     "${target}"/home/*/Desktop/"安装 Debian.desktop" \
     "${target}"/etc/skel/.config/autostart/calamares-live.desktop \
     "${target}"/etc/skel/Desktop/calamares.desktop \
     "${target}"/etc/skel/Desktop/install-debian.desktop \
     "${target}"/etc/skel/Desktop/"Install Debian.desktop" \
+    "${target}"/etc/skel/Desktop/"Install Ming OS.desktop" \
     "${target}"/etc/skel/Desktop/"安装 Debian.desktop"; do
     [[ -e "${installer_entry}" ]] && rm -f "${installer_entry}" 2>/dev/null || true
 done
@@ -2713,6 +2716,15 @@ echo "target_root=${root}"
 
 root_source="$(/usr/local/sbin/ming-installer-verify receipt --field source)" || exit 20
 root_uuid="$(/usr/local/sbin/ming-installer-verify receipt --field uuid)" || exit 20
+slot_b_uuid="$(python3 -c '
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream)["slots"]["B"]["uuid"]
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value)
+' "${root}/etc/ming-update/slots.json")" || exit 20
 current_root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
 [[ "${current_root_source}" == "${root_source}" ]] || {
     echo "ERROR: authoritative receipt source no longer matches the mounted target"
@@ -2867,9 +2879,17 @@ fi
 
 validate_final_grub_root_uuid() {
     local grub_cfg="$1"
-    awk -v expected="root=UUID=${root_uuid}" '
-        /^[[:space:]]*linux[[:space:]]+\/(boot\/)?vmlinuz[^[:space:]]*([[:space:]]|$)/ {
+    awk -v expected_a="root=UUID=${root_uuid}" -v expected_b="root=UUID=${slot_b_uuid}" '
+        /^[[:space:]]*linux[[:space:]]+\/(boot\/)?vmlinuz[^[:space:]]*([[:space:]]|$)/ ||
+        /^[[:space:]]*linux[[:space:]]+\/ming-slots\/[AB]\/vmlinuz([[:space:]]|$)/ {
             ming_linux_count++
+            expected=expected_a
+            if ($2 == "/ming-slots/A/vmlinuz") {
+                slot_a_count++
+            } else if ($2 == "/ming-slots/B/vmlinuz") {
+                slot_b_count++
+                expected=expected_b
+            }
             root_count=0
             for (field = 1; field <= NF; field++) {
                 if ($field ~ /^root=/) {
@@ -2887,7 +2907,11 @@ validate_final_grub_root_uuid() {
         }
         END {
             if (ming_linux_count == 0) {
-                print "ERROR: final grub.cfg has no Ming linux /vmlinuz stanzas" > "/dev/stderr"
+                print "ERROR: final grub.cfg has no Ming linux stanzas" > "/dev/stderr"
+                exit 1
+            }
+            if (slot_a_count == 0 || slot_b_count == 0) {
+                print "ERROR: final grub.cfg is missing Ming A/B slot stanzas" > "/dev/stderr"
                 exit 1
             }
             exit invalid ? 1 : 0
@@ -2898,6 +2922,10 @@ validate_final_grub_root_uuid() {
 if [ ! -s "${root}/boot/grub/grub.cfg" ] \
     || grep -Eq '__MING_(ROOT|BOOT).*UUID__' "${root}/boot/grub/grub.cfg"; then
     echo "ERROR: final grub.cfg is missing, empty, or still contains a placeholder"
+    exit 22
+fi
+if grep -Eq 'boot=live|ming\.installer=1|安装 Ming OS' "${root}/boot/grub/grub.cfg"; then
+    echo "ERROR: installed GRUB contains Live installer arguments or labels"
     exit 22
 fi
 for contract in \

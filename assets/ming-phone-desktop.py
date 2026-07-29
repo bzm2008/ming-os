@@ -245,6 +245,7 @@ CORE_NAMES = {
     "ming-firefox.desktop",
     "spark-store.desktop",
     "papyrus.desktop",
+    "Install Ming OS.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-settings.desktop",
@@ -252,6 +253,7 @@ DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-firefox.desktop",
     "spark-store.desktop",
     "papyrus.desktop",
+    "Install Ming OS.desktop",
     "ming-terminal.desktop",
 ])}
 CORE_FALLBACKS = {
