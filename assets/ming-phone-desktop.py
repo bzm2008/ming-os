@@ -888,6 +888,7 @@ def layout_item_identity(item):
         trusted_location = (
             is_system_application_path(candidate)
             or candidate.parent == DESKTOP_DIR
+            or candidate.parent == HOME / ".local/share/applications"
         )
         if not trusted_location:
             continue

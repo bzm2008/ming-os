@@ -246,9 +246,14 @@ class DesktopSourceTests(unittest.TestCase):
                      str(PHONE_DESKTOP), "exec"), namespace)
         namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
         namespace["DESKTOP_DIR"] = pathlib.Path("C:/ming-test/home/user/Desktop")
+        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
         apps = [
             {
                 "path": "C:/ming-test/home/user/Desktop/ming-settings.desktop",
+                "basename": "ming-settings.desktop",
+            },
+            {
+                "path": "C:/ming-test/home/user/.local/share/applications/ming-settings.desktop",
                 "basename": "ming-settings.desktop",
             },
             {
