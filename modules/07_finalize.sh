@@ -31,6 +31,7 @@ readonly DESKTOP_LAUNCHERS=(
     "spark-store.desktop"
     "papyrus.desktop"
     "ming-terminal.desktop"
+    "Install Ming OS.desktop"
 )
 
 refresh_dock_launchers() {

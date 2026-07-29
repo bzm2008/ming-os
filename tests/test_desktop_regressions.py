@@ -67,6 +67,7 @@ class DesktopSourceTests(unittest.TestCase):
         cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
         cls.drawer = APP_DRAWER.read_text(encoding="utf-8")
         cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        cls.finalize = FINALIZE_MODULE.read_text(encoding="utf-8")
 
     def test_tile_text_is_bounded(self):
         for marker in [
@@ -111,6 +112,13 @@ class DesktopSourceTests(unittest.TestCase):
             "X-Ming-Live-Only=true",
         ):
             self.assertIn(marker, installer)
+
+    def test_finalize_keeps_the_live_installer_on_live_desktops(self):
+        launcher_list = self.finalize[
+            self.finalize.index("readonly DESKTOP_LAUNCHERS=("):
+            self.finalize.index(")\n\nrefresh_dock_launchers", self.finalize.index("readonly DESKTOP_LAUNCHERS=("))
+        ]
+        self.assertIn('"Install Ming OS.desktop"', launcher_list)
 
     def test_gtk3_shell_entries_lock_gdk3_before_importing_gdk(self):
         for source in (self.phone, self.drawer):
