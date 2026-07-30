@@ -68,6 +68,24 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertNotIn("wget", installer)
         self.assertNotIn("curl", installer)
 
+    def test_spark_system_launcher_is_trusted_for_the_launch_broker(self):
+        finalize = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+        receipt = finalize[finalize.index("seed_trusted_desktop_receipts"):
+                           finalize.index("# Keep the shipped desktop intentional")]
+        self.assertIn('"spark-store.desktop"', receipt)
+
+    def test_spark_desktop_and_dock_use_the_same_verified_launch_path(self):
+        self.assertIn("Exec=/usr/local/bin/ming-spark-store", APPS)
+        self.assertIn('"spark-store:spark-store.desktop"', DESKTOP)
+        self.assertIn("exec_line=\"/usr/local/bin/ming-launch --desktop-file", DESKTOP)
+
+    def test_spark_wrapper_requires_process_or_window_readiness_before_success(self):
+        wrapper = heredoc(APPS, "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'", "MINGSPARK")
+        self.assertIn("wait_for_spark_ready", wrapper)
+        self.assertIn("spark_window_visible", wrapper)
+        self.assertIn("[[ \"${rc}\" -ne 0 ]] || rc=1", wrapper)
+        self.assertNotIn("daemonized successfully", wrapper)
+
     def test_spark_is_a_verified_build_asset_and_runtime_repair_never_downloads_it(self):
         app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
         installer = heredoc(

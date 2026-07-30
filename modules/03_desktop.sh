@@ -264,6 +264,54 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
+    cat > /usr/local/bin/ming-refresh-desktop-state << 'MINGREFRESHDESKTOP'
+#!/usr/bin/env bash
+set -uo pipefail
+
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    target_user=""
+    if [[ -n "${PKEXEC_UID:-}" ]]; then
+        target_user="$(getent passwd "${PKEXEC_UID}" 2>/dev/null | cut -d: -f1 || true)"
+    elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        target_user="${SUDO_USER}"
+    elif command -v loginctl >/dev/null 2>&1; then
+        target_user="$(loginctl list-users --no-legend 2>/dev/null |
+            awk '$1 >= 1000 && $2 != "root" {print $2; exit}')"
+    fi
+    if [[ -z "${target_user}" ]] || ! id "${target_user}" >/dev/null 2>&1; then
+        exit 0
+    fi
+    target_uid="$(id -u "${target_user}")"
+    target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
+    exec runuser -u "${target_user}" -- env \
+        HOME="${target_home}" USER="${target_user}" LOGNAME="${target_user}" \
+        XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+        /usr/local/bin/ming-refresh-desktop-state
+fi
+
+status=0
+user_apps="${HOME}/.local/share/applications"
+mkdir -p "${user_apps}"
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "${user_apps}" >/dev/null 2>&1 || status=1
+fi
+if command -v xdg-desktop-menu >/dev/null 2>&1; then
+    xdg-desktop-menu forceupdate >/dev/null 2>&1 || status=1
+fi
+if [[ -d "${HOME}/.local/share/icons/hicolor" ]] &&
+   command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || status=1
+fi
+if command -v ming-phone-desktop >/dev/null 2>&1; then
+    ming-phone-desktop --sync >/dev/null 2>&1 || status=1
+fi
+if [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+    /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >/dev/null 2>&1 || status=1
+fi
+exit "${status}"
+MINGREFRESHDESKTOP
+    chmod 0755 /usr/local/bin/ming-refresh-desktop-state
+
     # Thunar custom actions do not display a command's stdout.  Keep privilege
     # elevation in the narrow installer, while this unprivileged wrapper turns
     # its structured result into an explicit success/failure dialog and asks
@@ -348,6 +396,12 @@ then
     if command -v ming-phone-desktop >/dev/null 2>&1; then
         ming-phone-desktop --sync >/dev/null 2>&1 || true
     fi
+    if command -v ming-refresh-desktop-state >/dev/null 2>&1; then
+        ming-refresh-desktop-state >/dev/null 2>&1 || true
+    fi
+    if command -v ming-refresh-dock-launchers >/dev/null 2>&1; then
+        ming-refresh-dock-launchers "$(id -un)" >/dev/null 2>&1 || true
+    fi
     exit 0
 fi
 exit 1
@@ -371,7 +425,7 @@ if /usr/local/bin/ming-appimage-installer "${appimage_file}" >"${result_file}"; 
 else
     rc=$?
 fi
-python3 - "${result_file}" "${rc}" << 'MINGAPPIMAGEUIPY'
+if python3 - "${result_file}" "${rc}" << 'MINGAPPIMAGEUIPY'
 import json
 import shutil
 import subprocess
@@ -395,6 +449,22 @@ elif shutil.which("notify-send"):
     subprocess.run(["notify-send", "-u", "normal" if ok else "critical", title, text], check=False)
 raise SystemExit(0 if ok else 1)
 MINGAPPIMAGEUIPY
+then
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${HOME}/.local/share/applications" >/dev/null 2>&1 || true
+    fi
+    if command -v ming-phone-desktop >/dev/null 2>&1; then
+        ming-phone-desktop --sync >/dev/null 2>&1 || true
+    fi
+    if command -v ming-refresh-desktop-state >/dev/null 2>&1; then
+        ming-refresh-desktop-state >/dev/null 2>&1 || true
+    fi
+    if command -v ming-refresh-dock-launchers >/dev/null 2>&1; then
+        ming-refresh-dock-launchers "$(id -un)" >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+exit 1
 MINGAPPIMAGEGUI
     chmod 0755 /usr/local/bin/ming-appimage-install-gui
 
@@ -566,6 +636,8 @@ for section in ("Default Applications", "Added Associations"):
 config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
 config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
+config["Default Applications"]["application/x-appimage"] = "ming-appimage-installer.desktop"
+config["Default Applications"]["application/x-executable"] = "ming-appimage-installer.desktop"
 existing = config["Added Associations"].get("inode/directory", "")
 items = [item for item in existing.split(";") if item]
 items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]
@@ -2956,6 +3028,22 @@ phone_desktop_running() {
     pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' >/dev/null 2>&1
 }
 
+phone_desktop_process_count() {
+    local count
+    count="$(pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' 2>/dev/null | wc -l || true)"
+    [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+    printf '%s\n' "${count}"
+}
+
+stop_duplicate_phone_desktops() {
+    local count
+    count="$(phone_desktop_process_count)"
+    [[ "${count}" -le 1 ]] && return 0
+    log "stopping duplicate Ming Phone Desktop processes (${count})"
+    pkill -TERM -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' >/dev/null 2>&1 || true
+    sleep 0.2
+}
+
 phone_desktop_ready() {
     [[ -s "${HOME}/.cache/ming-os/ming-phone-desktop.ready" ]]
 }
@@ -2984,6 +3072,7 @@ start_phone_desktop() {
         return 1
     fi
     command -v ming-phone-desktop >/dev/null 2>&1 || return 0
+    stop_duplicate_phone_desktops
     export DISPLAY="${DISPLAY:-:0}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
@@ -3138,6 +3227,13 @@ valid_window_id() {
     [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
 }
 
+plank_process_count() {
+    local processes
+    processes="$(pgrep -u "$(id -u)" -x plank 2>/dev/null | wc -l || true)"
+    [[ "${processes}" =~ ^[0-9]+$ ]] || processes=0
+    printf '%s\n' "${processes}"
+}
+
 plank_window_id() {
     command -v wmctrl >/dev/null 2>&1 || return 1
     local fallback_id="" candidate_id candidate_geometry screen=""
@@ -3203,7 +3299,10 @@ window_has_property() {
 }
 
 plank_health_reason() {
-    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || { printf 'not-running\n'; return; }
+    local processes
+    processes="$(plank_process_count)"
+    [[ "${processes}" -eq 0 ]] && { printf 'not-running\n'; return; }
+    [[ "${processes}" -eq 1 ]] || { printf 'duplicate-processes\n'; return; }
     local window_id geometry screen
     window_id="$(plank_window_id)"
     [[ -n "${window_id}" ]] || { printf 'window-not-visible\n'; return; }
@@ -3430,6 +3529,28 @@ process_count() {
     printf '%s\n' "${count}"
 }
 
+stop_duplicate_phone_desktops() {
+    local processes
+    processes="$(process_count phone)"
+    [[ "${processes}" -eq 1 ]] && return 0
+    [[ "${processes}" -gt 1 ]] || return 0
+    log "stopping duplicate Ming Phone Desktop processes (${processes})"
+    probe_timeout pkill -TERM -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' \
+        >/dev/null 2>&1 || true
+    sleep 0.2
+}
+
+stop_duplicate_picom() {
+    local processes
+    processes="$(process_count picom)"
+    [[ "${processes}" -eq 1 ]] && return 0
+    [[ "${processes}" -gt 1 ]] || return 0
+    log "stopping duplicate Picom processes (${processes})"
+    probe_timeout pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
+    sleep 0.2
+}
+
 xfce_panel_running() {
     probe_timeout pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1
 }
@@ -3502,9 +3623,7 @@ ensure_audio_session() {
 }
 
 phone_desktop_running() {
-    probe_timeout pgrep -u "$(id -u)" -f \
-        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' \
-        >/dev/null 2>&1
+    [[ "$(process_count phone)" -eq 1 ]]
 }
 
 phone_desktop_ready() {
@@ -3533,7 +3652,7 @@ stop_xfdesktop_after_phone_ready() {
 }
 
 plank_running() {
-    probe_timeout pgrep -u "$(id -u)" -x plank >/dev/null 2>&1
+    [[ "$(process_count plank)" -eq 1 ]]
 }
 
 plank_window_visible() {
@@ -3543,7 +3662,7 @@ plank_window_visible() {
 }
 
 picom_running() {
-    probe_timeout pgrep -u "$(id -u)" -x picom >/dev/null 2>&1
+    [[ "$(process_count picom)" -eq 1 ]]
 }
 
 wait_for_process() {
@@ -3585,6 +3704,7 @@ start_phone_desktop() {
         start_xfdesktop_fallback
         return 1
     fi
+    stop_duplicate_phone_desktops
     if phone_desktop_ready; then
         phone_recovered=true
         stop_xfdesktop_after_phone_ready || true
@@ -3654,6 +3774,7 @@ start_xrender_picom() {
 
 start_picom() {
     local started_at finished_at deadline_at
+    stop_duplicate_picom
     if picom_running; then
         picom_recovered=true
         return 0
@@ -4904,7 +5025,7 @@ PICOMCFG
     mkdir -p /etc/xdg/picom
     cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'
 backend = "xrender";
-vsync = true;
+vsync = false;
 unredir-if-possible = false;
 use-damage = true;
 shadow = false;
@@ -4923,8 +5044,8 @@ active-opacity = 1.0;
 frame-opacity = 1.0;
 wintypes:
 {
-  dock = { shadow = false; opacity = 0.92; };
-  notification = { shadow = false; opacity = 0.94; };
+  dock = { shadow = false; opacity = 1.0; };
+  notification = { shadow = false; opacity = 1.0; };
 };
 PICOMFALLBACK
 
@@ -4986,6 +5107,7 @@ reason="modern-gpu"
 
 mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+virt="$(systemd-detect-virt 2>/dev/null || true)"
 gpu="$(LC_ALL=C lspci 2>/dev/null | grep -Ei 'vga|3d|display' | tr '\n' ' ' || true)"
 renderer=""
 if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
@@ -5007,6 +5129,9 @@ elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
 elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; then
     config="${fallback_conf}"
     reason="virtual-machine-gpu"
+elif [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
+    config="${fallback_conf}"
+    reason="virtual-machine-${virt}"
 elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
     config="${lowmem_conf}"
     reason="balanced-low-memory-${mem_mb}mb"
@@ -5688,6 +5813,25 @@ if [[ -f "${MARKER}" ]] && [[ "$(head -n 1 "${MARKER}" 2>/dev/null || true)" == 
     exit 0
 fi
 
+log_oobe_event() {
+    local event="$1"
+    local detail="${2:-}"
+    local log_dir="${HOME}/.local/state/ming-os"
+    mkdir -p "${log_dir}"
+    python3 - "${log_dir}/oobe-account.jsonl" "${event}" "${detail}" <<'PY' 2>/dev/null || true
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+path, event, detail = sys.argv[1:]
+record = {"timestamp": datetime.now(timezone.utc).isoformat(), "event": event}
+if detail:
+    record["detail"] = detail[:300]
+with Path(path).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+PY
+}
+
 # 等桌面与授权代理就绪
 sleep 4
 
@@ -5711,49 +5855,57 @@ ensure_autologin() {
 
 # OOBE only collects the display name. The privileged helper owns the visible
 # password prompts so an untrusted session process cannot submit a password.
-FORM=$(dialog --form --title="设置账户" \
-    --text="下一步将由系统安全窗口创建本机管理员密码。开机仍会自动进入桌面；安装软件或更改保护设置时需要输入此密码。" \
-    --field="显示名称:" \
-    --width=440 \
-    "Ming 用户" 2>/dev/null)
-FRC=$?
+# Keep retries finite: a failed helper must never exec this script recursively.
+OOBE_MAX_ATTEMPTS=3
+oobe_attempt=0
+while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
+    oobe_attempt=$((oobe_attempt + 1))
+    FORM=$(dialog --form --title="设置账户" \
+        --text="下一步将由系统安全窗口创建本机管理员密码。开机仍会自动进入桌面；安装软件或更改保护设置时需要输入此密码。" \
+        --field="显示名称:" \
+        --width=440 \
+        "Ming 用户" 2>/dev/null)
+    FRC=$?
 
-if [[ "${FRC}" != "0" ]]; then
-    # 尚未建立管理员身份，不写完成标记；下次登录继续提示。
-    sleep 1
-    exec /usr/local/bin/ming-oobe-account
-fi
+    if [[ "${FRC}" != "0" ]]; then
+        log_oobe_event "retry" "account form cancelled (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+        continue
+    fi
 
-FULLNAME=$(echo "${FORM}" | cut -d'|' -f1)
+    FULLNAME=$(echo "${FORM}" | cut -d'|' -f1)
+    ensure_autologin
 
-ensure_autologin
+    if [[ -n "${FULLNAME}" ]]; then
+        pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
+    fi
 
-# 设置显示名
-if [[ -n "${FULLNAME}" ]]; then
-    pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
-fi
+    # 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
+    if ! pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" >/dev/null 2>&1; then
+        log_oobe_event "bootstrap_failed" "admin bootstrap returned non-zero (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+        dialog --title="无法完成" --text="管理员初始化未成功，请重新设置。" \
+            --width=400 --button="重新设置:0" 2>/dev/null || true
+        continue
+    fi
+    if ! /usr/local/sbin/ming-admin-bootstrap status --user "${CUR_USER}" --json \
+        | grep -Fq '"ready": true'; then
+        dialog --title="无法完成" --text="管理员状态回读失败，请重新设置。" \
+            --width=400 --button="重新设置:0" 2>/dev/null || true
+        log_oobe_event "status_not_ready" "admin status was not ready (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+        continue
+    fi
 
-# 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
-if ! pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" >/dev/null 2>&1; then
-    dialog --title="无法完成" --text="管理员初始化未成功，请重新设置。" \
-        --width=400 --button="重新设置:0" 2>/dev/null || true
-    exec /usr/local/bin/ming-oobe-account
-fi
-if ! /usr/local/sbin/ming-admin-bootstrap status --user "${CUR_USER}" --json \
-    | grep -Fq '"ready": true'; then
-    dialog --title="无法完成" --text="管理员状态回读失败，请重新设置。" \
-        --width=400 --button="重新设置:0" 2>/dev/null || true
-    exec /usr/local/bin/ming-oobe-account
-fi
+    mkdir -p "$(dirname "${MARKER}")"
+    echo "configured" > "${MARKER}"
 
-mkdir -p "$(dirname "${MARKER}")"
-echo "configured" > "${MARKER}"
+    dialog --title="完成" \
+        --text="本机管理员已建立。\n开机仍会自动进入桌面，管理操作会要求输入刚才的密码。" \
+        --width=380 --button="开始使用:0" 2>/dev/null || true
+    repair_desktop_session
+    exit 0
+done
 
-dialog --title="完成" \
-    --text="本机管理员已建立。\n开机仍会自动进入桌面，管理操作会要求输入刚才的密码。" \
-    --width=380 --button="开始使用:0" 2>/dev/null || true
-repair_desktop_session
-exit 0
+log_oobe_event "retry_exhausted" "administrator setup did not reach ready state"
+exit 1
 OOBEACCOUNT
     chmod +x /usr/local/bin/ming-oobe-account
 
@@ -5787,6 +5939,16 @@ configure_simplified_menus() {
     <description>验证并安装本地 Debian 软件包</description>
     <range>*</range>
     <patterns>*.deb</patterns>
+    <other-files/>
+</action>
+<action>
+    <icon>application-x-executable</icon>
+    <name>安装 AppImage</name>
+    <submenu></submenu>
+    <command>/usr/local/bin/ming-appimage-install-gui "%f"</command>
+    <description>设置执行权限并创建用户启动器</description>
+    <range>*</range>
+    <patterns>*.AppImage;*.appimage</patterns>
     <other-files/>
 </action>
 <action>
@@ -5856,13 +6018,15 @@ UCACFG
 
 deploy_live_installer() {
     local verifier_source=/tmp/ming-build/assets/ming-installer-verify.py
+    local install_mode_source=/tmp/ming-build/assets/ming-install-mode.py
     local receipt_module=/usr/lib/x86_64-linux-gnu/calamares/modules/ming-installer-target-receipt
-    if [[ ! -s "${verifier_source}" ]]; then
+    if [[ ! -s "${verifier_source}" || ! -s "${install_mode_source}" ]]; then
         echo "ERROR: missing installer verification asset" >&2
         return 1
     fi
     install -d -m 0755 /usr/local/sbin "${receipt_module}" /etc/calamares/modules
     install -m 0755 "${verifier_source}" /usr/local/sbin/ming-installer-verify
+    install -m 0755 "${install_mode_source}" /usr/local/sbin/ming-install-mode
     cat > "${receipt_module}/module.desc" << 'TARGETRECEIPTDESC'
 ---
 type: "job"
@@ -6165,6 +6329,29 @@ log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
 log "locale_conf=$(tr '\n' ';' </etc/calamares/modules/locale.conf 2>/dev/null || true)"
 log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/null | awk '{print $1}')"
 
+# Re-apply the user-selected install mode after the static fallback files have
+# been written.  A cancelled or invalid choice never reaches Calamares.
+if [ -s /run/ming-installer/install-mode.json ]; then
+    /usr/local/sbin/ming-install-mode show \
+        --state /run/ming-installer/install-mode.json >/dev/null 2>>"${LOG}" || {
+        log "ERROR: selected install mode receipt is invalid"
+        exit 31
+    }
+    mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mode"])' \
+        /run/ming-installer/install-mode.json 2>>"${LOG}" || true)"
+    case "${mode}" in
+        blank_ab|dual_boot_preserve)
+            /usr/local/sbin/ming-install-mode write --mode "${mode}" \
+                --state /run/ming-installer/install-mode.json \
+                --partition /etc/calamares/modules/partition.conf >>"${LOG}" 2>&1 || exit 31
+            ;;
+        *)
+            log "ERROR: selected install mode value is invalid"
+            exit 31
+            ;;
+    esac
+fi
+
 # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
 # Only initialize completely blank non-removable disks; never touch a disk
 # that already has partitions or a mounted filesystem. Prefer msdos here so
@@ -6338,7 +6525,7 @@ hostname:
   forbidden_names: [ localhost ]
 STATICUSERSCONF
 
-    cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
+cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
 #!/usr/bin/env bash
 set -e
 
@@ -6380,9 +6567,48 @@ show_preflight_error() {
         2>/dev/null || true
 }
 
+choose_install_mode() {
+    local choice=""
+    if command -v zenity >/dev/null 2>&1; then
+        choice="$(zenity --list --radiolist --title='选择安装模式' --width=780 --height=340 \
+            --text='请先选择安装方式。保留双系统不会自动清空其他系统，但大版本 A/B OTA 将被禁用。' \
+            --column='' --column='安装方式' --column='说明' \
+            TRUE '空白盘自动安装（支持 A/B OTA）' '需要至少 48GB，将创建 Ming OS A/B 系统槽并支持自动回滚。' \
+            FALSE '保留双系统（禁用 major A/B OTA）' '只使用手动选择的空闲空间；保留其他系统，支持签名 patch/minor 更新。' \
+            2>/dev/null || true)"
+    fi
+    case "${choice}" in
+        '空白盘自动安装（支持 A/B OTA）') choice=blank_ab ;;
+        '保留双系统（禁用 major A/B OTA）') choice=dual_boot_preserve ;;
+        *)
+            zenity --warning --title='未选择安装方式' \
+                --text='未选择安装方式，安装程序不会启动。请从“安装 Ming OS”再次打开并选择。' \
+                2>/dev/null || true
+            return 1
+            ;;
+    esac
+    if [ "$(id -u)" -eq 0 ]; then
+        /usr/local/sbin/ming-install-mode write --mode "${choice}" \
+            --state /run/ming-installer/install-mode.json \
+            --partition /etc/calamares/modules/partition.conf
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo -n /usr/local/sbin/ming-install-mode write --mode "${choice}" \
+            --state /run/ming-installer/install-mode.json \
+            --partition /etc/calamares/modules/partition.conf
+    else
+        pkexec /usr/local/sbin/ming-install-mode write --mode "${choice}" \
+            --state /run/ming-installer/install-mode.json \
+            --partition /etc/calamares/modules/partition.conf
+    fi
+}
+
 if ! is_live_or_installer; then
     zenity --info --title="Ming OS" --text="This is not a Live installer session. The installer does not need to run here." 2>/dev/null || true
     exit 0
+fi
+
+if ! choose_install_mode; then
+    exit 1
 fi
 
 if ! run_preflight; then

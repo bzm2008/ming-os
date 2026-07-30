@@ -190,7 +190,15 @@ class PackageInstaller:
         ):
             returncode, _output, _error = self._call(command, timeout=30)
             refresh[name] = returncode == 0
+        refresh["desktop_state"] = self._refresh_desktop_state()
         return refresh
+
+    def _refresh_desktop_state(self):
+        helper = shutil.which("ming-refresh-desktop-state")
+        if not helper:
+            return False
+        returncode, _output, _error = self._call((helper,), timeout=20)
+        return returncode == 0
 
     @staticmethod
     def _desktop_program(argv):

@@ -59,6 +59,11 @@ REQUIRED_DESKTOP_FILES = (
     "usr/share/xsessions/xfce.desktop",
     "home/user/.config/autostart/ming-session-healthcheck.desktop",
 )
+INSTALL_MODE_SCHEMA = "ming-install-mode/v1"
+INSTALL_MODE_POLICIES = {
+    "blank_ab": "ab_slot",
+    "dual_boot_preserve": "disabled_dual_boot",
+}
 
 
 class TargetReceiptError(RuntimeError):
@@ -101,6 +106,36 @@ def _yaml_bool(text: str, key: str) -> bool | None:
     return None
 
 
+def _read_install_mode(path: Path) -> dict[str, Any] | None:
+    """Read an optional install-mode receipt without following target symlinks."""
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TargetReceiptError(f"cannot inspect install mode receipt: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise TargetReceiptError("install mode receipt is not a regular file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise TargetReceiptError(f"install mode receipt is malformed: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise TargetReceiptError("install mode receipt must be a JSON object")
+    mode = payload.get("mode")
+    expected_ota = INSTALL_MODE_POLICIES.get(mode)
+    if (
+        payload.get("schema") != INSTALL_MODE_SCHEMA
+        or payload.get("version") != 1
+        or expected_ota is None
+        or payload.get("major_ota") != expected_ota
+        or not isinstance(payload.get("message"), str)
+        or not payload["message"].strip()
+    ):
+        raise TargetReceiptError("install mode receipt does not match a supported policy")
+    return payload
+
+
 def _calamares_show_steps(settings: str) -> set[str]:
     steps: set[str] = set()
     in_show = False
@@ -133,10 +168,41 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         errors.append("Calamares show sequence does not expose the partition page")
     initial_choice = _yaml_scalar(partition, "initialPartitioningChoice")
     manual_enabled = _yaml_bool(partition, "allowManualPartitioning")
+    explicit_mode = False
+    try:
+        mode_payload = _read_install_mode(
+            root_path / "run/ming-installer/install-mode.json"
+        )
+    except TargetReceiptError as exc:
+        errors.append(str(exc))
+        mode_payload = None
+        explicit_mode = True
+    if mode_payload is None:
+        # Compatibility for older callers that validate the static A/B config
+        # before the launcher has written the root-only mode receipt.
+        install_mode = "blank_ab"
+        major_ota = "ab_slot"
+    else:
+        explicit_mode = True
+        install_mode = mode_payload["mode"]
+        major_ota = mode_payload["major_ota"]
     if initial_choice != "none":
         errors.append("Calamares must keep the full-disk install choice visible")
-    if manual_enabled is not False:
-        errors.append("Calamares manual partitioning must be disabled")
+    if install_mode == "blank_ab":
+        if manual_enabled is not False:
+            errors.append("Calamares manual partitioning must be disabled")
+        if explicit_mode:
+            required = _yaml_scalar(partition, "requiredStorage")
+            for label in ("MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME"):
+                if label not in partition:
+                    errors.append(f"Calamares A/B partition layout is missing {label}")
+            if required != "48":
+                errors.append("Calamares A/B install must require 48 GB")
+    elif install_mode == "dual_boot_preserve":
+        if manual_enabled is not True:
+            errors.append("Calamares dual-boot mode must enable manual partitioning")
+        if "MING-ROOT-B" in partition:
+            errors.append("Calamares dual-boot mode must not create an A/B root slot")
     unpack_source = _yaml_scalar(unpackfs, "source")
     source_path = Path(source) if source is not None else Path(unpack_source or "")
     if not unpack_source:
@@ -153,6 +219,8 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         full_disk_install="available" if initial_choice == "none" else "unknown",
         source=str(source_path),
         unpackfs_source=unpack_source or "",
+        install_mode=install_mode,
+        major_ota=major_ota,
     )
 
 
@@ -769,39 +837,87 @@ def verify_installed(
         errors.append("Installed fstab must contain exactly one persistent root filesystem entry")
     elif expected_root_uuid and not authoritative_root_entry_found:
         errors.append("Installed fstab root entry does not match the authoritative root UUID")
-    if expected_root_uuid:
-        slot_a_expected = None
-        slot_b_expected = None
-        try:
-            slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
-            if slots.get("schema") != 1 or slots.get("layout") != "ming-ab-v1":
-                raise ValueError("invalid A/B layout")
-            if not isinstance(slots.get("slots"), dict) or set(slots["slots"]) != {"A", "B"}:
-                raise ValueError("invalid A/B slot set")
-            slot_a_uuid = slots["slots"]["A"]["uuid"]
-            slot_b_uuid = slots["slots"]["B"]["uuid"]
-            if (
-                not isinstance(slot_a_uuid, str)
-                or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_a_uuid)
-                or not isinstance(slot_b_uuid, str)
-                or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_b_uuid)
-            ):
-                raise ValueError("invalid A/B UUID")
-            if slot_a_uuid != expected_root_uuid:
-                errors.append("Installed A/B layout slot A root UUID does not match the authoritative receipt")
-            if slot_b_uuid == slot_a_uuid:
-                errors.append("Installed A/B layout slot UUIDs must be distinct")
-            slot_a_expected = f"root=UUID={slot_a_uuid}"
-            slot_b_expected = f"root=UUID={slot_b_uuid}"
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            errors.append("Installed system has no valid ming-ab-v1 layout")
+    install_mode = "blank_ab"
+    major_ota = "ab_slot"
+    try:
+        mode_payload = _read_install_mode(
+            root_path / "etc/ming-update/install-mode.json"
+        )
+    except TargetReceiptError as exc:
+        errors.append(str(exc))
+        mode_payload = None
+    if mode_payload is not None:
+        install_mode = mode_payload["mode"]
+        major_ota = mode_payload["major_ota"]
 
+    if expected_root_uuid:
         grub_template = _read_text(root_path / "etc/grub.d/09_ming_os")
         if not grub_template:
             errors.append("Installed Ming GRUB template is missing after identity repair")
         elif re.search(r"__MING_(?:ROOT|BOOT)[A-Z_]*UUID__", grub_template):
             errors.append("Installed Ming GRUB template still contains an unresolved UUID placeholder")
+        elif install_mode == "dual_boot_preserve":
+            # A preserved dual-boot install deliberately has one root.  Any
+            # A/B receipt or slot payload would falsely advertise major OTA.
+            for relative in (
+                "etc/ming-update/slots.json",
+                "etc/ming-update/ota-ready",
+                "etc/ming-ota-slot",
+            ):
+                try:
+                    metadata = os.lstat(root_path / relative)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    errors.append(f"Installed dual-boot mode cannot inspect {relative}: {exc}")
+                    continue
+                # Any path with an A/B state name is invalid in preserved mode;
+                # directories and special files must not evade the gate.
+                errors.append("Installed dual-boot mode must not contain A/B state")
+            expected = f"root=UUID={expected_root_uuid}"
+            linux_lines = [
+                (line.split()[1], line.split())
+                for line in grub_template.splitlines()
+                if re.match(r"^\s*linux\s+/(?:vmlinuz|boot/vmlinuz[^\s]*)(?:\s|$)", line)
+            ]
+            if not linux_lines:
+                errors.append("Installed Ming GRUB template has no Ming linux stanza")
+            for path, fields in linux_lines:
+                if path.startswith("/ming-slots/"):
+                    errors.append("Installed dual-boot GRUB must not contain A/B slot entries")
+                    continue
+                roots = [field for field in fields if field.startswith("root=")]
+                if len(roots) != 1:
+                    errors.append("Installed Ming GRUB template stanza must contain exactly one root UUID")
+                elif roots != [expected]:
+                    errors.append("Installed Ming GRUB template does not match the authoritative root UUID")
         else:
+            slot_a_expected = None
+            slot_b_expected = None
+            try:
+                slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
+                if slots.get("schema") != 1 or slots.get("layout") != "ming-ab-v1":
+                    raise ValueError("invalid A/B layout")
+                if not isinstance(slots.get("slots"), dict) or set(slots["slots"]) != {"A", "B"}:
+                    raise ValueError("invalid A/B slot set")
+                slot_a_uuid = slots["slots"]["A"]["uuid"]
+                slot_b_uuid = slots["slots"]["B"]["uuid"]
+                if (
+                    not isinstance(slot_a_uuid, str)
+                    or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_a_uuid)
+                    or not isinstance(slot_b_uuid, str)
+                    or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_b_uuid)
+                ):
+                    raise ValueError("invalid A/B UUID")
+                if slot_a_uuid != expected_root_uuid:
+                    errors.append("Installed A/B layout slot A root UUID does not match the authoritative receipt")
+                if slot_b_uuid == slot_a_uuid:
+                    errors.append("Installed A/B layout slot UUIDs must be distinct")
+                slot_a_expected = f"root=UUID={slot_a_uuid}"
+                slot_b_expected = f"root=UUID={slot_b_uuid}"
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                errors.append("Installed system has no valid ming-ab-v1 layout")
+
             linux_lines = [
                 (line.split()[1], line.split())
                 for line in grub_template.splitlines()
@@ -857,6 +973,8 @@ def verify_installed(
         requested_target=requested_target,
         target=str(root_path),
         target_mode=target_mode,
+        install_mode=install_mode,
+        major_ota=major_ota,
         default_target="graphical" if "graphical.target" in default_target else "non-graphical",
         display_manager="lightdm" if "lightdm.service" in display_manager else "missing",
         desktop_session="ready" if not errors else "incomplete",

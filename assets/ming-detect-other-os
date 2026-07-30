@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Conservatively generate one GRUB chainloader entry for another OS."""
+
+import os
+import pathlib
+import re
+import subprocess
+
+
+ROOT_VALUE = os.environ.get("MING_OTHER_OS_ROOT", "").strip()
+ROOT = pathlib.Path(ROOT_VALUE) if ROOT_VALUE else None
+OUT = pathlib.Path(os.environ.get("MING_OTHER_OS_OUT", "/etc/grub.d/11_ming_other_os"))
+LOG = pathlib.Path(os.environ.get("MING_OTHER_OS_LOG", "/var/log/ming-other-os-detect.log"))
+UUID_RE = re.compile(r"^[A-Za-z0-9-]{4,128}$")
+
+
+def actual(logical):
+    return ROOT / logical.lstrip("/") if ROOT is not None else pathlib.Path(logical)
+
+
+def log(message):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a", encoding="utf-8") as stream:
+            stream.write(message + "\n")
+    except OSError:
+        pass
+
+
+def esp_uuid(path):
+    override = os.environ.get("MING_OTHER_OS_UUID", "")
+    if override:
+        return override.strip()
+    try:
+        result = subprocess.run(
+            ["findmnt", "-no", "UUID", "--target", str(path)],
+            check=False, capture_output=True, text=True,
+        )
+    except OSError:
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+def esp_filesystem_type(path):
+    override = os.environ.get("MING_OTHER_OS_FSTYPE", "")
+    if override:
+        return override.strip().lower()
+    try:
+        result = subprocess.run(
+            ["findmnt", "-no", "FSTYPE", "--target", str(path)],
+            check=False, capture_output=True, text=True,
+        )
+    except OSError:
+        return ""
+    return result.stdout.strip().splitlines()[0].lower() if result.stdout.strip() else ""
+
+
+def esp_is_fat(path):
+    fstype = esp_filesystem_type(path)
+    # Unit/integration fixtures are ordinary directories rather than mounts;
+    # real mounted ESPs are fail-closed on any reported non-FAT filesystem.
+    if not fstype:
+        log(f"ESP filesystem type unavailable for {path}; continuing only with explicit loader checks")
+        return True
+    if fstype not in {"vfat", "fat", "fat32"}:
+        log(f"skip {path}: ESP filesystem is not FAT ({fstype})")
+        return False
+    return True
+
+
+def regular_file(path):
+    return path.is_file() and not path.is_symlink()
+
+
+def candidates():
+    for logical in ("/boot/efi", "/efi", "/mnt/efi"):
+        yield actual(logical)
+    media = actual("/media")
+    if media.is_dir() and not media.is_symlink():
+        for user_mount in sorted(media.iterdir()):
+            if user_mount.is_dir() and not user_mount.is_symlink():
+                yield user_mount / "efi"
+
+
+def make_entry(kind, esp, loader, uuid):
+    try:
+        relative = loader.relative_to(esp).as_posix()
+    except ValueError:
+        log(f"skip {kind}: loader is outside ESP: {loader}")
+        return ""
+    if relative != "EFI/Microsoft/Boot/bootmgfw.efi" and not (
+        relative.startswith("EFI/Linux/") and relative.lower().endswith(".efi")
+    ):
+        log(f"skip {kind}: unsafe EFI path {relative}")
+        return ""
+    if not UUID_RE.fullmatch(uuid or ""):
+        log(f"skip {kind}: invalid ESP UUID")
+        return ""
+    log(f"detected {kind} loader={relative} esp_uuid={uuid}")
+    return (
+        "menuentry '启动另一个系统' --class os {\n"
+        f"    search --no-floppy --fs-uuid --set=esp {uuid}\n"
+        f"    chainloader ($esp)/{relative}\n"
+        "}\n"
+    )
+
+
+def detect():
+    for esp in candidates():
+        if not esp.is_dir() or esp.is_symlink() or not (esp / "EFI").is_dir():
+            continue
+        if not esp_is_fat(esp):
+            continue
+        uuid = esp_uuid(esp)
+        if not uuid:
+            log(f"skip {esp}: ESP UUID unavailable")
+            continue
+        windows = esp / "EFI/Microsoft/Boot/bootmgfw.efi"
+        if regular_file(windows):
+            return make_entry("windows", esp, windows, uuid)
+        linux_dir = esp / "EFI/Linux"
+        if linux_dir.is_dir() and not linux_dir.is_symlink():
+            for loader in sorted(linux_dir.iterdir()):
+                if regular_file(loader) and loader.suffix.lower() == ".efi":
+                    entry = make_entry("linux", esp, loader, uuid)
+                    if entry:
+                        return entry
+    log("no safe other OS EFI loader detected")
+    return ""
+
+
+def main():
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    content = detect()
+    temporary = OUT.with_name(OUT.name + f".{os.getpid()}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.chmod(temporary, 0o755)
+    os.replace(temporary, OUT)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

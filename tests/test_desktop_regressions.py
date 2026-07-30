@@ -898,6 +898,36 @@ class DesktopSourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, status)
 
+    def test_blank_desktop_press_is_consumed_before_release_context_menu(self):
+        fixed = self.phone[self.phone.index("    def on_fixed_button_press"):
+                           self.phone.index("    def on_fixed_motion", self.phone.index("    def on_fixed_button_press"))]
+        self.assertIn("if not item:", fixed)
+        self.assertIn("return True", fixed)
+
+    def test_virtualbox_picom_profile_disables_animation_and_opacity(self):
+        start = self.desktop.index("cat > /usr/local/bin/ming-picom")
+        body_start = self.desktop.index("#!/usr/bin/env bash", start)
+        picom = self.desktop[body_start:self.desktop.index("\nMINGPICOM", body_start)]
+        self.assertIn("systemd-detect-virt", picom)
+        self.assertIn("virtual-machine", picom)
+        self.assertIn("picom-fallback.conf", picom)
+        fallback_start = self.desktop.index("picom-fallback.conf << 'PICOMFALLBACK'")
+        fallback_body = self.desktop.index('backend = "xrender"', fallback_start)
+        fallback = self.desktop[fallback_body:self.desktop.index("\nPICOMFALLBACK", fallback_body)]
+        self.assertIn("vsync = false;", fallback)
+        self.assertIn("fading = false;", fallback)
+        self.assertIn("opacity = 1.0", fallback)
+        self.assertIn("shadow = false", fallback)
+
+    def test_thunar_final_menu_supports_deb_and_appimage_without_script_install(self):
+        menu = self.desktop[self.desktop.index("configure_simplified_menus()"):
+                            self.desktop.index("# ======================== Live 安装器脚本", self.desktop.index("configure_simplified_menus()"))]
+        self.assertIn("<patterns>*.deb</patterns>", menu)
+        self.assertIn("<patterns>*.AppImage;*.appimage</patterns>", menu)
+        self.assertIn("ming-appimage-install-gui", menu)
+        self.assertNotIn("*.run", menu)
+        self.assertNotIn("*.sh", menu)
+
     def test_live_installer_session_uses_release_wallpaper_not_solid_fill(self):
         installer = self.desktop[
             self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
@@ -1084,11 +1114,13 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("xfce4-session-logout", self.phone)
         self.assertIn("gnome-session-quit", self.phone)
 
-    def test_spark_daemonized_zero_exit_is_success(self):
-        self.assertIn('if [[ "${rc}" -eq 0 ]]; then', self.apps)
-        self.assertIn("Spark Store launcher daemonized successfully", self.apps)
+    def test_spark_requires_visible_process_or_window_before_success(self):
+        self.assertIn("wait_for_spark_ready", self.apps)
         self.assertIn("pgrep -f", self.apps)
         self.assertIn("wmctrl -lx", self.apps)
+        self.assertIn("Spark Store startup failed rc=", self.apps)
+        self.assertIn('[[ "${rc}" -ne 0 ]] || rc=1', self.apps)
+        self.assertNotIn("Spark Store launcher daemonized successfully", self.apps)
 
     def test_settings_and_app_library_fit_the_monitor_workarea(self):
         self.assertIn("responsive_window_size", self.settings)

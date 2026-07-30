@@ -26,12 +26,12 @@ def layout():
             "A": {
                 "device": "/dev/disk/by-uuid/root-a",
                 "uuid": "11111111-1111-1111-1111-111111111111",
-                "grub_entry": "Ming OS slot A",
+                "grub_entry": "Ming OS 高级启动>Ming OS slot A",
             },
             "B": {
                 "device": "/dev/disk/by-uuid/root-b",
                 "uuid": "22222222-2222-2222-2222-222222222222",
-                "grub_entry": "Ming OS slot B",
+                "grub_entry": "Ming OS 高级启动>Ming OS slot B",
             },
         },
         "boot": {
@@ -123,6 +123,26 @@ class OtaAbContractTests(unittest.TestCase):
 
         self.assertEqual("rolled_back", rolled_back["status"])
 
+    def test_force_rollback_preserves_canonical_nested_entry(self):
+        transaction = self.ab.begin_transaction(
+            layout(), active_slot="A", target_slot="B", version="26.4.1", checksum="a" * 64
+        )
+
+        rolled_back = self.ab.force_rollback(transaction, "health check failed")
+
+        self.assertEqual("Ming OS 高级启动>Ming OS slot A", rolled_back["previous_entry"])
+        self.assertEqual("A", rolled_back["boot_target"])
+
+    def test_force_rollback_normalizes_legacy_entry_for_read_only_compatibility(self):
+        transaction = self.ab.begin_transaction(
+            layout(), active_slot="A", target_slot="B", version="26.4.1", checksum="a" * 64
+        )
+        transaction["previous_entry"] = "Ming OS slot A"
+
+        rolled_back = self.ab.force_rollback(transaction, "legacy receipt")
+
+        self.assertEqual("Ming OS 高级启动>Ming OS slot A", rolled_back["previous_entry"])
+
     def test_prepares_inactive_root_with_target_root_and_shared_home_fstab(self):
         with tempfile.TemporaryDirectory(prefix="ming-ab-root-") as directory:
             root = pathlib.Path(directory)
@@ -156,6 +176,9 @@ class OtaAbContractTests(unittest.TestCase):
                 encoding="utf-8")
             self.assertIn("Ming OS slot A", grub)
             self.assertIn("Ming OS slot B", grub)
+            self.assertIn("submenu 'Ming OS 高级启动'", grub)
+            self.assertLess(grub.index("submenu 'Ming OS 高级启动'"), grub.index("menuentry 'Ming OS slot A'"))
+            self.assertIn("linux /ming-slots/B/vmlinuz root=UUID=22222222-2222-2222-2222-222222222222", grub)
             self.assertIn("root=UUID=11111111-1111-1111-1111-111111111111", grub)
             self.assertIn("root=UUID=22222222-2222-2222-2222-222222222222", grub)
             self.assertNotIn("__MING_", grub)
@@ -180,6 +203,7 @@ class OtaAbContractTests(unittest.TestCase):
             self.assertIn(required, stage)
         self.assertNotIn("mkfs", stage)
         self.assertNotIn("parted", stage)
+        self.assertIn("Ming OS 高级启动>", stage)
 
     def test_stage_engine_keeps_slot_specific_kernels_on_shared_boot(self):
         stage = STAGE_PATH.read_text(encoding="utf-8")
@@ -291,8 +315,60 @@ class OtaAbContractTests(unittest.TestCase):
             "\nABHEALTH\n", 1)[0]
         self.assertIn("rollback_ab_boot()", health)
         self.assertIn("force-rollback", health)
+        self.assertIn("saved_entry=${previous_entry}", health)
+        self.assertIn("next_entry=${previous_entry}", health)
+        self.assertNotIn('grub-set-default "${previous_entry}" || true', health)
+        self.assertNotIn('grub-reboot "${previous_entry}" || true', health)
         self.assertNotIn('status)" || exit 1', health)
         self.assertNotIn('[[ "${current}" == "${target}" ]] || exit 1', health)
+
+    def test_health_rollback_verifies_saved_and_next_grub_entries(self):
+        module = OTA.read_text(encoding="utf-8")
+        health = module.split("cat > /usr/local/sbin/ming-ota-ab-health << 'ABHEALTH'\n", 1)[1].split(
+            "\nABHEALTH\n", 1)[0]
+        self.assertIn("saved_entry=${previous_entry}", health)
+        self.assertIn("next_entry=${previous_entry}", health)
+        self.assertIn("grub-editenv list", health)
+        self.assertNotIn('grub-set-default "${previous_entry}" || true', health)
+        self.assertNotIn('grub-reboot "${previous_entry}" || true', health)
+
+    def test_stage_checks_grub_commands_before_starting_transaction(self):
+        stage = STAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("command -v grub-reboot", stage)
+        self.assertIn("command -v grub-editenv", stage)
+        self.assertLess(stage.index("command -v grub-reboot"), stage.index("ming-ota-ab --layout", stage.index("ISO_MOUNT=\"\"")))
+
+    def test_patch_apply_revalidates_manifest_schema_signature_and_digest(self):
+        module = OTA.read_text(encoding="utf-8")
+        apply = module.split("apply_manifest_apt_update() {", 1)[1].split(
+            "# ======================== major ISO 升级", 1
+        )[0]
+        self.assertIn("validate_ota_manifest_schema", apply)
+        self.assertIn("verify_signed_ota_manifest", apply)
+        self.assertIn("sha256sum", apply)
+
+    def test_legacy_patch_command_reuses_signed_main_manifest(self):
+        module = OTA.read_text(encoding="utf-8")
+        patch = module.split("patch_update() {", 1)[1].split("apply_manifest_apt_update() {", 1)[0]
+        self.assertIn("check_update", patch)
+        self.assertIn("apply_manifest_apt_update", patch)
+        self.assertNotIn("/api/onion-patch", patch)
+
+    def test_patch_apply_binds_the_revalidated_manifest_fingerprint(self):
+        module = OTA.read_text(encoding="utf-8")
+        apply = module.split("apply_manifest_apt_update() {", 1)[1].split(
+            "# ======================== major ISO 升级", 1
+        )[0]
+        self.assertIn('expected_sha256="${2:-}"', apply)
+        self.assertIn('"${manifest_digest,,}" != "${expected_sha256,,}"', apply)
+
+    def test_major_apply_blocks_dual_boot_mode_before_writing_a_slot(self):
+        module = OTA.read_text(encoding="utf-8")
+        self.assertIn("disabled_dual_boot", module)
+        self.assertIn("保留双系统模式，大版本 A/B OTA 已禁用", module)
+        apply = module.split("apply_update() {", 1)[1].split("# 用途：夜间挂机维护", 1)[0]
+        self.assertIn("major_ota_allowed", apply)
+        self.assertLess(apply.index("major_ota_allowed"), apply.index("major_install_with_home_backup"))
 
     def test_layout_manifest_example_documents_installer_handoff(self):
         manifest = ROOT / "docs" / "ota" / "ming-ab-layout-v1.json"

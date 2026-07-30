@@ -426,8 +426,9 @@ class BuildContractTests(unittest.TestCase):
         self.assertIn("/usr/local/sbin/ming-admin-bootstrap", script)
         self.assertNotIn('button="跳过', script.lower())
         self.assertNotIn('echo "skipped"', script)
-        self.assertGreaterEqual(
-            script.count("exec /usr/local/bin/ming-oobe-account"), 3)
+        self.assertIn("OOBE_MAX_ATTEMPTS=3", script)
+        self.assertIn('log_oobe_event "retry_exhausted"', script)
+        self.assertNotIn("exec /usr/local/bin/ming-oobe-account", script)
 
     def test_oobe_does_not_collect_or_pipe_the_bootstrap_password(self):
         script = self.desktop.split(

@@ -236,7 +236,13 @@ DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 DESKTOP_DIR = HOME / "Desktop"
 SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
-APP_DIRS = [DESKTOP_DIR, SYSTEM_APPLICATION_DIR, HOME / ".local/share/applications"]
+LOCAL_APPLICATION_DIR = Path("/usr/local/share/applications")
+APP_DIRS = [
+    DESKTOP_DIR,
+    SYSTEM_APPLICATION_DIR,
+    LOCAL_APPLICATION_DIR,
+    HOME / ".local/share/applications",
+]
 APP_CATALOG_FINGERPRINT_VERSION = 1
 CORE_NAMES = {
     "ming-settings.desktop",
@@ -324,7 +330,9 @@ DRAG_THRESHOLD = 12
 ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
 CLOCK_MARGIN_X = 26
-CLOCK_MARGIN_Y = 20
+# Keep the status widget close to the top edge in both compact and expanded
+# layouts; the desktop coordinator owns the remaining vertical spacing.
+CLOCK_MARGIN_Y = 8
 STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_EXPANDED_HEIGHT = 248
 WALLPAPER_PATHS = [
@@ -3468,7 +3476,14 @@ class PhoneDesktop(Gtk.Window):
         else:
             self.fixed_press_offset = (0, 0)
         self.fixed_press_moved = False
-        return bool(item)
+        if not item:
+            # Keep the root surface as the event owner so the matching
+            # button-release can open the desktop context menu.
+            return True
+        # Consume the press on the root surface as well as on a tile.  GTK can
+        # otherwise route a blank-area right click to the window below us and
+        # the release event never reaches the desktop context-menu handler.
+        return True
 
     def on_fixed_motion(self, _widget, event):
         if not self.fixed_press_origin:

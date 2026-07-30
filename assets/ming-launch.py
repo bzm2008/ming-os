@@ -470,6 +470,47 @@ class LaunchBroker:
         previous = self._recent.get(key)
         if previous is not None and moment - previous < DEDUP_SECONDS:
             return False
+
+        def watch_for_window(process, failure_status):
+            feedback = self.static_feedback if self.reduced_motion() else self.animate
+            finish = feedback(request, self.workarea())
+
+            def ready():
+                self.record_event(request, "ready")
+                if callable(finish):
+                    finish()
+
+            def failed(error):
+                self._recent.pop(key, None)
+                if callable(finish):
+                    finish()
+                self.record_event(request, failure_status, error)
+                self.report_error(request, error)
+
+            def timed_out():
+                self._recent.pop(key, None)
+                if callable(finish):
+                    finish()
+                error = RuntimeError("应用窗口未在等待时间内出现")
+                self.record_event(request, "window_timeout", error)
+                self.report_error(request, error)
+
+            try:
+                self.probe(
+                    process,
+                    request.desktop_file,
+                    on_ready=ready,
+                    on_failure=failed,
+                    on_timeout=timed_out,
+                )
+            except TypeError:
+                self.probe(
+                    process,
+                    request.desktop_file,
+                    on_ready=ready,
+                    on_failure=failed,
+                )
+
         if request.mode == "desktop_app_info":
             if not self.trusted_verifier(request.desktop_file):
                 error = RuntimeError("desktop launcher verification failed")
@@ -489,8 +530,7 @@ class LaunchBroker:
                 return False
             self._recent[key] = moment
             self.record_event(request, "activated")
-            feedback = self.static_feedback if self.reduced_motion() else self.animate
-            feedback(request, self.workarea())
+            watch_for_window(None, "activation_failed")
             return True
         if request.mode == "desktop_proxy" and not self.proxy_verifier(request.desktop_file):
             error = RuntimeError("desktop proxy verification failed")
@@ -506,43 +546,7 @@ class LaunchBroker:
             return False
         self._recent[key] = moment
         self.record_event(request, "spawned")
-        finish = None
-        feedback = self.static_feedback if self.reduced_motion() else self.animate
-        finish = feedback(request, self.workarea())
-
-        def ready():
-            self.record_event(request, "ready")
-            if callable(finish):
-                finish()
-
-        def failed(error):
-            self._recent.pop(key, None)
-            if callable(finish):
-                finish()
-            self.record_event(request, "process_exit", error)
-            self.report_error(request, error)
-
-        def timed_out():
-            self._recent.pop(key, None)
-            self.record_event(request, "window_timeout")
-            if callable(finish):
-                finish()
-
-        try:
-            self.probe(
-                process,
-                request.desktop_file,
-                on_ready=ready,
-                on_failure=failed,
-                on_timeout=timed_out,
-            )
-        except TypeError:
-            self.probe(
-                process,
-                request.desktop_file,
-                on_ready=ready,
-                on_failure=failed,
-            )
+        watch_for_window(process, "process_exit")
         return True
 
 

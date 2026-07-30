@@ -1580,12 +1580,50 @@ class MingSettings(Adw.ApplicationWindow):
     def on_wifi_toggle(self, sw, _p):
         if self.loading_wifi_state:
             return
-        state = "on" if sw.get_active() else "off"
+        requested_enabled = bool(sw.get_active())
+        previous_enabled = not requested_enabled
+        state = "on" if requested_enabled else "off"
+
+        def update_switch(active):
+            self.loading_wifi_state = True
+            try:
+                sw.set_active(bool(active))
+            finally:
+                self.loading_wifi_state = False
+
+        def write_done(rc, _output, write_error):
+            def readback_done(read_rc, output, read_error):
+                normalized = (output or "").strip().casefold()
+                known_states = {"enabled": True, "disabled": False}
+                if read_rc != 0 or normalized not in known_states:
+                    update_switch(previous_enabled)
+                    detail = read_error or output or "NetworkManager 未返回 enabled/disabled。"
+                    self.toast("无法确认无线网络实际状态：%s" % detail, "error")
+                    return False
+
+                actual_enabled = known_states[normalized]
+                if actual_enabled != requested_enabled:
+                    update_switch(actual_enabled)
+                    self.toast(
+                        "无线网络切换未生效：实际状态仍为%s。" % (
+                            "开启" if actual_enabled else "关闭"),
+                        "error")
+                elif rc != 0:
+                    update_switch(actual_enabled)
+                    self.toast(
+                        "无线网络命令返回失败，但已读回实际状态：%s" % (
+                            write_error or "NetworkManager 未提供原因"),
+                        "error")
+                return False
+
+            run_capture_async(
+                ["env", "LC_ALL=C", "nmcli", "radio", "wifi"], timeout=6,
+                on_done=readback_done)
+            return False
+
         run_capture_async(
             ["env", "LC_ALL=C", "nmcli", "radio", "wifi", state], timeout=8,
-            on_done=lambda rc, _output, error: (
-                self.toast("无线网络切换失败：%s" % (error or "NetworkManager 不可用"))
-                if rc != 0 else None))
+            on_done=write_done)
 
     def on_wifi_status_refresh(self, _button):
         generation = self.wifi_probe_state.begin()
@@ -2179,6 +2217,15 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_action_button.set_sensitive(False)
             self.update_status.set_label("新版本 %s 已准备完成，系统将自动重启并继续安装。" % (version or ""))
             return
+        if action == "blocked":
+            self.update_action_state = "check"
+            self.update_action_button.set_label("检查更新")
+            self.update_status.set_label(error or "此安装模式不支持该大版本 OTA。")
+            self.update_detail.set_label(
+                "当前安装保留了其他系统，因此不会自动改写 A/B 系统槽。\n"
+                "已签名的 patch/minor 更新仍可使用。")
+            self.update_detail.set_visible(True)
+            return
         if available and ready and action == "apply":
             if not manifest_path or not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest_sha256):
                 self.update_action_state = "check"
@@ -2441,21 +2488,14 @@ class MingSettings(Adw.ApplicationWindow):
         dialog.set_default_response("confirm")
         dialog.set_response_appearance("confirm", Adw.ResponseAppearance.SUGGESTED)
         remaining = {"seconds": int(seconds)}
+        state = {"finished": False, "timer": None}
 
-        def tick():
-            remaining["seconds"] -= 1
-            if remaining["seconds"] <= 0:
-                dialog.close()
-                self.toast("未确认显示设置，系统正在自动恢复原设置。", "warning")
+        def dispatch(action, automatic=False):
+            if state["finished"]:
                 return False
-            dialog.set_body("请在 %d 秒内确认；否则自动恢复原设置。" % remaining["seconds"])
-            return True
-
-        timer = GLib.timeout_add_seconds(1, tick)
-
-        def respond(_dialog, response):
-            GLib.source_remove(timer)
-            action = "confirm" if response == "confirm" else "rollback"
+            state["finished"] = True
+            if not automatic and state["timer"] is not None:
+                GLib.source_remove(state["timer"])
 
             def done(rc, text, error):
                 try:
@@ -2468,6 +2508,23 @@ class MingSettings(Adw.ApplicationWindow):
                 return False
 
             run_capture_async([DISPLAY_CONTROL_HELPER, action, token], timeout=10, on_done=done)
+            return False
+
+        def tick():
+            remaining["seconds"] -= 1
+            if remaining["seconds"] <= 0:
+                self.toast("未确认显示设置，系统正在自动恢复原设置。", "warning")
+                dispatch("rollback", automatic=True)
+                dialog.close()
+                return False
+            dialog.set_body("请在 %d 秒内确认；否则自动恢复原设置。" % remaining["seconds"])
+            return True
+
+        state["timer"] = GLib.timeout_add_seconds(1, tick)
+
+        def respond(_dialog, response):
+            action = "confirm" if response == "confirm" else "rollback"
+            dispatch(action)
 
         dialog.connect("response", respond)
         dialog.present()

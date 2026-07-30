@@ -163,6 +163,7 @@ class DockLifecycleContracts(unittest.TestCase):
     def test_watchdog_logs_specific_failure_and_recovery_states(self):
         for marker in (
             "not-running",
+            "duplicate-processes",
             "window-not-visible",
             "wrong-window-type",
             "not-above",
@@ -171,6 +172,18 @@ class DockLifecycleContracts(unittest.TestCase):
             "recovery succeeded",
         ):
             self.assertIn(marker, self.watchdog)
+
+    def test_dock_and_compositor_health_require_exactly_one_process(self):
+        self.assertIn("plank_process_count", self.watchdog)
+        self.assertIn('[[ "${processes}" -eq 1 ]]', self.watchdog)
+        for marker in (
+            '[[ "$(process_count phone)" -eq 1 ]]',
+            '[[ "$(process_count plank)" -eq 1 ]]',
+            '[[ "$(process_count picom)" -eq 1 ]]',
+            "stop_duplicate_phone_desktops",
+            "stop_duplicate_picom",
+        ):
+            self.assertIn(marker, self.session_healthcheck)
 
     def test_healthcheck_has_json_repair_and_component_state(self):
         for marker in (
@@ -212,6 +225,23 @@ class DockLifecycleContracts(unittest.TestCase):
             self.oobe.index(marker),
             self.oobe.index("repair_desktop_session", self.oobe.index(marker)),
         )
+
+    def test_oobe_failures_are_structured_and_never_mark_ready(self):
+        for marker in (
+            "log_oobe_event",
+            '"bootstrap_failed"',
+            '"status_not_ready"',
+            '"retry"',
+            "oobe-account.jsonl",
+        ):
+            self.assertIn(marker, self.oobe)
+        self.assertLess(
+            self.oobe.index('"status_not_ready"'),
+            self.oobe.index('echo "configured"'),
+        )
+        self.assertIn("OOBE_MAX_ATTEMPTS=3", self.oobe)
+        self.assertIn('"retry_exhausted"', self.oobe)
+        self.assertNotIn("exec /usr/local/bin/ming-oobe-account", self.oobe)
 
     def test_generated_runtime_scripts_are_valid_bash(self):
         for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):

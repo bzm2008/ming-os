@@ -35,6 +35,8 @@ done
 [[ -f "${ISO}" && ! -L "${ISO}" ]] || fail "ISO is missing or unsafe"
 [[ "${CHECKSUM}" =~ ^[A-Fa-f0-9]{64}$ ]] || fail "checksum is invalid"
 [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+){1,3}([A-Za-z0-9._-]*)?$ ]] || fail "version is invalid"
+command -v grub-reboot >/dev/null 2>&1 || fail "grub-reboot is unavailable"
+command -v grub-editenv >/dev/null 2>&1 || fail "grub-editenv is unavailable"
 ISO="$(readlink -f -- "${ISO}")" || fail "cannot resolve trusted ISO staging path"
 trusted_root="$(readlink -f -- "${TRUSTED_STAGING_ROOT}")" || fail "trusted ISO staging root is missing"
 [[ "${ISO}" == "${trusted_root}/"*.iso ]] || fail "ISO is outside trusted ISO staging"
@@ -49,14 +51,21 @@ target="$(jq -r '.inactive_slot' <<<"${status}")"
 target_device="$(jq -r '.inactive.device' <<<"${status}")"
 target_uuid="$(jq -r '.inactive.uuid' <<<"${status}")"
 target_entry="$(jq -r '.inactive.grub_entry' <<<"${status}")"
+target_label="${target_entry##*>}"
+case "${target_entry}" in
+    "Ming OS 高级启动>Ming OS slot ${target}") ;;
+    *) fail "target GRUB entry must include Ming OS 高级启动> submenu path" ;;
+esac
 [[ "${active}" != "${target}" && "${target_device}" == /dev/* ]] || fail "inactive slot identity is invalid"
 [[ -b "${target_device}" ]] || fail "inactive slot is not a block device"
 [[ "$(findmnt -nro UUID -T /)" != "${target_uuid}" ]] || fail "refusing to overwrite the mounted root slot"
 [[ -z "$(findmnt -nro TARGET -S "${target_device}" 2>/dev/null || true)" ]] || fail "inactive slot is already mounted"
 [[ -z "$(findmnt -nro TARGET -S "UUID=${target_uuid}" 2>/dev/null || true)" ]] || fail "inactive slot UUID is already mounted"
 [[ "$(blkid -s UUID -o value "${target_device}")" == "${target_uuid}" ]] || fail "inactive slot UUID changed"
-grep -Fq "menuentry '${target_entry}'" /boot/grub/grub.cfg \
-    || grep -Fq "menuentry \"${target_entry}\"" /boot/grub/grub.cfg \
+grep -Fq "submenu 'Ming OS 高级启动'" /boot/grub/grub.cfg \
+    || fail "Ming advanced GRUB submenu is absent"
+grep -Fq "menuentry '${target_label}'" /boot/grub/grub.cfg \
+    || grep -Fq "menuentry \"${target_label}\"" /boot/grub/grub.cfg \
     || fail "target slot is absent from grub.cfg"
 grep -Fq "/ming-slots/${target}/vmlinuz" /boot/grub/grub.cfg \
     || fail "target GRUB entry does not use its slot-specific kernel"
@@ -111,7 +120,8 @@ ISO_MOUNT=""
 # Transaction command: ming-ota-ab begin
 ming-ota-ab --layout "${LAYOUT}" --transaction "${TRANSACTION}" begin \
     --target "${target}" --version "${VERSION}" --checksum "${CHECKSUM}" >/dev/null
-grub-reboot "${target_entry}"
-grep -Fqx "next_entry=${target_entry}" <<<"$(grub-editenv list)" \
+grub-reboot "${target_entry}" || fail "grub-reboot failed for target slot"
+grub_env="$(grub-editenv list 2>/dev/null)" || fail "grub-editenv readback failed"
+grep -Fqx "next_entry=${target_entry}" <<<"${grub_env}" \
     || fail "GRUB next_entry readback failed"
 printf 'staged slot %s; previous slot %s remains the default\n' "${target}" "${active}"

@@ -52,6 +52,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     x11-utils
     x11-xserver-utils
     desktop-file-utils
+    zenity
     im-config
     blueman
 )
@@ -103,6 +104,7 @@ install_xfce_desktop() {
         ristretto \
         xdg-user-dirs \
         xdg-utils \
+        zenity \
         desktop-base \
         xfce4-power-manager \
         xfce4-power-manager-plugins || return 1
@@ -2018,6 +2020,12 @@ elif [[ -n "${PKEXEC_UID:-}" ]]; then
 fi
 if [[ -n "${target_user}" ]]; then
     runuser -u "${target_user}" -- ming-phone-desktop --sync >>"${log}" 2>&1 || true
+    if [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
+        /usr/local/sbin/ming-refresh-dock-launchers "${target_user}" >>"${log}" 2>&1 || true
+    fi
+    if [[ -x /usr/local/bin/ming-refresh-desktop-state ]]; then
+        runuser -u "${target_user}" -- ming-refresh-desktop-state >>"${log}" 2>&1 || true
+    fi
 fi
 SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
@@ -2055,27 +2063,39 @@ fi
 printf '[%s] starting %s %s\n' "$(date '+%F %T')" "${spark_bin}" "${spark_args[*]}" >>"${MING_SPARK_LOG}"
 "${spark_bin}" "${spark_args[@]}" "$@" >>"${MING_SPARK_LOG}" 2>&1 &
 spark_pid=$!
-sleep 2
-if kill -0 "${spark_pid}" 2>/dev/null; then
-    printf '[%s] Spark Store process is running after startup window\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
+
+spark_window_visible() {
+    command -v wmctrl >/dev/null 2>&1 \
+        && wmctrl -lx 2>/dev/null | grep -qi 'spark-store'
+}
+
+wait_for_spark_ready() {
+    local deadline=$((SECONDS + 15))
+    while (( SECONDS < deadline )); do
+        if kill -0 "${spark_pid}" 2>/dev/null || pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 || spark_window_visible; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
+if wait_for_spark_ready; then
+    printf '[%s] Spark Store process or window is ready\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
     exit 0
 fi
 
 wait "${spark_pid}"
 rc=$?
-if [[ "${rc}" -eq 0 ]]; then
-    printf '[%s] Spark Store launcher daemonized successfully\n' "$(date '+%F %T')" >>"${MING_SPARK_LOG}"
-    exit 0
-fi
 
-if pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 \
-    || (command -v wmctrl >/dev/null 2>&1 && wmctrl -lx 2>/dev/null | grep -qi 'spark-store'); then
+if pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 || spark_window_visible; then
     printf '[%s] Spark Store is ready despite launcher exit rc=%s\n' "$(date '+%F %T')" "${rc}" >>"${MING_SPARK_LOG}"
     exit 0
 fi
 
 printf '[%s] Spark Store startup failed rc=%s with no process or window\n' "$(date '+%F %T')" "${rc}" >>"${MING_SPARK_LOG}"
 notify-send -i dialog-error "星火应用商店" "启动失败，日志：${MING_SPARK_LOG}" 2>/dev/null || true
+[[ "${rc}" -ne 0 ]] || rc=1
 exit "${rc}"
 MINGSPARK
     chmod 0755 /usr/local/bin/ming-spark-store
@@ -2128,7 +2148,7 @@ Name=星火应用商店
 Name[zh_CN]=星火应用商店
 Comment=Install Chinese Linux applications on demand
 Comment[zh_CN]=按需安装适合中文用户的 Linux 应用
-Exec=/usr/local/bin/ming-spark-store
+Exec=/usr/local/bin/ming-launch --desktop-file /usr/share/applications/spark-store.desktop --source desktop
 Icon=ming-app-store
 Terminal=false
 Type=Application

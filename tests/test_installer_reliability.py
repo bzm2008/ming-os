@@ -928,9 +928,20 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn("linux /ming-slots/A/vmlinuz root=UUID=__MING_ROOT_A_UUID__", identity)
         self.assertIn("linux /ming-slots/B/vmlinuz root=UUID=__MING_ROOT_B_UUID__", identity)
         self.assertIn("/boot/ming-slots/A", identity)
-        self.assertNotIn('"${target}/boot/ming-slots/B"', identity)
+        self.assertIn('"${target}/boot/ming-slots/B"', identity)
         self.assertIn("insmod ext2", identity)
-        self.assertIn("inactive slot B is intentionally not bootable", identity)
+        self.assertIn("seed both shared-boot slot payloads", identity)
+
+    def test_uefi_install_requires_a_real_fat_esp_and_no_nvram_fallback(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        bootloader = base.split("cat > /usr/local/sbin/ming-install-bootloader", 1)[1].split(
+            "\nMINGBOOTLOADER", 1
+        )[0]
+        uefi = bootloader.split("install_uefi_grub()", 1)[1].split("install_bios_grub()", 1)[0]
+        self.assertIn("FSTYPE", uefi)
+        self.assertIn("PARTTYPE", uefi)
+        self.assertIn("vfat", uefi)
+        self.assertGreaterEqual(uefi.count("--no-nvram"), 2)
 
     def test_installed_identity_removes_the_live_only_installer_entry(self):
         base = BASE_MODULE.read_text(encoding="utf-8")

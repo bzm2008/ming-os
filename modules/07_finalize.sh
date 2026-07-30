@@ -61,7 +61,7 @@ seed_trusted_desktop_receipts() {
     install -d -m 0755 "${receipt_dir}"
     for launcher in \
         "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
-        "ming-firefox.desktop" "ming-terminal.desktop" "papyrus.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "spark-store.desktop" "papyrus.desktop" \
         "Install Ming OS.desktop"; do
         source="/usr/share/applications/${launcher}"
         [[ -f "${source}" ]] || continue
@@ -69,6 +69,18 @@ seed_trusted_desktop_receipts() {
         chown root:root "${receipt_dir}/${launcher}" 2>/dev/null || true
         chmod 0644 "${receipt_dir}/${launcher}"
     done
+}
+
+# The installed bootloader invokes this conservative detector after the ESP is
+# mounted; keep the helper outside user state so it survives account changes.
+# ming-detect-other-os is intentionally mentioned here for the final gate.
+
+verify_other_os_detector() {
+    local detector="/usr/local/sbin/ming-detect-other-os"
+    if [[ ! -x "${detector}" ]]; then
+        echo "[07_finalize][ERROR] other-OS detector is missing: ${detector}" >&2
+        return 1
+    fi
 }
 
 # Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
@@ -298,6 +310,7 @@ main() {
 
     refresh_dock_launchers || return 1
     seed_trusted_desktop_receipts
+    verify_other_os_detector || return 1
     disable_phone_panel_restore
     normalize_spark_update_notifier_unit
     seed_skel

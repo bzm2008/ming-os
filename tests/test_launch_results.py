@@ -60,6 +60,69 @@ class LaunchResultTests(unittest.TestCase):
             self.assertTrue(broker.launch(request))
         self.assertEqual(["desktop", "dock", "drawer"], feedback)
 
+    def test_gio_activation_waits_for_window_before_recording_ready(self):
+        events = []
+        callbacks = {}
+
+        def probe(_process, desktop_file, on_ready=None, on_failure=None, on_timeout=None):
+            callbacks.update({
+                "desktop_file": desktop_file,
+                "ready": on_ready,
+                "failure": on_failure,
+                "timeout": on_timeout,
+            })
+
+        request = self.launch.LaunchRequest(
+            (), source="desktop",
+            desktop_file="/usr/share/applications/papyrus.desktop",
+            mode="desktop_app_info")
+        broker = self.launch.LaunchBroker(
+            trusted_verifier=lambda _path: True,
+            desktop_activator=lambda _path: True,
+            animate=lambda *_args: None,
+            reduced_motion=lambda: True,
+            probe=probe,
+            record_event=lambda _request, status, detail="": events.append(status),
+            report_error=lambda *_args: None,
+        )
+
+        self.assertTrue(broker.launch(request))
+        self.assertEqual(request.desktop_file, callbacks["desktop_file"])
+        self.assertEqual(["activated"], events)
+        callbacks["ready"]()
+        self.assertEqual(["activated", "ready"], events)
+
+    def test_gio_activation_window_timeout_is_reported_and_allows_retry(self):
+        events = []
+        errors = []
+        activations = []
+
+        def probe(_process, _desktop_file, on_ready=None, on_failure=None, on_timeout=None):
+            on_timeout()
+
+        request = self.launch.LaunchRequest(
+            (), source="desktop",
+            desktop_file="/usr/share/applications/papyrus.desktop",
+            mode="desktop_app_info")
+        broker = self.launch.LaunchBroker(
+            trusted_verifier=lambda _path: True,
+            desktop_activator=lambda path: activations.append(path) or True,
+            animate=lambda *_args: None,
+            now=lambda: 1.0,
+            reduced_motion=lambda: True,
+            probe=probe,
+            record_event=lambda _request, status, detail="": events.append(status),
+            report_error=lambda _request, error: errors.append(str(error)),
+        )
+
+        self.assertTrue(broker.launch(request))
+        self.assertTrue(broker.launch(request))
+        self.assertEqual([request.desktop_file, request.desktop_file], activations)
+        self.assertEqual(
+            ["activated", "window_timeout", "activated", "window_timeout"], events)
+        self.assertEqual(2, len(errors))
+        self.assertTrue(all("窗口" in error for error in errors))
+
     def test_reduced_motion_keeps_static_launch_feedback(self):
         feedback = []
         broker = self.launch.LaunchBroker(

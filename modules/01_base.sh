@@ -1999,6 +1999,7 @@ RELEASE
         return 1
     fi
     install -m 0644 /tmp/ming-build/assets/grub-theme/theme.txt /boot/grub/themes/ming/theme.txt
+    install -m 0755 /tmp/ming-build/assets/ming-detect-other-os /usr/local/sbin/ming-detect-other-os
     cat > /etc/default/grub.d/10-ming-os.cfg << GRUBCFG
 GRUB_DISTRIBUTOR="Ming OS"
 GRUB_THEME="/boot/grub/themes/ming/theme.txt"
@@ -2007,7 +2008,7 @@ GRUB_TERMINAL_INPUT=console
 GRUB_TIMEOUT=3
 GRUB_TIMEOUT_STYLE=menu
 GRUB_RECORDFAIL_TIMEOUT=0
-GRUB_DISABLE_SUBMENU=true
+GRUB_DISABLE_SUBMENU=false
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
 GRUBCFG
@@ -2113,6 +2114,21 @@ MINGOTAPREFLIGHT
 set -uo pipefail
 
 version="${MING_OS_VERSION:-26.4.1}"
+install_mode_state=/run/ming-installer/install-mode.json
+[[ -f "${install_mode_state}" && ! -L "${install_mode_state}" ]] || {
+    echo "ERROR: root-only install mode receipt is missing or unsafe" >&2
+    exit 30
+}
+install_mode_json="$(/usr/local/sbin/ming-install-mode show --state "${install_mode_state}")" || {
+    echo "ERROR: install mode receipt failed validation" >&2
+    exit 30
+}
+install_mode="$(jq -er '.mode' <<<"${install_mode_json}")" || exit 30
+major_ota="$(jq -er '.major_ota' <<<"${install_mode_json}")" || exit 30
+case "${install_mode}:${major_ota}" in
+    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot) ;;
+    *) echo "ERROR: install mode and major OTA policy do not match" >&2; exit 30 ;;
+esac
 target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || {
     echo "ERROR: authoritative Calamares target receipt is missing or invalid" >&2
     exit 30
@@ -2185,7 +2201,7 @@ write_ota_ready_layout() {
     }
     mkdir -p "${target}/etc/ming-update"
     cat > "${target}/etc/ming-update/slots.json" <<SLOTS
-{"schema":1,"layout":"ming-ab-v1","slots":{"A":{"device":"/dev/disk/by-uuid/${root_a_uuid}","uuid":"${root_a_uuid}","grub_entry":"Ming OS slot A"},"B":{"device":"/dev/disk/by-uuid/${root_b_uuid}","uuid":"${root_b_uuid}","grub_entry":"Ming OS slot B"}},"boot":{"device":"/dev/disk/by-uuid/${boot_uuid}","uuid":"${boot_uuid}"},"home":{"device":"/dev/disk/by-uuid/${home_uuid}","uuid":"${home_uuid}"}}
+{"schema":1,"layout":"ming-ab-v1","slots":{"A":{"device":"/dev/disk/by-uuid/${root_a_uuid}","uuid":"${root_a_uuid}","grub_entry":"Ming OS 高级启动>Ming OS slot A"},"B":{"device":"/dev/disk/by-uuid/${root_b_uuid}","uuid":"${root_b_uuid}","grub_entry":"Ming OS 高级启动>Ming OS slot B"}},"boot":{"device":"/dev/disk/by-uuid/${boot_uuid}","uuid":"${boot_uuid}"},"home":{"device":"/dev/disk/by-uuid/${home_uuid}","uuid":"${home_uuid}"}}
 SLOTS
     printf 'A\n' > "${target}/etc/ming-ota-slot"
     printf 'ming-ab-v1\n' > "${target}/etc/ming-update/ota-ready"
@@ -2196,7 +2212,23 @@ SLOTS
     OTA_BOOT_UUID="${boot_uuid}"
 }
 
-write_ota_ready_layout || exit 30
+mkdir -p "${target}/etc/ming-update"
+# This policy contains no secret and must be readable by the unprivileged
+# status/check commands so a preserved dual-boot install can explain why major
+# A/B OTA is disabled. It remains root-owned and is written atomically.
+install -m 0644 "${install_mode_state}" "${target}/etc/ming-update/install-mode.json" || exit 30
+case "${install_mode}" in
+    blank_ab)
+        write_ota_ready_layout || exit 30
+        ;;
+    dual_boot_preserve)
+        # A preserved dual-boot install has one Ming root.  Advertising slot
+        # state here would let a major OTA overwrite an unrelated partition.
+        rm -f "${target}/etc/ming-update/slots.json" \
+            "${target}/etc/ming-update/ota-ready" \
+            "${target}/etc/ming-ota-slot"
+        ;;
+esac
 
 write_file() {
     local path="$1"
@@ -2439,28 +2471,30 @@ ensure_kernel_boot_links
 
 kernel="$(find "${target}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"
 initrd="$(find "${target}/boot" -maxdepth 1 -type f -name 'initrd.img-*' 2>/dev/null | sort -V | tail -n 1 || true)"
-[[ -s "${kernel}" && -s "${initrd}" ]] || { echo "ERROR: A/B boot payload is missing" >&2; exit 30; }
-install -d -m 0755 "${target}/boot/ming-slots/A"
-install -m 0644 "${kernel}" "${target}/boot/ming-slots/A/vmlinuz"
-install -m 0644 "${initrd}" "${target}/boot/ming-slots/A/initrd.img"
-# inactive slot B is intentionally not bootable until the first verified OTA
+[[ -s "${kernel}" && -s "${initrd}" ]] || { echo "ERROR: installed boot payload is missing" >&2; exit 30; }
+if [[ "${install_mode}" == "blank_ab" ]]; then
+    # Initial installation must seed both shared-boot slot payloads.  Slot B is
+    # not the default root, but it must remain bootable before the first OTA.
+    install -d -m 0755 "${target}/boot/ming-slots/A" "${target}/boot/ming-slots/B"
+    install -m 0644 "${kernel}" "${target}/boot/ming-slots/A/vmlinuz"
+    install -m 0644 "${initrd}" "${target}/boot/ming-slots/A/initrd.img"
+    install -m 0644 "${kernel}" "${target}/boot/ming-slots/B/vmlinuz"
+    install -m 0644 "${initrd}" "${target}/boot/ming-slots/B/initrd.img"
+    # seed both shared-boot slot payloads before GRUB generation
+else
+    rm -rf "${target}/boot/ming-slots"
+fi
 
+# Compact installed menu: A/B and hardware recovery entries live below one
+# submenu so OTA can still address the named entries without top-level noise.
+# submenu 'Ming OS 高级启动' | menuentry 'Ming OS slot A' | menuentry 'Ming OS slot B'
 mkdir -p "${target}/etc/grub.d"
+if [[ "${install_mode}" == "blank_ab" ]]; then
 cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBENTRY'
 #!/bin/sh
 set -e
 
 cat <<'EOF'
-menuentry 'Ming OS slot A' --class ming --class gnu-linux --class os {
-    search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
-    linux /ming-slots/A/vmlinuz root=UUID=__MING_ROOT_A_UUID__ ro quiet loglevel=3 systemd.show_status=false
-    initrd /ming-slots/A/initrd.img
-}
-menuentry 'Ming OS slot B' --class ming --class gnu-linux --class os {
-    search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
-    linux /ming-slots/B/vmlinuz root=UUID=__MING_ROOT_B_UUID__ ro quiet loglevel=3 systemd.show_status=false
-    initrd /ming-slots/B/initrd.img
-}
 menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
     load_video
     insmod gzio
@@ -2472,18 +2506,70 @@ menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
-    load_video
-    insmod gzio
-    insmod part_msdos
-    insmod part_gpt
-    insmod ext2
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
-    initrd /initrd.img
-}
+submenu 'Ming OS 高级启动' --class ming --class gnu-linux --class os {
+    menuentry 'Ming OS slot A' --class ming --class gnu-linux --class os {
+        search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
+        linux /ming-slots/A/vmlinuz root=UUID=__MING_ROOT_A_UUID__ ro quiet loglevel=3 systemd.show_status=false
+        initrd /ming-slots/A/initrd.img
+    }
+    menuentry 'Ming OS slot B' --class ming --class gnu-linux --class os {
+        search --no-floppy --fs-uuid --set=root __MING_BOOT_UUID__
+        linux /ming-slots/B/vmlinuz root=UUID=__MING_ROOT_B_UUID__ ro quiet loglevel=3 systemd.show_status=false
+        initrd /ming-slots/B/initrd.img
+    }
+    menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+        initrd /initrd.img
+    }
 
-menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+    menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+        initrd /initrd.img
+    }
+
+    menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+        initrd /initrd.img
+    }
+
+    menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+        initrd /initrd.img
+    }
+}
+EOF
+TARGETGRUBENTRY
+else
+cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBSINGLE'
+#!/bin/sh
+set -e
+
+cat <<'EOF'
+    menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
     load_video
     insmod gzio
     insmod part_msdos
@@ -2494,29 +2580,31 @@ menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-li
     initrd /initrd.img
 }
 
-menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
-    load_video
-    insmod gzio
-    insmod part_msdos
-    insmod part_gpt
-    insmod ext2
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
-    initrd /initrd.img
-}
-
-menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
-    load_video
-    insmod gzio
-    insmod part_msdos
-    insmod part_gpt
-    insmod ext2
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
-    initrd /initrd.img
+    submenu 'Ming OS 高级启动' --class ming --class gnu-linux --class os {
+    menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+        initrd /initrd.img
+    }
+    menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+        load_video
+        insmod gzio
+        insmod part_msdos
+        insmod part_gpt
+        insmod ext2
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+        initrd /initrd.img
+    }
 }
 EOF
-TARGETGRUBENTRY
+TARGETGRUBSINGLE
+fi
 chmod 0755 "${target}/etc/grub.d/09_ming_os" 2>/dev/null || true
 
 grub_template="${target}/etc/grub.d/09_ming_os"
@@ -2528,14 +2616,16 @@ if ! sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_template}"; then
     echo "ERROR: failed to write the authoritative root UUID into the Ming GRUB template" >&2
     exit 30
 fi
-sed -i "s/__MING_ROOT_A_UUID__/${OTA_ROOT_A_UUID}/g; s/__MING_ROOT_B_UUID__/${OTA_ROOT_B_UUID}/g; s/__MING_BOOT_UUID__/${OTA_BOOT_UUID}/g" "${grub_template}" || exit 30
-sed -i \
-    -e "s|search --no-floppy --set=root --file /vmlinuz|search --no-floppy --fs-uuid --set=root ${OTA_BOOT_UUID}|g" \
-    -e "s|linux /vmlinuz root=UUID=${root_uuid}|linux /ming-slots/A/vmlinuz root=UUID=${root_uuid}|g" \
-    -e "s|initrd /initrd.img|initrd /ming-slots/A/initrd.img|g" \
-    "${grub_template}" || exit 30
-grep -Fq "root=UUID=${OTA_ROOT_A_UUID}" "${grub_template}" || exit 30
-grep -Fq "root=UUID=${OTA_ROOT_B_UUID}" "${grub_template}" || exit 30
+if [[ "${install_mode}" == "blank_ab" ]]; then
+    sed -i "s/__MING_ROOT_A_UUID__/${OTA_ROOT_A_UUID}/g; s/__MING_ROOT_B_UUID__/${OTA_ROOT_B_UUID}/g; s/__MING_BOOT_UUID__/${OTA_BOOT_UUID}/g" "${grub_template}" || exit 30
+    sed -i \
+        -e "s|search --no-floppy --set=root --file /vmlinuz|search --no-floppy --fs-uuid --set=root ${OTA_BOOT_UUID}|g" \
+        -e "s|linux /vmlinuz root=UUID=${root_uuid}|linux /ming-slots/A/vmlinuz root=UUID=${root_uuid}|g" \
+        -e "s|initrd /initrd.img|initrd /ming-slots/A/initrd.img|g" \
+        "${grub_template}" || exit 30
+    grep -Fq "root=UUID=${OTA_ROOT_A_UUID}" "${grub_template}" || exit 30
+    grep -Fq "root=UUID=${OTA_ROOT_B_UUID}" "${grub_template}" || exit 30
+fi
 if grep -Fq '__MING_ROOT_UUID__' "${grub_template}"; then
     echo "ERROR: Ming GRUB template still contains __MING_ROOT_UUID__" >&2
     exit 30
@@ -2545,15 +2635,22 @@ if ! grep -Fq "root=UUID=${root_uuid}" "${grub_template}"; then
     exit 30
 fi
 
-for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
+# The Live root already carries the audited detector asset.  Copy that exact
+# helper into the installed target so Live and installed GRUB use one rule.
+install -d -m 0755 "${target}/usr/local/sbin"
+if [[ ! -x "/usr/local/sbin/ming-detect-other-os" ]]; then
+    echo "ERROR: Ming other-OS detector is missing from the Live root" >&2
+    exit 30
+fi
+install -m 0755 /usr/local/sbin/ming-detect-other-os \
+    "${target}/usr/local/sbin/ming-detect-other-os"
+
+for noisy_grub in "10_linux" 20_linux_xen 30_os-prober 30_uefi-firmware; do
     if [[ -f "${target}/etc/grub.d/${noisy_grub}" ]]; then
-        if [[ "${noisy_grub}" == "10_linux" ]]; then
-            # Keep Debian's official kernel generator executable so GRUB
-            # retains every installed kernel/initramfs as a real fallback.
-            chmod 0755 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
-        else
-            chmod 0644 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
-        fi
+        # The authoritative Ming generator owns the compact menu.  Debian's
+        # generic generator would add a second top-level entry for every
+        # installed kernel, so leave it shipped but non-executable.
+        chmod 0644 "${target}/etc/grub.d/${noisy_grub}" 2>/dev/null || true
     fi
 done
 
@@ -2581,7 +2678,7 @@ GRUB_TERMINAL_INPUT=console
 GRUB_TIMEOUT=3
 GRUB_TIMEOUT_STYLE=menu
 GRUB_RECORDFAIL_TIMEOUT=0
-GRUB_DISABLE_SUBMENU=true
+GRUB_DISABLE_SUBMENU=false
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
 GRUBCFG
@@ -2716,7 +2813,15 @@ echo "target_root=${root}"
 
 root_source="$(/usr/local/sbin/ming-installer-verify receipt --field source)" || exit 20
 root_uuid="$(/usr/local/sbin/ming-installer-verify receipt --field uuid)" || exit 20
-slot_b_uuid="$(python3 -c '
+install_mode="$(jq -er '.mode' "${root}/etc/ming-update/install-mode.json")" || exit 20
+major_ota="$(jq -er '.major_ota' "${root}/etc/ming-update/install-mode.json")" || exit 20
+case "${install_mode}:${major_ota}" in
+    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot) ;;
+    *) echo "ERROR: installed mode receipt is inconsistent"; exit 20 ;;
+esac
+slot_b_uuid=""
+if [[ "${install_mode}" == "blank_ab" ]]; then
+    slot_b_uuid="$(python3 -c '
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -2725,6 +2830,7 @@ if not isinstance(value, str) or not value:
     raise SystemExit(1)
 print(value)
 ' "${root}/etc/ming-update/slots.json")" || exit 20
+fi
 current_root_source="$(findmnt -n -o SOURCE --target "${root}" 2>/dev/null || true)"
 [[ "${current_root_source}" == "${root_source}" ]] || {
     echo "ERROR: authoritative receipt source no longer matches the mounted target"
@@ -2777,10 +2883,26 @@ mkdir -p "${root}/boot/grub"
 
 install_uefi_grub() {
     [ -d /sys/firmware/efi ] || return 1
-    if ! findmnt --target "${root}/boot/efi" >/dev/null 2>&1; then
-        echo "UEFI firmware detected but target /boot/efi is not mounted; falling back to BIOS GRUB"
+    local esp_source esp_fstype esp_parttype
+    if ! mountpoint -q "${root}/boot/efi"; then
+        echo "ERROR: UEFI firmware detected but target /boot/efi is not a real mount"
         return 1
     fi
+    esp_source="$(findmnt -nro SOURCE --target "${root}/boot/efi" 2>/dev/null || true)"
+    esp_fstype="$(findmnt -nro FSTYPE --target "${root}/boot/efi" 2>/dev/null || true)"
+    [[ "${esp_source}" == /dev/* && -b "${esp_source}" ]] || {
+        echo "ERROR: target ESP SOURCE is not an independent block device"
+        return 1
+    }
+    case "${esp_fstype}" in
+        vfat|fat|fat32) ;;
+        *) echo "ERROR: target ESP FSTYPE must be FAT/vfat, got ${esp_fstype:-unknown}"; return 1 ;;
+    esac
+    esp_parttype="$(lsblk -ndo PARTTYPE "${esp_source}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    case "${esp_parttype}" in
+        c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef|ef) ;;
+        *) echo "ERROR: target ESP PARTTYPE is not an EFI System Partition"; return 1 ;;
+    esac
     mkdir -p "${root}/boot/efi/EFI/Ming" "${root}/boot/efi/EFI/BOOT"
     if [ -x "${root}/usr/sbin/grub-install" ]; then
         chroot "${root}" /usr/sbin/grub-install \
@@ -2793,7 +2915,8 @@ install_uefi_grub() {
             --efi-directory=/boot/efi \
             --bootloader-id="Ming OS" \
             --recheck \
-            --removable
+            --removable \
+            --no-nvram
     elif command -v grub-install >/dev/null 2>&1; then
         grub-install \
             --target=x86_64-efi \
@@ -2864,6 +2987,18 @@ else
     echo "Ming BIOS bootloader path completed"
 fi
 
+# Discover a second OS only after the target ESP is mounted.  An empty helper
+# output is valid and keeps single-OS installations at two top-level entries.
+if [ -x "${root}/usr/local/sbin/ming-detect-other-os" ]; then
+    MING_OTHER_OS_ROOT="${root}" \
+    MING_OTHER_OS_OUT="${root}/etc/grub.d/11_ming_other_os" \
+    MING_OTHER_OS_LOG="${root}/var/log/ming-other-os-detect.log" \
+        python3 "${root}/usr/local/sbin/ming-detect-other-os" || {
+            echo "ERROR: conservative other-OS detection failed; refusing unverified GRUB output"
+            exit 22
+        }
+fi
+
 # A GRUB core without a usable config drops users at grub>, so final config
 # generation and validation are installation hard gates.
 if [ -x "${root}/usr/sbin/update-grub" ]; then
@@ -2879,7 +3014,8 @@ fi
 
 validate_final_grub_root_uuid() {
     local grub_cfg="$1"
-    awk -v expected_a="root=UUID=${root_uuid}" -v expected_b="root=UUID=${slot_b_uuid}" '
+    awk -v expected_a="root=UUID=${root_uuid}" -v expected_b="root=UUID=${slot_b_uuid}" \
+        -v install_mode="${install_mode:-blank_ab}" '
         /^[[:space:]]*linux[[:space:]]+\/(boot\/)?vmlinuz[^[:space:]]*([[:space:]]|$)/ ||
         /^[[:space:]]*linux[[:space:]]+\/ming-slots\/[AB]\/vmlinuz([[:space:]]|$)/ {
             ming_linux_count++
@@ -2910,8 +3046,12 @@ validate_final_grub_root_uuid() {
                 print "ERROR: final grub.cfg has no Ming linux stanzas" > "/dev/stderr"
                 exit 1
             }
-            if (slot_a_count == 0 || slot_b_count == 0) {
+            if (install_mode == "blank_ab" && (slot_a_count == 0 || slot_b_count == 0)) {
                 print "ERROR: final grub.cfg is missing Ming A/B slot stanzas" > "/dev/stderr"
+                exit 1
+            }
+            if (install_mode == "dual_boot_preserve" && (slot_a_count != 0 || slot_b_count != 0)) {
+                print "ERROR: dual-boot grub.cfg contains false A/B slot stanzas" > "/dev/stderr"
                 exit 1
             }
             exit invalid ? 1 : 0
@@ -2928,13 +3068,20 @@ if grep -Eq 'boot=live|ming\.installer=1|安装 Ming OS' "${root}/boot/grub/grub
     echo "ERROR: installed GRUB contains Live installer arguments or labels"
     exit 22
 fi
-for contract in \
-    "Ming OS slot A" "/ming-slots/A/vmlinuz" "/ming-slots/A/initrd.img" \
-    "Ming OS slot B" "/ming-slots/B/vmlinuz" "/ming-slots/B/initrd.img"; do
-    grep -Fq "${contract}" "${root}/boot/grub/grub.cfg" || {
-        echo "ERROR: final grub.cfg is missing A/B contract ${contract}"; exit 22;
-    }
-done
+if [[ "${install_mode}" == "blank_ab" ]]; then
+    for contract in \
+        "Ming OS slot A" "/ming-slots/A/vmlinuz" "/ming-slots/A/initrd.img" \
+        "Ming OS slot B" "/ming-slots/B/vmlinuz" "/ming-slots/B/initrd.img"; do
+        grep -Fq "${contract}" "${root}/boot/grub/grub.cfg" || {
+            echo "ERROR: final grub.cfg is missing A/B contract ${contract}"; exit 22;
+        }
+    done
+else
+    if grep -Eq 'Ming OS slot [AB]|/ming-slots/[AB]/' "${root}/boot/grub/grub.cfg"; then
+        echo "ERROR: dual-boot grub.cfg contains false A/B state"
+        exit 22
+    fi
+fi
 if ! validate_final_grub_root_uuid "${root}/boot/grub/grub.cfg"; then
     echo "ERROR: all Ming linux stanzas must use the authoritative root UUID"
     exit 22
@@ -4489,25 +4636,27 @@ menuentry 'Ming OS' --class ming --class gnu-linux --class gnu --class os {
     linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
     initrd /initrd.img
 }
-menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
-    initrd /initrd.img
-}
-menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
-    initrd /initrd.img
-}
-menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
-    initrd /initrd.img
-}
-menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
-    search --no-floppy --set=root --file /vmlinuz
-    linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
-    initrd /initrd.img
+submenu 'Ming OS 高级启动' --class ming --class gnu-linux --class os {
+    menuentry 'Ming OS (Safe Graphics)' --class ming --class gnu-linux --class gnu --class os {
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog nomodeset vga=791
+        initrd /initrd.img
+    }
+    menuentry 'Ming OS (Old Intel / ThinkPad / MacBook)' --class ming --class gnu-linux --class gnu --class os {
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog
+        initrd /initrd.img
+    }
+    menuentry 'Ming OS (Radeon Legacy Recovery)' --class ming --class gnu-linux --class gnu --class os {
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog radeon.modeset=1 amdgpu.modeset=0
+        initrd /initrd.img
+    }
+    menuentry 'Ming OS (Radeon GCN Recovery SI/CIK)' --class ming --class gnu-linux --class gnu --class os {
+        search --no-floppy --set=root --file /vmlinuz
+        linux /vmlinuz root=UUID=__MING_ROOT_UUID__ ro quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 nowatchdog amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+        initrd /initrd.img
+    }
 }
 EOF
 STATICGRUB

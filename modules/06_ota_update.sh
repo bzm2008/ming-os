@@ -72,6 +72,7 @@ readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
 readonly STAGING_DIR="/var/lib/ming-update"
 readonly STAGING_RECORD="/var/lib/ming-update/staging.json"
 readonly AB_STAGING_DIR="/var/lib/ming-update/ab-staging"
+readonly INSTALL_MODE_FILE="/etc/ming-update/install-mode.json"
 readonly USER_CONFIG_DIR="${HOME}/.config/ming-update"
 readonly USER_CACHE_DIR="${HOME}/.cache/ming-update"
 readonly USER_STATE_FILE="${USER_CONFIG_DIR}/state.json"
@@ -86,6 +87,46 @@ log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_step() { printf '\n=====> %s <=====\n\n' "$*"; }
+
+major_ota_allowed() {
+    # A preserved dual-boot install cannot safely replace a complete root
+    # slot.  Refuse all major/A-B writes while retaining patch/minor updates.
+    if [[ ! -e "${INSTALL_MODE_FILE}" ]]; then
+        return 0
+    fi
+    if [[ ! -f "${INSTALL_MODE_FILE}" || -L "${INSTALL_MODE_FILE}" ]]; then
+        log_error "安装模式文件不可信，拒绝大版本 A/B OTA。"
+        return 1
+    fi
+    local mode major_ota
+    if ! jq -e '
+        type == "object" and
+        (.mode | type == "string") and
+        (.major_ota | type == "string")
+    ' "${INSTALL_MODE_FILE}" >/dev/null 2>&1; then
+        log_error "安装模式文件结构无效，拒绝大版本 A/B OTA。"
+        return 1
+    fi
+    mode="$(jq -r '.mode' "${INSTALL_MODE_FILE}")"
+    major_ota="$(jq -r '.major_ota' "${INSTALL_MODE_FILE}")"
+    case "${mode}:${major_ota}" in
+        blank_ab:ab_slot) return 0 ;;
+        dual_boot_preserve:disabled_dual_boot)
+            log_error "此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"
+            return 1
+            ;;
+        *)
+            log_error "安装模式与 OTA 策略不一致，拒绝大版本 A/B OTA。"
+            return 1
+            ;;
+    esac
+}
+
+dual_boot_major_ota_blocked() {
+    [[ -r "${INSTALL_MODE_FILE}" && ! -L "${INSTALL_MODE_FILE}" ]] || return 1
+    [[ "$(jq -r '.mode // empty' "${INSTALL_MODE_FILE}" 2>/dev/null || true)" == "dual_boot_preserve" ]] \
+        && [[ "$(jq -r '.major_ota // empty' "${INSTALL_MODE_FILE}" 2>/dev/null || true)" == "disabled_dual_boot" ]]
+}
 
 ensure_dirs() {
     if [[ ${EUID:-$(id -u)} -eq 0 || ( -w "${CONFIG_DIR}" && -w "${CACHE_DIR}" ) ]]; then
@@ -875,6 +916,11 @@ check_update() {
         record_background_availability
         return 1
     fi
+    if [[ "${update_type}" == "major" ]] && dual_boot_major_ota_blocked; then
+        record_check_result true true "${new_version}" "${notes}" "${update_type}"
+        log_error "此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"
+        return 1
+    fi
     chmod 644 "${manifest}"
     set_config '.last_check' "$(date -Iseconds)"
     record_check_result true true "${new_version}" "${notes}" "${update_type}"
@@ -1181,6 +1227,12 @@ stage_selected_manifest() {
         return 1
     fi
 
+    if ! validate_ota_manifest_schema "${tmp}" || ! verify_signed_ota_manifest "${tmp}"; then
+        rm -f -- "${tmp}"
+        log_error "选中的更新清单结构或 Minisign 签名无效。"
+        return 1
+    fi
+
     selected="$(manifest_apply_identity "${tmp}" || true)"
     authoritative="$(manifest_apply_identity "${CACHE_DIR}/update_info.json" || true)"
     if [[ -z "${selected}" || -z "${authoritative}" || "${selected}" != "${authoritative}" ]]; then
@@ -1307,6 +1359,16 @@ show_status_json() {
     home_preservation="$(home_preservation_status_json "${update_type}")"
     preservation_ready="$(printf '%s' "${home_preservation}" | jq -r '.ready // false' 2>/dev/null || true)"
     [[ "${preservation_ready}" == "true" ]] || preservation_ready=false
+    if [[ "${action}" != "reboot" && "${update_type}" == "major" ]] \
+       && dual_boot_major_ota_blocked; then
+        action="blocked"
+        error="此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"
+        home_preservation="$(jq -n --arg message "${error}" \
+            '{ready: false, strategy: "disabled_dual_boot", message: $message}')"
+        preservation_ready=false
+        manifest_path=""
+        manifest_sha256=""
+    fi
 
     jq -n \
         --arg current_version "${current}" \
@@ -1491,87 +1553,51 @@ recover_dpkg() {
 patch_update() {
     log_step "Ming OS patch 级更新"
     init_config
-
-    if ! check_network; then
-        log_error "网络不可用，无法检查 patch 更新。"
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || {
+        log_error "APT patch/minor 更新需要管理员权限，请使用 pkexec ming-update patch。"
         return 1
-    fi
-
-    local server
-    server=$(get_config '.update_server')
-    server=${server:-${UPDATE_SERVER}}
-    local patch_url="${server}/api/onion-patch?version=$(current_version)&arch=amd64"
-
-    log_info "检查 patch 更新：${patch_url}"
-    local response
-    response=$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 "${patch_url}") || {
-        log_warn "Patch manifest 获取失败，当前已是最新或网络超时。"
-        return 0
     }
+    # Compatibility command: use the same signed discovery manifest as the
+    # Settings one-click flow.  The legacy unsigned patch endpoint is not an
+    # authority for package installation.
+    check_update || return 1
 
-    if ! is_json_response "${response}"; then
-        log_warn "Patch API 暂未返回有效 JSON，按暂无 patch 更新处理。"
+    local manifest="${CACHE_DIR}/update_info.json" update_type version manifest_sha256
+    if [[ ! -f "${manifest}" || -L "${manifest}" ]]; then
+        log_info "当前已是最新（patch/minor 级别），无需更新。"
         return 0
     fi
-
-    local has_patch script_url
-    has_patch=$(printf '%s' "${response}" | jq -r '.has_patch // false')
-    if [[ "${has_patch}" != "true" ]]; then
-        log_info "当前已是最新（patch 级别），无需更新。"
-        notify-send -i system-software-update "Ming OS" "系统已是最新，无需 patch 更新。" 2>/dev/null || true
-        return 0
-    fi
-
-    local patch_version notes
-    patch_version=$(printf '%s' "${response}" | jq -r '.patch_version // "unknown"' 2>/dev/null)
-    notes=$(printf '%s' "${response}" | jq -r '.notes // ""' 2>/dev/null)
-    log_info "发现 patch 更新：${patch_version}  ${notes}"
-    notify-send -i system-software-update "Ming OS patch 更新" "正在应用 ${patch_version}…" 2>/dev/null || true
-
-    # Remote code is never executed without a signed update format and trust root.
-    script_url=$(printf '%s' "${response}" | jq -r '.patch_script_url // ""' 2>/dev/null)
-    if [[ -n "${script_url}" && "${script_url}" != "null" ]]; then
-        log_error "unsigned patch_script_url is not supported; refusing the patch manifest"
+    update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    case "${update_type}" in
+        patch|minor) ;;
+        major)
+            log_error "检测到 major 更新，请使用 ming-update apply 走 A/B 或备份门禁。"
+            return 1
+            ;;
+        *)
+            log_error "更新类型无效：${update_type}"
+            return 1
+            ;;
+    esac
+    manifest_sha256="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+    [[ "${manifest_sha256}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "无法绑定 patch/minor 更新清单指纹。"
         return 1
-    fi
-
-    # 1) apt 包更新（若 manifest 包含包列表）
-    local -a packages=()
-    mapfile -t packages < <(printf '%s' "${response}" | jq -r '.apt_packages[]?' 2>/dev/null)
-    if [[ ${#packages[@]} -gt 0 ]]; then
-        local package
-        for package in "${packages[@]}"; do
-            if ! is_safe_apt_package "${package}"; then
-                log_error "Patch manifest 包含非法 APT 包名：${package}"
-                return 1
-            fi
-        done
-        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-            log_error "APT patch 需要管理员权限，请使用 pkexec ming-update patch。"
-            return 1
-        fi
-        recover_dpkg || return 1
-        log_info "更新 apt 包：${packages[*]}"
-        if ! DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Use-Pty=0 \
-            install -- "${packages[@]}" </dev/null; then
-            log_error "APT patch 安装失败，已保留 dpkg 日志供 ming-update doctor 检查。"
-            return 1
-        fi
-    fi
-
-    # 2) 记录已应用的 patch 版本
-    set_config '.patch_version' "${patch_version}"
+    }
+    apply_manifest_apt_update "${manifest}" "${manifest_sha256}" || return 1
+    version="$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || true)"
+    clear_applied_update_cache
+    set_config '.patch_version' "${version}"
     set_config '.last_patch' "$(date -Iseconds)"
-    notify-send -i system-software-update "Ming OS patch 完成" \
-        "已应用 ${patch_version}，无需重启。" 2>/dev/null || true
-    log_info "patch 更新完成：${patch_version}"
+    notify-send -i system-software-update "Ming OS patch/minor 更新完成" \
+        "已应用 ${version}。" 2>/dev/null || true
 }
 
 apply_manifest_apt_update() {
     # A one-button patch/minor update must execute exactly the manifest that
     # was displayed to the user.  Do not delegate to the legacy patch endpoint
     # here: it can describe a different update or report no patch at all.
-    local manifest="$1" version package
+    local manifest="$1" expected_sha256="${2:-}" version package manifest_digest update_type script_url
     local -a packages=()
     [[ ${EUID:-$(id -u)} -eq 0 ]] || {
         log_error "应用更新需要管理员权限。请使用：pkexec ming-update apply"
@@ -1581,6 +1607,35 @@ apply_manifest_apt_update() {
         log_error "更新清单不存在或不可信。"
         return 1
     }
+    if ! validate_ota_manifest_schema "${manifest}"; then
+        log_error "更新清单结构无效，拒绝应用 patch/minor 更新。"
+        return 1
+    fi
+    if ! verify_signed_ota_manifest "${manifest}"; then
+        log_error "更新清单 Minisign 签名无效，拒绝应用 patch/minor 更新。"
+        return 1
+    fi
+    manifest_digest="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+    [[ "${expected_sha256}" =~ ^[A-Fa-f0-9]{64}$ && \
+       "${manifest_digest}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "更新清单指纹格式无效。"
+        return 1
+    }
+    if [[ "${manifest_digest,,}" != "${expected_sha256,,}" ]]; then
+        log_error "更新清单指纹已变化，拒绝应用 patch/minor 更新。"
+        return 1
+    fi
+    update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
+    case "${update_type}" in patch|minor) ;; *)
+        log_error "APT 更新入口只接受 patch/minor 清单。"
+        return 1
+        ;;
+    esac
+    script_url="$(jq -r '.patch_script_url // empty' "${manifest}" 2>/dev/null || true)"
+    if [[ -n "${script_url}" ]]; then
+        log_error "unsigned patch_script_url is not supported; refusing the patch manifest"
+        return 1
+    fi
 
     mapfile -t packages < <(jq -r '.apt_packages[]? | select(type == "string")' "${manifest}" 2>/dev/null)
     if [[ ${#packages[@]} -eq 0 ]]; then
@@ -1687,6 +1742,7 @@ prepare_authoritative_ab_iso() {
 
 major_install_to_inactive_slot() {
     local sfile source_iso checksum version status trusted
+    major_ota_allowed || return 1
     sfile="$(find_download_state_file)" || {
         log_error "未找到已下载的 major 更新。"
         return 1
@@ -1710,6 +1766,7 @@ major_install_to_inactive_slot() {
 
 major_install_with_home_backup() {
     log_step "Ming OS major 大版本升级（保留用户文件）"
+    major_ota_allowed || return 1
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
         log_error "major OTA 备份与启动项暂存需要管理员权限。"
         return 1
@@ -1872,7 +1929,7 @@ apply_update() {
     # supplies a manifest path+fingerprint, root rechecks the server and then
     # applies that exact displayed manifest (or refuses if it has changed).
     init_config
-    local manifest update_type available ready target_version already_checked=false restart_after_stage=false
+    local manifest manifest_sha256 update_type available ready target_version already_checked=false restart_after_stage=false
     local selected_manifest="" selected_sha256=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1935,6 +1992,11 @@ apply_update() {
         log_error "没有已确认的更新。请先运行：ming-update check"
         return 1
     fi
+    manifest_sha256="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+    [[ "${manifest_sha256}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "无法绑定已确认更新清单的 SHA256 指纹。"
+        return 1
+    }
     available="$(jq -r '.has_update // .update_available // false' "${manifest}" 2>/dev/null || true)"
     ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
     update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
@@ -1947,7 +2009,7 @@ apply_update() {
 
     case "${update_type}" in
         patch|minor)
-            if apply_manifest_apt_update "${manifest}"; then
+            if apply_manifest_apt_update "${manifest}" "${manifest_sha256}"; then
                 clear_applied_update_cache "${selected_manifest}"
                 if [[ "${restart_after_stage}" == "true" ]] && ! schedule_update_restart; then
                     log_error "更新已完成，但自动重启未成功。请手动重启系统。"
@@ -1958,6 +2020,7 @@ apply_update() {
             return 1
             ;;
         major)
+            major_ota_allowed || return 1
             if download_update && major_install_with_home_backup; then
                 clear_applied_update_cache "${selected_manifest}"
                 if [[ "${restart_after_stage}" == "true" ]] && ! schedule_update_restart; then
@@ -2111,27 +2174,89 @@ readonly HEALTH_READY_TIMEOUT_SECONDS=90
 layout=/etc/ming-update/slots.json
 transaction=/home/.ming-ota/ab-transaction.json
 [[ -f "${layout}" && -f "${transaction}" ]] || exit 0
+
+canonical_grub_entry() {
+    case "${1:-}" in
+        A|B) printf 'Ming OS 高级启动>Ming OS slot %s\n' "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
 transaction_status="$(jq -r '.status // ""' "${transaction}" 2>/dev/null)" || exit 1
 case "${transaction_status}" in pending|rollback_required) ;; *) exit 0 ;; esac
 previous="$(jq -r '.previous_slot // ""' "${transaction}" 2>/dev/null)" || exit 1
 previous_entry="$(jq -r '.previous_entry // ""' "${transaction}" 2>/dev/null)" || exit 1
-case "${previous}:${previous_entry}" in
-    "A:Ming OS slot A"|"B:Ming OS slot B") ;;
+expected_previous_entry="$(canonical_grub_entry "${previous}")" || exit 1
+case "${previous_entry}" in
+    "${expected_previous_entry}"|"Ming OS slot ${previous}") previous_entry="${expected_previous_entry}" ;;
     *) exit 1 ;;
 esac
 
+restore_previous_grub_entries() {
+    local grub_env
+    command -v grub-set-default >/dev/null 2>&1 || {
+        printf 'ming-ota-ab-health: grub-set-default is unavailable\n' >&2
+        return 1
+    }
+    command -v grub-reboot >/dev/null 2>&1 || {
+        printf 'ming-ota-ab-health: grub-reboot is unavailable\n' >&2
+        return 1
+    }
+    command -v grub-editenv >/dev/null 2>&1 || {
+        printf 'ming-ota-ab-health: grub-editenv is unavailable\n' >&2
+        return 1
+    }
+    grub-set-default "${previous_entry}" || {
+        printf 'ming-ota-ab-health: failed to restore saved GRUB entry\n' >&2
+        return 1
+    }
+    grub_env="$(grub-editenv list 2>/dev/null)" || {
+        printf 'ming-ota-ab-health: failed to read GRUB environment\n' >&2
+        return 1
+    }
+    grep -Fqx "saved_entry=${previous_entry}" <<<"${grub_env}" || {
+        printf 'ming-ota-ab-health: saved GRUB entry readback mismatch\n' >&2
+        return 1
+    }
+    grub-reboot "${previous_entry}" || {
+        printf 'ming-ota-ab-health: failed to restore one-shot GRUB entry\n' >&2
+        return 1
+    }
+    grub_env="$(grub-editenv list 2>/dev/null)" || {
+        printf 'ming-ota-ab-health: failed to read GRUB environment after grub-reboot\n' >&2
+        return 1
+    }
+    grep -Fqx "next_entry=${previous_entry}" <<<"${grub_env}" || {
+        printf 'ming-ota-ab-health: next GRUB entry readback mismatch\n' >&2
+        return 1
+    }
+}
+
+save_target_grub_entry() {
+    local grub_env
+    command -v grub-set-default >/dev/null 2>&1 || return 1
+    command -v grub-editenv >/dev/null 2>&1 || return 1
+    grub-set-default "${target_entry}" || return 1
+    grub_env="$(grub-editenv list 2>/dev/null)" || return 1
+    grep -Fqx "saved_entry=${target_entry}" <<<"${grub_env}"
+}
+
 rollback_ab_boot() {
     local reason="${1:-A/B health check failed}"
-    ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
-        force-rollback --reason "${reason}" >/dev/null 2>&1 || true
-    if command -v grub-set-default >/dev/null 2>&1; then
-        grub-set-default "${previous_entry}" || true
+    if ! ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
+        force-rollback --reason "${reason}" >/dev/null; then
+        printf 'ming-ota-ab-health: failed to persist rollback state\n' >&2
+        return 1
     fi
-    if command -v grub-reboot >/dev/null 2>&1; then
-        grub-reboot "${previous_entry}" || true
+    if ! restore_previous_grub_entries; then
+        printf 'ming-ota-ab-health: GRUB rollback was not confirmed; refusing reboot\n' >&2
+        return 1
     fi
     sync
-    systemctl reboot --no-wall --message="${reason}; returning to the previous Ming OS slot." || true
+    if ! systemctl reboot --no-wall --message="${reason}; returning to the previous Ming OS slot."; then
+        printf 'ming-ota-ab-health: reboot request failed\n' >&2
+        return 1
+    fi
     return 1
 }
 
@@ -2143,16 +2268,17 @@ target="$(jq -r '.target_slot // ""' "${transaction}")" \
     || { rollback_ab_boot "cannot read target A/B slot"; exit 1; }
 target_entry="$(jq -r '.target_entry // ""' "${transaction}")" \
     || { rollback_ab_boot "cannot read target GRUB entry"; exit 1; }
-case "${target}:${target_entry}" in
-    "A:Ming OS slot A"|"B:Ming OS slot B") ;;
+expected_target_entry="$(canonical_grub_entry "${target}")" \
+    || { rollback_ab_boot "target A/B slot identity is invalid"; exit 1; }
+case "${target_entry}" in
+    "${expected_target_entry}"|"Ming OS slot ${target}") target_entry="${expected_target_entry}" ;;
     *) rollback_ab_boot "target A/B slot identity is invalid"; exit 1 ;;
 esac
 
 if [[ "${current}" == "${previous}" ]]; then
     ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
         observe-boot --health healthy >/dev/null || {
-            ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
-                force-rollback --reason "rollback confirmation failed" >/dev/null 2>&1 || true
+            rollback_ab_boot "rollback confirmation failed"
             exit 1
         }
     exit 0
@@ -2184,9 +2310,7 @@ if [[ "$(cat /etc/ming-version 2>/dev/null || true)" == "$(jq -r '.version' "${t
     done
 fi
 
-if [[ "${healthy}" == true ]] && command -v grub-set-default >/dev/null 2>&1 \
-   && grub-set-default "${target_entry}" \
-    && grep -Fqx "saved_entry=${target_entry}" <<<"$(grub-editenv list 2>/dev/null || true)"; then
+if [[ "${healthy}" == true ]] && save_target_grub_entry; then
     if ! ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
         observe-boot --health healthy >/dev/null; then
         rollback_ab_boot "A/B health confirmation state write failed"
@@ -2195,8 +2319,6 @@ if [[ "${healthy}" == true ]] && command -v grub-set-default >/dev/null 2>&1 \
     exit 0
 fi
 
-ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
-    force-rollback --reason "Ming OS A/B health check failed" >/dev/null 2>&1 || true
 rollback_ab_boot "Ming OS A/B health check failed"
 exit 1
 ABHEALTH

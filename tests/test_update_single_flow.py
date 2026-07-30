@@ -114,6 +114,19 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("preservation_ready", status)
         self.assertIn("backup_required", self.ota)
 
+    def test_dual_boot_major_ota_is_visible_as_a_status_block(self):
+        status = method_block(self.ota, "show_status_json() {", "show_status() {")
+        self.assertIn("dual_boot_major_ota_blocked", self.ota)
+        self.assertIn('action="blocked"', status)
+        self.assertIn("disabled_dual_boot", status)
+        self.assertIn("保留双系统模式，大版本 A/B OTA 已禁用", self.ota)
+
+    def test_installed_install_mode_policy_is_readable_by_unprivileged_ota_status(self):
+        policy = method_block(self.ota, "dual_boot_major_ota_blocked() {", "ensure_dirs() {")
+        self.assertIn('[[ -r "${INSTALL_MODE_FILE}"', policy)
+        base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
+        self.assertIn('install -m 0644 "${install_mode_state}"', base)
+
     def test_cli_help_advertises_the_one_click_restart_command_and_legacy_alias(self):
         help_block = method_block(self.ota, "show_help() {", "validate_staging_record_local() {")
 
@@ -646,6 +659,9 @@ selected_manifest_path_is_safe() {
 }
 check_update() {
     cp -- "${MING_TEST_AUTHORITATIVE_MANIFEST}" "${CACHE_DIR}/update_info.json"
+}
+verify_signed_ota_manifest() {
+    return 0
 }
 apply_manifest_apt_update() {
     cp -- "$1" "${MING_TEST_APPLIED_MANIFEST}"

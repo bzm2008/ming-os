@@ -172,9 +172,9 @@ class FirefoxPerformanceContracts(unittest.TestCase):
         self.assertIn("Safe Graphics", BUILD)
         self.assertIn("must keep a safe-graphics entry", BUILD)
 
-    def test_official_debian_grub_generator_remains_executable_for_kernel_fallback(self):
-        self.assertIn('"${noisy_grub}" == "10_linux"', BASE)
-        self.assertIn('chmod 0755 "${target}/etc/grub.d/${noisy_grub}"', BASE)
+    def test_official_debian_grub_generator_is_disabled_to_prevent_top_level_fanout(self):
+        self.assertIn('"10_linux"', BASE)
+        self.assertIn('chmod 0644 "${target}/etc/grub.d/${noisy_grub}"', BASE)
         self.assertIn('etc/grub.d/10_linux', BUILD)
 
 

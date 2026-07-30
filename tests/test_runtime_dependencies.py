@@ -39,6 +39,7 @@ REQUIRED_PACKAGES = [
     "polkitd",
     "lxpolkit",
     "libnotify-bin",
+    "zenity",
     "x11-utils",
     "x11-xserver-utils",
     "desktop-file-utils",
@@ -125,6 +126,24 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             DESKTOP,
         )
 
+    def test_downloaded_appimages_have_a_context_menu_and_mime_handler(self):
+        self.assertIn("ming-appimage-installer.desktop", DESKTOP)
+        self.assertIn("MimeType=application/x-appimage;application/x-executable;", DESKTOP)
+        self.assertIn("Exec=/usr/local/bin/ming-appimage-install-gui %f", DESKTOP)
+        final_menu = DESKTOP.split("configure_simplified_menus() {", 1)[1].split(
+            "\n# ========================", 1)[0]
+        self.assertIn("安装 AppImage", final_menu)
+        self.assertIn("<patterns>*.AppImage;*.appimage</patterns>", final_menu)
+        self.assertIn("/usr/local/bin/ming-appimage-install-gui \"%f\"", final_menu)
+
+    def test_appimage_install_refreshes_desktop_catalog_and_dock(self):
+        appimage_gui = DESKTOP.split(
+            "cat > /usr/local/bin/ming-appimage-install-gui << 'MINGAPPIMAGEGUI'", 1
+        )[1].split("MINGAPPIMAGEGUI", 1)[0]
+        self.assertIn("update-desktop-database", appimage_gui)
+        self.assertIn("ming-phone-desktop --sync", appimage_gui)
+        self.assertIn("ming-refresh-dock-launchers", appimage_gui)
+
     def test_apps_module_has_a_dedicated_required_runtime_package_set(self):
         block = APPS.split("REQUIRED_DESKTOP_RUNTIME_PACKAGES=(", 1)[1].split(")", 1)[0]
         for package in REQUIRED_PACKAGES:
@@ -188,6 +207,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "pkexec",
             "lxpolkit",
             "notify-send",
+            "zenity",
             "xprop",
             "desktop-file-utils",
             "/usr/sbin/rfkill",

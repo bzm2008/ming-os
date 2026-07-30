@@ -1,4 +1,5 @@
 import ast
+import json
 import pathlib
 import textwrap
 import threading
@@ -77,6 +78,113 @@ class Page:
 
 
 class SettingsRadioAudioContracts(unittest.TestCase):
+    def test_display_confirmation_timeout_executes_rollback_once(self):
+        commands = []
+        refreshed = []
+
+        class Dialog:
+            def __init__(self, **_kwargs):
+                self.closed = False
+                self.response_handler = None
+
+            def add_response(self, *_args):
+                pass
+
+            def set_default_response(self, *_args):
+                pass
+
+            def set_response_appearance(self, *_args):
+                pass
+
+            def set_body(self, *_args):
+                pass
+
+            def close(self):
+                self.closed = True
+
+            def connect(self, _signal, handler):
+                self.response_handler = handler
+
+            def present(self):
+                pass
+
+        class FakeAdw:
+            MessageDialog = Dialog
+            ResponseAppearance = types.SimpleNamespace(SUGGESTED=object())
+
+        class FakeGLib:
+            tick = None
+
+            @classmethod
+            def timeout_add_seconds(cls, _seconds, callback):
+                cls.tick = callback
+                return 41
+
+            @staticmethod
+            def source_remove(_source_id):
+                pass
+
+        def capture(command, timeout, on_done):
+            commands.append((tuple(command), timeout))
+            on_done(0, json.dumps({"ok": True, "message": "restored"}), "")
+
+        show_confirmation = executable_function("show_display_confirmation", {
+            "Adw": FakeAdw,
+            "GLib": FakeGLib,
+            "DISPLAY_CONTROL_HELPER": "/usr/local/bin/ming-display-control",
+            "json": json,
+            "run_capture_async": capture,
+        }, "MingSettings")
+        window = types.SimpleNamespace(toasts=[])
+        window.toast = lambda text, severity: window.toasts.append((text, severity))
+        window.refresh_display_status = lambda: refreshed.append(True)
+
+        show_confirmation(window, "display-token", 1)
+        self.assertFalse(FakeGLib.tick())
+
+        self.assertEqual([
+            (("/usr/local/bin/ming-display-control", "rollback", "display-token"), 10)
+        ], commands)
+        self.assertEqual([True], refreshed)
+
+    def test_wifi_toggle_reads_back_and_restores_switch_on_mismatch(self):
+        jobs = []
+
+        def capture(command, timeout, on_done):
+            jobs.append((tuple(command), timeout, on_done))
+
+        toggle = executable_function("on_wifi_toggle", {
+            "run_capture_async": capture,
+        }, "MingSettings")
+
+        class Switch:
+            def __init__(self):
+                self.active = True
+
+            def get_active(self):
+                return self.active
+
+            def set_active(self, value):
+                self.active = bool(value)
+
+        switch = Switch()
+        window = types.SimpleNamespace(loading_wifi_state=False, toasts=[])
+        window.toast = lambda text, severity="info": window.toasts.append((text, severity))
+
+        toggle(window, switch, None)
+        self.assertEqual(
+            ("env", "LC_ALL=C", "nmcli", "radio", "wifi", "on"), jobs[0][0])
+        jobs.pop(0)[2](0, "", "")
+        self.assertEqual(
+            ("env", "LC_ALL=C", "nmcli", "radio", "wifi"), jobs[0][0])
+        jobs.pop(0)[2](0, "disabled\n", "")
+
+        self.assertFalse(switch.get_active())
+        self.assertFalse(window.loading_wifi_state)
+        self.assertTrue(window.toasts)
+        self.assertEqual("error", window.toasts[-1][1])
+        self.assertIn("实际状态", window.toasts[-1][0])
+
     def test_settings_typography_uses_noto_and_static_spacing_without_effects(self):
         install_css = function_source("install_css", "MingSettings")
 

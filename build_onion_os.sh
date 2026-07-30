@@ -302,6 +302,10 @@ prepare_chroot_scripts() {
         log_error "missing required build asset: assets/ming-installer-verify.py"
         return 1
     fi
+    if [[ ! -s "${SCRIPT_DIR}/assets/ming-detect-other-os" ]]; then
+        log_error "missing required build asset: assets/ming-detect-other-os"
+        return 1
+    fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
@@ -920,7 +924,7 @@ validate_required_desktop_runtime() {
     fi
 
     local command package
-    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send xprop nm-online fc-match; do
+    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send zenity xprop nm-online fc-match; do
         if ! chroot_exec /bin/sh -c "command -v '${command}' >/dev/null 2>&1"; then
             log_error "required desktop command is missing: ${command}"
             return 1
@@ -958,7 +962,7 @@ validate_required_desktop_runtime() {
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
         pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
-        lxpolkit libnotify-bin x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
+        lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
         i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
         mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \
         fcitx5-rime librime-data rime-data-luna-pinyin; do
@@ -2097,7 +2101,7 @@ for marker in [
     "GRUB_TIMEOUT_STYLE=menu",
     "GRUB_TERMINAL_INPUT=console",
     "GRUB_RECORDFAIL_TIMEOUT=0",
-    "GRUB_DISABLE_SUBMENU=true",
+    "GRUB_DISABLE_SUBMENU=false",
     "GRUB_DISABLE_OS_PROBER=true",
     "GRUB_DISABLE_RECOVERY=true",
 ]:
@@ -2105,11 +2109,14 @@ for marker in [
         errors.append(f"grub defaults missing {marker}")
 
 hard_disk_grub = require_file("etc/grub.d/09_ming_os", "menuentry 'Ming OS'")
+other_os_detector = require_file("usr/local/sbin/ming-detect-other-os", "EFI/Microsoft/Boot/bootmgfw.efi")
+if "EFI/Linux" not in other_os_detector or "chainloader ($esp)" not in other_os_detector:
+    errors.append("other-OS detector must keep explicit Windows and Linux EFI chainloader rules")
 official_grub = root / "etc/grub.d/10_linux"
 if not official_grub.is_file():
     errors.append("Debian official /etc/grub.d/10_linux generator is missing")
-elif not (official_grub.stat().st_mode & 0o111):
-    errors.append("Debian official /etc/grub.d/10_linux generator must remain executable for kernel fallback")
+elif official_grub.stat().st_mode & 0o111:
+    errors.append("Debian official /etc/grub.d/10_linux generator must be disabled to avoid duplicate top-level entries")
 if "ming.installer=1" in hard_disk_grub or "boot=live" in hard_disk_grub or "安装 Ming OS" in hard_disk_grub:
     errors.append("installed hard-disk GRUB entry must not boot the Live installer")
 if " splash" in hard_disk_grub:
@@ -2296,36 +2303,33 @@ menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphic
     initrd /live/initrd
 }
 
-menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
-    initrd /live/initrd
-}
+submenu "高级兼容启动" {
+  menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
+   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+      initrd /live/initrd
+  }
 
-menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
-    initrd /live/initrd
-}
+  menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
+   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
+      initrd /live/initrd
+  }
 
-menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
-    initrd /live/initrd
-}
+  menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
+   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+      initrd /live/initrd
+  }
 
-# Surface Pro 1/2/3：Atom/Ivy Bridge + IPTS 触控 + 特殊 EFI 固件
-# 关键参数：i8042.noloop 修复键盘不识别；ipts=1 启用触控板协议；
-# intel_idle.max_cstate=1 防止老Atom/IvyBridge挂起后不醒；
-# acpi_mask_gpe=0x6e 处理 Surface 特定 ACPI GPE 事件风暴
-menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
-    initrd /live/initrd
-}
+  # Surface Pro 1/2/3: preserve the touch and ACPI compatibility arguments.
+  menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
+   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
+      initrd /live/initrd
+  }
 
-# Mac EFI / 苹果 MacBook：Apple EFI 固件有特殊 ACPI 实现
-# acpi_osi=Darwin 让 BIOS 暴露 Mac 专用 ACPI 表；
-# reboot=pci 解决 Mac 重启后停在黑屏问题
-menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
-    initrd /live/initrd
+  # Mac EFI / MacBook compatibility.
+  menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
+   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
+      initrd /live/initrd
+  }
 }
 
 GRUBCFG

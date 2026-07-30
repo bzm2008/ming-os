@@ -16,10 +16,18 @@ LAYOUT_PATH = pathlib.Path("/etc/ming-update/slots.json")
 TRANSACTION_PATH = pathlib.Path("/home/.ming-ota/ab-transaction.json")
 UUID_RE = re.compile(r"^[A-Fa-f0-9][A-Fa-f0-9-]{3,127}$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:[A-Za-z0-9._-]*)?$")
+GRUB_SUBMENU = "Ming OS 高级启动"
 
 
 class ContractError(ValueError):
     pass
+
+
+def canonical_grub_entry(slot):
+    """Return the only GRUB entry spelling written by current OTA state."""
+    if slot not in ("A", "B"):
+        raise ContractError(f"slot {slot} is invalid")
+    return f"{GRUB_SUBMENU}>Ming OS slot {slot}"
 
 
 def _slot(layout, name):
@@ -33,9 +41,18 @@ def _slot(layout, name):
         raise ContractError(f"slot {name} device is unsafe")
     if not isinstance(uuid, str) or not UUID_RE.fullmatch(uuid):
         raise ContractError(f"slot {name} UUID is invalid")
-    if not isinstance(entry, str) or not entry.startswith("Ming OS slot ") or "\n" in entry:
+    legacy_entry = f"Ming OS slot {name}"
+    canonical_entry = canonical_grub_entry(name)
+    if entry == legacy_entry:
+        # Read legacy receipts for compatibility, but never write them back.
+        entry = canonical_entry
+    if not isinstance(entry, str) or entry != canonical_entry or "\n" in entry:
         raise ContractError(f"slot {name} GRUB entry is invalid")
     return {"device": device, "uuid": uuid.lower(), "grub_entry": entry}
+
+
+def _grub_entry_label(entry):
+    return str(entry).rsplit(">", 1)[-1]
 
 
 def validate_layout(layout):
@@ -142,10 +159,15 @@ def force_rollback(transaction, reason):
         raise ContractError("no rollback-capable A/B transaction")
     previous = transaction.get("previous_slot")
     previous_entry = transaction.get("previous_entry")
-    if previous not in ("A", "B") or previous_entry != f"Ming OS slot {previous}":
+    if previous not in ("A", "B"):
+        raise ContractError("previous slot identity is invalid")
+    canonical_entry = canonical_grub_entry(previous)
+    if previous_entry not in (canonical_entry, f"Ming OS slot {previous}"):
         raise ContractError("previous slot identity is invalid")
     return {
         **transaction,
+        # Legacy receipts are accepted for reading but never propagated.
+        "previous_entry": canonical_entry,
         "status": "rollback_required",
         "boot_target": previous,
         "failure_reason": str(reason or "health check failed")[:512],
@@ -232,13 +254,25 @@ def prepare_slot_root(root, layout, target_slot):
     for name in ("A", "B"):
         slot = checked["slots"][name]
         slot_lines.extend([
-            f"menuentry '{slot['grub_entry']}' --class ming --class gnu-linux --class os {{",
+            f"menuentry '{_grub_entry_label(slot['grub_entry'])}' --class ming --class gnu-linux --class os {{",
             f"    search --no-floppy --fs-uuid --set=root {checked['boot']['uuid']}",
             f"    linux /ming-slots/{name}/vmlinuz root=UUID={slot['uuid']} ro quiet loglevel=3 systemd.show_status=false",
             f"    initrd /ming-slots/{name}/initrd.img",
             "}",
         ])
-    grub_script = "#!/bin/sh\nset -e\ncat <<'EOF'\n" + "\n".join(slot_lines) + "\nEOF\n"
+    normal_name = target_slot
+    normal = checked["slots"][normal_name]
+    grub_lines = [
+        "menuentry 'Ming OS' --class ming --class gnu-linux --class os {",
+        f"    search --no-floppy --fs-uuid --set=root {checked['boot']['uuid']}",
+        f"    linux /ming-slots/{normal_name}/vmlinuz root=UUID={normal['uuid']} ro quiet loglevel=3 systemd.show_status=false",
+        f"    initrd /ming-slots/{normal_name}/initrd.img",
+        "}",
+        "submenu 'Ming OS 高级启动' --class ming --class gnu-linux --class os {",
+    ]
+    grub_lines.extend("    " + line if line else line for line in slot_lines)
+    grub_lines.append("}")
+    grub_script = "#!/bin/sh\nset -e\ncat <<'EOF'\n" + "\n".join(grub_lines) + "\nEOF\n"
     _write_text_atomic(grub_dir / "09_ming_os", grub_script, 0o755)
 
     defaults_path = defaults_dir / "10-ming-os.cfg"
@@ -247,7 +281,8 @@ def prepare_slot_root(root, layout, target_slot):
         line for line in existing_defaults.splitlines()
         if not line.startswith("GRUB_DEFAULT=") and not line.startswith("GRUB_SAVEDEFAULT=")
     ]
-    kept_defaults.extend(["GRUB_DEFAULT=saved", "GRUB_SAVEDEFAULT=false"])
+    kept_defaults = [line for line in kept_defaults if not line.startswith("GRUB_DISABLE_SUBMENU=")]
+    kept_defaults.extend(["GRUB_DEFAULT=saved", "GRUB_SAVEDEFAULT=false", "GRUB_DISABLE_SUBMENU=false"])
     _write_text_atomic(defaults_path, "\n".join(kept_defaults).rstrip() + "\n", 0o644)
 
 

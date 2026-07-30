@@ -99,7 +99,9 @@ class AppImageInstaller:
                 "StartupNotify=true\n" % (stem, self._desktop_escape(target)),
                 encoding="utf-8",
             )
-            os.chmod(desktop, 0o600)
+            # Desktop catalogs and launch brokers need to read this entry after
+            # installation; keep it user-owned but readable to the session.
+            os.chmod(desktop, 0o644)
         except OSError as exception:
             return self._result(False, state="install_failed", source=str(resolved), error="无法安装 AppImage：%s" % exception)
         return self._result(
