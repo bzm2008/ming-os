@@ -195,6 +195,22 @@ class OtaAbContractTests(unittest.TestCase):
         self.assertIn("display-manager.service", health)
         self.assertIn("rollback_required", health)
 
+    def test_boot_health_waits_for_display_manager_before_fail_closed_rollback(self):
+        """A freshly staged slot must not roll back merely because LightDM is still starting."""
+        module = OTA.read_text(encoding="utf-8")
+        health = module.split("cat > /usr/local/sbin/ming-ota-ab-health << 'ABHEALTH'\n", 1)[1].split(
+            "\nABHEALTH\n", 1
+        )[0]
+        unit = module.split(
+            "cat > /etc/systemd/system/ming-ota-ab-health.service << 'ABHEALTHSERVICE'\n", 1
+        )[1].split("\nABHEALTHSERVICE\n", 1)[0]
+
+        self.assertIn("After=multi-user.target graphical.target display-manager.service", unit)
+        self.assertIn("Wants=display-manager.service", unit)
+        self.assertIn("HEALTH_READY_TIMEOUT_SECONDS=", health)
+        self.assertIn("while (( SECONDS < health_deadline )); do", health)
+        self.assertIn("sleep 2", health)
+
     def test_stage_engine_unmounts_iso_on_failure_and_checks_target_uuid_mounts(self):
         stage = STAGE_PATH.read_text(encoding="utf-8")
         cleanup = stage.split("cleanup() {", 1)[1].split("}\ntrap cleanup", 1)[0]

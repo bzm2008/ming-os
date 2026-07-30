@@ -2106,6 +2106,8 @@ BOOTCHECK
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly HEALTH_READY_TIMEOUT_SECONDS=90
+
 layout=/etc/ming-update/slots.json
 transaction=/home/.ming-ota/ab-transaction.json
 [[ -f "${layout}" && -f "${transaction}" ]] || exit 0
@@ -2164,12 +2166,23 @@ if [[ "${transaction_status}" == rollback_required ]]; then
     exit 1
 fi
 
-healthy=true
-[[ "$(cat /etc/ming-version 2>/dev/null || true)" == "$(jq -r '.version' "${transaction}")" ]] || healthy=false
-[[ "$(findmnt -nro UUID -T /home 2>/dev/null || true)" == "$(jq -r '.home.uuid' "${layout}")" ]] || healthy=false
-system_state="$(systemctl is-system-running 2>/dev/null || true)"
-case "${system_state}" in running|degraded) ;; *) healthy=false ;; esac
-systemctl is-active --quiet display-manager.service || healthy=false
+healthy=false
+if [[ "$(cat /etc/ming-version 2>/dev/null || true)" == "$(jq -r '.version' "${transaction}")" ]] \
+   && [[ "$(findmnt -nro UUID -T /home 2>/dev/null || true)" == "$(jq -r '.home.uuid' "${layout}")" ]]; then
+    health_deadline=$(( SECONDS + HEALTH_READY_TIMEOUT_SECONDS ))
+    while (( SECONDS < health_deadline )); do
+        system_state="$(systemctl is-system-running 2>/dev/null || true)"
+        case "${system_state}" in
+            running|degraded)
+                if systemctl is-active --quiet display-manager.service; then
+                    healthy=true
+                    break
+                fi
+                ;;
+        esac
+        sleep 2
+    done
+fi
 
 if [[ "${healthy}" == true ]] && command -v grub-set-default >/dev/null 2>&1 \
    && grub-set-default "${target_entry}" \
@@ -2193,7 +2206,8 @@ ABHEALTH
     cat > /etc/systemd/system/ming-ota-ab-health.service << 'ABHEALTHSERVICE'
 [Unit]
 Description=Ming OS A/B OTA boot health confirmation
-After=multi-user.target graphical.target
+After=multi-user.target graphical.target display-manager.service
+Wants=display-manager.service
 ConditionPathExists=/etc/ming-update/slots.json
 ConditionPathExists=/home/.ming-ota/ab-transaction.json
 
