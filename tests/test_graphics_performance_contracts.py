@@ -175,6 +175,7 @@ class FirefoxPerformanceContracts(unittest.TestCase):
     def test_official_debian_grub_generator_is_disabled_to_prevent_top_level_fanout(self):
         self.assertIn('"10_linux"', BASE)
         self.assertIn('chmod 0644 "${target}/etc/grub.d/${noisy_grub}"', BASE)
+        self.assertIn('chmod 0644 "/etc/grub.d/${noisy_grub}"', BASE)
         self.assertIn('etc/grub.d/10_linux', BUILD)
 
 

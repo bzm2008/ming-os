@@ -2012,6 +2012,13 @@ GRUB_DISABLE_SUBMENU=false
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
 GRUBCFG
+    for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
+        if [[ -f "/etc/grub.d/${noisy_grub}" ]]; then
+            # Ming's audited generator owns the compact menu. Debian's generic
+            # generator would add one top-level item per installed kernel.
+            chmod 0644 "/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+        fi
+    done
 }
 
 # ======================== 安装器品牌与安装后身份兜底 ========================
@@ -4661,6 +4668,11 @@ submenu 'Ming OS 高级启动' --class ming --class gnu-linux --class os {
 EOF
 STATICGRUB
     chmod 0755 /etc/grub.d/09_ming_os
+    for noisy_grub in 10_linux 20_linux_xen 30_os-prober 30_uefi-firmware; do
+        if [[ -f "/etc/grub.d/${noisy_grub}" ]]; then
+            chmod 0644 "/etc/grub.d/${noisy_grub}" 2>/dev/null || true
+        fi
+    done
 
     cat > /etc/lightdm/lightdm.conf.d/60-ming-autologin.conf << 'STATICLIGHTDM'
 [Seat:*]
