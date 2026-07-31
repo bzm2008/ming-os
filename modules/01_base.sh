@@ -34,7 +34,11 @@ deb https://mirrors.tuna.tsinghua.edu.cn/debian/ trixie-updates main contrib non
 deb https://mirrors.tuna.tsinghua.edu.cn/debian-security trixie-security main contrib non-free non-free-firmware
 APTSRC
 
-    if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]]; then
+    # Host dependency installation may use its own skip flag to avoid a
+    # redundant host apt update. Do not let that leak into the target rootfs:
+    # after rewriting sources.list, chroot apt must refresh so contrib,
+    # non-free and non-free-firmware packages are visible.
+    if [[ "${MING_SKIP_CHROOT_APT_UPDATE:-0}" != "1" ]]; then
         apt update
     fi
 }

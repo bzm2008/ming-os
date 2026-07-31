@@ -35,6 +35,14 @@ class RadioBuildContracts(unittest.TestCase):
         self.assertNotIn("firmware-ralink", installer)
         self.assertIn("required radio firmware package is not installed", installer)
 
+    def test_chroot_apt_source_refresh_is_not_controlled_by_host_skip_flag(self):
+        sources = shell_function(BASE, "configure_apt_sources")
+
+        self.assertIn("non-free-firmware", sources)
+        self.assertIn("apt update", sources)
+        self.assertIn("MING_SKIP_CHROOT_APT_UPDATE", sources)
+        self.assertNotIn("MING_SKIP_APT_UPDATE", sources)
+
     def test_cn_regulatory_domain_precedes_networkmanager(self):
         network = shell_function(BASE, "configure_network")
         self.assertIn("ming-regdom.service", network)
