@@ -34,7 +34,12 @@ IFNAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}\Z")
 NETWORK_ID_PATTERN = re.compile(r"[a-f0-9]{32}\Z")
 WIFI_SCAN_CACHE_MAX_AGE = 180
 NET_ROOT = Path("/sys/class/net")
-ETHERNET_CONNECTIVITY_URL = "https://connectivitycheck.gstatic.com/generate_204"
+ETHERNET_CONNECTIVITY_URLS = (
+    "https://connectivitycheck.gstatic.com/generate_204",
+    "https://cp.cloudflare.com/generate_204",
+    "https://connectivitycheck.platform.hicloud.com/generate_204",
+)
+ETHERNET_CONNECTIVITY_URL = ETHERNET_CONNECTIVITY_URLS[0]
 POWER_PROFILE_PATH = Path("/run/ming-os/power-profile")
 
 
@@ -1648,9 +1653,13 @@ class DeviceController:
             return ""
         return os.path.basename(resolved) if resolved and os.path.exists(resolved) else ""
 
-    def _ethernet_internet(self, ifname, state, carrier, probe=True):
+    def _ethernet_internet(self, ifname, state, carrier, probe=True, dns_servers=()):
         base = {"interface": ifname, "state": "pending", "reason_code": "E_ETHERNET_PENDING",
-                "reason_text": "正在等待有线网络完成配置。"}
+                "reason_text": "正在等待有线网络完成配置。",
+                "network_manager": {
+                    "route_confirmed": False,
+                    "dns_confirmed": bool(dns_servers),
+                }}
         if carrier is False:
             base.update(state="offline", reason_code="E_ETHERNET_CARRIER_DOWN",
                         reason_text="未检测到网线连接。")
@@ -1665,6 +1674,7 @@ class DeviceController:
             base.update(reason_code="E_ETHERNET_ROUTE_UNCONFIRMED",
                         reason_text="未确认到该有线接口的 IPv4 默认路由。")
             return base
+        base["network_manager"]["route_confirmed"] = True
         if not probe:
             base.update(reason_code="E_ETHERNET_ROUTE_CONFIRMED",
                         reason_text="已确认该有线接口路由；未执行互联网探测。")
@@ -1673,17 +1683,26 @@ class DeviceController:
             base.update(reason_code="E_ETHERNET_PROBE_UNAVAILABLE",
                         reason_text="已确认路由，等待联网探测工具可用。")
             return base
-        probe = [
-            "curl", "--interface", ifname, "--connect-timeout", "2", "--max-time", "5",
-            "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
-            ETHERNET_CONNECTIVITY_URL,
-        ]
-        rc, output, _error = self._run(probe, timeout=7)
-        if rc == 0 and re.fullmatch(r"2\d\d", (output or "").strip()):
-            base.update(state="online", reason_code="OK", reason_text="有线网络已连接互联网。")
-        else:
-            base.update(state="offline", reason_code="E_ETHERNET_INTERNET_UNREACHABLE",
-                        reason_text="该有线接口无法访问互联网，请检查路由器、DHCP 或 DNS。")
+        attempted = []
+        for url in ETHERNET_CONNECTIVITY_URLS:
+            command = [
+                "curl", "--interface", ifname, "--connect-timeout", "2", "--max-time", "5",
+                "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
+                url,
+            ]
+            rc, output, _error = self._run(command, timeout=7)
+            attempted.append(url)
+            if rc == 0 and re.fullmatch(r"2\d\d", (output or "").strip()):
+                base.update(
+                    state="online", reason_code="OK", reason_text="有线网络已连接互联网。",
+                    probe_endpoint=url, probe_attempts=len(attempted),
+                )
+                return base
+        base.update(
+            state="offline", reason_code="E_ETHERNET_INTERNET_UNREACHABLE",
+            reason_text="该有线接口无法访问多个联网探测端点，请检查路由器、DHCP 或 DNS。",
+            probe_attempts=len(attempted),
+        )
         return base
 
     def ethernet_status(self, probe_internet=True):
@@ -1728,7 +1747,8 @@ class DeviceController:
                 "driver": self._net_driver(ifname),
                 "ipv4": {"addresses": addresses, "gateway": details.get("IP4.GATEWAY", ""), "dns": dns},
                 "ipv6": {"addresses": ipv6_addresses, "gateway": details.get("IP6.GATEWAY", "")},
-                "internet": self._ethernet_internet(ifname, row["state"], carrier, probe=probe_internet),
+                "internet": self._ethernet_internet(
+                    ifname, row["state"], carrier, probe=probe_internet, dns_servers=dns),
             })
         return {
             "ok": True, "state": "ready" if devices else "no_ethernet", "devices": devices,

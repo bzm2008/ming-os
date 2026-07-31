@@ -197,6 +197,17 @@ class AppDrawerCoreTests(unittest.TestCase):
             show.index("transition = drawer_transition(reduced_motion_enabled())"),
         )
 
+    def test_drawer_uses_shared_ming_launch_proxy_without_direct_argv_fallback(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        launch = source[source.index("    def launch(self, app, widget):"):
+                       source.index("    def show(self):", source.index("    def launch(self, app, widget):"))]
+        self.assertIn('LAUNCH_PROXY = "/usr/local/bin/ming-launch"', source)
+        self.assertIn("LAUNCH_PROXY", launch)
+        self.assertIn('"--desktop-file"', launch)
+        self.assertIn('"--source", "drawer"', launch)
+        self.assertNotIn("Popen(list(app.argv)", launch)
+        self.assertNotIn("COMMON.send_launch_request", launch)
+
 
 class LaunchBrokerCoreTests(unittest.TestCase):
     @classmethod

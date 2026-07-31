@@ -609,6 +609,10 @@ check_update() {
                                    'readonly CONFIG_DIR="%s"' % git_path(root_config))
             base_cli = base_cli.replace('readonly CACHE_DIR="/var/cache/ming-update"',
                                         'readonly CACHE_DIR="%s"' % git_path(root_cache))
+            base_cli = base_cli.replace(
+                'current_version() {\n    cat /etc/ming-version 2>/dev/null || echo "unknown"\n}',
+                'current_version() { printf "%s\\n" "26.3.2"; }',
+            )
 
             # First exercise the same unprivileged status path used by
             # Settings.  The user's just-checked v2 must win over both the

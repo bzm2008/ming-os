@@ -2586,8 +2586,16 @@ class StatusWidget(Gtk.Box):
             message = result.get("error") or "控制失败"
             log("%s control rejected: %s" % (kind, message))
             if kind == "volume":
-                state.pending = False
-                self.volume_label.set_text("音量设置失败，点击重试")
+                fallback_value = state.confirmed_value
+                if fallback_value is not None:
+                    state.settle(generation, fallback_value)
+                    self.volume_scale.set_value(fallback_value)
+                    self.volume_label.set_text("音量 %d%%（设置失败）" % fallback_value)
+                    self.volume_scale.queue_draw()
+                else:
+                    state.pending = False
+                    state.optimistic_value = None
+                    self.volume_label.set_text("音量设置失败，点击重试")
             else:
                 self.brightness_backend = result.get("backend", self.brightness_backend)
                 fallback_value = value if value is not None else state.confirmed_value

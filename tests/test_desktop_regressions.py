@@ -333,12 +333,14 @@ class DesktopSourceTests(unittest.TestCase):
             self.phone,
         )
 
-    def test_shell_launches_use_socket_ack_and_direct_fallback(self):
+    def test_shell_launches_use_shared_proxy_and_socket_ack(self):
         common = (ROOT / "assets" / "ming-shell-common.py").read_text(encoding="utf-8")
         self.assertIn("def send_launch_request", common)
         self.assertIn("COMMON = load_shell_common()", self.phone)
         self.assertIn("COMMON.send_launch_request", self.phone)
-        self.assertIn("COMMON.send_launch_request", self.drawer)
+        self.assertIn('LAUNCH_PROXY = "/usr/local/bin/ming-launch"', self.drawer)
+        self.assertIn('"--source", "drawer"', self.drawer)
+        self.assertNotIn("COMMON.send_launch_request", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
 
     def test_power_button_uses_ming_menu_before_session_logout_actions(self):

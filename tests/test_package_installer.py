@@ -308,11 +308,13 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 refresh_icons: (0, "", ""),
             })
 
-            result = installer.PackageInstaller(
+            service = installer.PackageInstaller(
                 runner=runner,
                 uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
-            ).install(package)
+            )
+            service._refresh_desktop_state = lambda: True
+            result = service.install(package)
 
         self.assertTrue(result["ok"])
         self.assertEqual("installed", result["state"])
@@ -323,6 +325,44 @@ class PackageInstallerInstallTests(unittest.TestCase):
              refresh_desktops, refresh_icons, list_files],
             runner.commands,
         )
+
+    def test_install_reports_refresh_warning_after_package_is_verified(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                apt_install: (0, "", ""),
+                verify: (0, "ii ", ""),
+            })
+            installer = installer.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            )
+            installer._refresh_caches = lambda: {
+                "desktop_database": True,
+                "icon_cache": False,
+                "desktop_state": True,
+            }
+
+            result = installer.install(package)
+
+        self.assertTrue(result["installed"])
+        self.assertTrue(result["launch_ready"])
+        self.assertFalse(result["ok"])
+        self.assertEqual("installed_with_refresh_warning", result["state"])
+        self.assertEqual("E_DESKTOP_REFRESH_FAILED", result["error_code"])
+        self.assertIn("刷新", result["error"])
 
     def test_install_requires_administrator_after_safe_inspection(self):
         installer = load_installer()
@@ -395,11 +435,13 @@ class PackageInstallerRepairTests(unittest.TestCase):
                 refresh_icons: (0, "", ""),
             })
 
-            result = installer.PackageInstaller(
+            service = installer.PackageInstaller(
                 runner=runner,
                 uid_getter=lambda: 0,
                 log_path=pathlib.Path(directory) / "installer.log",
-            ).repair("sample-app")
+            )
+            service._refresh_desktop_state = lambda: True
+            result = service.repair("sample-app")
 
         self.assertTrue(result["ok"])
         self.assertEqual("repaired", result["state"])

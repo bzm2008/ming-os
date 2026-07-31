@@ -447,10 +447,7 @@ validate_staging_inputs() {
     actual_checksum="$(sha256sum -- "${iso_path}" | awk '{print $1}')"
     [[ "${actual_checksum}" == "${checksum,,}" ]] || { log_error "OTA ISO SHA256 mismatch"; return 1; }
 
-    authoritative="$(fetch_authoritative_major_manifest)" || {
-        rm -f "${trusted_tmp}"
-        return 1
-    }
+    authoritative="$(fetch_authoritative_major_manifest)" || return 1
     authoritative_available="$(printf '%s' "${authoritative}" | jq -r '.has_update // .update_available // false')"
     authoritative_ready="$(printf '%s' "${authoritative}" | jq -r '.ready // true')"
     authoritative_type="$(printf '%s' "${authoritative}" | jq -r '.update_type // "major"')"
@@ -540,8 +537,74 @@ is_2641_upgrade_source() {
     return 1
 }
 
+ota_version_parts() {
+    local value="$1" major minor patch suffix stage
+    [[ "${value}" =~ ^([0-9]+)[.]([0-9]+)([.]([0-9]+))?([A-Za-z][A-Za-z0-9._-]*|-[A-Za-z0-9._-]+)?$ ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[4]:-0}"
+    suffix="${BASH_REMATCH[5]:-}"
+    if [[ -z "${suffix}" ]]; then
+        stage=9
+    elif [[ "${suffix}" =~ ^-?(alpha|preview|pre) ]]; then
+        stage=1
+    elif [[ "${suffix}" =~ ^-?beta ]]; then
+        stage=2
+    elif [[ "${suffix}" =~ ^-?rc ]]; then
+        stage=3
+    else
+        stage=10
+    fi
+    printf '%s %s %s %s %s\n' \
+        "${major}" "${minor}" "${patch}" "${stage}" "${suffix}"
+}
+
+version_is_strictly_newer() {
+    local source="$1" target="$2"
+    local source_parts target_parts
+    local source_major source_minor source_patch source_stage source_suffix
+    local target_major target_minor target_patch target_stage target_suffix
+    source_parts="$(ota_version_parts "${source}")" || return 1
+    target_parts="$(ota_version_parts "${target}")" || return 1
+    read -r source_major source_minor source_patch source_stage source_suffix <<< "${source_parts}"
+    read -r target_major target_minor target_patch target_stage target_suffix <<< "${target_parts}"
+    source_major=$((10#${source_major}))
+    source_minor=$((10#${source_minor}))
+    source_patch=$((10#${source_patch}))
+    target_major=$((10#${target_major}))
+    target_minor=$((10#${target_minor}))
+    target_patch=$((10#${target_patch}))
+    if (( target_major != source_major )); then
+        (( target_major > source_major ))
+        return
+    fi
+    if (( target_minor != source_minor )); then
+        (( target_minor > source_minor ))
+        return
+    fi
+    if (( target_patch != source_patch )); then
+        (( target_patch > source_patch ))
+        return
+    fi
+    if (( target_stage != source_stage )); then
+        (( target_stage > source_stage ))
+        return
+    fi
+    [[ "${target_suffix}" != "${source_suffix}" ]] || return 1
+    local source_revision target_revision
+    source_revision="${source_suffix##*-}"
+    target_revision="${target_suffix##*-}"
+    [[ "${source_revision}" =~ ^[0-9]+$ && "${target_revision}" =~ ^[0-9]+$ ]] || return 1
+    (( 10#${target_revision} > 10#${source_revision} ))
+}
+
 validate_update_route() {
     local source="$1" target="$2"
+
+    if ! version_is_strictly_newer "${source}" "${target}"; then
+        log_error "目标版本 ${target} 不是当前版本 ${source} 的严格前进版本，拒绝 OTA。"
+        return 1
+    fi
 
     case "${target}" in
         "${OTA_2641_TARGET_VERSION}")
@@ -682,9 +745,6 @@ verify_signed_ota_manifest() {
     local manifest="$1" signature expected_trusted_comment
     signature="$(jq -r '.signature // .minisign_signature // empty' "${manifest}" 2>/dev/null || true)"
     expected_trusted_comment="$(jq -r '.trusted_comment // .minisign_trusted_comment // empty' "${manifest}" 2>/dev/null || true)"
-    if [[ -n "${MING_TEST_RESPONSE:-}" ]]; then
-        return 0
-    fi
     if [[ ! -r "${OTA_RELEASE_PUBLIC_KEY}" ]]; then
         log_error "系统 OTA 发布公钥缺失，拒绝在线更新。Papyrus 公钥不能用于系统 OTA。"
         return 1

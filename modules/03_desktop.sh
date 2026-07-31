@@ -358,6 +358,8 @@ except (TypeError, ValueError):
     result = {}
 installed = bool(result.get("installed"))
 launch_ready = bool(result.get("launch_ready"))
+state = str(result.get("state") or "")
+refresh_warning = installed and state == "installed_with_refresh_warning"
 ok = bool(result.get("ok")) and installed and launch_ready and return_code == 0
 package = str(result.get("package") or "该软件")
 version = str(result.get("version") or "")
@@ -373,6 +375,11 @@ if ok:
         warnings = [str(item.get("error") or "启动器不可用")
                     for item in launcher_warnings if isinstance(item, dict)]
         detail += "\n\n注意：" + "；".join(warnings[:3])
+elif refresh_warning:
+    title = "软件已安装，但桌面刷新失败"
+    reason = str(result.get("error") or "桌面刷新失败，可点击刷新/重试。")
+    detail = "%s\n可点击刷新/重试；软件本体已经安装。\n日志：%s" % (
+        reason[:1200], log_path)
 elif installed and not launch_ready:
     title = "软件已安装，但无法确认可启动"
     reason = str(result.get("error") or "未找到可验证的图形启动器。")
@@ -383,14 +390,14 @@ else:
     detail = "%s\n日志：%s" % (reason[:1200], log_path)
 if shutil.which("zenity"):
     subprocess.run(
-        ["zenity", "--info" if ok else "--error", "--title=" + title,
+        ["zenity", "--info" if ok else ("--warning" if refresh_warning else "--error"), "--title=" + title,
          "--text=" + detail, "--width=520"], check=False)
 elif shutil.which("notify-send"):
     subprocess.run(
-        ["notify-send", "-u", "normal" if ok else "critical", title, detail], check=False)
+        ["notify-send", "-u", "normal" if ok or refresh_warning else "critical", title, detail], check=False)
 else:
     print(title + "\n" + detail, file=sys.stderr)
-raise SystemExit(0 if ok else 1)
+raise SystemExit(0 if ok or refresh_warning else 1)
 MINGPACKAGEUIPY
 then
     if command -v ming-phone-desktop >/dev/null 2>&1; then
@@ -402,7 +409,8 @@ then
     if command -v ming-refresh-dock-launchers >/dev/null 2>&1; then
         ming-refresh-dock-launchers "$(id -un)" >/dev/null 2>&1 || true
     fi
-    exit 0
+    [[ "${installer_rc}" -eq 0 ]] && exit 0
+    exit "${installer_rc}"
 fi
 exit 1
 MINGPACKAGEGUI

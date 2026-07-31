@@ -17,6 +17,7 @@ ANIMATION_DURATION_MS = 160
 DRAWER_REVEAL_OFFSET = 32
 DRAWER_HEIGHT_RATIO = 0.72
 IPC_VERSION = 1
+LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
 _CATEGORY_RULES = (
     ("网络", {"Network", "WebBrowser", "Email", "Chat"}),
@@ -449,13 +450,18 @@ class DrawerController:
             origin = widget.get_window().get_origin()
             allocation = widget.get_allocation()
             rect = widget_source_rect(origin, allocation)
-        started = COMMON.send_launch_request(str(app.path), "drawer", rect)
-        if not started:
-            try:
-                subprocess.Popen(list(app.argv), shell=False)
-                started = True
-            except (OSError, ValueError, subprocess.SubprocessError):
-                started = False
+        launch_command = [
+            LAUNCH_PROXY, "--desktop-file", str(app.path), "--source", "drawer",
+        ]
+        if rect is not None:
+            launch_command.extend(("--rect", json.dumps(rect, separators=(",", ":"))))
+        try:
+            # The proxy owns trust checks, window probing, error notification and
+            # broker fallback.  The drawer only reports that the proxy started.
+            subprocess.Popen(launch_command, shell=False)
+            started = True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            started = False
         if not started:
             dialog = self.Gtk.MessageDialog(
                 transient_for=self.window,

@@ -506,6 +506,25 @@ class PackageInstaller:
                 error="软件包已安装，但没有可验证的图形启动器。",
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
             )
+        refresh_failures = [name for name, ready in refresh.items() if not ready]
+        if refresh_failures:
+            self._log("desktop refresh failed for %s: %s" % (
+                inspected["package"], ", ".join(refresh_failures)))
+            return self._result(
+                False,
+                action="install",
+                state="installed_with_refresh_warning",
+                error_code="E_DESKTOP_REFRESH_FAILED",
+                installed=True,
+                launch_ready=True,
+                dependency_repair_attempted=dependency_repair_attempted,
+                refresh=refresh,
+                launchers=launchers,
+                launcher_warnings=[],
+                error="软件包已安装，但桌面刷新失败（%s）。请在应用库点击刷新/重试。" %
+                      ", ".join(refresh_failures),
+                **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
+            )
         self._log("installed %s from %s" % (inspected["package"], inspected["file"]))
         return self._result(
             True,

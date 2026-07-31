@@ -57,20 +57,29 @@ class Ota2641CompatibilityTests(unittest.TestCase):
             "ready": True,
             "version": "26.4.1",
             "update_type": "major",
+            "download_url": "https://ming.sca-hub.cn/download/ming-os-26.4.1.iso",
+            "checksum": "a" * 64,
+            "signature": "RWQtestsignature",
+            "trusted_comment": "Ming OS OTA test",
             "release_notes": "26.4.1 compatibility test",
         })
         with tempfile.TemporaryDirectory(prefix="ming-ota-check-") as directory:
             root = pathlib.Path(directory)
             config = root / "config"
             cache = root / "cache"
+            public_key = root / "ota-release.pub"
             config.mkdir()
             cache.mkdir()
+            public_key.write_text("untrusted comment: test\nRWQtest\n", encoding="utf-8")
             cli = self.cli.replace(
                 'readonly CONFIG_DIR="/etc/ming-update"',
                 'readonly CONFIG_DIR="%s"' % git_path(config),
             ).replace(
                 'readonly CACHE_DIR="/var/cache/ming-update"',
                 'readonly CACHE_DIR="%s"' % git_path(cache),
+            ).replace(
+                'readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"',
+                'readonly OTA_RELEASE_PUBLIC_KEY="%s"' % git_path(public_key),
             ).replace(
                 'current_version() {\n    cat /etc/ming-version 2>/dev/null || echo "unknown"\n}',
                 'current_version() { printf "%s\\n" "%s"; }' % ("%s", source),
@@ -79,6 +88,7 @@ class Ota2641CompatibilityTests(unittest.TestCase):
 check_network() { return 0; }
 api_url() { printf '%s\\n' "https://test.invalid"; }
 curl() { printf '%s' "${MING_TEST_RESPONSE}"; }
+minisign() { return 0; }
 '''
             cli = cli.replace('case "${1:-help}" in', injected + '\ncase "${1:-help}" in')
             script = root / "ming-update"
@@ -122,6 +132,61 @@ curl() { printf '%s' "${MING_TEST_RESPONSE}"; }
             with self.subTest(source=source, target=target):
                 result = self.route(source, target)
                 self.assertNotEqual(0, result.returncode)
+
+    def test_rejects_non_forward_routes_outside_the_2641_target(self):
+        for source, target in (
+            ("26.4.1", "26.3.9"),
+            ("26.3.9", "26.3.8"),
+            ("26.3.9", "26.3.9"),
+        ):
+            with self.subTest(source=source, target=target):
+                result = self.route(source, target)
+                self.assertNotEqual(0, result.returncode)
+
+    def test_ming_test_response_does_not_bypass_unsigned_manifest_verification(self):
+        with tempfile.TemporaryDirectory(prefix="ming-ota-signature-") as directory:
+            root = pathlib.Path(directory)
+            public_key = root / "ota-release.pub"
+            manifest = root / "unsigned.json"
+            script = root / "verify.sh"
+            public_key.write_text("untrusted comment: test\nRWQtest\n", encoding="utf-8")
+            manifest.write_text(
+                json.dumps({
+                    "has_update": True,
+                    "ready": True,
+                    "version": "26.4.1",
+                    "update_type": "major",
+                    "download_url": "https://ming.sca-hub.cn/download/ming-os-26.4.1.iso",
+                    "checksum": "a" * 64,
+                }),
+                encoding="utf-8",
+            )
+            cli = self.cli.replace(
+                'readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"',
+                'readonly OTA_RELEASE_PUBLIC_KEY="%s"' % git_path(public_key),
+            )
+            prefix = cli.split('case "${1:-help}" in', 1)[0]
+            script.write_text(
+                prefix + '\nverify_signed_ota_manifest "${MING_TEST_MANIFEST}"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [str(GIT_BASH), git_path(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                env={
+                    **os.environ,
+                    "MING_TEST_RESPONSE": "test response must not bypass signatures",
+                    "MING_TEST_MANIFEST": git_path(manifest),
+                },
+            )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("signature", result.stderr.lower())
 
     def test_check_caches_a_2641_manifest_for_eligible_sources(self):
         for source in ("26.3.0-r1", "26.4-preview.1", "26.4.0"):

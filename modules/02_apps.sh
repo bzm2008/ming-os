@@ -2070,10 +2070,23 @@ spark_window_visible() {
 }
 
 wait_for_spark_ready() {
-    local deadline=$((SECONDS + 15))
+    local deadline=$((SECONDS + 15)) stable_checks=0 missing_checks=0
     while (( SECONDS < deadline )); do
-        if kill -0 "${spark_pid}" 2>/dev/null || pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 || spark_window_visible; then
+        if spark_window_visible; then
             return 0
+        fi
+        if kill -0 "${spark_pid}" 2>/dev/null || pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1; then
+            stable_checks=$((stable_checks + 1))
+            missing_checks=0
+            if (( stable_checks >= 4 )); then
+                return 0
+            fi
+        else
+            stable_checks=0
+            missing_checks=$((missing_checks + 1))
+            if (( missing_checks >= 4 )); then
+                return 1
+            fi
         fi
         sleep 0.25
     done

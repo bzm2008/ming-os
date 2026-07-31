@@ -1471,6 +1471,48 @@ class EthernetCliTests(unittest.TestCase):
         self.assertIn(probe_command, runner.commands)
         self.assertNotIn(("curl", "--interface", "wlan0"), runner.commands)
 
+    def test_ethernet_uses_a_second_endpoint_when_the_first_is_unreachable(self):
+        status_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        detail_command = c_command(
+            "nmcli", "-t", "-f",
+            "GENERAL.DEVICE,GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER,"
+            "WIRED-PROPERTIES.SPEED,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS,IP6.GATEWAY",
+            "device", "show", "enp0s25")
+        route_command = c_command("ip", "-4", "route", "get", "1.1.1.1", "oif", "enp0s25")
+
+        def probe(url):
+            return (
+                "curl", "--interface", "enp0s25", "--connect-timeout", "2", "--max-time", "5",
+                "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
+                url,
+            )
+
+        first = probe("https://connectivitycheck.gstatic.com/generate_204")
+        second = probe("https://cp.cloudflare.com/generate_204")
+        runner = FakeRunner({
+            status_command: (0, "enp0s25:ethernet:connected:Wired connection 1", ""),
+            detail_command: (0, "GENERAL.DEVICE:enp0s25\nGENERAL.STATE:100 (connected)\n"
+                                "WIRED-PROPERTIES.CARRIER:on\nIP4.ADDRESS[1]:192.168.1.8/24\n"
+                                "IP4.GATEWAY:192.168.1.1\nIP4.DNS[1]:192.168.1.1", ""),
+            route_command: (0, "1.1.1.1 via 192.168.1.1 dev enp0s25 src 192.168.1.8", ""),
+            first: (7, "", "connection failed"),
+            second: (0, "204", ""),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            sysfs = pathlib.Path(directory) / "net"
+            (sysfs / "enp0s25").mkdir(parents=True)
+            (sysfs / "enp0s25" / "carrier").write_text("1\n", encoding="utf-8")
+            controller = self.device.DeviceController(
+                runner=runner, executable=lambda name: name == "curl", net_root=sysfs)
+            result = controller.ethernet_status()
+
+        internet = result["devices"][0]["internet"]
+        self.assertEqual("online", internet["state"])
+        self.assertTrue(internet["network_manager"]["dns_confirmed"])
+        self.assertIn(first, runner.commands)
+        self.assertIn(second, runner.commands)
+
     def test_ethernet_repair_reconnects_only_the_requested_interface(self):
         status_command = c_command(
             "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")

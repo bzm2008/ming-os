@@ -86,6 +86,15 @@ class ControlRequestStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    def test_volume_failure_restores_last_confirmed_value(self):
+        failure = self.source[
+            self.source.index('if kind == "volume":', self.source.index("def apply_control_result")):
+            self.source.index("self.updating_controls = False", self.source.index("def apply_control_result"))
+        ]
+        self.assertIn("fallback_value = state.confirmed_value", failure)
+        self.assertIn("self.volume_scale.set_value(fallback_value)", failure)
+        self.assertIn("state.settle(generation, fallback_value)", failure)
+
     def test_resource_metric_button_and_modes_are_persistent(self):
         for marker in (
             "metric_mode",

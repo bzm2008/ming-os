@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -9,6 +11,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 AB_PATH = ROOT / "assets" / "ming-ota-ab.py"
 STAGE_PATH = ROOT / "assets" / "ming-ota-ab-stage.sh"
 OTA = ROOT / "modules" / "06_ota_update.sh"
+GIT_BASH = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+
+
+def git_path(path):
+    value = str(path.resolve()).replace("\\", "/")
+    return "/%s%s" % (value[0].lower(), value[2:])
+
+
+def generated_cli_prefix():
+    module = OTA.read_text(encoding="utf-8")
+    marker = "cat > /usr/local/bin/ming-update << 'OTACLI'\n"
+    cli = module.split(marker, 1)[1].split("\nOTACLI\n", 1)[0]
+    return cli.split('case "${1:-help}" in', 1)[0]
 
 
 def load_ab():
@@ -308,6 +323,75 @@ class OtaAbContractTests(unittest.TestCase):
             "    }",
             helper,
         )
+
+    def test_legacy_staging_authoritative_fetch_failure_has_no_unbound_cleanup(self):
+        if not GIT_BASH.is_file():
+            self.skipTest("Git Bash is unavailable")
+
+        checksum = "a" * 64
+        backup_uuid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory(prefix="ming-ota-staging-") as directory:
+            root = pathlib.Path(directory)
+            iso = root / "ming-os-26.4.1.iso"
+            backup_manifest = root / "manifest.json"
+            state_path = root / "state.json"
+            script = root / "validate-staging.sh"
+            iso.write_text("fake iso payload\n", encoding="utf-8")
+            backup_manifest.write_text("{}", encoding="utf-8")
+            state_path.write_text(
+                json.dumps({
+                    "status": "downloaded",
+                    "version": "26.4.1",
+                    "iso_path": git_path(iso),
+                    "checksum": checksum,
+                    "backup_uuid": backup_uuid,
+                    "backup_manifest": git_path(backup_manifest),
+                    "backup_manifest_relative": "/manifest.json",
+                    "home_preservation": {"strategy": "completed_backup"},
+                }),
+                encoding="utf-8",
+            )
+            script.write_text(
+                generated_cli_prefix() + r'''
+findmnt() {
+    case "$*" in
+        *UUID*) printf '%s\n' "${MING_TEST_BACKUP_UUID}" ;;
+        *TARGET*) printf '%s\n' "${MING_TEST_MOUNT_TARGET}" ;;
+        *) return 1 ;;
+    esac
+}
+paths_share_physical_disk() { return 1; }
+sha256sum() { printf '%s  %s\n' "${MING_TEST_SHA256}" "$1"; }
+fetch_authoritative_major_manifest() {
+    log_error "authoritative fetch failed"
+    return 1
+}
+validate_staging_inputs "${MING_TEST_STATE}"
+''',
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [str(GIT_BASH), git_path(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                env={
+                    **os.environ,
+                    "MING_TEST_BACKUP_UUID": backup_uuid,
+                    "MING_TEST_MOUNT_TARGET": git_path(root),
+                    "MING_TEST_SHA256": checksum,
+                    "MING_TEST_STATE": git_path(state_path),
+                },
+            )
+
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("authoritative fetch failed", combined)
+        self.assertNotIn("trusted_tmp", combined)
+        self.assertNotIn("unbound variable", combined)
 
     def test_health_failures_use_one_fail_closed_rollback_path(self):
         module = OTA.read_text(encoding="utf-8")

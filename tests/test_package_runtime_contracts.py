@@ -1,4 +1,7 @@
+import os
 import pathlib
+import subprocess
+import tempfile
 import unittest
 
 
@@ -8,6 +11,7 @@ APPIMAGE = (ROOT / "assets" / "ming-appimage-installer.py").read_text(encoding="
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 PACKAGE = (ROOT / "assets" / "ming-package-installer.py").read_text(encoding="utf-8")
+GIT_BASH = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
 
 
 class PackageRuntimeContracts(unittest.TestCase):
@@ -37,6 +41,38 @@ class PackageRuntimeContracts(unittest.TestCase):
         )[1].split("MINGREFRESHDESKTOP", 1)[0]
         self.assertIn("runuser -u \"${target_user}\" -- env \\", refresh)
         self.assertNotIn("env +", refresh)
+
+    def test_spark_wrapper_does_not_accept_a_short_lived_process_as_ready(self):
+        self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for wrapper regression")
+        marker = "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'\n"
+        wrapper = APPS.split(marker, 1)[1].split("\nMINGSPARK\n", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="ming-spark-wrapper-") as directory:
+            root = pathlib.Path(directory)
+            fake = root / "spark-store"
+            fake.write_text("#!/usr/bin/env bash\nsleep 0.2\nexit 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            wrapper = wrapper.replace(
+                "for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do",
+                'for candidate in "${MING_TEST_SPARK_BIN}"; do',
+            )
+            script = root / "ming-spark-store"
+            script.write_text(wrapper, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [str(GIT_BASH), str(script).replace("\\", "/")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=20,
+                env={
+                    **os.environ,
+                    "HOME": str(root),
+                    "MING_TEST_SPARK_BIN": str(fake).replace("\\", "/"),
+                },
+            )
+        self.assertNotEqual(0, result.returncode)
+
+    def test_package_gui_explains_refresh_warning_after_successful_install(self):
+        self.assertIn("installed_with_refresh_warning", DESKTOP)
+        self.assertIn("桌面刷新失败", DESKTOP)
+        self.assertIn("刷新/重试", DESKTOP)
 
 
 if __name__ == "__main__":
