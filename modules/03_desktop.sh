@@ -7205,6 +7205,7 @@ close_live_notice_when_calamares_visible() {
         )"
         if [ -n "${calamares_window}" ]; then
             timeout --foreground 2s wmctrl -i -r "${calamares_window}" -b add,maximized_vert,maximized_horz 2>/dev/null || true
+            timeout --foreground 2s wmctrl -x -a calamares.calamares 2>/dev/null || true
             timeout --foreground 2s wmctrl -i -a "${calamares_window}" 2>/dev/null || true
             kill "${notice_pid}" 2>/dev/null || true
             wait "${notice_pid}" 2>/dev/null || true

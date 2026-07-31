@@ -1015,6 +1015,7 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("wmctrl -lx", installer)
         self.assertIn("tolower($0) ~ /calamares/", installer)
         self.assertIn("wmctrl -i -r", installer)
+        self.assertIn("wmctrl -x -a calamares.calamares", installer)
         self.assertIn("wmctrl -i -a", installer)
         self.assertLess(installer.index("tolower($0) ~ /calamares/"), installer.index('kill "${notice_pid}"'))
         self.assertIn("notice_pid=", installer)
