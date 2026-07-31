@@ -632,10 +632,40 @@ else:
         errors.append(f"unpackfs.conf must use the stable Ming runtime source, got {item.get('source')!r}")
 
 partition = load_yaml("etc/calamares/modules/partition.conf")
-if partition.get("initialPartitioningChoice") != "none":
-    errors.append("partition.conf must not force one-click erase; initialPartitioningChoice must be none")
+initial_choice = partition.get("initialPartitioningChoice")
+if initial_choice not in {"erase", "none"}:
+    errors.append("partition.conf initialPartitioningChoice must be erase or none")
 if partition.get("allowManualPartitioning") is not False:
     errors.append("partition.conf must disable manual partitioning for the OTA-ready layout")
+layout = partition.get("partitionLayout") or []
+expected_layout = {
+    "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
+    "MING-BOOT": ({"ext4"}, "/boot"),
+    "MING-ROOT-A": ({"ext4"}, "/"),
+    "MING-ROOT-B": ({"ext4"}, None),
+    "MING-HOME": ({"ext4"}, "/home"),
+}
+for label, (filesystems, mountpoint) in expected_layout.items():
+    entries = [item for item in layout if isinstance(item, dict) and item.get("name") == label]
+    if len(entries) != 1:
+        errors.append(f"partition.conf must create exactly one {label} partition")
+        continue
+    entry = entries[0]
+    if str(entry.get("filesystem", "")).casefold() not in filesystems:
+        errors.append(f"partition.conf {label} has the wrong filesystem")
+    if entry.get("mountPoint") != mountpoint:
+        errors.append(f"partition.conf {label} has the wrong mount point")
+if initial_choice == "erase":
+    for required_live_path in (
+        "usr/local/sbin/ming-live-installer-root",
+        "usr/local/bin/ming-calamares-launcher",
+        "usr/local/sbin/ming-install-mode",
+        "usr/share/polkit-1/actions/org.ming.live.installer.policy",
+    ):
+        if not (root / required_live_path).is_file():
+            errors.append(
+                f"blank_ab erase flow requires explicit mode/root helper: {required_live_path}"
+            )
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True or \
@@ -735,6 +765,7 @@ if not grub_install.is_file():
 
 for relative_path in [
     "usr/local/sbin/ming-calamares-preflight",
+    "usr/local/sbin/ming-live-installer-root",
     "usr/local/sbin/ming-install-bootloader",
     "usr/local/sbin/ming-installer-verify",
     "usr/local/sbin/ming-finish-install-reboot",
@@ -751,6 +782,24 @@ for relative_path in [
             errors.append(f"{relative_path} must not create partition tables before the Calamares partition page")
         if relative_path.endswith("ming-calamares-preflight") and "Asia/Shanghai" not in text:
             errors.append(f"{relative_path} missing Asia/Shanghai runtime enforcement")
+        if relative_path.endswith("ming-live-installer-root"):
+            if "boot=live" not in text or "ming.installer=1" not in text:
+                errors.append(f"{relative_path} must refuse non-Live execution")
+            if (
+                "ming-install-mode write" not in text
+                or "ming-calamares-preflight" not in text
+                or "calamares -d" not in text
+            ):
+                errors.append(f"{relative_path} must own mode write, preflight, and Calamares")
+        if relative_path.endswith((
+            "ming-calamares-preflight", "ming-live-installer-root",
+            "ming-ota-preflight", "ming-install-bootloader",
+            "ming-finish-install-reboot",
+        )):
+            if "/tmp/ming-installer" in text:
+                errors.append(f"{relative_path} must not write privileged logs under /tmp")
+            if "/run/ming-installer" not in text:
+                errors.append(f"{relative_path} must use the root-owned /run/ming-installer state directory")
         if relative_path.endswith("ming-calamares-preflight"):
             # 运行时会动态找到 squashfs 并创建 /run/ming-installer 软链接
             if "run/live/medium" not in text and "lib/live/mount" not in text and "find /run/live" not in text:
@@ -770,6 +819,10 @@ for relative_path in [
                 errors.append(f"{relative_path} must write a diagnostic bootloader log")
             if "grub-script-check" not in text or "exit 22" not in text:
                 errors.append(f"{relative_path} must reject a missing or invalid target grub.cfg")
+            if "ming-installer-verify installed --receipt --final-boot" not in text:
+                errors.append(
+                    f"{relative_path} must run the unified final installed-system verification"
+                )
         if relative_path.endswith("ming-finish-install-reboot"):
             if "systemctl -i reboot" not in text:
                 errors.append(f"{relative_path} must request an inhibitor-safe reboot")
@@ -778,10 +831,10 @@ for relative_path in [
             if "efibootmgr -n" not in text:
                 errors.append(f"{relative_path} must prefer Ming OS for the next UEFI boot")
         if relative_path.endswith("ming-calamares-launcher"):
-            if "ming-calamares-preflight" not in text or "calamares -d" not in text:
-                errors.append(f"{relative_path} must run preflight before calamares")
             if "is_live_or_installer" not in text:
                 errors.append(f"{relative_path} must refuse to run outside Live/installer sessions")
+            if "choose_install_mode" not in text or "ming-live-installer-root" not in text:
+                errors.append(f"{relative_path} must choose an install mode before invoking the root helper")
         if relative_path.endswith(("ming-live-installer.sh", "ming-installer-session")) and "ming-calamares-launcher" not in text:
             errors.append(f"{relative_path} must launch Calamares through ming-calamares-launcher")
 
@@ -1367,10 +1420,23 @@ if "if wait_phone_desktop_ready" not in phone_watchdog:
     errors.append("ming-phone-desktop-watchdog must wait for Ming desktop readiness before stopping xfdesktop")
 if 'if wait_phone_desktop_ready "${log_file}"; then\n            stop_xfdesktop' not in phone_watchdog:
     errors.append("ming-phone-desktop-watchdog must stop xfdesktop only after Ming desktop is running")
-require_file("home/user/.config/autostart/ming-dock.desktop", "ming-plank-watchdog --session")
-phone_autostart = require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")
-if "X-GNOME-Autostart-enabled=true" not in phone_autostart or "Hidden=false" not in phone_autostart:
-    errors.append("phone desktop autostart must be enabled")
+session_autostart = require_file(
+    "home/user/.config/autostart/ming-session-healthcheck.desktop",
+    "ming-session-healthcheck --session",
+)
+if "X-GNOME-Autostart-enabled=true" not in session_autostart or "Hidden=false" not in session_autostart:
+    errors.append("unified session healthcheck autostart must be enabled")
+dock_autostart = require_file("home/user/.config/autostart/ming-dock.desktop", "/usr/bin/true")
+if "X-GNOME-Autostart-enabled=false" not in dock_autostart or "Hidden=true" not in dock_autostart:
+    errors.append("legacy Dock autostart must be disabled")
+phone_autostart = require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "/usr/bin/true")
+if "X-GNOME-Autostart-enabled=false" not in phone_autostart or "Hidden=true" not in phone_autostart:
+    errors.append("legacy phone desktop autostart must be disabled")
+for legacy_entry in (dock_autostart, phone_autostart):
+    legacy_exec = next(
+        (line for line in legacy_entry.splitlines() if line.startswith("Exec=")), "")
+    if legacy_exec != "Exec=/usr/bin/true":
+        errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
 for marker in ["IconSize=38", "ZoomEnabled=true", "ZoomPercent=112", "HideMode=0", "Theme=Ming"]:

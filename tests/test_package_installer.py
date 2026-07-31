@@ -147,6 +147,64 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
 
 class PackageInstallerInstallTests(unittest.TestCase):
+    def test_refresh_caches_updates_system_and_local_desktop_databases(self):
+        installer = load_installer()
+        local_desktops = ("update-desktop-database", "/usr/local/share/applications")
+        system_desktops = ("update-desktop-database", "/usr/share/applications")
+        refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+        runner = FakeRunner({
+            local_desktops: (0, "", ""),
+            system_desktops: (0, "", ""),
+            refresh_icons: (0, "", ""),
+        })
+        service = installer.PackageInstaller(runner=runner)
+        service._refresh_desktop_state = lambda: True
+
+        result = service._refresh_caches()
+
+        self.assertTrue(result["desktop_database"])
+        self.assertEqual([local_desktops, system_desktops, refresh_icons], runner.commands)
+
+    def test_install_publishes_package_launchers_before_refreshing_desktop_state(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                apt_install: (0, "", ""),
+                verify: (0, "ii ", ""),
+            })
+            events = []
+            service = installer.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            )
+            service._package_launchers = lambda package_name: (
+                events.append(("publish", package_name)) or []
+            )
+            service._refresh_caches = lambda: (
+                events.append(("refresh",)) or {
+                    "desktop_database": True,
+                    "icon_cache": True,
+                    "desktop_state": True,
+                }
+            )
+
+            result = service.install(package)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([("publish", "sample-app"), ("refresh",)], events)
+
     def test_apt_commands_have_a_bounded_dpkg_lock_wait(self):
         installer = load_installer()
         expected = "Dpkg::Lock::Timeout=30"
@@ -212,12 +270,15 @@ class PackageInstallerInstallTests(unittest.TestCase):
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_local_desktops = (
+                "update-desktop-database", "/usr/local/share/applications")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
                 metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
                 apt_install: (0, "", ""),
                 verify: (0, "ii ", ""),
+                refresh_local_desktops: (0, "", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
                 list_files: (0, str(desktop) + "\n", ""),
@@ -254,12 +315,15 @@ class PackageInstallerInstallTests(unittest.TestCase):
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_local_desktops = (
+                "update-desktop-database", "/usr/local/share/applications")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
                 metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
                 apt_install: (0, "", ""),
                 verify: (0, "ii ", ""),
+                refresh_local_desktops: (0, "", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
                 list_files: (0, str(desktop) + "\n", ""),
@@ -297,6 +361,8 @@ class PackageInstallerInstallTests(unittest.TestCase):
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_local_desktops = (
+                "update-desktop-database", "/usr/local/share/applications")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
@@ -304,6 +370,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
                 apt_install: [(100, "", "unmet dependencies"), (0, "", "")],
                 fix_dependencies: (0, "", ""),
                 verify: (0, "ii ", ""),
+                refresh_local_desktops: (0, "", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
             })
@@ -322,7 +389,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
             [metadata, apt_install, fix_dependencies, apt_install, verify,
-             refresh_desktops, refresh_icons, list_files],
+             list_files, refresh_local_desktops, refresh_desktops, refresh_icons],
             runner.commands,
         )
 
@@ -363,6 +430,44 @@ class PackageInstallerInstallTests(unittest.TestCase):
         self.assertEqual("installed_with_refresh_warning", result["state"])
         self.assertEqual("E_DESKTOP_REFRESH_FAILED", result["error_code"])
         self.assertIn("刷新", result["error"])
+
+    def test_install_publishes_launchers_before_refreshing_desktop_caches(self):
+        """The first post-install catalog refresh must see newly published proxies."""
+        installer_module = load_installer()
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            apt_install = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                "-o", "Dpkg::Lock::Timeout=30", "install", str(package),
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.2.3\namd64\n", ""),
+                apt_install: (0, "", ""),
+                verify: (0, "ii ", ""),
+            })
+            service = installer_module.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            )
+            service._package_launchers = lambda package_name: (
+                events.append("publish") or [])
+            service._refresh_caches = lambda: (
+                events.append("refresh") or {
+                    "desktop_database": True,
+                    "icon_cache": True,
+                    "desktop_state": True,
+                })
+            result = service.install(package)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(["publish", "refresh"], events)
 
     def test_install_requires_administrator_after_safe_inspection(self):
         installer = load_installer()
@@ -417,6 +522,39 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
 
 class PackageInstallerRepairTests(unittest.TestCase):
+    def test_repair_publishes_package_launchers_before_refreshing_desktop_state(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            reinstall = (
+                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
+                "-o", "Dpkg::Lock::Timeout=30", "install", "sample-app",
+            )
+            verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
+            runner = FakeRunner({
+                reinstall: (0, "", ""),
+                verify: (0, "ii ", ""),
+            })
+            events = []
+            service = installer.PackageInstaller(
+                runner=runner, uid_getter=lambda: 0,
+                log_path=pathlib.Path(directory) / "installer.log",
+            )
+            service._package_launchers = lambda package_name: (
+                events.append(("publish", package_name)) or []
+            )
+            service._refresh_caches = lambda: (
+                events.append(("refresh",)) or {
+                    "desktop_database": True,
+                    "icon_cache": True,
+                    "desktop_state": True,
+                }
+            )
+
+            result = service.repair("sample-app")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([("publish", "sample-app"), ("refresh",)], events)
+
     def test_repair_reinstalls_package_and_refreshes_desktop_entries(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:
@@ -426,11 +564,14 @@ class PackageInstallerRepairTests(unittest.TestCase):
             )
             verify = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}", "sample-app")
             list_files = ("dpkg-query", "-L", "sample-app")
+            refresh_local_desktops = (
+                "update-desktop-database", "/usr/local/share/applications")
             refresh_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
             runner = FakeRunner({
                 reinstall: (0, "", ""),
                 verify: (0, "ii ", ""),
+                refresh_local_desktops: (0, "", ""),
                 refresh_desktops: (0, "", ""),
                 refresh_icons: (0, "", ""),
             })
@@ -447,7 +588,8 @@ class PackageInstallerRepairTests(unittest.TestCase):
         self.assertEqual("repaired", result["state"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
-            [reinstall, verify, refresh_desktops, refresh_icons, list_files], runner.commands)
+            [reinstall, verify, list_files, refresh_local_desktops,
+             refresh_desktops, refresh_icons], runner.commands)
 
 
 class PackageInstallerCliTests(unittest.TestCase):

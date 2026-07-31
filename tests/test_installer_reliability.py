@@ -129,6 +129,80 @@ def write_receipt(receipt, target, *, nonce=None, attempt_nonce=None, create_att
     return mount
 
 
+def write_blank_ab_install_contract(root, uuid, slot_b_uuid):
+    boot_uuid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+    home_uuid = "cccccccc-4444-5555-6666-dddddddddddd"
+    write(
+        root,
+        "etc/ming-update/install-mode.json",
+        json.dumps({
+            "schema": "ming-install-mode/v1",
+            "version": 1,
+            "mode": "blank_ab",
+            "major_ota": "ab_slot",
+            "message": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
+        }),
+    )
+    write(
+        root,
+        "etc/fstab",
+        f"UUID={uuid} / ext4 defaults 0 1\n"
+        f"UUID={boot_uuid} /boot ext4 defaults 0 2\n"
+        f"UUID={home_uuid} /home ext4 defaults 0 2\n"
+        "UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1\n",
+    )
+    write(
+        root,
+        "etc/ming-update/slots.json",
+        json.dumps({
+            "schema": 1,
+            "layout": "ming-ab-v1",
+            "slots": {
+                "A": {"uuid": uuid},
+                "B": {"uuid": slot_b_uuid},
+            },
+            "boot": {"uuid": boot_uuid},
+            "home": {"uuid": home_uuid},
+        }),
+    )
+    write(root, "boot/efi/EFI/BOOT/BOOTX64.EFI", "efi")
+    for slot in ("A", "B"):
+        write(root, f"boot/ming-slots/{slot}/vmlinuz", "kernel")
+        write(root, f"boot/ming-slots/{slot}/initrd.img", "initrd")
+    write(
+        root,
+        "etc/grub.d/09_ming_os",
+        "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+        f" linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+        "}\nmenuentry 'Ming OS slot B' {\n"
+        f" linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+        "}\n",
+        executable=True,
+    )
+
+
+def write_final_blank_ab_grub(root, uuid, slot_b_uuid, extra=""):
+    write(
+        root,
+        "boot/grub/grub.cfg",
+        "menuentry 'Ming OS' {\n"
+        f" linux /ming-slots/A/vmlinuz root=UUID={uuid} ro quiet\n"
+        " initrd /ming-slots/A/initrd.img\n"
+        "}\n"
+        "submenu 'Ming OS 高级启动' {\n"
+        " menuentry 'Ming OS slot A' {\n"
+        f"  linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+        "  initrd /ming-slots/A/initrd.img\n"
+        " }\n"
+        " menuentry 'Ming OS slot B' {\n"
+        f"  linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+        "  initrd /ming-slots/B/initrd.img\n"
+        " }\n"
+        "}\n"
+        f"{extra}",
+    )
+
+
 def shell_executable():
     git_bash = pathlib.Path("C:/Program Files/Git/bin/bash.exe")
     return str(git_bash) if git_bash.is_file() else shutil.which("bash")
@@ -356,6 +430,31 @@ class InstallerReceiptContracts(unittest.TestCase):
             receipt = root / "run/ming-installer/target-receipt.json"
             expected = write_receipt(receipt, target)
             slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+            boot_uuid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+            home_uuid = "cccccccc-4444-5555-6666-dddddddddddd"
+            write(
+                target,
+                "etc/ming-update/install-mode.json",
+                json.dumps({
+                    "schema": "ming-install-mode/v1",
+                    "version": 1,
+                    "mode": "blank_ab",
+                    "major_ota": "ab_slot",
+                    "message": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
+                }),
+            )
+            write(
+                target,
+                "etc/fstab",
+                f"UUID={expected['uuid']} / ext4 defaults 0 1\n"
+                f"UUID={boot_uuid} /boot ext4 defaults 0 2\n"
+                f"UUID={home_uuid} /home ext4 defaults 0 2\n"
+                "UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1\n",
+            )
+            write(target, "boot/efi/EFI/BOOT/BOOTX64.EFI", "efi")
+            for slot in ("A", "B"):
+                write(target, f"boot/ming-slots/{slot}/vmlinuz", "kernel")
+                write(target, f"boot/ming-slots/{slot}/initrd.img", "initrd")
             write(
                 target,
                 "etc/ming-update/slots.json",
@@ -367,6 +466,8 @@ class InstallerReceiptContracts(unittest.TestCase):
                             "A": {"uuid": expected["uuid"]},
                             "B": {"uuid": slot_b_uuid},
                         },
+                        "boot": {"uuid": boot_uuid},
+                        "home": {"uuid": home_uuid},
                     }
                 ),
             )
@@ -389,6 +490,175 @@ class InstallerReceiptContracts(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"], result["errors"])
+
+    def test_receipt_bound_installed_gate_rejects_missing_install_mode_receipt(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "calamares-root-authoritative"
+            create_installed_root(target)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            expected = write_receipt(receipt, target)
+            slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+            write(
+                target,
+                "etc/fstab",
+                f"UUID={expected['uuid']} / ext4 defaults 0 1\n"
+                "UUID=boot /boot ext4 defaults 0 2\n"
+                "UUID=home /home ext4 defaults 0 2\n"
+                "UUID=esp /boot/efi vfat umask=0077 0 1\n",
+            )
+            write(
+                target,
+                "etc/ming-update/slots.json",
+                json.dumps({
+                    "schema": 1,
+                    "layout": "ming-ab-v1",
+                    "slots": {
+                        "A": {"uuid": expected["uuid"]},
+                        "B": {"uuid": slot_b_uuid},
+                    },
+                }),
+            )
+            write(target, "boot/efi/EFI/BOOT/BOOTX64.EFI", "efi")
+            for slot in ("A", "B"):
+                write(target, f"boot/ming-slots/{slot}/vmlinuz", "kernel")
+                write(target, f"boot/ming-slots/{slot}/initrd.img", "initrd")
+            write(
+                target,
+                "etc/grub.d/09_ming_os",
+                "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                f" linux /ming-slots/A/vmlinuz root=UUID={expected['uuid']} ro\n"
+                "}\nmenuentry 'Ming OS slot B' {\n"
+                f" linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+                "}\n",
+                executable=True,
+            )
+
+            result = verifier.verify_installed_from_receipt(
+                receipt,
+                mount_info_provider=lambda _path: expected,
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(
+            any("install mode" in item.lower() for item in result["errors"]),
+            result["errors"],
+        )
+
+    def test_explicit_blank_ab_gate_requires_esp_mounts_and_slot_payloads(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        boot_uuid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        home_uuid = "cccccccc-4444-5555-6666-dddddddddddd"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write(
+                target,
+                "etc/ming-update/install-mode.json",
+                json.dumps({
+                    "schema": "ming-install-mode/v1",
+                    "version": 1,
+                    "mode": "blank_ab",
+                    "major_ota": "ab_slot",
+                    "message": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
+                }),
+            )
+            write(
+                target,
+                "etc/fstab",
+                f"UUID={uuid} / ext4 defaults 0 1\n"
+                f"UUID={boot_uuid} /boot ext4 defaults 0 2\n"
+                f"UUID={home_uuid} /home ext4 defaults 0 2\n"
+                "UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1\n",
+            )
+            write(
+                target,
+                "etc/ming-update/slots.json",
+                json.dumps({
+                    "schema": 1,
+                    "layout": "ming-ab-v1",
+                    "slots": {
+                        "A": {"uuid": uuid},
+                        "B": {"uuid": slot_b_uuid},
+                    },
+                    "boot": {"uuid": boot_uuid},
+                    "home": {"uuid": home_uuid},
+                }),
+            )
+            write(target, "boot/efi/EFI/BOOT/BOOTX64.EFI", "efi")
+            for slot, slot_uuid in (("A", uuid), ("B", slot_b_uuid)):
+                write(target, f"boot/ming-slots/{slot}/vmlinuz", "kernel")
+                write(target, f"boot/ming-slots/{slot}/initrd.img", "initrd")
+            write(
+                target,
+                "etc/grub.d/09_ming_os",
+                "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+                f" linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+                "}\nmenuentry 'Ming OS slot B' {\n"
+                f" linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+                "}\n",
+                executable=True,
+            )
+
+            accepted = verifier.verify_installed(target, expected_root_uuid=uuid)
+            self.assertTrue(accepted["ok"], accepted)
+
+            (target / "boot/ming-slots/B/initrd.img").unlink()
+            rejected = verifier.verify_installed(target, expected_root_uuid=uuid)
+            self.assertFalse(rejected["ok"], rejected)
+            self.assertTrue(
+                any("slot B initrd.img payload" in item for item in rejected["errors"]),
+                rejected["errors"],
+            )
+
+    def test_blank_ab_gate_rejects_boot_and_home_fstab_uuid_drift(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_blank_ab_install_contract(target, uuid, slot_b_uuid)
+            accepted = verifier.verify_installed(target, expected_root_uuid=uuid)
+            (target / "etc/fstab").write_text(
+                f"UUID={uuid} / ext4 defaults 0 1\n"
+                "UUID=wrong-boot /boot ext4 defaults 0 2\n"
+                "UUID=wrong-home /home ext4 defaults 0 2\n"
+                "UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1\n",
+                encoding="utf-8",
+            )
+            rejected = verifier.verify_installed(target, expected_root_uuid=uuid)
+
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(rejected["ok"], rejected)
+        self.assertTrue(any("/boot source UUID" in error for error in rejected["errors"]), rejected)
+        self.assertTrue(any("/home source UUID" in error for error in rejected["errors"]), rejected)
+
+    def test_blank_ab_gate_rejects_duplicate_boot_home_or_esp_fstab_entries(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_blank_ab_install_contract(target, uuid, slot_b_uuid)
+            original = (target / "etc/fstab").read_text(encoding="utf-8")
+            (target / "etc/fstab").write_text(
+                original
+                + "UUID=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb /boot ext4 defaults 0 2\n"
+                + "UUID=cccccccc-4444-5555-6666-dddddddddddd /home ext4 defaults 0 2\n"
+                + "UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1\n",
+                encoding="utf-8",
+            )
+            result = verifier.verify_installed(target, expected_root_uuid=uuid)
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("duplicate" in error.lower() for error in result["errors"]), result)
 
     def test_receipt_bound_installed_gate_rejects_ota_slot_b_uuid_drift(self):
         verifier = load_verifier()
@@ -741,6 +1011,82 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn("ming-installer-verify receipt --field source", bootloader)
         self.assertNotIn("calamares-root-*", bootloader)
 
+    def test_bootloader_runs_final_installed_verifier_after_grub_generation(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        bootloader = base.split("cat > /usr/local/sbin/ming-install-bootloader", 1)[1].split(
+            "\nMINGBOOTLOADER", 1
+        )[0]
+        final_gate = "ming-installer-verify installed --receipt --final-boot"
+        self.assertIn(final_gate, bootloader)
+        self.assertLess(bootloader.index("grub-script-check"), bootloader.index(final_gate))
+
+    def test_final_boot_gate_rejects_live_arguments_missing_slots_and_duplicate_root(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_blank_ab_install_contract(target, uuid, slot_b_uuid)
+            write_final_blank_ab_grub(target, uuid, slot_b_uuid)
+            accepted = verifier.verify_installed(
+                target, expected_root_uuid=uuid, final_boot=True
+            )
+            self.assertTrue(accepted["ok"], accepted)
+
+            write_final_blank_ab_grub(
+                target,
+                uuid,
+                slot_b_uuid,
+                extra=(
+                    "menuentry 'bad live entry' {\n"
+                    f" linux /ming-slots/A/vmlinuz root=UUID={uuid} boot=live ro\n"
+                    "}\n"
+                ),
+            )
+            live_args = verifier.verify_installed(
+                target, expected_root_uuid=uuid, final_boot=True
+            )
+            self.assertFalse(live_args["ok"], live_args)
+            self.assertTrue(any("Live installer" in item for item in live_args["errors"]))
+
+            write(
+                target,
+                "boot/grub/grub.cfg",
+                "menuentry 'Ming OS' {\n"
+                f" linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+                " initrd /ming-slots/A/initrd.img\n"
+                "}\n"
+                "submenu 'Ming OS 高级启动' {\n"
+                " menuentry 'Ming OS slot A' {\n"
+                f"  linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+                " }\n"
+                "}\n",
+            )
+            missing_b = verifier.verify_installed(
+                target, expected_root_uuid=uuid, final_boot=True
+            )
+            self.assertFalse(missing_b["ok"], missing_b)
+            self.assertTrue(any("A/B slot" in item for item in missing_b["errors"]))
+
+            write_final_blank_ab_grub(
+                target,
+                uuid,
+                slot_b_uuid,
+                extra=(
+                    "menuentry 'duplicate root' {\n"
+                    f" linux /ming-slots/A/vmlinuz root=UUID={uuid} root=UUID={slot_b_uuid} ro\n"
+                    "}\n"
+                ),
+            )
+            duplicate_root = verifier.verify_installed(
+                target, expected_root_uuid=uuid, final_boot=True
+            )
+            self.assertFalse(duplicate_root["ok"], duplicate_root)
+            self.assertTrue(
+                any("exactly one root=UUID" in item for item in duplicate_root["errors"])
+            )
+
     def test_identity_fstab_rewrite_is_atomic_and_preserves_non_root_entries(self):
         verifier = load_verifier()
         base = BASE_MODULE.read_text(encoding="utf-8")
@@ -932,6 +1278,58 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn("insmod ext2", identity)
         self.assertIn("seed both shared-boot slot payloads", identity)
 
+    def test_installed_identity_reads_back_real_fat_esp_on_target_disk(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        for marker in (
+            "MING-ESP",
+            "esp_device",
+            "esp_fstype",
+            "esp_parttype",
+            "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        ):
+            self.assertIn(marker, identity)
+
+    def test_installed_identity_normalizes_esp_device_paths_before_mount_check(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn('readlink -f -- "${esp_device}"', identity)
+        self.assertIn('readlink -f -- "${esp_mount_source}"', identity)
+        self.assertIn("esp_mount_source", identity)
+        self.assertIn('[[ "${esp_mount_source}" == "${esp_device}" ]]', identity)
+
+    def test_installed_identity_binds_mounts_and_fstab_to_readback_uuids(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("mounted_from_device", identity)
+        for device, mountpoint in (
+            ("boot_device", "/boot"),
+            ("home_device", "/home"),
+            ("esp_device", "/boot/efi"),
+        ):
+            self.assertIn(f'mounted_from_device "${{{device}}}" "${{target}}{mountpoint}"', identity)
+        self.assertIn("fstab_uses_uuid", identity)
+        for uuid, mountpoint in (
+            ("boot_uuid", "/boot"),
+            ("home_uuid", "/home"),
+            ("esp_uuid", "/boot/efi"),
+        ):
+            self.assertIn(f'fstab_uses_uuid "${{{uuid}}}" "{mountpoint}"', identity)
+
+    def test_installed_identity_keeps_the_existing_slots_json_interface(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        slots_template = identity.split(
+            'cat > "${target}/etc/ming-update/slots.json" <<SLOTS', 1
+        )[1].split("\nSLOTS", 1)[0]
+        self.assertNotIn('"esp":', slots_template)
+        for field in ('"schema":1', '"layout":"ming-ab-v1"', '"slots":', '"boot":', '"home":'):
+            self.assertIn(field, slots_template)
+
     def test_uefi_install_requires_a_real_fat_esp_and_no_nvram_fallback(self):
         base = BASE_MODULE.read_text(encoding="utf-8")
         bootloader = base.split("cat > /usr/local/sbin/ming-install-bootloader", 1)[1].split(
@@ -951,6 +1349,40 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertIn('"${target}/usr/share/applications/Install Ming OS.desktop"', identity)
         self.assertIn('"${target}"/home/*/Desktop/"Install Ming OS.desktop"', identity)
         self.assertIn('"${target}"/etc/skel/Desktop/"Install Ming OS.desktop"', identity)
+
+
+    def test_installed_identity_removes_live_root_helper_and_policy(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("ming-live-installer-root", identity)
+        self.assertIn("org.ming.live.installer.policy", identity)
+
+    def test_privileged_installer_logs_never_use_the_world_writable_tmp_directory(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+        scripts = (
+            desktop.split("cat > /usr/local/sbin/ming-calamares-preflight", 1)[1].split(
+                "\nCALAMARESPREFLIGHT", 1
+            )[0],
+            desktop.split("cat > /usr/local/sbin/ming-live-installer-root", 1)[1].split(
+                "\nLIVEINSTALLERROOT", 1
+            )[0],
+            base.split("cat > /usr/local/sbin/ming-ota-preflight", 1)[1].split(
+                "\nMINGOTAPREFLIGHT", 1
+            )[0],
+            base.split("cat > /usr/local/sbin/ming-install-bootloader", 1)[1].split(
+                "\nMINGBOOTLOADER", 1
+            )[0],
+            base.split("cat > /usr/local/sbin/ming-finish-install-reboot", 1)[1].split(
+                "\nMINGFINISHREBOOT", 1
+            )[0],
+        )
+        for script in scripts:
+            with self.subTest(script=script[:80]):
+                self.assertNotIn("/tmp/ming-installer", script)
+                self.assertIn("/run/ming-installer", script)
+        self.assertNotIn("install -d -m 1777 /tmp/ming-installer", scripts[1])
 
 
 if __name__ == "__main__":

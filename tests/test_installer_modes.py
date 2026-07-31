@@ -74,10 +74,21 @@ class InstallerModeTests(unittest.TestCase):
         self.assertEqual("ab_slot", payload["major_ota"])
         self.assertIn("A/B", payload["message"])
         partition = mode.partition_config("blank_ab")
+        self.assertIn('name: "MING-ESP"', partition)
+        self.assertIn('filesystem: "fat32"', partition)
+        self.assertIn('mountPoint: "/boot/efi"', partition)
         self.assertIn('name: "MING-ROOT-A"', partition)
         self.assertIn('name: "MING-ROOT-B"', partition)
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
+
+    def test_generated_blank_ab_templates_create_a_real_fat32_esp(self):
+        for source in (BASE, DESKTOP):
+            with self.subTest(source="base" if source is BASE else "desktop"):
+                self.assertIn('name: "MING-ESP"', source)
+                self.assertIn('filesystem: "fat32"', source)
+                self.assertIn('mountPoint: "/boot/efi"', source)
+                self.assertLess(source.index('name: "MING-ESP"'), source.index('name: "MING-BOOT"'))
 
     def test_blank_ab_payload_defaults_to_erase_disk_flow(self):
         mode = load_mode()
@@ -126,9 +137,13 @@ class InstallerModeTests(unittest.TestCase):
         launcher = DESKTOP.split(
             "cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'", 1
         )[1].split("\nCALAMARESLAUNCHER", 1)[0]
-        self.assertIn("install-mode.json", launcher)
         self.assertIn("选择安装模式", launcher)
-        self.assertLess(launcher.index("install-mode.json"), launcher.index("calamares -d"))
+        self.assertIn("ming-live-installer-root", launcher)
+        helper = DESKTOP.split(
+            "cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'", 1
+        )[1].split("\nLIVEINSTALLERROOT", 1)[0]
+        self.assertIn("install-mode.json", helper)
+        self.assertLess(helper.index("ming-install-mode write"), helper.index("calamares -d"))
 
     def test_identity_branches_and_marks_dual_boot_install(self):
         identity = BASE.split(
@@ -168,6 +183,35 @@ class InstallerModeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("dual_boot_preserve", result["install_mode"])
         self.assertEqual("enabled", result["manual_partitioning"])
+
+    def test_live_verifier_rejects_blank_ab_partition_attribute_drift(self):
+        mode = load_mode()
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "run/ming-installer/filesystem.squashfs"
+            source.parent.mkdir(parents=True)
+            source.write_text("rootfs", encoding="utf-8")
+            settings = root / "etc/calamares/settings.conf"
+            settings.parent.mkdir(parents=True)
+            settings.write_text("sequence:\n  - show:\n      - partition\n", encoding="utf-8")
+            partition = root / "etc/calamares/modules/partition.conf"
+            partition.parent.mkdir(parents=True)
+            malformed = mode.partition_config("blank_ab").replace(
+                'name: "MING-BOOT"\n    filesystem: "ext4"\n    noEncrypt: true\n    mountPoint: "/boot"',
+                'name: "MING-BOOT"\n    filesystem: "fat32"\n    noEncrypt: true\n    mountPoint: "/wrong-boot"',
+            )
+            partition.write_text(malformed, encoding="utf-8")
+            unpack = root / "etc/calamares/modules/unpackfs.conf"
+            unpack.write_text(
+                "source: /run/ming-installer/filesystem.squashfs\n", encoding="utf-8"
+            )
+            mode.write_mode(root / "run/ming-installer/install-mode.json", "blank_ab")
+
+            result = verifier.verify_live(root=root, source=source)
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("MING-BOOT" in error for error in result["errors"]), result)
 
     def test_installed_dual_boot_mode_requires_no_ab_receipts(self):
         mode = load_mode()

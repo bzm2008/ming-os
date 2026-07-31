@@ -36,6 +36,12 @@ availableFileSystemTypes:
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-ESP"
+    filesystem: "fat32"
+    noEncrypt: true
+    mountPoint: "/boot/efi"
+    size: 512M
+    minSize: 256M
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true

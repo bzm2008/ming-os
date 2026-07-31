@@ -357,6 +357,18 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn('echo "user:user"', self.base)
         self.assertNotIn('> /etc/ming-os/identity', self.base.split('user:user')[0] if 'user:user' in self.base else '')
 
+    def test_welcome_waits_for_account_oobe_before_presenting(self):
+        welcome = self.desktop.split("cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'", 1)[1].split(
+            "\nWELCOMEPY", 1
+        )[0]
+        self.assertIn("oobe-account-done", welcome)
+        self.assertIn("wait_for_account_oobe", welcome)
+        self.assertLess(welcome.index("wait_for_account_oobe"), welcome.index("win.present"))
+
+    def test_first_boot_locks_are_deferred_until_oobe_is_configured(self):
+        self.assertIn("ming-screensaver-after-oobe", self.desktop)
+        self.assertIn("oobe-account-done", self.desktop)
+
     def test_base_deploys_account_helper_and_polkit_policy(self):
         for marker in (
                 "ming-account-control.py", "/usr/local/sbin/ming-account-control",

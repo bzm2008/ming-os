@@ -393,6 +393,20 @@ validate_staging_inputs "${MING_TEST_STATE}"
         self.assertNotIn("trusted_tmp", combined)
         self.assertNotIn("unbound variable", combined)
 
+    def test_legacy_staging_revalidates_authoritative_manifest_signature(self):
+        module = OTA.read_text(encoding="utf-8")
+        helper = module.split("validate_staging_inputs() {", 1)[1].split(
+            "current_version() {", 1
+        )[0]
+        self.assertIn('authoritative_tmp="$(mktemp', helper)
+        self.assertIn("validate_ota_manifest_schema", helper)
+        self.assertIn("verify_signed_ota_manifest", helper)
+        self.assertIn('rm -f "${authoritative_tmp}"', helper)
+        self.assertLess(
+            helper.index("verify_signed_ota_manifest"),
+            helper.index("authoritative_available="),
+        )
+
     def test_health_failures_use_one_fail_closed_rollback_path(self):
         module = OTA.read_text(encoding="utf-8")
         health = module.split("cat > /usr/local/sbin/ming-ota-ab-health << 'ABHEALTH'\n", 1)[1].split(

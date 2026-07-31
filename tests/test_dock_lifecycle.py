@@ -185,6 +185,15 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.session_healthcheck)
 
+    def test_session_coordinator_reuses_full_plank_geometry_health(self):
+        self.assertIn("--check)", self.watchdog)
+        self.assertIn("plank_health_reason", self.watchdog)
+        session_probe = re.search(
+            r"plank_window_visible\(\) \{(.*?)\n\}", self.session_healthcheck, re.S
+        ).group(1)
+        self.assertIn("ming-plank-watchdog --check", session_probe)
+        self.assertIn("run_bounded", session_probe)
+
     def test_healthcheck_has_json_repair_and_component_state(self):
         for marker in (
             "--json",

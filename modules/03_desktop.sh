@@ -264,6 +264,31 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
+    # AppImage files normally mount through FUSE.  Older kernels, containers
+    # and some virtual machines do not expose /dev/fuse, so all generated
+    # launchers go through this small user-level dispatcher and use the
+    # runtime's extract-and-run fallback in that case.
+    cat > /usr/local/bin/ming-appimage-run << 'MINGAPPIMAGERUN'
+#!/usr/bin/env bash
+set -u
+
+appimage="${1:-}"
+shift || true
+if [[ -z "${appimage}" || ! -f "${appimage}" || ! -x "${appimage}" ]]; then
+    echo "AppImage 文件不存在或不可执行。" >&2
+    exit 2
+fi
+
+if [[ -e /dev/fuse && -r /dev/fuse && -w /dev/fuse ]]; then
+    exec "${appimage}" "$@"
+fi
+
+# AppImage type 2 runtimes provide this mode specifically for systems where
+# FUSE is unavailable.  Keep the original arguments after the control flag.
+exec "${appimage}" --appimage-extract-and-run "$@"
+MINGAPPIMAGERUN
+    chmod 0755 /usr/local/bin/ming-appimage-run
+
     cat > /usr/local/bin/ming-refresh-desktop-state << 'MINGREFRESHDESKTOP'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -279,7 +304,8 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
             awk '$1 >= 1000 && $2 != "root" {print $2; exit}')"
     fi
     if [[ -z "${target_user}" ]] || ! id "${target_user}" >/dev/null 2>&1; then
-        exit 0
+        echo "ERROR: no active desktop user is available for refresh" >&2
+        exit 1
     fi
     target_uid="$(id -u "${target_user}")"
     target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
@@ -486,7 +512,7 @@ Comment[zh_CN]=为当前用户安全安装 AppImage
 Exec=/usr/local/bin/ming-appimage-install-gui %f
 Icon=application-x-executable
 Terminal=false
-MimeType=application/x-appimage;application/x-executable;
+MimeType=application/x-appimage;
 NoDisplay=true
 StartupNotify=true
 MINGAPPIMAGEINSTALLERDESKTOP
@@ -641,11 +667,23 @@ if path.exists():
 for section in ("Default Applications", "Added Associations"):
     if not config.has_section(section):
         config.add_section(section)
+
+def remove_handler(section, mime_type, handler):
+    entries = [item for item in config[section].get(mime_type, "").split(";") if item]
+    entries = [item for item in entries if item != handler]
+    if entries:
+        config[section][mime_type] = ";".join(entries) + ";"
+    else:
+        config[section].pop(mime_type, None)
+
+# Older Ming images associated every executable with the AppImage installer.
+# Remove only that retired handler and preserve any explicit user choice.
+remove_handler("Default Applications", "application/x-executable", "ming-appimage-installer.desktop")
+remove_handler("Added Associations", "application/x-executable", "ming-appimage-installer.desktop")
 config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
 config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
 config["Default Applications"]["application/x-appimage"] = "ming-appimage-installer.desktop"
-config["Default Applications"]["application/x-executable"] = "ming-appimage-installer.desktop"
 existing = config["Added Associations"].get("inode/directory", "")
 items = [item for item in existing.split(";") if item]
 items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]
@@ -3170,6 +3208,32 @@ FadeOpacity=1.0
 PLANKRUNTIMESETTINGS
 }
 
+apply_low_resource_plank_profile() {
+    local settings="$1"
+    local mem_mb virt renderer cmdline
+    mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    virt="$(systemd-detect-virt 2>/dev/null || true)"
+    cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+    renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//' || true)"
+    if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]] \
+        || [[ -n "${virt}" && "${virt}" != "none" ]] \
+        || [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]] \
+        || [[ "${cmdline}" == *nomodeset* ]]; then
+        sed -i \
+            -e 's/^IconSize=.*/IconSize=36/' \
+            -e 's/^ZoomEnabled=.*/ZoomEnabled=false/' \
+            -e 's/^ZoomPercent=.*/ZoomPercent=100/' \
+            -e 's/^FadeOpacity=.*/FadeOpacity=1.0/' \
+            -e 's/^HideMode=.*/HideMode=0/' \
+            "${settings}" 2>/dev/null || true
+        grep -q '^IconSize=' "${settings}" || printf 'IconSize=36\n' >>"${settings}"
+        grep -q '^ZoomEnabled=' "${settings}" || printf 'ZoomEnabled=false\n' >>"${settings}"
+        grep -q '^ZoomPercent=' "${settings}" || printf 'ZoomPercent=100\n' >>"${settings}"
+        grep -q '^FadeOpacity=' "${settings}" || printf 'FadeOpacity=1.0\n' >>"${settings}"
+        log "low-resource Plank profile applied (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown})"
+    fi
+}
+
 migrate_compact_rail_profile() {
     local settings="$1"
     grep -q '^# MingDockProfile=2641-compact-rail-1$' "${settings}" 2>/dev/null && return 0
@@ -3354,14 +3418,25 @@ diagnose_and_promote_stacking() {
     return 0
 }
 
+wait_for_plank_exit() {
+    for _stop_try in $(seq 1 20); do
+        pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 stop_plank() {
-    pkill -TERM -u "$(id -u)" -x plank >/dev/null 2>&1 || true
+    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || return 0
+    pkill -TERM -u "$(id -u)" -x plank >/dev/null 2>&1 || return 1
+    wait_for_plank_exit
 }
 
 start_plank() {
     command -v plank >/dev/null 2>&1 || return 1
     stop_legacy_dock
     ensure_plank_settings
+    apply_low_resource_plank_profile "${HOME}/.config/plank/dock1/settings"
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then
@@ -3405,6 +3480,26 @@ run_one_shot() {
 }
 
 case "${1:-start}" in
+    --check)
+        reason="$(plank_health_reason)"
+        if [[ "${reason}" == "healthy" ]]; then
+            exit 0
+        fi
+        log "Plank health check failed: ${reason}"
+        exit 1
+        ;;
+    --reload)
+        lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
+        exec 9>"${lock_file}" || exit 1
+        if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+            exit 1
+        fi
+        stop_plank || {
+            log "Plank reload could not stop the old process"
+            exit 1
+        }
+        start_plank
+        ;;
     --session)
         lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-plank-watchdog.lock"
         exec 9>"${lock_file}" || exit 1
@@ -3486,6 +3581,7 @@ health_log="${log_dir}/session-health.log"
 metrics_file="${log_dir}/session-startup.json"
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
+picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
 touch "${health_log}" 2>/dev/null || true
 
 # Image builds may provide a system-wide default.  An explicitly exported
@@ -3555,8 +3651,7 @@ stop_duplicate_picom() {
     [[ "${processes}" -eq 1 ]] && return 0
     [[ "${processes}" -gt 1 ]] || return 0
     log "stopping duplicate Picom processes (${processes})"
-    probe_timeout pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
-    sleep 0.2
+    stop_picom_and_wait
 }
 
 xfce_panel_running() {
@@ -3665,12 +3760,63 @@ plank_running() {
 
 plank_window_visible() {
     plank_running || return 1
+    if command -v ming-plank-watchdog >/dev/null 2>&1; then
+        run_bounded "${PROBE_TIMEOUT}" /usr/local/bin/ming-plank-watchdog --check
+        return $?
+    fi
     command -v wmctrl >/dev/null 2>&1 || return 0
     x11_call wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /plank/ {found=1} END {exit !found}'
 }
 
 picom_running() {
     [[ "$(process_count picom)" -eq 1 ]]
+}
+
+picom_policy_disabled() {
+    [[ -r "${picom_policy_file}" ]] \
+        && grep -Fxq 'compositor=disabled-by-policy' "${picom_policy_file}" 2>/dev/null
+}
+
+picom_user_disabled() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    local settings="${HOME}/.config/ming-os/settings.json"
+    local appearance="${HOME}/.config/ming-os/appearance.json"
+    [[ -r "${settings}" || -r "${appearance}" ]] || return 1
+    python3 - "${settings}" "${appearance}" <<'PY'
+import json
+import pathlib
+import sys
+
+for value in sys.argv[1:]:
+    try:
+        payload = json.loads(pathlib.Path(value).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        continue
+    if isinstance(payload, dict) and payload.get("compositor_profile") == "off":
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+picom_disabled() {
+    picom_policy_disabled || picom_user_disabled
+}
+
+wait_for_picom_exit() {
+    local deadline_at=$(( $(now_ms) + 2000 )) current_ms
+    while [[ "$(process_count picom)" -gt 0 ]]; do
+        current_ms="$(now_ms)"
+        [[ "${current_ms}" =~ ^[0-9]+$ ]] || return 1
+        (( current_ms >= deadline_at )) && return 1
+        sleep 0.1
+    done
+    return 0
+}
+
+stop_picom_and_wait() {
+    [[ "$(process_count picom)" -gt 0 ]] || return 0
+    probe_timeout pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || return 1
+    wait_for_picom_exit
 }
 
 wait_for_process() {
@@ -3772,6 +3918,7 @@ start_plank_dock() {
 
 start_xrender_picom() {
     local deadline_at="${1:-$(( $(now_ms) + PICOM_STARTUP_DEADLINE * 1000 ))}"
+    picom_disabled && return 0
     command -v picom >/dev/null 2>&1 || return 1
     picom_running && return 0
     log 'starting Picom xrender fallback'
@@ -3782,7 +3929,16 @@ start_xrender_picom() {
 
 start_picom() {
     local started_at finished_at deadline_at
-    stop_duplicate_picom
+    stop_duplicate_picom || return 1
+    if picom_disabled; then
+        if ! stop_picom_and_wait; then
+            log 'Picom is disabled but the old process did not exit'
+            picom_recovered=false
+            return 1
+        fi
+        picom_recovered=true
+        return 0
+    fi
     if picom_running; then
         picom_recovered=true
         return 0
@@ -3793,6 +3949,14 @@ start_picom() {
     if command -v ming-picom >/dev/null 2>&1; then
         log "starting Picom (deadline=${PICOM_STARTUP_DEADLINE}s)"
         (nohup /usr/local/bin/ming-picom >>"${health_log}" 2>&1 &) || true
+        for _policy_try in 1 2 3 4 5; do
+            picom_disabled && {
+                picom_elapsed_ms=$(( $(now_ms) - started_at ))
+                picom_recovered=true
+                return 0
+            }
+            sleep 0.1
+        done
         if wait_for_process_until picom "${deadline_at}"; then
             finished_at="$(now_ms)"
             picom_elapsed_ms=$((finished_at - started_at))
@@ -3834,7 +3998,11 @@ write_metrics() {
     (( phone_pid_count > 1 )) && phone_duplicates=$((phone_pid_count - 1))
     (( plank_pid_count > 1 )) && plank_duplicates=$((plank_pid_count - 1))
     (( picom_pid_count > 1 )) && picom_duplicates=$((picom_pid_count - 1))
-    if ${compositor}; then
+    if picom_user_disabled; then
+        compositor_backend=disabled-by-user
+    elif picom_policy_disabled; then
+        compositor_backend=disabled-by-policy
+    elif ${compositor}; then
         local compositor_cmd
         compositor_cmd="$(probe_timeout pgrep -a -u "$(id -u)" -x picom 2>/dev/null || true)"
         case "${compositor_cmd}" in
@@ -3914,7 +4082,8 @@ payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
     and payload["plank"]["visible"]
-    and payload["picom"]["running"]
+    and (payload["picom"]["running"]
+         or payload["picom"]["backend"] in {"disabled-by-policy", "disabled-by-user"})
     and (not payload["phone_desktop"]["enabled"]
          or not payload["xfce_panel"]["running"])
 )
@@ -3988,8 +4157,13 @@ case "${1:---once}" in
     --check)
         [[ -s "${metrics_file}" ]] && cat "${metrics_file}" || write_metrics check
         ;;
+    --reload-dock)
+        command -v ming-plank-watchdog >/dev/null 2>&1 || exit 1
+        run_bounded "${PLANK_STARTUP_DEADLINE}" \
+            /usr/local/bin/ming-plank-watchdog --reload
+        ;;
     *)
-        printf 'Usage: %s --session|--once|--check\n' "$0" >&2
+        printf 'Usage: %s --session|--once|--check|--reload-dock\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -4406,15 +4580,17 @@ class AppLibrary(Gtk.ApplicationWindow):
         return True
 
     def launch(self, app):
+        broker = '/usr/local/bin/ming-launch'
+        if not os.path.isfile(broker):
+            return
         try:
-            info = Gio.DesktopAppInfo.new_from_filename(app['path'])
-            if info:
-                info.launch([], None)
-                return
-        except Exception:
-            pass
-        command = app['exec'].replace('%U', '').replace('%u', '').replace('%F', '').replace('%f', '').strip()
-        subprocess.Popen(command, shell=True)
+            subprocess.Popen(
+                [broker, '--desktop-file', app['path'], '--source', 'app-library'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return
 
 class MingApp(Gtk.Application):
     def do_activate(self):
@@ -4529,7 +4705,7 @@ gio set "${tools_dir}" metadata::custom-icon-name applications-utilities 2>/dev/
 gio set "${common_dir}" metadata::custom-icon-name emblem-favorite 2>/dev/null || true
 
 if command -v ming-phone-desktop >/dev/null 2>&1; then
-    ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
+    timeout --foreground 8s ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
 else
     sync_apps
 fi
@@ -4541,7 +4717,7 @@ if [[ "${1:-}" == "--watch" ]]; then
             sleep 20
         fi
         if command -v ming-phone-desktop >/dev/null 2>&1; then
-            ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
+            timeout --foreground 8s ming-phone-desktop --sync >/tmp/ming-phone-desktop-sync.log 2>&1 || true
         else
             sync_apps
         fi
@@ -5107,11 +5283,13 @@ PICOMLOWMEM
 set -u
 
 log="/tmp/ming-picom.log"
+policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
 main_conf="${HOME}/.config/picom/picom.conf"
 fallback_conf="/etc/xdg/picom/picom-fallback.conf"
 lowmem_conf="/etc/xdg/picom/picom-lowmem.conf"
 config="${main_conf}"
 reason="modern-gpu"
+disabled_reason=""
 
 mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
@@ -5122,31 +5300,36 @@ if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
 fi
 
-if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2600 ]]; then
-    config="${fallback_conf}"
-    reason="low-memory-${mem_mb}mb"
+if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2662 ]]; then
+    # Below 2.6 GB, compositing costs more memory and bandwidth than it saves.
+    disabled_reason="low-memory-${mem_mb}mb"
 elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${cmdline}" == *"radeon.modeset=0"* || "${cmdline}" == *"amdgpu.modeset=0"* ]]; then
-    config="${fallback_conf}"
-    reason="safe-graphics-cmdline"
+    disabled_reason="safe-graphics-cmdline"
 elif [[ ! -d /dev/dri ]]; then
-    config="${fallback_conf}"
-    reason="no-dri"
+    disabled_reason="no-dri"
 elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
-    config="${fallback_conf}"
-    reason="software-renderer"
-elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox'; then
-    config="${fallback_conf}"
-    reason="virtual-machine-gpu"
+    disabled_reason="software-renderer"
+elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox|QEMU'; then
+    disabled_reason="virtual-machine-gpu"
 elif [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
-    config="${fallback_conf}"
-    reason="virtual-machine-${virt}"
+    disabled_reason="virtual-machine-${virt}"
 elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
     config="${lowmem_conf}"
     reason="balanced-low-memory-${mem_mb}mb"
 elif echo "${gpu}" | grep -Eiq 'Intel.*(Core Processor|HD Graphics 2000|HD Graphics 3000|GMA|4 Series|Ironlake|Sandy Bridge)'; then
-    config="${fallback_conf}"
-    reason="old-intel-gpu"
+    disabled_reason="old-intel-gpu"
 fi
+
+if [[ -n "${disabled_reason}" ]]; then
+    mkdir -p "$(dirname "${policy_file}")" 2>/dev/null || true
+    printf 'compositor=disabled-by-policy\nreason=%s\n' "${disabled_reason}" >"${policy_file}"
+    pkill -TERM -u "$(id -u)" -x picom >/dev/null 2>&1 || true
+    printf '[%s] disabled-by-policy reason=%s mem_mb=%s renderer=%s gpu=%s\n' \
+        "$(date '+%F %T')" "${disabled_reason}" "${mem_mb}" "${renderer:-unknown}" "${gpu:-unknown}" \
+        >> "${log}" 2>/dev/null || true
+    exit 0
+fi
+rm -f "${policy_file}" 2>/dev/null || true
 
 if [[ ! -f "${config}" ]]; then
     config="${fallback_conf}"
@@ -5496,12 +5679,34 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 POWERAUTOSTART
 
+    cat > /usr/local/bin/ming-screensaver-after-oobe << 'SCREENSAVERHELPER'
+#!/usr/bin/env bash
+set -u
+marker="${HOME}/.config/ming-os/oobe-account-done"
+if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null \
+    || [[ -f /.disk/info || -d /lib/live/mount/medium ]]; then
+    exit 0
+fi
+for _try in $(seq 1 900); do
+    if [[ -r "${marker}" ]] && grep -Fxq configured "${marker}" 2>/dev/null; then
+        command -v xfconf-query >/dev/null 2>&1 && {
+            xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
+            xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
+        }
+        exec xfce4-screensaver
+    fi
+    sleep 1
+done
+exit 0
+SCREENSAVERHELPER
+    chmod 0755 /usr/local/bin/ming-screensaver-after-oobe
+
     cat > "${autostart_dir}/xfce4-screensaver.desktop" << SCREENSAVERAUTO
 [Desktop Entry]
 Type=Application
 Name=Xfce Screensaver
 Comment=Ming OS lock screen and idle screensaver
-Exec=xfce4-screensaver
+Exec=/usr/local/bin/ming-screensaver-after-oobe
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -5604,10 +5809,37 @@ from gi.repository import Gtk, Gdk, GLib
 import os
 import subprocess
 import sys
+import time
 
 WELCOME_DONE = os.path.expanduser('~/.config/ming-os/welcome-done')
+OOBE_ACCOUNT_DONE = os.path.expanduser('~/.config/ming-os/oobe-account-done')
 if os.path.exists(WELCOME_DONE):
     sys.exit(0)
+
+def is_live_session():
+    try:
+        cmdline = open('/proc/cmdline', encoding='ascii').read()
+    except OSError:
+        cmdline = ''
+    return (
+        any(token in cmdline.split() for token in ('boot=live', 'live-config', 'ming.installer=1'))
+        or os.path.exists('/.disk/info')
+        or os.path.exists('/lib/live/mount/medium')
+    )
+
+if is_live_session():
+    sys.exit(0)
+
+def wait_for_account_oobe(timeout_seconds=900):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            if open(OOBE_ACCOUNT_DONE, encoding='utf-8').readline().strip() == 'configured':
+                return True
+        except OSError:
+            pass
+        time.sleep(1)
+    return False
 
 class WelcomeWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
@@ -5669,6 +5901,10 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         btn.get_style_context().add_class('big-button')
         btn.set_size_request(240, 56)
         btn.connect('clicked', lambda w: self.next_step())
+        btn.set_can_default(True)
+        btn.set_receives_default(True)
+        btn.connect('key-press-event', self.activate_button_on_key)
+        GLib.idle_add(btn.grab_focus)
 
         dots = Gtk.Label()
         dots.set_markup('<span size="12000" foreground="#2F8A7D">● ○ ○</span>')
@@ -5701,6 +5937,10 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         wifi_btn.get_style_context().add_class('big-button')
         wifi_btn.set_size_request(280, 56)
         wifi_btn.connect('clicked', lambda w: self.open_wifi())
+        wifi_btn.set_can_default(True)
+        wifi_btn.set_receives_default(True)
+        wifi_btn.connect('key-press-event', self.activate_button_on_key)
+        GLib.idle_add(wifi_btn.grab_focus)
 
         skip_btn = Gtk.Button(label='跳过，稍后设置')
         skip_btn.get_style_context().add_class('big-button-alt')
@@ -5741,6 +5981,10 @@ class WelcomeWindow(Gtk.ApplicationWindow):
         btn.get_style_context().add_class('big-button')
         btn.set_size_request(300, 56)
         btn.connect('clicked', lambda w: self.finish())
+        btn.set_can_default(True)
+        btn.set_receives_default(True)
+        btn.connect('key-press-event', self.activate_button_on_key)
+        GLib.idle_add(btn.grab_focus)
 
         dots = Gtk.Label()
         dots.set_markup('<span size="12000" foreground="#1FA89E">○ ○ ●</span>')
@@ -5757,6 +6001,13 @@ class WelcomeWindow(Gtk.ApplicationWindow):
     def next_step(self):
         self.current += 1
         self.show_step()
+
+    @staticmethod
+    def activate_button_on_key(button, event):
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            button.clicked()
+            return True
+        return False
 
     def open_wifi(self):
         try:
@@ -5775,8 +6026,11 @@ class WelcomeApp(Gtk.Application):
     def __init__(self):
         Gtk.Application.__init__(self)
     def do_activate(self):
+        if not wait_for_account_oobe():
+            return
         win = WelcomeWindow(self)
         win.show_all()
+        win.present()
         win.connect('destroy', lambda w: self.quit())
     def do_startup(self):
         Gtk.Application.do_startup(self)
@@ -6090,10 +6344,10 @@ INSTALLEDDESKTOPGATECONF
 #!/usr/bin/env bash
 set -u
 
-LOG="/tmp/ming-installer/preflight.log"
-mkdir -p /tmp/ming-installer
-chmod 1777 /tmp/ming-installer 2>/dev/null || true
+LOG="/run/ming-installer/preflight.log"
+install -d -m 0755 /run/ming-installer
 : > "${LOG}"
+chmod 0644 "${LOG}"
 
 log() {
     printf '%s\n' "$*" >> "${LOG}"
@@ -6326,19 +6580,9 @@ unpack:
     destination: ""
 UNPACKFSCONF
 
-if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
-    log "ERROR: Live Calamares verification failed"
-    exit 2
-fi
-
-log "unpackfs_source=${squash}"
-log "unpackfs_stable_source=${squash_link}"
-log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
-log "locale_conf=$(tr '\n' ';' </etc/calamares/modules/locale.conf 2>/dev/null || true)"
-log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/null | awk '{print $1}')"
-
 # Re-apply the user-selected install mode after the static fallback files have
-# been written.  A cancelled or invalid choice never reaches Calamares.
+# been written and before verification.  A cancelled or invalid choice never
+# reaches Calamares, and dual_boot_preserve is not checked as blank_ab.
 if [ -s /run/ming-installer/install-mode.json ]; then
     /usr/local/sbin/ming-install-mode show \
         --state /run/ming-installer/install-mode.json >/dev/null 2>>"${LOG}" || {
@@ -6359,6 +6603,17 @@ if [ -s /run/ming-installer/install-mode.json ]; then
             ;;
     esac
 fi
+
+if ! /usr/local/sbin/ming-installer-verify live --source "${final_source}" >> "${LOG}" 2>&1; then
+    log "ERROR: Live Calamares verification failed"
+    exit 2
+fi
+
+log "unpackfs_source=${squash}"
+log "unpackfs_stable_source=${squash_link}"
+log "timezone=$(cat /etc/timezone 2>/dev/null || true)"
+log "locale_conf=$(tr '\n' ';' </etc/calamares/modules/locale.conf 2>/dev/null || true)"
+log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/null | awk '{print $1}')"
 
 # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
 # Only initialize completely blank non-removable disks; never touch a disk
@@ -6462,6 +6717,12 @@ availableFileSystemTypes:
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-ESP"
+    filesystem: "fat32"
+    noEncrypt: true
+    mountPoint: "/boot/efi"
+    size: 512M
+    minSize: 256M
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true
@@ -6533,7 +6794,71 @@ hostname:
   forbidden_names: [ localhost ]
 STATICUSERSCONF
 
-cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
+    cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=""
+display="${DISPLAY:-:0}"
+xauthority="${XAUTHORITY:-}"
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --mode) mode="${2:-}"; shift 2 ;;
+        --display) display="${2:-:0}"; shift 2 ;;
+        --xauthority) xauthority="${2:-}"; shift 2 ;;
+        *) echo "unknown ming-live-installer-root argument: $1" >&2; exit 2 ;;
+    esac
+done
+[[ "${EUID}" -eq 0 ]] || {
+    echo "ming-live-installer-root must be called through Polkit" >&2
+    exit 10
+}
+case "${mode}" in
+    blank_ab|dual_boot_preserve) ;;
+    *) echo "an explicit Ming install mode is required" >&2; exit 11 ;;
+esac
+if ! grep -qw "boot=live" /proc/cmdline 2>/dev/null \
+    && ! grep -qw "live-config" /proc/cmdline 2>/dev/null \
+    && ! grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null \
+    && [[ ! -d /run/live/medium && ! -d /lib/live/mount/medium && ! -f /.disk/info ]]; then
+    echo "refusing to run the Live installer helper outside a Live session" >&2
+    exit 12
+fi
+install -d -m 0755 /run/ming-installer
+/usr/local/sbin/ming-install-mode write --mode "${mode}" \
+    --state /run/ming-installer/install-mode.json \
+    --partition /etc/calamares/modules/partition.conf
+/usr/local/sbin/ming-calamares-preflight
+export DISPLAY="${display}"
+if [[ -n "${xauthority}" ]]; then
+    export XAUTHORITY="${xauthority}"
+fi
+export TZ=Asia/Shanghai LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8
+exec calamares -d
+LIVEINSTALLERROOT
+    chmod 0755 /usr/local/sbin/ming-live-installer-root
+
+    cat > /usr/share/polkit-1/actions/org.ming.live.installer.policy << 'LIVEINSTALLERPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming.live.installer">
+    <description>Start the Ming OS Live installer</description>
+    <message>Authentication is required to start the Live installer.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-live-installer-root</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+LIVEINSTALLERPOLICY
+
+    cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
 #!/usr/bin/env bash
 set -e
 
@@ -6544,17 +6869,10 @@ export LC_ALL=zh_CN.UTF-8
 
 mkdir -p /tmp/ming-installer
 chmod 1777 /tmp/ming-installer 2>/dev/null || true
-mkdir -p /run/lock
-exec 9>/run/lock/ming-calamares.lock
+exec 9>/tmp/ming-installer/ming-calamares.lock
 flock -n 9 || exit 0
 
-run_preflight() {
-    if [ "$(id -u)" -eq 0 ]; then
-        /usr/local/sbin/ming-calamares-preflight
-    else
-        sudo -n /usr/local/sbin/ming-calamares-preflight
-    fi
-}
+selected_mode=""
 
 is_live_or_installer() {
     grep -qw "boot=live" /proc/cmdline 2>/dev/null && return 0
@@ -6569,9 +6887,9 @@ is_live_or_installer() {
 
 show_preflight_error() {
     local detail
-    detail="$(tail -n 80 /tmp/ming-installer/preflight.log 2>/dev/null || true)"
+    detail="$(tail -n 80 /run/ming-installer/preflight.log 2>/dev/null || true)"
     zenity --error --title="Ming OS installer preflight failed" --width=620 \
-        --text="Could not prepare the installer unpack source or Beijing timezone defaults.\n\n${detail}\n\nLog: /tmp/ming-installer/preflight.log" \
+        --text="Could not prepare the installer unpack source or Beijing timezone defaults.\n\n${detail}\n\nLog: /run/ming-installer/preflight.log" \
         2>/dev/null || true
 }
 
@@ -6595,19 +6913,7 @@ choose_install_mode() {
             return 1
             ;;
     esac
-    if [ "$(id -u)" -eq 0 ]; then
-        /usr/local/sbin/ming-install-mode write --mode "${choice}" \
-            --state /run/ming-installer/install-mode.json \
-            --partition /etc/calamares/modules/partition.conf
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-        sudo -n /usr/local/sbin/ming-install-mode write --mode "${choice}" \
-            --state /run/ming-installer/install-mode.json \
-            --partition /etc/calamares/modules/partition.conf
-    else
-        pkexec /usr/local/sbin/ming-install-mode write --mode "${choice}" \
-            --state /run/ming-installer/install-mode.json \
-            --partition /etc/calamares/modules/partition.conf
-    fi
+    selected_mode="${choice}"
 }
 
 if ! is_live_or_installer; then
@@ -6616,31 +6922,29 @@ if ! is_live_or_installer; then
 fi
 
 if ! choose_install_mode; then
-    exit 1
+    exit 2
 fi
 
-if ! run_preflight; then
+helper=(/usr/local/sbin/ming-live-installer-root
+    --mode "${selected_mode}"
+    --display "${DISPLAY:-:0}"
+    --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}")
+if [ "$(id -u)" -eq 0 ]; then
+    "${helper[@]}" || {
+        show_preflight_error
+        exit 1
+    }
+    exit 0
+fi
+if ! command -v pkexec >/dev/null 2>&1; then
     show_preflight_error
     exit 1
 fi
-
-if [ "$(id -u)" -eq 0 ]; then
-    exec env TZ=Asia/Shanghai LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8 \
-        calamares -d
+if ! pkexec "${helper[@]}"; then
+    show_preflight_error
+    exit 1
 fi
-
-if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    exec sudo -n env \
-        DISPLAY="${DISPLAY:-:0}" \
-        XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" \
-        TZ=Asia/Shanghai \
-        LANG=zh_CN.UTF-8 \
-        LANGUAGE=zh_CN:zh \
-        LC_ALL=zh_CN.UTF-8 \
-        calamares -d
-fi
-
-exec pkexec calamares -d
+exit 0
 CALAMARESLAUNCHER
     chmod +x /usr/local/bin/ming-calamares-launcher
 
@@ -6696,15 +7000,6 @@ prepare_installer_disks() {
     done
 }
 
-prepare_calamares_runtime() {
-    export TZ=Asia/Shanghai
-    if [ "$(id -u)" -eq 0 ]; then
-        /usr/local/sbin/ming-calamares-preflight
-    else
-        sudo -n /usr/local/sbin/ming-calamares-preflight
-    fi
-}
-
 sleep 2
 
 if is_live_environment || is_installer_boot; then
@@ -6717,12 +7012,7 @@ if is_live_environment || is_installer_boot; then
     if command -v calamares &>/dev/null; then
         # -style/maximize handled by calamares window manager hint; keep retrying
         # if the X session is not ready yet.
-        for _try in 1 2 3 4 5; do
-            if /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1; then
-                break
-            fi
-            sleep 2
-        done &
+        /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1 &
     else
         zenity --error --title="安装错误" --text="找不到 Calamares 安装程序。" 2>/dev/null || true
     fi
@@ -6811,18 +7101,25 @@ class LiveNotice(Gtk.Window):
 
     @staticmethod
     def activate_installer(_button):
-        activated = subprocess.run(
-            ["wmctrl", "-x", "-a", "calamares.calamares"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode == 0
-        if not activated:
-            subprocess.Popen(
-                ["/usr/local/bin/ming-calamares-launcher"],
+        try:
+            activated = subprocess.run(
+                ["wmctrl", "-x", "-a", "calamares.calamares"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-            )
+                timeout=2,
+                check=False,
+            ).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            activated = False
+        if not activated:
+            try:
+                subprocess.Popen(
+                    ["/usr/local/bin/ming-calamares-launcher"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                return
 
 
 window = LiveNotice()
@@ -6903,12 +7200,12 @@ close_live_notice_when_calamares_visible() {
     for _focus_try in $(seq 1 720); do
         local calamares_window
         calamares_window="$(
-            wmctrl -lx 2>/dev/null |
+            timeout --foreground 2s wmctrl -lx 2>/dev/null |
                 awk 'tolower($0) ~ /calamares/ && $1 ~ /^0[xX][0-9a-fA-F]+$/ { print $1; exit }'
         )"
         if [ -n "${calamares_window}" ]; then
-            wmctrl -i -r "${calamares_window}" -b add,maximized_vert,maximized_horz 2>/dev/null || true
-            wmctrl -i -a "${calamares_window}" 2>/dev/null || true
+            timeout --foreground 2s wmctrl -i -r "${calamares_window}" -b add,maximized_vert,maximized_horz 2>/dev/null || true
+            timeout --foreground 2s wmctrl -i -a "${calamares_window}" 2>/dev/null || true
             kill "${notice_pid}" 2>/dev/null || true
             wait "${notice_pid}" 2>/dev/null || true
             return 0
@@ -6941,25 +7238,17 @@ prepare_installer_disks() {
         fi
     done
 }
-prepare_calamares_runtime() {
-    export TZ=Asia/Shanghai
-    if [ -x /usr/local/sbin/ming-calamares-preflight ]; then
-        if [ "$(id -u)" -eq 0 ]; then
-            /usr/local/sbin/ming-calamares-preflight
-        else
-            sudo -n /usr/local/sbin/ming-calamares-preflight
-        fi
-    fi
-}
 while true; do
-    if ! prepare_calamares_runtime; then
-        zenity --error --title="安装预检失败" --text="无法找到或配置 live/filesystem.squashfs。\n\n请查看 /tmp/ming-installer/preflight.log" 2>/dev/null || true
-        sleep 3
-        continue
-    fi
     chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
     close_live_notice_when_calamares_visible &
+    notice_watcher_pid="$!"
     /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
+    launcher_status="$?"
+    if [[ "${launcher_status}" -ne 0 ]]; then
+        kill "${notice_watcher_pid}" 2>/dev/null || true
+        wait "${notice_watcher_pid}" 2>/dev/null || true
+    fi
+    [[ "${launcher_status}" -eq 2 ]] && break
     # 已触发关机/重启则退出循环
     systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null && break
     sleep 1
@@ -7273,14 +7562,14 @@ XSETTINGSCFG
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-screensaver" version="1.0">
   <property name="saver" type="empty">
-    <property name="enabled" type="bool" value="true"/>
+    <property name="enabled" type="bool" value="false"/>
     <property name="fullscreen-inhibit" type="bool" value="true"/>
     <property name="mode" type="int" value="0"/>
   </property>
   <property name="lock" type="empty">
-    <property name="enabled" type="bool" value="true"/>
+    <property name="enabled" type="bool" value="false"/>
     <property name="saver-activation" type="empty">
-      <property name="enabled" type="bool" value="true"/>
+      <property name="enabled" type="bool" value="false"/>
       <property name="delay" type="int" value="5"/>
     </property>
   </property>
@@ -7404,11 +7693,21 @@ xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /saver/fullscreen-inhibit -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
-xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
+oobe_ready=false
+if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
+    && grep -Fxq configured "${HOME}/.config/ming-os/oobe-account-done" 2>/dev/null; then
+    oobe_ready=true
+fi
+if "${oobe_ready}"; then
+    xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s true 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /saver/fullscreen-inhibit -n -t bool -s true 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s true 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
+else
+    xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s false 2>/dev/null || true
+fi
 
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
@@ -7442,10 +7741,6 @@ if command -v ming-plank-watchdog &>/dev/null; then
     /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
 fi
 
-if command -v xfce4-screensaver >/dev/null 2>&1 && ! pgrep -f '^xfce4-screensaver' >/dev/null 2>&1; then
-    (sleep 1 && nohup xfce4-screensaver >/dev/null 2>&1 &) 2>/dev/null || true
-fi
-
 exit 0
 APPLYAPPEARANCE
     chmod +x /usr/local/bin/ming-apply-appearance
@@ -7473,6 +7768,32 @@ APPLYAUTO
 #   1. Onboard 虚拟键盘：点击文本输入框时自动弹起（auto-show），无物理键盘也能输入。
 #   2. touchegg：三指上滑=显示桌面、三指下滑=最小化、四指左右=切换工作区。
 configure_touch_input() {
+    cat > /usr/local/bin/ming-touch-session << 'TOUCHSESSION'
+#!/usr/bin/env bash
+set -u
+action="${1:-}"
+has_touch_hardware() {
+    if command -v xinput >/dev/null 2>&1 \
+        && xinput --list --short 2>/dev/null | grep -Eiq 'touchscreen|tablet'; then
+        return 0
+    fi
+    for name in /sys/class/input/event*/device/name; do
+        [[ -r "${name}" ]] || continue
+        grep -Eiq 'touchscreen|tablet' "${name}" && return 0
+    done
+    return 1
+}
+case "${action}" in
+    onboard|touchegg)
+        has_touch_hardware || exit 0
+        command -v "${action}" >/dev/null 2>&1 || exit 0
+        exec "${action}"
+        ;;
+    *) exit 2 ;;
+esac
+TOUCHSESSION
+    chmod 0755 /usr/local/bin/ming-touch-session
+
     # ---- Onboard 虚拟键盘：自动弹起 ----
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/onboard-autostart.desktop" << 'ONBOARDAUTO'
@@ -7480,7 +7801,7 @@ configure_touch_input() {
 Type=Application
 Name=Onboard 虚拟键盘
 Comment=触屏点击输入框时自动弹起
-Exec=onboard
+Exec=/usr/local/bin/ming-touch-session onboard
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -7622,12 +7943,12 @@ TOUCHEGGCFG
 Type=Application
 Name=Touchégg
 Comment=触摸手势
-Exec=touchegg
+Exec=/usr/local/bin/ming-touch-session touchegg
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 TOUCHEGGAUTO
-    systemctl enable touchegg 2>/dev/null || true
+    systemctl disable touchegg.service 2>/dev/null || true
 
     chown -R "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.config/onboard" \

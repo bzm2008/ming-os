@@ -198,44 +198,48 @@ HWLOAD
 set -u
 
 LOG=/tmp/ming-hardware-preload.log
-modules=(
-btusb
-btintel
-btrtl
-btbcm
-ath3k
+PRELOAD_TOTAL_BUDGET_SECONDS=6
+critical_modules=(
 usbhid
 i2c_hid
 hid_multitouch
 bcm5974
 hid_apple
 applespi
-applesmc
-apple_gmux
-spi_pxa2xx_platform
-spi_pxa2xx_pci
-thinkpad_acpi
-ideapad_laptop
-huawei_wmi
 intel_lpss
 intel_lpss_pci
-k10temp
 surface_aggregator
 surface_hid_core
 )
+late_modules=(
+    btusb btintel btrtl btbcm ath3k applesmc apple_gmux
+    spi_pxa2xx_platform spi_pxa2xx_pci
+    thinkpad_acpi ideapad_laptop huawei_wmi k10temp
+)
+modules=("${critical_modules[@]}")
+[[ "${1:-}" == "--late" ]] && modules=("${late_modules[@]}")
 
 mkdir -p /tmp
+preload_deadline=$((SECONDS + PRELOAD_TOTAL_BUDGET_SECONDS))
 for module in "${modules[@]}"; do
-    if modprobe -q "${module}" 2>/dev/null; then
+    if (( SECONDS >= preload_deadline )); then
+        printf '%s preload deadline reached before %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
+        break
+    fi
+    if timeout --foreground 2s modprobe -q "${module}" 2>/dev/null; then
         printf '%s loaded %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
     else
-        printf '%s skipped %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
+        printf '%s skipped/timeout %s\n' "$(date '+%F %T')" "${module}" >> "${LOG}" 2>/dev/null || true
     fi
 done
 
+if (( SECONDS < preload_deadline )); then
+    {
+        printf '%s Broadcom devices and kernel bindings\n' "$(date '+%F %T')"
+        timeout --foreground 1s lspci -Dnnk -d 14e4: 2>/dev/null || true
+    } >> "${LOG}" 2>/dev/null || true
+fi
 {
-    printf '%s Broadcom devices and kernel bindings\n' "$(date '+%F %T')"
-    lspci -Dnnk -d 14e4: 2>/dev/null || true
     printf '%s wireless interfaces\n' "$(date '+%F %T')"
     for wireless_path in /sys/class/net/*/wireless; do
         [[ -d "${wireless_path}" ]] && printf '%s\n' "${wireless_path%/wireless}"
@@ -254,12 +258,29 @@ Before=NetworkManager.service bluetooth.service display-manager.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/ming-hardware-preload
+TimeoutStartSec=8s
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 HWPRELOADSVC
     systemctl enable ming-hardware-preload.service 2>/dev/null || true
+
+    cat > /etc/systemd/system/ming-hardware-preload-late.service << 'HWPRELOADLATESVC'
+[Unit]
+Description=Ming OS non-critical hardware module preload
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ming-hardware-preload --late
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target
+HWPRELOADLATESVC
+    systemctl enable ming-hardware-preload-late.service 2>/dev/null || true
 
     # i2c_piix4 is the in-tree SMBus driver used by many old AMD chipsets.
     # Never blacklist it globally: that hides temperature and power sensors.
@@ -2067,9 +2088,11 @@ MINGOTAGUARDPY
 #!/usr/bin/env bash
 set -euo pipefail
 
-log=/tmp/ming-installer/ota-preflight.log
+log=/run/ming-installer/ota-preflight.log
 marker=/run/ming-ota-preflight.ok
-mkdir -p /tmp/ming-installer /run
+install -d -m 0755 /run/ming-installer
+: >"${log}"
+chmod 0600 "${log}"
 exec >>"${log}" 2>&1
 rm -f "${marker}"
 
@@ -2172,18 +2195,43 @@ ensure_persistent_root_fstab() {
 ensure_persistent_root_fstab || exit 30
 
 write_ota_ready_layout() {
-    local boot_device root_a_device root_b_device home_device
-    local boot_uuid root_a_uuid root_b_uuid home_uuid unique_count target_disk candidate_disk
+    local esp_device boot_device root_a_device root_b_device home_device
+    local esp_uuid boot_uuid root_a_uuid root_b_uuid home_uuid unique_count target_disk candidate_disk
+    local esp_fstype esp_parttype esp_mount_source
     physical_disk_for_device() {
         lsblk -s -nrpo NAME,TYPE "$1" 2>/dev/null \
             | awk '$2 == "disk" {print $1}' | sort -u
     }
     udevadm settle --timeout=10 2>/dev/null || true
+    esp_device="$(blkid -L MING-ESP 2>/dev/null || true)"
     boot_device="$(blkid -L MING-BOOT 2>/dev/null || true)"
     root_a_device="$(blkid -L MING-ROOT-A 2>/dev/null || true)"
     root_b_device="$(blkid -L MING-ROOT-B 2>/dev/null || true)"
     home_device="$(blkid -L MING-HOME 2>/dev/null || true)"
-    for device in "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+    if [[ "${esp_device}" == /dev/* ]]; then
+        esp_device="$(readlink -f -- "${esp_device}" 2>/dev/null || true)"
+    fi
+    if [[ "${boot_device}" == /dev/* ]]; then
+        boot_device="$(readlink -f -- "${boot_device}" 2>/dev/null || true)"
+    fi
+    if [[ "${root_a_device}" == /dev/* ]]; then
+        root_a_device="$(readlink -f -- "${root_a_device}" 2>/dev/null || true)"
+    fi
+    if [[ "${root_b_device}" == /dev/* ]]; then
+        root_b_device="$(readlink -f -- "${root_b_device}" 2>/dev/null || true)"
+    fi
+    if [[ "${home_device}" == /dev/* ]]; then
+        home_device="$(readlink -f -- "${home_device}" 2>/dev/null || true)"
+    fi
+    mounted_from_device() {
+        local expected_device="$1" mountpoint="$2" mounted_source
+        mounted_source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
+        if [[ "${mounted_source}" == /dev/* ]]; then
+            mounted_source="$(readlink -f -- "${mounted_source}" 2>/dev/null || true)"
+        fi
+        [[ "${mounted_source}" == "${expected_device}" ]]
+    }
+    for device in "${esp_device}" "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
         [[ "${device}" == /dev/* && -b "${device}" ]] || {
             echo "ERROR: OTA-ready partition labels are incomplete" >&2; return 1;
         }
@@ -2192,19 +2240,67 @@ write_ota_ready_layout() {
     [[ -n "${target_disk}" && "${target_disk}" != *$'\n'* ]] || {
         echo "ERROR: cannot identify one OTA-ready target disk" >&2; return 1;
     }
-    for device in "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+    for device in "${esp_device}" "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
         candidate_disk="$(physical_disk_for_device "${device}")"
         [[ "${candidate_disk}" == "${target_disk}" ]] || {
             echo "ERROR: OTA-ready labels resolve outside the selected target disk" >&2; return 1;
         }
     done
+    esp_fstype="$(blkid -s TYPE -o value "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    case "${esp_fstype}" in
+        vfat|fat|fat32) ;;
+        *) echo "ERROR: MING-ESP must be a FAT/vfat EFI System Partition" >&2; return 1 ;;
+    esac
+    esp_parttype="$(lsblk -ndo PARTTYPE "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    case "${esp_parttype}" in
+        c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef|ef) ;;
+        *) echo "ERROR: MING-ESP PARTTYPE is not an EFI System Partition" >&2; return 1 ;;
+    esac
+    esp_mount_source="$(findmnt -nro SOURCE --target "${target}/boot/efi" 2>/dev/null || true)"
+    if [[ "${esp_mount_source}" == /dev/* ]]; then
+        esp_mount_source="$(readlink -f -- "${esp_mount_source}" 2>/dev/null || true)"
+    fi
+    [[ "${esp_mount_source}" == "${esp_device}" ]] || {
+        echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
+    }
     root_a_uuid="$(blkid -s UUID -o value "${root_a_device}")"
     root_b_uuid="$(blkid -s UUID -o value "${root_b_device}")"
+    esp_uuid="$(blkid -s UUID -o value "${esp_device}")"
     boot_uuid="$(blkid -s UUID -o value "${boot_device}")"
     home_uuid="$(blkid -s UUID -o value "${home_device}")"
-    unique_count="$(printf '%s\n' "${root_a_uuid}" "${root_b_uuid}" "${boot_uuid}" "${home_uuid}" | sort -u | wc -l)"
-    [[ "${unique_count}" -eq 4 && "${root_uuid}" == "${root_a_uuid}" ]] || {
+    for filesystem_uuid in "${root_a_uuid}" "${root_b_uuid}" "${esp_uuid}" "${boot_uuid}" "${home_uuid}"; do
+        [[ "${filesystem_uuid}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+            echo "ERROR: OTA-ready filesystem UUID readback is invalid" >&2; return 1;
+        }
+    done
+    unique_count="$(printf '%s\n' "${root_a_uuid}" "${root_b_uuid}" "${esp_uuid}" "${boot_uuid}" "${home_uuid}" | sort -u | wc -l)"
+    [[ "${unique_count}" -eq 5 && "${root_uuid}" == "${root_a_uuid}" ]] || {
         echo "ERROR: OTA-ready UUID readback failed" >&2; return 1;
+    }
+    mounted_from_device "${boot_device}" "${target}/boot" || {
+        echo "ERROR: target /boot is not mounted from MING-BOOT" >&2; return 1;
+    }
+    mounted_from_device "${home_device}" "${target}/home" || {
+        echo "ERROR: target /home is not mounted from MING-HOME" >&2; return 1;
+    }
+    mounted_from_device "${esp_device}" "${target}/boot/efi" || {
+        echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
+    }
+    fstab_uses_uuid() {
+        local filesystem_uuid="$1" mountpoint="$2"
+        awk -v source="UUID=${filesystem_uuid}" -v target_mount="${mountpoint}" '
+            $0 !~ /^[[:space:]]*#/ && $1 == source && $2 == target_mount { matches++ }
+            END { exit matches == 1 ? 0 : 1 }
+        ' "${target}/etc/fstab"
+    }
+    fstab_uses_uuid "${boot_uuid}" "/boot" || {
+        echo "ERROR: target fstab /boot UUID does not match MING-BOOT" >&2; return 1;
+    }
+    fstab_uses_uuid "${home_uuid}" "/home" || {
+        echo "ERROR: target fstab /home UUID does not match MING-HOME" >&2; return 1;
+    }
+    fstab_uses_uuid "${esp_uuid}" "/boot/efi" || {
+        echo "ERROR: target fstab /boot/efi UUID does not match MING-ESP" >&2; return 1;
     }
     mkdir -p "${target}/etc/ming-update"
     cat > "${target}/etc/ming-update/slots.json" <<SLOTS
@@ -2739,6 +2835,8 @@ rm -f \
     "${target}/usr/share/applications/calamares-install-debian.desktop" \
     "${target}/usr/share/applications/Install Ming OS.desktop" \
     "${target}/usr/share/xsessions/ming-installer.desktop" \
+    "${target}/usr/local/sbin/ming-live-installer-root" \
+    "${target}/usr/share/polkit-1/actions/org.ming.live.installer.policy" \
     "${target}/usr/local/sbin/sfdisk" \
     "${target}/etc/systemd/system/ming-live-installer.service" \
     "${target}/etc/systemd/system/graphical.target.wants/ming-live-installer.service" \
@@ -2783,8 +2881,10 @@ MINGIDENTITY
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG=/tmp/ming-installer/bootloader.log
-mkdir -p /tmp/ming-installer
+LOG=/run/ming-installer/bootloader.log
+install -d -m 0755 /run/ming-installer
+: >"${LOG}"
+chmod 0644 "${LOG}"
 exec > >(tee -a "${LOG}") 2>&1
 
 echo "==== Ming bootloader install $(date -Is) ===="
@@ -3010,13 +3110,13 @@ fi
 # generation and validation are installation hard gates.
 if [ -x "${root}/usr/sbin/update-grub" ]; then
     chroot "${root}" /usr/sbin/update-grub \
-        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
+        >/run/ming-installer/update-grub.log 2>&1 || exit 22
 elif [ -x "${root}/usr/sbin/grub-mkconfig" ]; then
     chroot "${root}" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg \
-        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
+        >/run/ming-installer/update-grub.log 2>&1 || exit 22
 else
     grub-mkconfig -o "${root}/boot/grub/grub.cfg" \
-        >/tmp/ming-installer/update-grub.log 2>&1 || exit 22
+        >/run/ming-installer/update-grub.log 2>&1 || exit 22
 fi
 
 validate_final_grub_root_uuid() {
@@ -3098,6 +3198,12 @@ if [ -x "${root}/usr/bin/grub-script-check" ]; then
 elif command -v grub-script-check >/dev/null 2>&1; then
     grub-script-check "${root}/boot/grub/grub.cfg" || exit 22
 fi
+final_install_result="$(/usr/local/sbin/ming-installer-verify installed --receipt --final-boot)" || {
+    printf '%s\n' "${final_install_result}" >&2
+    echo "ERROR: unified final installed-system verification failed"
+    exit 22
+}
+printf '%s\n' "${final_install_result}"
 echo "grub.cfg OK: $(wc -l < "${root}/boot/grub/grub.cfg") lines"
 echo "Ming bootloader install completed"
 MINGBOOTLOADER
@@ -3243,8 +3349,10 @@ BOOTLOADERCONF
 #!/usr/bin/env bash
 set +e
 
-LOG=/tmp/ming-installer/finish-reboot.log
-mkdir -p /tmp/ming-installer
+LOG=/run/ming-installer/finish-reboot.log
+install -d -m 0755 /run/ming-installer
+: >"${LOG}"
+chmod 0644 "${LOG}"
 exec >>"${LOG}" 2>&1
 
 echo "==== Ming finish reboot $(date -Is) ===="
@@ -3312,6 +3420,12 @@ availableFileSystemTypes:
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-ESP"
+    filesystem: "fat32"
+    noEncrypt: true
+    mountPoint: "/boot/efi"
+    size: 512M
+    minSize: 256M
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true

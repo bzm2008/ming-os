@@ -27,6 +27,7 @@ UUID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 FILESYSTEM_UUID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+FAT_FILESYSTEM_UUID_PATTERN = re.compile(r"^[0-9a-fA-F]{4}-[0-9a-fA-F]{4}$")
 NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 TEMPORARY_ROOT_SOURCES = (
     "overlay",
@@ -104,6 +105,16 @@ def _yaml_bool(text: str, key: str) -> bool | None:
     if value.casefold() == "false":
         return False
     return None
+
+
+def _partition_layout_block(text: str, label: str) -> str:
+    pattern = re.compile(
+        r"(?ms)^[ \t]*-[ \t]+name:[ \t]*[\"']?"
+        + re.escape(label)
+        + r"[\"']?[ \t]*\n(?P<body>.*?)(?=^[ \t]*-[ \t]+name:|\Z)"
+    )
+    match = pattern.search(text)
+    return match.group(0) if match else ""
 
 
 def _read_install_mode(path: Path) -> dict[str, Any] | None:
@@ -186,19 +197,42 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         explicit_mode = True
         install_mode = mode_payload["mode"]
         major_ota = mode_payload["major_ota"]
-    if initial_choice != "none":
-        errors.append("Calamares must keep the full-disk install choice visible")
     if install_mode == "blank_ab":
+        expected_choice = "erase" if explicit_mode else "none"
+        if initial_choice != expected_choice:
+            errors.append(
+                "Calamares blank A/B mode must use the selected erase flow"
+                if explicit_mode
+                else "Calamares must keep the full-disk install choice visible"
+            )
         if manual_enabled is not False:
             errors.append("Calamares manual partitioning must be disabled")
         if explicit_mode:
             required = _yaml_scalar(partition, "requiredStorage")
-            for label in ("MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME"):
-                if label not in partition:
-                    errors.append(f"Calamares A/B partition layout is missing {label}")
+            expected_layout = {
+                "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
+                "MING-BOOT": ({"ext4"}, "/boot"),
+                "MING-ROOT-A": ({"ext4"}, "/"),
+                "MING-ROOT-B": ({"ext4"}, None),
+                "MING-HOME": ({"ext4"}, "/home"),
+            }
+            for label, (filesystems, mountpoint) in expected_layout.items():
+                if partition.count(f'name: "{label}"') != 1:
+                    errors.append(f"Calamares A/B partition layout must contain exactly one {label}")
+                    continue
+                block = _partition_layout_block(partition, label)
+                if _yaml_scalar(block, "filesystem") not in filesystems:
+                    errors.append(
+                        f"Calamares A/B {label} must use {'/'.join(sorted(filesystems))}"
+                    )
+                if _yaml_scalar(block, "mountPoint") != mountpoint:
+                    expected_mount = mountpoint if mountpoint is not None else "no mount point"
+                    errors.append(f"Calamares A/B {label} must use {expected_mount}")
             if required != "48":
                 errors.append("Calamares A/B install must require 48 GB")
     elif install_mode == "dual_boot_preserve":
+        if initial_choice != "none":
+            errors.append("Calamares dual-boot mode must require manual partition selection")
         if manual_enabled is not True:
             errors.append("Calamares dual-boot mode must enable manual partitioning")
         if "MING-ROOT-B" in partition:
@@ -216,7 +250,11 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
     return _result(
         errors,
         manual_partitioning="enabled" if manual_enabled is True else "disabled",
-        full_disk_install="available" if initial_choice == "none" else "unknown",
+        full_disk_install=(
+            "selected"
+            if explicit_mode and install_mode == "blank_ab" and initial_choice == "erase"
+            else "available" if initial_choice == "none" else "unknown"
+        ),
         source=str(source_path),
         unpackfs_source=unpack_source or "",
         install_mode=install_mode,
@@ -775,6 +813,192 @@ def _fstab_entries(text: str) -> Iterable[list[str]]:
             yield fields
 
 
+def _validate_blank_ab_install(root_path: Path, errors: list[str]) -> None:
+    entries = list(_fstab_entries(_read_text(root_path / "etc/fstab")))
+    entries_by_mount: dict[str, list[list[str]]] = {}
+    for fields in entries:
+        entries_by_mount.setdefault(fields[1], []).append(fields)
+    by_mount = {mountpoint: values[-1] for mountpoint, values in entries_by_mount.items()}
+    required_mounts = {
+        "/boot": {"ext2", "ext3", "ext4"},
+        "/home": {"ext2", "ext3", "ext4", "xfs", "btrfs"},
+        "/boot/efi": {"vfat", "fat", "fat32"},
+    }
+    for mountpoint, filesystems in required_mounts.items():
+        mount_entries = entries_by_mount.get(mountpoint, [])
+        if not mount_entries:
+            errors.append(f"Installed A/B fstab is missing {mountpoint}")
+            continue
+        if len(mount_entries) != 1:
+            errors.append(f"Installed A/B fstab has duplicate {mountpoint} entries")
+            continue
+        fields = mount_entries[0]
+        if fields[2].casefold() not in filesystems:
+            errors.append(
+                f"Installed A/B {mountpoint} must use {', '.join(sorted(filesystems))}"
+            )
+
+    try:
+        slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
+        if slots.get("schema") != 1 or slots.get("layout") != "ming-ab-v1":
+            raise ValueError("invalid A/B layout")
+        for volume, mountpoint in (("boot", "/boot"), ("home", "/home")):
+            expected_uuid = slots[volume]["uuid"]
+            if not isinstance(expected_uuid, str) or not FILESYSTEM_UUID_PATTERN.fullmatch(expected_uuid):
+                raise ValueError(f"invalid {volume} UUID")
+            fields = by_mount.get(mountpoint)
+            if fields and fields[0] != f"UUID={expected_uuid}":
+                errors.append(f"Installed A/B {mountpoint} source UUID does not match slots.json")
+        esp_fields = by_mount.get("/boot/efi")
+        esp_uuid = esp_fields[0][5:] if esp_fields and esp_fields[0].startswith("UUID=") else ""
+        if esp_fields and not (
+            FILESYSTEM_UUID_PATTERN.fullmatch(esp_uuid)
+            or FAT_FILESYSTEM_UUID_PATTERN.fullmatch(esp_uuid)
+        ):
+            errors.append("Installed A/B /boot/efi source must use a filesystem UUID")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        errors.append("Installed A/B boot/home UUID contract is missing or invalid")
+
+    for slot in ("A", "B"):
+        for payload in ("vmlinuz", "initrd.img"):
+            if not (root_path / "boot/ming-slots" / slot / payload).is_file():
+                errors.append(f"Installed A/B slot {slot} {payload} payload is missing")
+
+
+def _grub_top_level_entries(text: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    depth = 0
+    pattern = re.compile(
+        r"^\s*(menuentry|submenu)\s+(?P<quote>['\"])(?P<title>.*?)(?P=quote)(?:\s|$)"
+    )
+    for line in text.splitlines():
+        match = pattern.match(line) if depth == 0 else None
+        if match:
+            entries.append((match.group(1), match.group("title")))
+        depth = max(0, depth + line.count("{") - line.count("}"))
+    return entries
+
+
+def _final_grub_linux_entries(text: str) -> list[tuple[str, list[str]]]:
+    entries: list[tuple[str, list[str]]] = []
+    pattern = re.compile(
+        r"^\s*linux\s+(?P<path>/(?:vmlinuz|boot/vmlinuz[^\s]*|ming-slots/[AB]/vmlinuz))"
+        r"(?:\s|$)"
+    )
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match:
+            entries.append((match.group("path"), line.split()))
+    return entries
+
+
+def _read_final_ab_uuids(
+    root_path: Path, expected_root_uuid: str, errors: list[str]
+) -> tuple[str | None, str | None]:
+    try:
+        slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
+        slot_a_uuid = slots["slots"]["A"]["uuid"]
+        slot_b_uuid = slots["slots"]["B"]["uuid"]
+        if (
+            slots.get("schema") != 1
+            or slots.get("layout") != "ming-ab-v1"
+            or not isinstance(slot_a_uuid, str)
+            or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_a_uuid)
+            or not isinstance(slot_b_uuid, str)
+            or not FILESYSTEM_UUID_PATTERN.fullmatch(slot_b_uuid)
+            or slot_a_uuid != expected_root_uuid
+            or slot_b_uuid == slot_a_uuid
+        ):
+            raise ValueError("invalid final A/B UUID contract")
+        return slot_a_uuid, slot_b_uuid
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        errors.append("Final GRUB verification has no valid ming-ab-v1 UUID contract")
+        return None, None
+
+
+def _validate_final_grub(
+    root_path: Path,
+    errors: list[str],
+    *,
+    install_mode: str,
+    expected_root_uuid: str | None,
+) -> None:
+    grub_cfg = _read_text(root_path / "boot/grub/grub.cfg")
+    if not grub_cfg:
+        errors.append("Final grub.cfg is missing or empty")
+        return
+    if expected_root_uuid is None:
+        errors.append("Final GRUB verification requires an authoritative root UUID")
+        return
+    if re.search(r"__MING_(?:ROOT|BOOT)[A-Z_]*UUID__", grub_cfg):
+        errors.append("Final grub.cfg contains an unresolved UUID placeholder")
+    if re.search(r"boot=live|ming\.installer=1|安装 Ming OS", grub_cfg):
+        errors.append("Final grub.cfg contains Live installer arguments or labels")
+
+    top_level = _grub_top_level_entries(grub_cfg)
+    titles = [title for _kind, title in top_level]
+    allowed_titles = {"Ming OS", "Ming OS 高级启动", "启动另一个系统"}
+    if len(top_level) > 3:
+        errors.append("Final grub.cfg has more than three top-level entries")
+    if "Ming OS" not in titles or "Ming OS 高级启动" not in titles:
+        errors.append("Final grub.cfg is missing the compact Ming OS top-level menu")
+    if any(title not in allowed_titles for title in titles):
+        errors.append("Final grub.cfg contains an unexpected top-level entry")
+    if "启动另一个系统" in titles:
+        trusted_chainloader = re.search(
+            r"chainloader\s+\(\$esp\)/EFI/(?:Microsoft/Boot/bootmgfw\.efi|Linux/[^\s]+\.efi)",
+            grub_cfg,
+            re.IGNORECASE,
+        )
+        if (
+            not trusted_chainloader
+            or not re.search(r"search\s+--no-floppy\s+--fs-uuid\s+--set=esp\s+\S+", grub_cfg)
+        ):
+            errors.append("Final grub.cfg contains an untrusted other-system chainloader")
+
+    slot_a_uuid: str | None = expected_root_uuid
+    slot_b_uuid: str | None = None
+    if install_mode == "blank_ab":
+        slot_a_uuid, slot_b_uuid = _read_final_ab_uuids(
+            root_path, expected_root_uuid, errors
+        )
+
+    linux_entries = _final_grub_linux_entries(grub_cfg)
+    if not linux_entries:
+        errors.append("Final grub.cfg has no Ming linux stanzas")
+    slot_paths: set[str] = set()
+    for path, fields in linux_entries:
+        if path.startswith("/ming-slots/"):
+            slot_paths.add(path)
+        roots = [field for field in fields if field.startswith("root=")]
+        if len(roots) != 1 or not roots[0].startswith("root=UUID="):
+            errors.append("Final grub.cfg Ming stanza must contain exactly one root=UUID argument")
+            continue
+        expected = expected_root_uuid
+        if path == "/ming-slots/A/vmlinuz":
+            expected = slot_a_uuid
+        elif path == "/ming-slots/B/vmlinuz":
+            expected = slot_b_uuid
+        if expected is None or roots[0] != f"root=UUID={expected}":
+            errors.append("Final grub.cfg Ming stanza uses the wrong root UUID")
+
+    if install_mode == "blank_ab":
+        required = {
+            "/ming-slots/A/vmlinuz",
+            "/ming-slots/B/vmlinuz",
+        }
+        if not required.issubset(slot_paths):
+            errors.append("Final grub.cfg is missing Ming A/B slot linux entries")
+        for marker in (
+            "/ming-slots/A/initrd.img",
+            "/ming-slots/B/initrd.img",
+        ):
+            if marker not in grub_cfg:
+                errors.append(f"Final grub.cfg is missing A/B slot payload {marker}")
+    elif any(path.startswith("/ming-slots/") for path, _fields in linux_entries):
+        errors.append("Final dual-boot grub.cfg contains false A/B slot state")
+
+
 def _system_target(path: Path) -> str:
     if path.is_symlink():
         try:
@@ -790,6 +1014,7 @@ def verify_installed(
     target_mode: str = "explicit",
     expected_root_uuid: str | None = None,
     expected_root_fstype: str | None = None,
+    final_boot: bool = False,
 ) -> dict[str, Any]:
     requested_target = str(root or "")
     if root is None:
@@ -846,9 +1071,19 @@ def verify_installed(
     except TargetReceiptError as exc:
         errors.append(str(exc))
         mode_payload = None
-    if mode_payload is not None:
+    explicit_install_mode = mode_payload is not None
+    if target_mode == "receipt" and mode_payload is None and not any(
+        "install mode receipt" in error.casefold() for error in errors
+    ):
+        errors.append(
+            "Receipt-bound installed verification requires an install mode receipt"
+        )
+    if explicit_install_mode:
         install_mode = mode_payload["mode"]
         major_ota = mode_payload["major_ota"]
+
+    if explicit_install_mode and install_mode == "blank_ab":
+        _validate_blank_ab_install(root_path, errors)
 
     if expected_root_uuid:
         grub_template = _read_text(root_path / "etc/grub.d/09_ming_os")
@@ -952,6 +1187,13 @@ def verify_installed(
                     else:
                         errors.append("Installed Ming GRUB template does not match the authoritative root UUID")
                     break
+    if final_boot:
+        _validate_final_grub(
+            root_path,
+            errors,
+            install_mode=install_mode,
+            expected_root_uuid=expected_root_uuid,
+        )
     default_target = _system_target(root_path / "etc/systemd/system/default.target")
     if "graphical.target" not in default_target:
         errors.append("Installed system default.target is not graphical.target")
@@ -984,6 +1226,7 @@ def verify_installed(
 def verify_installed_from_receipt(
     receipt_path: Path | str = TARGET_RECEIPT_PATH,
     *,
+    final_boot: bool = False,
     attempt_path: Path | str | None = None,
     mount_info_provider: Callable[[Path], Mapping[str, Any]] | None = None,
     lstat_func: Callable[[Path], object] = os.lstat,
@@ -1001,6 +1244,7 @@ def verify_installed_from_receipt(
         target_mode="receipt",
         expected_root_uuid=receipt["uuid"],
         expected_root_fstype=receipt["fstype"],
+        final_boot=final_boot,
     )
 
 
@@ -1015,6 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
     installed.add_argument("--root")
     installed.add_argument("--receipt", action="store_true")
     installed.add_argument("--receipt-path", default=str(TARGET_RECEIPT_PATH))
+    installed.add_argument("--final-boot", action="store_true")
     receipt = commands.add_parser("receipt")
     receipt.add_argument("--path", default=str(TARGET_RECEIPT_PATH))
     receipt.add_argument("--begin-attempt", action="store_true")
@@ -1068,7 +1313,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.receipt:
         try:
-            result = verify_installed_from_receipt(args.receipt_path)
+            result = verify_installed_from_receipt(
+                args.receipt_path,
+                final_boot=args.final_boot,
+            )
         except TargetReceiptError as exc:
             result = _result(
                 [f"Authoritative Calamares target receipt rejected: {exc}"],
@@ -1080,7 +1328,10 @@ def main(argv: list[str] | None = None) -> int:
                 desktop_session="incomplete",
             )
     else:
-        result = verify_installed(args.root or args.target)
+        result = verify_installed(
+            args.root or args.target,
+            final_boot=args.final_boot,
+        )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["ok"] else 1
 

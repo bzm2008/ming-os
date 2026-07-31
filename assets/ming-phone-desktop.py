@@ -21,6 +21,9 @@ def widget_state_path():
 
 METRIC_MODES = ("memory", "cpu", "network")
 COMPACT_BATTERY_REFRESH_SECONDS = 30
+STATUS_SUMMARY_REFRESH_SECONDS = 30
+STATUS_RESOURCE_REFRESH_SECONDS = 15
+LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 
 
 def normalize_metric_mode(value):
@@ -335,6 +338,18 @@ CLOCK_MARGIN_X = 26
 CLOCK_MARGIN_Y = 8
 STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_EXPANDED_HEIGHT = 248
+STATUS_WIDGET_TOP_GAP_MAX = 8
+
+
+def status_widget_top_gap_is_valid(content_y, card_y, max_gap=STATUS_WIDGET_TOP_GAP_MAX):
+    """Keep compact and expanded widget content aligned to the card top."""
+    try:
+        gap = int(content_y) - int(card_y)
+        return 0 <= gap <= int(max_gap)
+    except (TypeError, ValueError):
+        return False
+
+
 WALLPAPER_PATHS = [
     Path("/usr/share/backgrounds/ming-os/default.png"),
     Path("/usr/share/backgrounds/ming-os/default-1366x768.png"),
@@ -738,13 +753,8 @@ def launch_item(item, source_rect=None):
         return False
     legacy_argv = item.get("legacy_argv")
     if legacy_argv:
-        log(f"shared launcher validation unavailable; using safe legacy argv for {path}")
-        try:
-            subprocess.Popen(list(legacy_argv), shell=False)
-            return True
-        except Exception as exc:
-            log(f"legacy exec fallback failed for {path}: {exc}")
-            return False
+        log(f"shared launcher validation unavailable; delegating to launch proxy for {path}")
+        return launch_through_proxy(path, source_rect)
     parser = getattr(COMMON, "parse_desktop_file", None)
     validator = getattr(COMMON, "desktop_launch_diagnostic", None)
     sender = getattr(COMMON, "send_launch_request", None)
@@ -765,12 +775,19 @@ def launch_item(item, source_rect=None):
         return False
     if COMMON.send_launch_request(path, "desktop", source_rect):
         return True
-    log(f"launch broker unavailable; using direct fallback for {path}")
+    log(f"launch broker unavailable; delegating restart and diagnostics for {path}")
+    return launch_through_proxy(path, source_rect)
+
+
+def launch_through_proxy(path, source_rect=None):
+    command = [LAUNCH_PROXY, "--desktop-file", str(path), "--source", "desktop"]
+    if source_rect is not None:
+        command.extend(("--rect", json.dumps(source_rect, separators=(",", ":"))))
     try:
-        subprocess.Popen(list(entry.argv), shell=False)
+        subprocess.Popen(command, shell=False)
         return True
     except Exception as exc:
-        log(f"exec fallback failed for {path}: {exc}")
+        log(f"launch proxy failed for {path}: {exc}")
     return False
 
 
@@ -2154,6 +2171,11 @@ class StatusWidget(Gtk.Box):
         self.compact_date_label = Gtk.Label()
         self.compact_date_label.get_style_context().add_class("status-compact-date")
         compact.pack_start(self.compact_date_label, False, False, 0)
+        self.compact_network_separator = Gtk.Label(label="|")
+        compact.pack_start(self.compact_network_separator, False, False, 0)
+        self.compact_network_label = Gtk.Label(label="网络 --")
+        self.compact_network_label.get_style_context().add_class("status-compact-date")
+        compact.pack_start(self.compact_network_label, False, False, 0)
         self.compact_battery_separator = Gtk.Label(label="|")
         self.compact_battery_separator.set_no_show_all(True)
         self.compact_battery_separator.set_visible(False)
@@ -2279,8 +2301,8 @@ class StatusWidget(Gtk.Box):
         self.apply_collapsed_state(animate=False)
         self.refresh()
         self.refresh_resource_metric()
-        GLib.timeout_add_seconds(15, self.refresh)
-        GLib.timeout_add_seconds(5, self.refresh_resource_metric_timer)
+        GLib.timeout_add_seconds(STATUS_SUMMARY_REFRESH_SECONDS, self.refresh)
+        GLib.timeout_add_seconds(STATUS_RESOURCE_REFRESH_SECONDS, self.refresh_resource_metric_timer)
 
     def geometry_snapshot(self):
         outer = self.get_allocation()
@@ -2302,7 +2324,9 @@ class StatusWidget(Gtk.Box):
         expected_content_y = geometry["card_y"]
         if (geometry["outer_y"] != CLOCK_MARGIN_Y
                 or geometry["card_y"] != 0
-                or geometry["content_y"] - expected_content_y > 16):
+                or not status_widget_top_gap_is_valid(
+                    geometry["content_y"], expected_content_y
+                )):
             log("geometry top-alignment failed: %s" % json.dumps(geometry, sort_keys=True))
         return False
 
@@ -2989,31 +3013,52 @@ class StatusWidget(Gtk.Box):
         self.compact_time_label.set_text(time_text)
         self.compact_date_label.set_text(date_text)
         if self.collapsed:
-            self.refresh_battery_status()
+            self.refresh_compact_status()
             return True
         if not self.refreshing:
             self.refreshing = True
             threading.Thread(target=self.collect_status, daemon=True).start()
         return True
 
-    def refresh_battery_status(self):
+    def refresh_compact_status(self):
         now = time.monotonic()
         if self.battery_refreshing or now < self.battery_next_refresh_at:
             return False
         self.battery_refreshing = True
         self.battery_next_refresh_at = now + COMPACT_BATTERY_REFRESH_SECONDS
-        threading.Thread(target=self.collect_battery_status, daemon=True).start()
+        threading.Thread(target=self.collect_compact_status, daemon=True).start()
         return True
 
-    def collect_battery_status(self):
+    def collect_compact_status(self):
+        controller = self.device_controller
+        battery = self.collect_compact_component(
+            controller.battery_status) if controller else {}
+        wifi = self.collect_compact_component(
+            controller.wifi_status) if controller else {}
+        ethernet = self.collect_compact_component(
+            controller.ethernet_status, probe_internet=False) if controller else {}
+        GLib.idle_add(self.apply_compact_status, battery, wifi, ethernet)
+
+    @staticmethod
+    def collect_compact_component(callback, *args, **kwargs):
         try:
-            battery = (
-                self.device_controller.battery_status()
-                if self.device_controller else {})
+            return callback(*args, **kwargs)
         except Exception as exc:
-            log(f"battery status collection failed: {exc}")
-            battery = {}
-        GLib.idle_add(self.apply_battery_status, battery)
+            log(f"compact status component failed: {exc}")
+            return {}
+
+    def apply_compact_status(self, battery, wifi, ethernet):
+        wifi_ready = isinstance(wifi, dict) and wifi.get("state") == "ready"
+        ethernet_devices = ethernet.get("devices", []) if isinstance(ethernet, dict) else []
+        ethernet_ready = any(
+            isinstance(device, dict)
+            and str(device.get("state", "")).casefold().startswith("connected")
+            for device in ethernet_devices
+        )
+        self.compact_network_label.set_text(
+            "网络 在线" if ethernet_ready else "网络 可用" if wifi_ready else "网络 --"
+        )
+        return self.apply_battery_status(battery)
 
     def apply_battery_status(self, battery):
         battery = battery if isinstance(battery, dict) else {}
@@ -3220,7 +3265,9 @@ class PhoneDesktop(Gtk.Window):
         self.catalog_stamp = app_catalog_fingerprint()
         self.render()
         GLib.timeout_add_seconds(2, self.mark_ready)
-        GLib.timeout_add_seconds(3, self.refresh_if_apps_changed)
+        # Package installers and Spark trigger refresh_desktop immediately.  This
+        # timer is only a bounded fallback for changes made outside Ming tools.
+        GLib.timeout_add_seconds(15, self.refresh_if_apps_changed)
 
     @property
     def window_origin(self):

@@ -3,6 +3,7 @@
 
 import argparse
 import configparser
+import contextlib
 import hashlib
 import json
 import pathlib
@@ -16,6 +17,11 @@ import sys
 import tempfile
 from datetime import datetime
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows test host fallback
+    fcntl = None
+
 
 SUPPORTED_ARCHITECTURES = {"amd64", "all"}
 PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
@@ -24,6 +30,7 @@ OPT_APPS_ROOT = pathlib.Path("/opt/apps")
 OPT_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
 OPT_PROXY_MANIFEST = pathlib.Path("/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 OPT_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
+OPT_PROXY_NAME_PATTERN = re.compile(r"^ming-opt-[0-9a-f]{64}\.desktop$")
 
 
 def _run(command, timeout=20):
@@ -184,12 +191,15 @@ class PackageInstaller:
 
     def _refresh_caches(self):
         refresh = {}
-        for name, command in (
-            ("desktop_database", ("update-desktop-database", "/usr/share/applications")),
-            ("icon_cache", ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")),
-        ):
+        desktop_results = []
+        for directory in (self.proxy_dir, pathlib.Path("/usr/share/applications")):
+            command = ("update-desktop-database", directory.as_posix())
             returncode, _output, _error = self._call(command, timeout=30)
-            refresh[name] = returncode == 0
+            desktop_results.append(returncode == 0)
+        refresh["desktop_database"] = all(desktop_results)
+        returncode, _output, _error = self._call(
+            ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor"), timeout=30)
+        refresh["icon_cache"] = returncode == 0
         refresh["desktop_state"] = self._refresh_desktop_state()
         return refresh
 
@@ -234,6 +244,12 @@ class PackageInstaller:
                 return record
             entry = parser["Desktop Entry"]
             record["name"] = entry.get("Name[zh_CN]") or entry.get("Name") or path.stem
+            entry_type = entry.get("Type", "Application").strip()
+            hidden = entry.get("Hidden", "").strip().lower() == "true"
+            no_display = entry.get("NoDisplay", "").strip().lower() == "true"
+            if entry_type != "Application" or hidden or no_display:
+                record.update(ok=True, ignored=True, launchable=False)
+                return record
             exec_line = entry.get("Exec", "").strip()
             if not exec_line:
                 record["error"] = "启动器没有 Exec 启动命令。"
@@ -273,7 +289,7 @@ class PackageInstaller:
                 if missing:
                     record["error"] = "缺少运行库：%s" % "; ".join(missing[:3])
                     return record
-            record["ok"] = True
+            record.update(ok=True, launchable=True)
             return record
         except (OSError, configparser.Error) as exc:
             record["error"] = "无法读取启动器：%s" % exc
@@ -289,11 +305,23 @@ class PackageInstaller:
         for value in output.splitlines():
             path = pathlib.Path(value.strip())
             if path.suffix == ".desktop":
-                if self._safe_opt_apps_source(path):
+                try:
+                    path.relative_to(self.opt_apps_root)
+                    under_opt_apps = True
+                except ValueError:
+                    under_opt_apps = False
+                if under_opt_apps and not self._safe_opt_apps_source(path):
+                    records.append({
+                        "path": str(path), "name": path.stem, "ok": False,
+                        "error": "/opt/apps 启动入口路径或权限不安全。",
+                    })
+                elif under_opt_apps:
                     opt_sources.append(path)
                 else:
-                    records.append(self._launcher_record(path))
-        if opt_sources:
+                    record = self._launcher_record(path)
+                    if not record.get("ignored"):
+                        records.append(record)
+        if opt_sources or self.proxy_manifest.exists():
             proxy_records, proxy_error = self.sync_opt_app_proxies(package, opt_sources)
             records.extend(proxy_records)
             if proxy_error and not proxy_records:
@@ -338,6 +366,52 @@ class PackageInstaller:
     def proxy_receipt_path(self):
         return self.proxy_manifest.with_name(self.proxy_manifest.name + ".receipt.json")
 
+    def proxy_lock_path(self):
+        return self.proxy_manifest.with_name(self.proxy_manifest.name + ".lock")
+
+    @contextlib.contextmanager
+    def _proxy_manifest_lock(self):
+        """Serialize manifest read-modify-write transactions across installers."""
+        lock_path = self.proxy_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as stream:
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                return
+
+            import msvcrt  # pylint: disable=import-outside-toplevel
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+                os.fsync(stream.fileno())
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def _managed_proxy_path(self, value):
+        """Return a stale proxy path only when it is owned by our proxy namespace."""
+        try:
+            candidate = pathlib.Path(value)
+            if not candidate.is_absolute() or not OPT_PROXY_NAME_PATTERN.fullmatch(candidate.name):
+                return None
+            proxy_root = self.proxy_dir.resolve(strict=False)
+            if candidate.parent.resolve(strict=False) != proxy_root:
+                return None
+            if candidate.is_symlink():
+                return None
+            return candidate
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+
     def _atomic_bytes(self, path, content, mode=0o644):
         path = pathlib.Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,69 +440,91 @@ class PackageInstaller:
         prepared = []
         for source in sources:
             record = self._launcher_record(source)
+            if record.get("ignored"):
+                continue
             if not record.get("ok"):
                 return [record], record.get("error") or "启动入口校验失败。"
             content = source.read_bytes()
             proxy_name = "ming-opt-%s.desktop" % self._sha256_bytes(str(source).encode("utf-8"))
             proxy = self.proxy_dir / proxy_name
             prepared.append((source, proxy, content, record))
-        self.proxy_dir.mkdir(parents=True, exist_ok=True)
-        existing_entries = []
-        if self.proxy_manifest.exists():
-            try:
-                existing = json.loads(self.proxy_manifest.read_text(encoding="utf-8"))
-                if (existing.get("schema_version") != 1
-                        or existing.get("generation") != OPT_PROXY_GENERATION
-                        or not isinstance(existing.get("entries"), list)):
-                    raise ValueError("existing proxy manifest schema is invalid")
-                for entry in existing["entries"]:
-                    if not isinstance(entry, dict) or not all(
-                            isinstance(entry.get(key), str) for key in (
-                                "proxy_path", "source_path", "package",
-                                "source_sha256", "proxy_sha256")):
-                        raise ValueError("existing proxy manifest entry is invalid")
-                    if entry["package"] != package:
-                        existing_entries.append(entry)
-            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                return [], "无法读取已有启动入口代理清单：%s" % exc
-        entries = list(existing_entries)
-        for source, proxy, content, _record in prepared:
-            entries.append({
-                "proxy_path": str(proxy), "source_path": str(source), "package": package,
-                "source_sha256": self._sha256_bytes(content),
-                "proxy_sha256": self._sha256_bytes(content),
-            })
-        manifest_core = {"schema_version": 1, "generation": OPT_PROXY_GENERATION,
-                         "entries": entries}
-        manifest_core_bytes = (json.dumps(manifest_core, ensure_ascii=False, sort_keys=True,
-                                           separators=(",", ":")) + "\n").encode("utf-8")
-        manifest = dict(manifest_core, sha256=self._sha256_bytes(manifest_core_bytes))
-        manifest_bytes = (json.dumps(manifest, ensure_ascii=False, sort_keys=True,
-                                     indent=2) + "\n").encode("utf-8")
-        receipt = {"schema_version": 1, "generation": OPT_PROXY_GENERATION,
-                   "manifest_sha256": self._sha256_bytes(manifest_bytes)}
-        receipt_bytes = (json.dumps(receipt, ensure_ascii=False, sort_keys=True,
-                                    indent=2) + "\n").encode("utf-8")
-        targets = [proxy for _source, proxy, _content, _record in prepared]
-        targets.extend([self.proxy_manifest, self.proxy_receipt_path()])
-        snapshot = {}
         try:
-            for target in targets:
-                snapshot[target] = target.read_bytes() if target.exists() else None
-            for _source, proxy, content, _record in prepared:
-                self._atomic_bytes(proxy, content)
-            self._atomic_bytes(self.proxy_manifest, manifest_bytes)
-            self._atomic_bytes(self.proxy_receipt_path(), receipt_bytes)
-        except (OSError, ValueError) as exc:
-            for target, content in snapshot.items():
+            with self._proxy_manifest_lock():
+                self.proxy_dir.mkdir(parents=True, exist_ok=True)
+                existing_entries = []
+                stale_entries = []
+                if self.proxy_manifest.exists():
+                    try:
+                        existing = json.loads(self.proxy_manifest.read_text(encoding="utf-8"))
+                        if (existing.get("schema_version") != 1
+                                or existing.get("generation") != OPT_PROXY_GENERATION
+                                or not isinstance(existing.get("entries"), list)):
+                            raise ValueError("existing proxy manifest schema is invalid")
+                        for entry in existing["entries"]:
+                            if not isinstance(entry, dict) or not all(
+                                    isinstance(entry.get(key), str) for key in (
+                                        "proxy_path", "source_path", "package",
+                                        "source_sha256", "proxy_sha256")):
+                                raise ValueError("existing proxy manifest entry is invalid")
+                            if entry["package"] == package:
+                                stale_entries.append(entry)
+                            else:
+                                existing_entries.append(entry)
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        return [], "无法读取已有启动入口代理清单：%s" % exc
+                entries = list(existing_entries)
+                for source, proxy, content, _record in prepared:
+                    entries.append({
+                        "proxy_path": str(proxy), "source_path": str(source), "package": package,
+                        "source_sha256": self._sha256_bytes(content),
+                        "proxy_sha256": self._sha256_bytes(content),
+                    })
+                manifest_core = {"schema_version": 1, "generation": OPT_PROXY_GENERATION,
+                                 "entries": entries}
+                manifest_core_bytes = (json.dumps(
+                    manifest_core, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":")) + "\n").encode("utf-8")
+                manifest = dict(manifest_core, sha256=self._sha256_bytes(manifest_core_bytes))
+                manifest_bytes = (json.dumps(
+                    manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+                receipt = {"schema_version": 1, "generation": OPT_PROXY_GENERATION,
+                           "manifest_sha256": self._sha256_bytes(manifest_bytes)}
+                receipt_bytes = (json.dumps(
+                    receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+                retained_proxy_paths = {entry["proxy_path"] for entry in entries}
+                stale_paths = []
+                for entry in stale_entries:
+                    if entry["proxy_path"] in retained_proxy_paths:
+                        continue
+                    stale = self._managed_proxy_path(entry["proxy_path"])
+                    if stale is not None:
+                        stale_paths.append(stale)
+                targets = [proxy for _source, proxy, _content, _record in prepared]
+                targets.extend(stale_paths)
+                targets.extend([self.proxy_manifest, self.proxy_receipt_path()])
+                snapshot = {}
                 try:
-                    if content is None:
-                        target.unlink(missing_ok=True)
-                    else:
-                        self._atomic_bytes(target, content)
-                except OSError:
-                    pass
-            return [], "启动入口代理发布失败：%s" % exc
+                    for target in targets:
+                        snapshot[target] = target.read_bytes() if target.exists() else None
+                    for _source, proxy, content, _record in prepared:
+                        self._atomic_bytes(proxy, content)
+                    for stale in stale_paths:
+                        stale.unlink(missing_ok=True)
+                    self._atomic_bytes(self.proxy_manifest, manifest_bytes)
+                    self._atomic_bytes(self.proxy_receipt_path(), receipt_bytes)
+                except (OSError, ValueError) as exc:
+                    for target, content in snapshot.items():
+                        try:
+                            if content is None:
+                                target.unlink(missing_ok=True)
+                            else:
+                                self._atomic_bytes(target, content)
+                        except OSError:
+                            pass
+                    return [], "启动入口代理发布失败：%s" % exc
+        except OSError as exc:
+            return [], "启动入口代理锁定失败：%s" % exc
         records = []
         for source, proxy, _content, record in prepared:
             updated = dict(record, path=str(proxy), proxy_path=str(proxy), source_path=str(source),
@@ -486,8 +582,8 @@ class PackageInstaller:
                 **{key: inspected[key] for key in ("file", "package", "version", "architecture")},
                 error="软件包安装后未处于已安装状态。",
             )
-        refresh = self._refresh_caches()
         launchers = self._package_launchers(inspected["package"])
+        refresh = self._refresh_caches()
         launcher_warnings = [record for record in launchers if not record.get("ok")]
         launch_ready = not launcher_warnings
         if not launch_ready:
@@ -586,8 +682,8 @@ class PackageInstaller:
                 dependency_repair_attempted=dependency_repair_attempted,
                 error="软件包修复后未处于已安装状态。",
             )
-        refresh = self._refresh_caches()
         launchers = self._package_launchers(package)
+        refresh = self._refresh_caches()
         launcher_warnings = [record for record in launchers if not record.get("ok")]
         self._log("repaired %s" % package)
         return self._result(

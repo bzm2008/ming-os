@@ -12,6 +12,9 @@ import sys
 
 
 MAX_APPIMAGE_BYTES = 8 * 1024 * 1024 * 1024
+APPIMAGE_HEADER_SIZE = 20
+APPIMAGE_MAGIC_OFFSET = 8
+APPIMAGE_MAGIC = b"AI\x02"
 
 
 class AppImageInstaller:
@@ -23,7 +26,8 @@ class AppImageInstaller:
     def _result(ok, **values):
         result = {
             "ok": bool(ok), "action": "install", "state": "", "error": "",
-            "source": "", "installed_file": "", "desktop_file": "", "fuse_ready": False,
+            "source": "", "installed_file": "", "desktop_file": "",
+            "fuse_ready": False, "run_mode": "",
         }
         result.update(values)
         return result
@@ -43,10 +47,21 @@ class AppImageInstaller:
         if not 0 < details.st_size <= MAX_APPIMAGE_BYTES:
             return None, "AppImage 文件大小无效。"
         try:
-            header = resolved.read_bytes()[:20]
+            # Read only the fixed ELF/AppImage header.  AppImages can be several
+            # gigabytes; reading the whole file just to validate its type can
+            # exhaust memory before the copy even starts.
+            with resolved.open("rb") as handle:
+                header = handle.read(APPIMAGE_HEADER_SIZE)
         except OSError:
             return None, "无法读取 AppImage 文件。"
-        if len(header) < 20 or header[:4] != b"\x7fELF" or header[4] != 2 or header[18:20] != b"\x3e\x00":
+        if (
+            len(header) < APPIMAGE_HEADER_SIZE
+            or header[:4] != b"\x7fELF"
+            or header[4] != 2
+            or header[18:20] != b"\x3e\x00"
+            or header[APPIMAGE_MAGIC_OFFSET:APPIMAGE_MAGIC_OFFSET + len(APPIMAGE_MAGIC)]
+            != APPIMAGE_MAGIC
+        ):
             return None, "该 AppImage 不是受支持的 amd64 可执行文件。"
         return resolved, ""
 
@@ -64,7 +79,13 @@ class AppImageInstaller:
 
     @staticmethod
     def fuse_ready():
-        return pathlib.Path("/dev/fuse").exists()
+        fuse = pathlib.Path("/dev/fuse")
+        return fuse.exists() and os.access(fuse, os.R_OK | os.W_OK)
+
+    @classmethod
+    def run_mode(cls):
+        """Return the launcher mode that works in this runtime environment."""
+        return "direct" if cls.fuse_ready() else "extract-and-run"
 
     def install(self, source):
         if self.uid_getter() == 0:
@@ -92,7 +113,7 @@ class AppImageInstaller:
                 "Type=Application\n"
                 "Name=%s\n"
                 "Comment=User-installed AppImage\n"
-                "Exec=%s\n"
+                "Exec=/usr/local/bin/ming-appimage-run %s\n"
                 "Icon=application-x-executable\n"
                 "Terminal=false\n"
                 "Categories=Utility;\n"
@@ -107,6 +128,7 @@ class AppImageInstaller:
         return self._result(
             True, state="installed", source=str(resolved), installed_file=str(target),
             desktop_file=str(desktop), fuse_ready=self.fuse_ready(),
+            run_mode=self.run_mode(),
         )
 
 

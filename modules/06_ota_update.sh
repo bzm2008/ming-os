@@ -387,7 +387,7 @@ validate_staging_inputs() {
     local backup_uuid backup_manifest backup_manifest_relative strategy iso_name
     local iso_uuid iso_mount_target iso_boot_path shared_status
     local manifest_uuid manifest_complete manifest_strategy mount_target expected_relative
-    local authoritative authoritative_version authoritative_checksum authoritative_filename
+    local authoritative authoritative_tmp authoritative_version authoritative_checksum authoritative_filename
     local authoritative_ready authoritative_available authoritative_type
     state="$(cat "${state_path}")"
     status="$(printf '%s' "${state}" | jq -r '.status // ""')"
@@ -448,20 +448,30 @@ validate_staging_inputs() {
     [[ "${actual_checksum}" == "${checksum,,}" ]] || { log_error "OTA ISO SHA256 mismatch"; return 1; }
 
     authoritative="$(fetch_authoritative_major_manifest)" || return 1
-    authoritative_available="$(printf '%s' "${authoritative}" | jq -r '.has_update // .update_available // false')"
-    authoritative_ready="$(printf '%s' "${authoritative}" | jq -r '.ready // true')"
-    authoritative_type="$(printf '%s' "${authoritative}" | jq -r '.update_type // "major"')"
-    authoritative_version="$(printf '%s' "${authoritative}" | jq -r '.version // .latest_version // ""')"
-    authoritative_checksum="$(printf '%s' "${authoritative}" | jq -r '.checksum // .sha256 // ""')"
-    authoritative_filename="$(printf '%s' "${authoritative}" | jq -r '.filename // .iso_name // empty')"
+    authoritative_tmp="$(mktemp)" || return 1
+    if ! printf '%s\n' "${authoritative}" >"${authoritative_tmp}" || \
+       ! validate_ota_manifest_schema "${authoritative_tmp}" || \
+       ! verify_signed_ota_manifest "${authoritative_tmp}"; then
+        rm -f "${authoritative_tmp}"
+        log_error "authoritative ISO manifest signature or schema is invalid"
+        return 1
+    fi
+    authoritative_available="$(jq -r '.has_update // .update_available // false' "${authoritative_tmp}")"
+    authoritative_ready="$(jq -r '.ready // true' "${authoritative_tmp}")"
+    authoritative_type="$(jq -r '.update_type // "major"' "${authoritative_tmp}")"
+    authoritative_version="$(jq -r '.version // .latest_version // ""' "${authoritative_tmp}")"
+    authoritative_checksum="$(jq -r '.checksum // .sha256 // ""' "${authoritative_tmp}")"
+    authoritative_filename="$(jq -r '.filename // .iso_name // empty' "${authoritative_tmp}")"
     authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
     if [[ "${authoritative_available}" != "true" || "${authoritative_ready}" != "true" ||
           "${authoritative_type}" != "major" || "${authoritative_version}" != "${version}" ||
           "${authoritative_checksum,,}" != "${checksum,,}" ||
           "$(basename -- "${authoritative_filename}")" != "${iso_name}" ]]; then
+        rm -f "${authoritative_tmp}"
         log_error "authoritative ISO metadata mismatch"
         return 1
     fi
+    rm -f "${authoritative_tmp}"
 
     [[ -f "${backup_manifest}" && ! -L "${backup_manifest}" ]] || {
         log_error "backup manifest is missing or a symlink"; return 1;

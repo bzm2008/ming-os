@@ -913,6 +913,13 @@ class DesktopSourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, status)
 
+    def test_status_widget_top_gap_is_capped_at_eight_pixels(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn("STATUS_WIDGET_TOP_GAP_MAX = 8", self.phone)
+        self.assertIn("status_widget_top_gap_is_valid", self.phone)
+        self.assertIn("status_widget_top_gap_is_valid(", status)
+
     def test_blank_desktop_press_is_consumed_before_release_context_menu(self):
         fixed = self.phone[self.phone.index("    def on_fixed_button_press"):
                            self.phone.index("    def on_fixed_motion", self.phone.index("    def on_fixed_button_press"))]
@@ -970,6 +977,36 @@ class DesktopSourceTests(unittest.TestCase):
             self.assertIn(marker, installer)
         self.assertNotIn("pkill -f ming-live-notice", installer)
 
+    def test_live_launcher_uses_a_restricted_root_helper(self):
+        launcher = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'"):
+            self.desktop.index("\nCALAMARESLAUNCHER", self.desktop.index("cat > /usr/local/bin/ming-calamares-launcher"))
+        ]
+        self.assertIn("ming-live-installer-root", launcher)
+        self.assertNotIn("exec pkexec calamares -d", launcher)
+        self.assertNotIn("sudo -n /usr/local/sbin/ming-calamares-preflight", launcher)
+
+    def test_installer_session_does_not_run_a_second_preflight(self):
+        session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        self.assertNotIn("prepare_calamares_runtime", session)
+        self.assertNotIn("ming-calamares-preflight", session)
+
+    def test_preflight_reapplies_selected_mode_before_live_verification(self):
+        preflight = self.desktop[
+            self.desktop.index("cat > /usr/local/sbin/ming-calamares-preflight"):
+            self.desktop.index(
+                "\nCALAMARESPREFLIGHT",
+                self.desktop.index("cat > /usr/local/sbin/ming-calamares-preflight"),
+            )
+        ]
+        self.assertLess(
+            preflight.index("/usr/local/sbin/ming-install-mode write --mode"),
+            preflight.index("/usr/local/sbin/ming-installer-verify live"),
+        )
+
     def test_live_installer_notice_closes_only_after_calamares_window_is_seen(self):
         installer = self.desktop[
             self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
@@ -981,6 +1018,25 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("wmctrl -i -a", installer)
         self.assertLess(installer.index("tolower($0) ~ /calamares/"), installer.index('kill "${notice_pid}"'))
         self.assertIn("notice_pid=", installer)
+
+    def test_live_window_probes_and_desktop_sync_are_bounded(self):
+        notice = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-live-notice"):
+            self.desktop.index("\nLIVENOTICE", self.desktop.index("cat > /usr/local/bin/ming-live-notice"))
+        ]
+        installer = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        organizer = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-desktop-organizer"):
+            self.desktop.index("\nDESKORG", self.desktop.index("cat > /usr/local/bin/ming-desktop-organizer"))
+        ]
+        self.assertIn("timeout=2", notice)
+        self.assertIn("subprocess.TimeoutExpired", notice)
+        self.assertIn("timeout --foreground 2s wmctrl -lx", installer)
+        self.assertIn("timeout --foreground 2s wmctrl -i -r", installer)
+        self.assertIn("timeout --foreground 8s ming-phone-desktop --sync", organizer)
 
     def test_live_notice_exposes_build_identity(self):
         notice = self.desktop[
@@ -1083,6 +1139,15 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("GLib.idle_add(self.apply_window_probe", self.phone)
         self.assertIn("self.launch_feedback.set_sensitive(False)", self.phone)
 
+    def test_phone_desktop_never_executes_launcher_argv_after_broker_failure(self):
+        launch = self.phone[
+            self.phone.index("def launch_item(item, source_rect=None):"):
+            self.phone.index("def write_generated_core_launcher", self.phone.index("def launch_item"))
+        ]
+        self.assertIn("LAUNCH_PROXY", launch)
+        self.assertIn('"--desktop-file"', launch)
+        self.assertNotIn("subprocess.Popen(list(entry.argv)", launch)
+
     def test_render_keeps_idle_launch_feedback_hidden(self):
         self.assertIn("if not self.launch_feedback.item:", self.phone)
         self.assertIn("self.launch_feedback.hide()", self.phone)
@@ -1110,15 +1175,30 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("self.header_battery_label.set_text(battery_text)", status)
         self.assertNotIn("self.battery_label = self.resource_label", status)
 
-    def test_collapsed_status_widget_refreshes_only_laptop_battery_in_background(self):
+    def test_collapsed_status_widget_refreshes_low_frequency_network_and_battery_summary(self):
         status = self.phone[self.phone.index("class StatusWidget"):
                             self.phone.index("class WallpaperCanvas")]
         refresh = status[status.index("    def refresh(self):"):
-                         status.index("    def collect_status", status.index("    def refresh(self):"))]
-        self.assertIn("self.refresh_battery_status()", refresh)
-        self.assertIn("def refresh_battery_status", status)
-        self.assertIn("threading.Thread(target=self.collect_battery_status, daemon=True).start()", status)
-        self.assertIn("self.device_controller.battery_status()", status)
+                          status.index("    def collect_status", status.index("    def refresh(self):"))]
+        self.assertIn("self.refresh_compact_status()", refresh)
+        self.assertIn("def refresh_compact_status", status)
+        self.assertIn("threading.Thread(target=self.collect_compact_status, daemon=True).start()", status)
+        self.assertIn("controller.battery_status", status)
+        self.assertIn("controller.wifi_status", status)
+        self.assertIn("controller.ethernet_status", status)
+        self.assertIn("self.compact_network_label", status)
+
+    def test_collapsed_status_keeps_partial_results_when_one_probe_fails(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn("def collect_compact_component", status)
+        self.assertIn("controller.wifi_status", status)
+        self.assertIn("controller.ethernet_status", status)
+
+    def test_collapsed_status_accepts_connected_ethernet_detail_states(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn('startswith("connected")', status)
 
     def test_status_wifi_button_uses_ming_diagnostics_not_empty_nm_editor(self):
         status = self.phone[self.phone.index("class StatusWidget"):
@@ -1133,7 +1213,8 @@ class DesktopPolishContractTests(unittest.TestCase):
 
     def test_spark_requires_visible_process_or_window_before_success(self):
         self.assertIn("wait_for_spark_ready", self.apps)
-        self.assertIn("pgrep -f", self.apps)
+        self.assertIn('kill -0 "${spark_pid}"', self.apps)
+        self.assertNotIn("pgrep -f '[/](spark-store)( |$)'", self.apps)
         self.assertIn("wmctrl -lx", self.apps)
         self.assertIn("Spark Store startup failed rc=", self.apps)
         self.assertIn('[[ "${rc}" -ne 0 ]] || rc=1', self.apps)

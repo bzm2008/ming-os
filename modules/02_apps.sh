@@ -2066,7 +2066,8 @@ spark_pid=$!
 
 spark_window_visible() {
     command -v wmctrl >/dev/null 2>&1 \
-        && wmctrl -lx 2>/dev/null | grep -qi 'spark-store'
+        && command -v timeout >/dev/null 2>&1 \
+        && timeout --foreground 2s wmctrl -lx 2>/dev/null | grep -qi 'spark-store'
 }
 
 wait_for_spark_ready() {
@@ -2075,10 +2076,13 @@ wait_for_spark_ready() {
         if spark_window_visible; then
             return 0
         fi
-        if kill -0 "${spark_pid}" 2>/dev/null || pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1; then
+        # Only the process started by this wrapper is authoritative.  A stale
+        # Spark process from a previous launch must not make a failed launch
+        # look successful.
+        if kill -0 "${spark_pid}" 2>/dev/null; then
             stable_checks=$((stable_checks + 1))
             missing_checks=0
-            if (( stable_checks >= 4 )); then
+            if (( stable_checks >= 8 )); then
                 return 0
             fi
         else
@@ -2101,7 +2105,7 @@ fi
 wait "${spark_pid}"
 rc=$?
 
-if pgrep -f '[/](spark-store)( |$)' >/dev/null 2>&1 || spark_window_visible; then
+if spark_window_visible; then
     printf '[%s] Spark Store is ready despite launcher exit rc=%s\n' "$(date '+%F %T')" "${rc}" >>"${MING_SPARK_LOG}"
     exit 0
 fi

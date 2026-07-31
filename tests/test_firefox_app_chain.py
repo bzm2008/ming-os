@@ -39,8 +39,12 @@ class AppImageInstallerContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "Example.AppImage"
-            # A minimal x86_64 ELF header is enough for validation; it is never executed.
-            source.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x02\x00\x3e\x00")
+            # A minimal x86_64 type-2 AppImage header is enough for validation;
+            # it is never executed by this unit test.
+            source.write_bytes(
+                b"\x7fELF\x02\x01\x01\x00AI\x02" + b"\x00" * 5
+                + b"\x02\x00\x3e\x00"
+            )
             home = root / "home"
             result = installer.AppImageInstaller(home=home, uid_getter=lambda: 1000).install(source)
 
@@ -52,12 +56,47 @@ class AppImageInstallerContracts(unittest.TestCase):
                 self.assertTrue(target.stat().st_mode & 0o100)
             self.assertTrue(launcher.is_file())
             desktop = launcher.read_text(encoding="utf-8")
-            if __import__("os").name == "nt":
-                self.assertIn("Exec=", desktop)
-                self.assertIn(target.name, desktop)
-            else:
-                self.assertIn("Exec=" + str(target), desktop)
+            self.assertIn("Exec=/usr/local/bin/ming-appimage-run ", desktop)
+            self.assertIn(target.name, desktop)
             self.assertIn("Icon=application-x-executable", desktop)
+
+    def test_appimage_validation_reads_a_fixed_header_and_requires_type2_magic(self):
+        source = APPIMAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("APPIMAGE_MAGIC = b\"AI\\x02\"", source)
+        self.assertIn("handle.read(APPIMAGE_HEADER_SIZE)", source)
+        self.assertNotIn("resolved.read_bytes()", source)
+
+    def test_appimage_installer_rejects_an_elf_without_the_appimage_magic(self):
+        installer = load_module("ming_appimage_installer_magic", APPIMAGE_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "NotAnAppImage.AppImage"
+            source.write_bytes(
+                b"\x7fELF\x02\x01\x01\x00BAD" + b"\x00" * 5
+                + b"\x02\x00\x3e\x00"
+            )
+            result = installer.AppImageInstaller(
+                home=root / "home", uid_getter=lambda: 1000
+            ).install(source)
+            self.assertFalse(result["ok"])
+            self.assertEqual("validation_failed", result["state"])
+            self.assertIn("AppImage", result["error"])
+
+    def test_appimage_install_reports_extract_and_run_fallback_without_fuse(self):
+        installer = load_module("ming_appimage_installer_fallback", APPIMAGE_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "Fallback.AppImage"
+            source.write_bytes(
+                b"\x7fELF\x02\x01\x01\x00AI\x02" + b"\x00" * 5
+                + b"\x02\x00\x3e\x00"
+            )
+            result = installer.AppImageInstaller(
+                home=root / "home", uid_getter=lambda: 1000
+            ).install(source)
+            self.assertIn(result["run_mode"], {"direct", "extract-and-run"})
+            if not result["fuse_ready"]:
+                self.assertEqual("extract-and-run", result["run_mode"])
 
     def test_appimage_installer_refuses_root_and_wrong_architecture_without_copying(self):
         installer = load_module("ming_appimage_installer_root", APPIMAGE_PATH)

@@ -321,6 +321,79 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
+    def test_build_gate_accepts_mode_selected_blank_ab_erase_flow(self):
+        self.assertIn("ming-install-mode", self.build)
+        self.assertIn("ming-calamares-launcher", self.build)
+        self.assertNotIn(
+            "partition.conf must not force one-click erase; initialPartitioningChoice must be none",
+            self.build,
+        )
+
+    def test_build_gate_structurally_validates_every_blank_ab_partition(self):
+        gate = self.build[
+            self.build.index('partition = load_yaml("etc/calamares/modules/partition.conf")'):
+            self.build.index('desktop_gate = load_yaml', self.build.index('partition = load_yaml'))
+        ]
+        for label, mountpoint in (
+            ("MING-ESP", "/boot/efi"),
+            ("MING-BOOT", "/boot"),
+            ("MING-ROOT-A", "/"),
+            ("MING-ROOT-B", ""),
+            ("MING-HOME", "/home"),
+        ):
+            self.assertIn(label, gate)
+            if mountpoint:
+                self.assertIn(mountpoint, gate)
+        self.assertIn("expected_layout", gate)
+        self.assertIn("exactly one", gate)
+
+    def test_build_gate_requires_root_helper_for_live_calamares(self):
+        self.assertIn("ming-live-installer-root", self.build)
+        self.assertIn("org.ming.live.installer.policy", self.build)
+
+    def test_build_gate_rejects_privileged_installer_logs_under_tmp(self):
+        self.assertIn("must not write privileged logs under /tmp", self.build)
+        self.assertIn("/run/ming-installer", self.build)
+
+    def test_build_gate_requires_unified_final_installed_verification(self):
+        self.assertIn("installed --receipt --final-boot", self.build)
+        self.assertIn("unified final installed-system verification", self.build)
+
+    def test_build_gate_follows_the_root_helper_installer_ownership(self):
+        helper_gate = self.build.split(
+            'if relative_path.endswith("ming-live-installer-root"):', 1
+        )[1].split(
+            'if relative_path.endswith("ming-calamares-preflight"):', 1
+        )[0]
+        for marker in ("ming-install-mode write", "ming-calamares-preflight", "calamares -d"):
+            self.assertIn(marker, helper_gate)
+
+        launcher_gate = self.build.split(
+            'if relative_path.endswith("ming-calamares-launcher"):', 1
+        )[1].split(
+            'if relative_path.endswith(("ming-live-installer.sh", "ming-installer-session"))', 1
+        )[0]
+        self.assertIn("choose_install_mode", launcher_gate)
+        self.assertIn("ming-live-installer-root", launcher_gate)
+        self.assertNotIn('"ming-calamares-preflight"', launcher_gate)
+        self.assertNotIn('"calamares -d"', launcher_gate)
+
+    def test_build_gate_requires_unified_session_coordinator_autostart(self):
+        """The image must not re-enable retired per-component session watchdogs."""
+        self.assertIn('home/user/.config/autostart/ming-session-healthcheck.desktop', self.build)
+        self.assertIn('ming-session-healthcheck --session', self.build)
+        self.assertNotIn(
+            'require_file("home/user/.config/autostart/ming-dock.desktop", "ming-plank-watchdog --session")',
+            self.build,
+        )
+        self.assertNotIn(
+            'require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")',
+            self.build,
+        )
+        self.assertIn("legacy_exec = next(", self.build)
+        self.assertIn('line.startswith("Exec=")', self.build)
+        self.assertNotIn('if "ming-plank-watchdog --session" in legacy_entry', self.build)
+
     def test_display_runtime_gate_accepts_schema_valid_diagnostic_status(self):
         """No X session returns display diagnostics with exit 2, not a bad image."""
         start = 'if display_status="$(chroot_exec /usr/local/bin/ming-display-control status --json)"'

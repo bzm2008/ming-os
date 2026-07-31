@@ -128,8 +128,27 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
 
     def test_downloaded_appimages_have_a_context_menu_and_mime_handler(self):
         self.assertIn("ming-appimage-installer.desktop", DESKTOP)
-        self.assertIn("MimeType=application/x-appimage;application/x-executable;", DESKTOP)
+        appimage_desktop = DESKTOP.split(
+            "cat > /usr/share/applications/ming-appimage-installer.desktop << 'MINGAPPIMAGEINSTALLERDESKTOP'",
+            1,
+        )[1].split("MINGAPPIMAGEINSTALLERDESKTOP", 1)[0]
+        self.assertIn("MimeType=application/x-appimage;", appimage_desktop)
+        self.assertNotIn("application/x-executable", appimage_desktop)
         self.assertIn("Exec=/usr/local/bin/ming-appimage-install-gui %f", DESKTOP)
+        mime_apps = DESKTOP.split("python3 - \"/home/${MING_USER}/.config/mimeapps.list\"", 1)[1]
+        self.assertNotIn(
+            'config["Default Applications"]["application/x-executable"]', mime_apps
+        )
+        self.assertIn(
+            'remove_handler("Default Applications", "application/x-executable", '
+            '"ming-appimage-installer.desktop")',
+            mime_apps,
+        )
+        self.assertIn(
+            'remove_handler("Added Associations", "application/x-executable", '
+            '"ming-appimage-installer.desktop")',
+            mime_apps,
+        )
         final_menu = DESKTOP.split("configure_simplified_menus() {", 1)[1].split(
             "\n# ========================", 1)[0]
         self.assertIn("安装 AppImage", final_menu)
