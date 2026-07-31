@@ -33,7 +33,7 @@ alwaysShowPartitionLabels: true
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
-initialPartitioningChoice: none
+initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
   - name: "MING-BOOT"

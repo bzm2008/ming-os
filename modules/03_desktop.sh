@@ -6451,7 +6451,7 @@ alwaysShowPartitionLabels: true
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
-initialPartitioningChoice: none
+initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
   - name: "MING-BOOT"
@@ -6888,12 +6888,19 @@ fi
 /usr/local/bin/ming-live-notice >/tmp/ming-installer-live-notice.log 2>&1 &
 notice_pid="$!"
 
-focus_installer() {
+close_live_notice_when_calamares_visible() {
     command -v wmctrl >/dev/null 2>&1 || return 0
-    for _focus_try in $(seq 1 40); do
-        if wmctrl -lx 2>/dev/null | grep -qi 'calamares\.calamares'; then
-            wmctrl -x -r calamares.calamares -b add,maximized_vert,maximized_horz 2>/dev/null || true
-            wmctrl -x -a calamares.calamares 2>/dev/null || true
+    # Keep watching through the mode selector and slow module startup. The
+    # notice must remain available when preflight or Calamares fails.
+    for _focus_try in $(seq 1 720); do
+        local calamares_window
+        calamares_window="$(
+            wmctrl -lx 2>/dev/null |
+                awk 'tolower($0) ~ /calamares/ && $1 ~ /^0[xX][0-9a-fA-F]+$/ { print $1; exit }'
+        )"
+        if [ -n "${calamares_window}" ]; then
+            wmctrl -i -r "${calamares_window}" -b add,maximized_vert,maximized_horz 2>/dev/null || true
+            wmctrl -i -a "${calamares_window}" 2>/dev/null || true
             kill "${notice_pid}" 2>/dev/null || true
             wait "${notice_pid}" 2>/dev/null || true
             return 0
@@ -6943,7 +6950,7 @@ while true; do
         continue
     fi
     chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
-    focus_installer &
+    close_live_notice_when_calamares_visible &
     /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
     # 已触发关机/重启则退出循环
     systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null && break

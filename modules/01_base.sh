@@ -3309,7 +3309,7 @@ defaultFileSystemType: "ext4"
 # ext4 稳定可靠，是绝大多数老机器的最佳选择
 availableFileSystemTypes:
   - "ext4"
-initialPartitioningChoice: none
+initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
   - name: "MING-BOOT"

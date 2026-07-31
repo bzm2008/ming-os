@@ -113,6 +113,19 @@ class DesktopSourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, installer)
 
+    def test_installer_session_keeps_live_notice_watcher_through_mode_selection(self):
+        session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"))
+        ]
+        self.assertIn("close_live_notice_when_calamares_visible", session)
+        self.assertIn("seq 1 720", session)
+        self.assertIn("wmctrl -lx", session)
+        self.assertIn("awk 'tolower($0) ~ /calamares/", session)
+        self.assertIn("wmctrl -i -r", session)
+        self.assertIn("wmctrl -i -a", session)
+        self.assertNotIn("grep -qi 'calamares\\.calamares'", session)
+
     def test_finalize_keeps_the_live_installer_on_live_desktops(self):
         launcher_list = self.finalize[
             self.finalize.index("readonly DESKTOP_LAUNCHERS=("):
@@ -961,8 +974,10 @@ class DesktopSourceTests(unittest.TestCase):
             self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
         ]
         self.assertIn("wmctrl -lx", installer)
-        self.assertIn("calamares\\.calamares", installer)
-        self.assertLess(installer.index("calamares\\.calamares"), installer.index('kill "${notice_pid}"'))
+        self.assertIn("tolower($0) ~ /calamares/", installer)
+        self.assertIn("wmctrl -i -r", installer)
+        self.assertIn("wmctrl -i -a", installer)
+        self.assertLess(installer.index("tolower($0) ~ /calamares/"), installer.index('kill "${notice_pid}"'))
         self.assertIn("notice_pid=", installer)
 
     def test_live_notice_exposes_build_identity(self):

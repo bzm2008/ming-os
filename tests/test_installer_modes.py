@@ -79,6 +79,12 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
 
+    def test_blank_ab_payload_defaults_to_erase_disk_flow(self):
+        mode = load_mode()
+        partition = mode.partition_config("blank_ab")
+        self.assertIn("initialPartitioningChoice: erase", partition)
+        self.assertNotIn("initialPartitioningChoice: none", partition)
+
     def test_dual_boot_payload_disables_major_ota_and_requires_manual_partitioning(self):
         mode = load_mode()
         payload = mode.build_mode_payload("dual_boot_preserve")
