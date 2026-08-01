@@ -153,22 +153,31 @@ def _system_storage_info(root_source: str) -> dict[str, Any]:
     if not disk:
         return {"available": False}
     table = _command_stdout(["lsblk", "-ndo", "PTTYPE", disk]).casefold()
-    parts = _command_stdout(["lsblk", "-nrpo", "NAME,TYPE,PARTTYPE,LABEL", disk])
+    parts = _command_stdout(["lsblk", "-nrpo", "NAME,TYPE,PARTTYPE,PARTLABEL", disk])
     bios_boot_present = False
+    bios_boot_parttype = ""
+    bios_boot_partlabel = ""
     for line in parts.splitlines():
         fields = line.split(None, 3)
         if len(fields) < 3 or fields[1] != "part":
             continue
         parttype = fields[2].casefold()
-        label = fields[3] if len(fields) > 3 else ""
-        if parttype == BIOS_BOOT_PARTITION_GUID or label == "MING-BIOSBOOT":
+        partlabel = fields[3] if len(fields) > 3 else ""
+        if partlabel == "MING-BIOSBOOT":
+            bios_boot_parttype = parttype
+            bios_boot_partlabel = partlabel
+        if parttype == BIOS_BOOT_PARTITION_GUID:
             bios_boot_present = True
-            break
+            if not bios_boot_parttype:
+                bios_boot_parttype = parttype
+                bios_boot_partlabel = partlabel
     return {
         "available": True,
         "disk": disk,
         "partition_table": table,
         "bios_boot_present": bios_boot_present,
+        "bios_boot_parttype": bios_boot_parttype,
+        "bios_boot_partlabel": bios_boot_partlabel,
     }
 
 
@@ -913,8 +922,12 @@ def _validate_blank_ab_storage(
     table = str(info.get("partition_table", "")).casefold()
     if table and table != "gpt":
         errors.append("Installed A/B target disk must use GPT")
-    if not firmware_efi and table == "gpt" and not info.get("bios_boot_present"):
-        errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
+    if not firmware_efi and table == "gpt":
+        bios_boot_parttype = str(info.get("bios_boot_parttype", "")).casefold()
+        if bios_boot_parttype and bios_boot_parttype != BIOS_BOOT_PARTITION_GUID:
+            errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
+        elif not info.get("bios_boot_present"):
+            errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
 
 
 def _validate_blank_ab_install(

@@ -387,6 +387,17 @@ class ReleaseGateContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.build)
 
+    def test_build_gate_requires_partition_type_normalizer_before_mount(self):
+        for marker in (
+            "ming-fix-partition-types",
+            "settings.conf missing ming-fix-partition-types instance",
+            "partition type normalizer must run after partition and before mount",
+            "MING-BIOSBOOT:ef02",
+            "MING-ESP:ef00",
+            "MING-BOOT:8300",
+        ):
+            self.assertIn(marker, self.build)
+
     def test_build_gate_requires_root_helper_for_live_calamares(self):
         self.assertIn("ming-live-installer-root", self.build)
         self.assertIn("org.ming.live.installer.policy", self.build)

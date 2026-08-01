@@ -85,6 +85,7 @@ install_base_packages() {
         wmctrl \
         e2fsprogs \
         dosfstools \
+        gdisk \
         libpwquality-tools \
         cracklib-runtime \
         wamerican \
@@ -3059,11 +3060,10 @@ install_bios_grub() {
     local pttype bios_boot_count
     pttype="$(lsblk -ndo PTTYPE "${boot_disk}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
     if [[ "${pttype}" == "gpt" ]]; then
-        bios_boot_count="$(lsblk -nrpo NAME,TYPE,PARTTYPE,LABEL "${boot_disk}" 2>/dev/null \
+        bios_boot_count="$(lsblk -nrpo NAME,TYPE,PARTTYPE,PARTLABEL "${boot_disk}" 2>/dev/null \
             | awk 'BEGIN{count=0} $2 == "part" {
                 parttype=tolower($3);
-                label=$4;
-                if (parttype == "21686148-6449-6e6f-744e-656564454649" || label == "MING-BIOSBOOT") {
+                if (parttype == "21686148-6449-6e6f-744e-656564454649") {
                     count++;
                 }
             } END{print count}')"
@@ -3278,6 +3278,117 @@ esac
 SFDISKWRAPPER
     chmod 0755 /usr/sbin/sfdisk
     rm -f /usr/local/sbin/sfdisk
+
+    cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG="${RUNTIME_DIR:-/run}/ming-installer/partition-types.log"
+install -d -m 0755 "${LOG%/*}"
+: >"${LOG}"
+chmod 0644 "${LOG}"
+
+log() {
+    printf '%s\n' "$*" >>"${LOG}"
+}
+
+install_mode="blank_ab"
+if [[ -s /run/ming-installer/install-mode.json ]] && command -v python3 >/dev/null 2>&1; then
+    install_mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode",""))' /run/ming-installer/install-mode.json 2>>"${LOG}" || printf '')"
+fi
+[[ "${install_mode}" == "blank_ab" ]] || {
+    log "skip: install_mode=${install_mode:-unknown}"
+    exit 0
+}
+
+partition_type_contracts=(
+    "MING-BIOSBOOT:ef02:21686148-6449-6e6f-744e-656564454649"
+    "MING-ESP:ef00:c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    "MING-BOOT:8300:0fc63daf-8483-4772-8e79-3d69d8477de4"
+    "MING-ROOT-A:8300:0fc63daf-8483-4772-8e79-3d69d8477de4"
+    "MING-ROOT-B:8300:0fc63daf-8483-4772-8e79-3d69d8477de4"
+    "MING-HOME:8300:0fc63daf-8483-4772-8e79-3d69d8477de4"
+)
+
+part_by_label() {
+    local label="$1"
+    lsblk -nrpo NAME,TYPE,PARTLABEL 2>>"${LOG}" \
+        | awk -v label="${label}" '$2 == "part" && $3 == label { print $1; exit }'
+}
+
+part_disk() {
+    local part="$1" parent
+    parent="$(lsblk -npo PKNAME "${part}" 2>>"${LOG}" | head -n 1 || true)"
+    [[ -n "${parent}" ]] && { printf '%s\n' "${parent}"; return 0; }
+    lsblk -npo NAME,TYPE "${part}" 2>>"${LOG}" | awk '$2 == "disk" { print $1; exit }'
+}
+
+part_number() {
+    lsblk -no PARTN "$1" 2>>"${LOG}" | head -n 1
+}
+
+set_part_type() {
+    local disk="$1" number="$2" short_code="$3" guid="$4"
+    if command -v sgdisk >/dev/null 2>&1; then
+        sgdisk --typecode="${number}:${short_code}" "${disk}" >>"${LOG}" 2>&1
+    elif command -v sfdisk >/dev/null 2>&1; then
+        sfdisk --part-type "${disk}" "${number}" "${guid}" >>"${LOG}" 2>&1
+    else
+        log "ERROR: neither sgdisk nor sfdisk is available to set GPT partition types"
+        return 1
+    fi
+}
+
+changed_disks=()
+for contract in "${partition_type_contracts[@]}"; do
+    IFS=: read -r label short_code guid <<<"${contract}"
+    part="$(part_by_label "${label}")"
+    [[ -n "${part}" ]] || { log "ERROR: missing partition label ${label}"; exit 31; }
+    disk="$(part_disk "${part}")"
+    number="$(part_number "${part}")"
+    [[ -b "${disk}" && -n "${number}" ]] || {
+        log "ERROR: cannot resolve disk/number for ${label} (${part})"
+        exit 31
+    }
+    actual="$(lsblk -nro PARTTYPE "${part}" 2>>"${LOG}" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    if [[ "${actual}" != "${guid}" ]]; then
+        log "fix ${label}: ${actual:-missing} -> ${guid} on ${disk}#${number}"
+        set_part_type "${disk}" "${number}" "${short_code}" "${guid}" || exit 31
+        changed_disks+=("${disk}")
+    else
+        log "ok ${label}: ${guid}"
+    fi
+done
+
+if ((${#changed_disks[@]})); then
+    printf '%s\n' "${changed_disks[@]}" | sort -u | while read -r disk; do
+        partprobe "${disk}" >>"${LOG}" 2>&1 || true
+    done
+    udevadm settle >>"${LOG}" 2>&1 || true
+fi
+
+for contract in "${partition_type_contracts[@]}"; do
+    IFS=: read -r label _short_code guid <<<"${contract}"
+    part="$(part_by_label "${label}")"
+    actual="$(lsblk -nro PARTTYPE "${part}" 2>>"${LOG}" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    [[ "${actual}" == "${guid}" ]] || {
+        log "ERROR: ${label} PARTTYPE is ${actual:-missing}, expected ${guid}"
+        exit 31
+    }
+done
+
+log "partition type normalization complete"
+exit 0
+MINGFIXPARTTYPES
+    chmod 0755 /usr/local/sbin/ming-fix-partition-types
+
+    cat > /etc/calamares/modules/ming-fix-partition-types.conf << 'MINGFIXPARTTYPESCONF'
+---
+dontChroot: true
+timeout: 45
+script:
+  - "/usr/local/sbin/ming-fix-partition-types"
+MINGFIXPARTTYPESCONF
 
     cat > /etc/calamares/branding/ming/branding.desc << BRANDING
 ---
@@ -3600,6 +3711,9 @@ instances:
 - id: ming-installer-target-receipt
   module: ming-installer-target-receipt
   config: ming-installer-target-receipt.conf
+- id: ming-fix-partition-types
+  module: shellprocess
+  config: ming-fix-partition-types.conf
 - id: ming-installer-target-receipt-reset
   module: shellprocess
   config: ming-installer-target-receipt-reset.conf
@@ -3632,6 +3746,7 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-fix-partition-types
   - shellprocess@ming-installer-target-receipt-reset
   - mount
   - ming-installer-target-receipt@ming-installer-target-receipt

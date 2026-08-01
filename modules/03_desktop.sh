@@ -3259,6 +3259,11 @@ migrate_glass_rail_profile() {
     else
         printf 'ZoomEnabled=true\n' >>"${settings}"
     fi
+    if grep -q '^Theme=' "${settings}"; then
+        sed -i "s/^Theme=.*/Theme=Ming/" "${settings}" 2>/dev/null || true
+    else
+        printf 'Theme=Ming\n' >>"${settings}"
+    fi
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
     printf '# MingDockProfile=2641-glass-rail-1\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
@@ -6326,13 +6331,22 @@ TARGETRECEIPTPY
     cat > /etc/calamares/modules/ming-installer-target-receipt.conf << 'TARGETRECEIPTCONF'
 ---
 TARGETRECEIPTCONF
-    cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
+cat > /etc/calamares/modules/ming-installer-target-receipt-reset.conf << 'TARGETRECEIPTRESETCONF'
 ---
 dontChroot: true
 timeout: 10
 script:
   - "/usr/local/sbin/ming-installer-verify receipt --begin-attempt"
 TARGETRECEIPTRESETCONF
+cat > /etc/calamares/modules/ming-fix-partition-types.conf << 'MINGFIXPARTTYPESCONF'
+---
+dontChroot: true
+timeout: 45
+script:
+  - "/usr/local/sbin/ming-fix-partition-types"
+MINGFIXPARTTYPESCONF
+# ming-fix-partition-types enforces MING-BIOSBOOT:ef02, MING-ESP:ef00,
+# MING-BOOT:8300, MING-ROOT-A:8300, MING-ROOT-B:8300 and MING-HOME:8300.
     cat > /etc/calamares/modules/ming-installed-desktop-gate.conf << 'INSTALLEDDESKTOPGATECONF'
 ---
 dontChroot: true
@@ -6378,6 +6392,9 @@ instances:
 - id: ming-installer-target-receipt
   module: ming-installer-target-receipt
   config: ming-installer-target-receipt.conf
+- id: ming-fix-partition-types
+  module: shellprocess
+  config: ming-fix-partition-types.conf
 - id: ming-installer-target-receipt-reset
   module: shellprocess
   config: ming-installer-target-receipt-reset.conf
@@ -6407,6 +6424,7 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-fix-partition-types
   - shellprocess@ming-installer-target-receipt-reset
   - mount
   - ming-installer-target-receipt@ming-installer-target-receipt
@@ -6657,6 +6675,9 @@ instances:
 - id: ming-installer-target-receipt
   module: ming-installer-target-receipt
   config: ming-installer-target-receipt.conf
+- id: ming-fix-partition-types
+  module: shellprocess
+  config: ming-fix-partition-types.conf
 - id: ming-installer-target-receipt-reset
   module: shellprocess
   config: ming-installer-target-receipt-reset.conf
@@ -6685,6 +6706,7 @@ sequence:
   - shellprocess@ming-ota-preflight
   - ming-ota-target-guard@ming-ota-target-guard
   - partition
+  - shellprocess@ming-fix-partition-types
   - shellprocess@ming-installer-target-receipt-reset
   - mount
   - ming-installer-target-receipt@ming-installer-target-receipt

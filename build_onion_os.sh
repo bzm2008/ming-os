@@ -588,7 +588,8 @@ for phase in settings.get("sequence", []) or []:
         exec_steps = phase.get("exec") or []
 expected_steps = [
     "shellprocess@ming-ota-preflight", "ming-ota-target-guard@ming-ota-target-guard",
-    "partition", "shellprocess@ming-installer-target-receipt-reset", "mount",
+    "partition", "shellprocess@ming-fix-partition-types",
+    "shellprocess@ming-installer-target-receipt-reset", "mount",
     "ming-installer-target-receipt@ming-installer-target-receipt", "unpackfs", "machineid",
     "fstab", "networkcfg", "hwclock", "initramfs", "grubcfg", "shellprocess@ming-identity",
     "shellprocess@ming-installed-desktop-gate", "shellprocess@ming-bootloader",
@@ -603,8 +604,12 @@ if all(step in exec_steps for step in ["shellprocess@ming-ota-preflight", "parti
 if all(step in exec_steps for step in ["ming-ota-target-guard@ming-ota-target-guard", "partition"]):
     if exec_steps.index("ming-ota-target-guard@ming-ota-target-guard") > exec_steps.index("partition"):
         errors.append("OTA target disk guard must run before the destructive partition step")
+if all(step in exec_steps for step in ["partition", "shellprocess@ming-fix-partition-types", "mount"]):
+    if not (exec_steps.index("partition") < exec_steps.index("shellprocess@ming-fix-partition-types") < exec_steps.index("mount")):
+        errors.append("partition type normalizer must run after partition and before mount")
 receipt_order = [
     "partition",
+    "shellprocess@ming-fix-partition-types",
     "shellprocess@ming-installer-target-receipt-reset",
     "mount",
     "ming-installer-target-receipt@ming-installer-target-receipt",
@@ -652,6 +657,8 @@ if not any(isinstance(item, dict) and item.get("id") == "ming-ota-target-guard" 
     errors.append("settings.conf missing ming-ota-target-guard instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt" for item in instances):
     errors.append("settings.conf missing ming-installer-target-receipt instance")
+if not any(isinstance(item, dict) and item.get("id") == "ming-fix-partition-types" for item in instances):
+    errors.append("settings.conf missing ming-fix-partition-types instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-installer-target-receipt-reset" for item in instances):
     errors.append("settings.conf missing ming-installer-target-receipt-reset instance")
 if not any(isinstance(item, dict) and item.get("id") == "ming-identity" for item in instances):
@@ -729,6 +736,11 @@ if initial_choice == "erase":
             errors.append(
                 f"blank_ab erase flow requires explicit mode/root helper: {required_live_path}"
             )
+
+partition_type_normalizer = require_file("usr/local/sbin/ming-fix-partition-types", "MING-BIOSBOOT:ef02")
+for marker in ("MING-BIOSBOOT:ef02", "MING-ESP:ef00", "MING-BOOT:8300", "MING-ROOT-A:8300", "MING-ROOT-B:8300", "MING-HOME:8300"):
+    if marker not in partition_type_normalizer:
+        errors.append(f"ming-fix-partition-types missing {marker}")
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True or \

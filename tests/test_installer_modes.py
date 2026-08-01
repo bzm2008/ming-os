@@ -92,6 +92,22 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
 
+    def test_blank_ab_templates_normalize_real_partition_types_after_partitioning(self):
+        for source in (BASE, DESKTOP):
+            with self.subTest(source="base" if source is BASE else "desktop"):
+                self.assertIn("ming-fix-partition-types", source)
+                self.assertIn("MING-BIOSBOOT:ef02", source)
+                self.assertIn("MING-ESP:ef00", source)
+                self.assertIn("MING-BOOT:8300", source)
+                self.assertIn("MING-ROOT-A:8300", source)
+                self.assertIn("MING-ROOT-B:8300", source)
+                self.assertIn("MING-HOME:8300", source)
+                settings = source.split("cat > /etc/calamares/settings.conf", 1)[1]
+                self.assertIn("shellprocess@ming-fix-partition-types", settings)
+                self.assertLess(settings.index("  - partition"), settings.index("  - shellprocess@ming-fix-partition-types"))
+                self.assertLess(settings.index("  - shellprocess@ming-fix-partition-types"), settings.index("  - shellprocess@ming-installer-target-receipt-reset"))
+                self.assertLess(settings.index("  - shellprocess@ming-fix-partition-types"), settings.index("  - mount"))
+
     def test_generated_blank_ab_templates_create_a_real_fat32_esp(self):
         for source in (BASE, DESKTOP):
             with self.subTest(source="base" if source is BASE else "desktop"):

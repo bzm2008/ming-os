@@ -118,6 +118,18 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
 
+    def test_glass_rail_profile_forces_theme_on_existing_live_user_settings(self):
+        self.assertIn("Theme=Ming", self.plank_settings)
+        migrate = re.search(
+            r"migrate_glass_rail_profile\(\) \{(.*?)\n\}",
+            self.watchdog,
+            re.S,
+        ).group(1)
+        self.assertIn("Theme=Ming", migrate)
+        self.assertIn('sed -i "s/^Theme=.*/Theme=Ming/"', migrate)
+        self.assertIn("FillStartColor=255;255;255;160", self.source)
+        self.assertIn("FillEndColor=232;248;242;184", self.source)
+
     def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
         for marker in (
             "TopRoundness=12",
