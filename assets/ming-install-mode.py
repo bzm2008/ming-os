@@ -30,12 +30,20 @@ userSwapChoices:
   - none
 drawNestedPartitions: false
 alwaysShowPartitionLabels: true
+defaultPartitionTableType: gpt
+requiredPartitionTableType: gpt
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-BIOSBOOT"
+    filesystem: "unformatted"
+    noEncrypt: true
+    type: "21686148-6449-6E6F-744E-656564454649"
+    size: 8M
+    minSize: 8M
   - name: "MING-ESP"
     filesystem: "fat32"
     noEncrypt: true

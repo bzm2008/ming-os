@@ -3056,6 +3056,25 @@ install_uefi_grub() {
 
 install_bios_grub() {
     local modules="part_gpt part_msdos ext2 search search_fs_uuid normal configfile linux"
+    local pttype bios_boot_count
+    pttype="$(lsblk -ndo PTTYPE "${boot_disk}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    if [[ "${pttype}" == "gpt" ]]; then
+        bios_boot_count="$(lsblk -nrpo NAME,TYPE,PARTTYPE,LABEL "${boot_disk}" 2>/dev/null \
+            | awk 'BEGIN{count=0} $2 == "part" {
+                parttype=tolower($3);
+                label=$4;
+                if (parttype == "21686148-6449-6e6f-744e-656564454649" || label == "MING-BIOSBOOT") {
+                    count++;
+                }
+            } END{print count}')"
+        if [[ "${bios_boot_count:-0}" -lt 1 ]]; then
+            echo "ERROR: BIOS + GPT 安装缺少 MING-BIOSBOOT / BIOS Boot Partition，无法可靠安装 BIOS GRUB"
+            return 1
+        fi
+    elif [[ -n "${pttype}" && "${install_mode}" == "blank_ab" ]]; then
+        echo "ERROR: blank_ab 自动安装必须使用 GPT 分区表，当前为 ${pttype}"
+        return 1
+    fi
     if [ -x "${root}/usr/sbin/grub-install" ]; then
         chroot "${root}" /usr/sbin/grub-install \
             --target=i386-pc --recheck --force --modules="${modules}" "${boot_disk}"
@@ -3415,6 +3434,8 @@ userSwapChoices:
   - file
 drawNestedPartitions: false
 alwaysShowPartitionLabels: true
+defaultPartitionTableType: gpt
+requiredPartitionTableType: gpt
 defaultFileSystemType: "ext4"
 # 只保留 ext4，移除 btrfs：
 # btrfs 在已有 Fedora/旧 btrfs 卷的磁盘上创建分区会失败（图二错误）
@@ -3424,6 +3445,12 @@ availableFileSystemTypes:
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-BIOSBOOT"
+    filesystem: "unformatted"
+    noEncrypt: true
+    type: "21686148-6449-6E6F-744E-656564454649"
+    size: 8M
+    minSize: 8M
   - name: "MING-ESP"
     filesystem: "fat32"
     noEncrypt: true

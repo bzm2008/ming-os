@@ -300,6 +300,9 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
             self.build,
         )
+        self.assertIn("OuterStrokeColor=255;255;255;118", self.build)
+        self.assertIn("FillStartColor=255;255;255;160", self.build)
+        self.assertIn("FillEndColor=232;248;242;184", self.build)
 
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""
@@ -334,7 +337,12 @@ class ReleaseGateContracts(unittest.TestCase):
             self.build.index('partition = load_yaml("etc/calamares/modules/partition.conf")'):
             self.build.index('desktop_gate = load_yaml', self.build.index('partition = load_yaml'))
         ]
+        self.assertIn("defaultPartitionTableType", gate)
+        self.assertIn("requiredPartitionTableType", gate)
+        self.assertIn("MING-BIOSBOOT", gate)
+        self.assertIn("21686148-6449-6E6F-744E-656564454649", gate)
         for label, mountpoint in (
+            ("MING-BIOSBOOT", ""),
             ("MING-ESP", "/boot/efi"),
             ("MING-BOOT", "/boot"),
             ("MING-ROOT-A", "/"),
@@ -346,6 +354,14 @@ class ReleaseGateContracts(unittest.TestCase):
                 self.assertIn(mountpoint, gate)
         self.assertIn("expected_layout", gate)
         self.assertIn("exactly one", gate)
+
+    def test_build_gate_rejects_blank_ab_without_gpt_and_bios_boot_contract(self):
+        for marker in (
+            "partition.conf blank_ab layout must require GPT",
+            "partition.conf MING-BIOSBOOT must be before MING-ESP",
+            "partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition",
+        ):
+            self.assertIn(marker, self.build)
 
     def test_build_gate_requires_root_helper_for_live_calamares(self):
         self.assertIn("ming-live-installer-root", self.build)

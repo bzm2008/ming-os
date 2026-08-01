@@ -2064,10 +2064,10 @@ configure_plank_dock() {
     local plank_dir="/home/${MING_USER}/.config/plank/dock1"
     mkdir -p "${plank_dir}/launchers"
 
-    # Dock 行为与外观：底部居中、轻放大、浅色半透明；避免老机动画压力过大。
+    # Dock 行为与外观：底部居中、轻放大、半透明玻璃底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-compact-rail-1
+# MingDockProfile=2641-glass-rail-1
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -2184,24 +2184,24 @@ MINGREFRESHDOCK
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
-    # Ming 纸感 Dock 主题
+    # Ming 半透明玻璃 Dock 主题
     local theme_dir="/usr/share/plank/themes/Ming"
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=6
-BottomRoundness=6
+TopRoundness=12
+BottomRoundness=12
 LineWidth=1
-OuterStrokeColor=31;98;84;54
-FillStartColor=255;255;255;226
-FillEndColor=242;250;247;238
-InnerStrokeColor=255;255;255;176
+OuterStrokeColor=255;255;255;118
+FillStartColor=255;255;255;160
+FillEndColor=232;248;242;184
+InnerStrokeColor=255;255;255;196
 
 [PlankDockTheme]
-HorizPadding=8
+HorizPadding=12
 TopPadding=-4
 BottomPadding=5
-ItemPadding=3
+ItemPadding=4
 IndicatorSize=4
 IconShadowSize=1
 UrgentBounceHeight=1.20
@@ -3188,7 +3188,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-compact-rail-1
+# MingDockProfile=2641-glass-rail-1
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
@@ -3234,9 +3234,9 @@ apply_low_resource_plank_profile() {
     fi
 }
 
-migrate_compact_rail_profile() {
+migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-compact-rail-1$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-glass-rail-1$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3259,9 +3259,10 @@ migrate_compact_rail_profile() {
     else
         printf 'ZoomEnabled=true\n' >>"${settings}"
     fi
-    printf '# MingDockProfile=2641-compact-rail-1\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-glass-rail-1\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
-    log "migrated Dock to 26.4.1 compact rail profile"
+    log "migrated Dock to 26.4.1 glass rail profile"
 }
 
 ensure_plank_settings() {
@@ -3278,7 +3279,7 @@ ensure_plank_settings() {
         restored=true
         log "restored complete Plank settings profile"
     fi
-    migrate_compact_rail_profile "${settings}"
+    migrate_glass_rail_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
         sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
     else
@@ -6616,9 +6617,9 @@ log "locale_conf=$(tr '\n' ';' </etc/calamares/modules/locale.conf 2>/dev/null |
 log "calamares_settings_sha256=$(sha256sum /etc/calamares/settings.conf 2>/dev/null | awk '{print $1}')"
 
 # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
-# Only initialize completely blank non-removable disks; never touch a disk
-# that already has partitions or a mounted filesystem. Prefer msdos here so
-# BIOS installs do not depend on a BIOS boot partition just to install GRUB.
+# Only inspect completely blank non-removable disks; never touch a disk that
+# already has partitions or a mounted filesystem. blank_ab is intentionally
+# GPT-only and carries its own BIOS Boot Partition for BIOS GRUB.
 for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
     [ -b "${disk}" ] || continue
     case "${disk}" in
@@ -6711,12 +6712,20 @@ userSwapChoices:
   - file
 drawNestedPartitions: false
 alwaysShowPartitionLabels: true
+defaultPartitionTableType: gpt
+requiredPartitionTableType: gpt
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
+  - name: "MING-BIOSBOOT"
+    filesystem: "unformatted"
+    noEncrypt: true
+    type: "21686148-6449-6E6F-744E-656564454649"
+    size: 8M
+    minSize: 8M
   - name: "MING-ESP"
     filesystem: "fat32"
     noEncrypt: true
@@ -6980,9 +6989,9 @@ prepare_installer_disks() {
     } > /tmp/ming-installer/preflight.log 2>&1
 
     # Fresh VirtualBox disks sometimes reach Calamares without a usable label.
-    # Only initialize completely blank non-removable disks; never touch a disk
-    # that already has partitions or a mounted filesystem. Prefer msdos here so
-    # BIOS installs do not depend on a BIOS boot partition just to install GRUB.
+    # Only inspect completely blank non-removable disks; never touch a disk that
+    # already has partitions or a mounted filesystem. blank_ab is intentionally
+    # GPT-only and carries its own BIOS Boot Partition for BIOS GRUB.
     for disk in /dev/sd? /dev/vd? /dev/nvme?n?; do
         [ -b "${disk}" ] || continue
         case "${disk}" in

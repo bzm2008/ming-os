@@ -65,6 +65,7 @@ INSTALL_MODE_POLICIES = {
     "blank_ab": "ab_slot",
     "dual_boot_preserve": "disabled_dual_boot",
 }
+BIOS_BOOT_PARTITION_GUID = "21686148-6449-6e6f-744e-656564454649"
 
 
 class TargetReceiptError(RuntimeError):
@@ -115,6 +116,60 @@ def _partition_layout_block(text: str, label: str) -> str:
     )
     match = pattern.search(text)
     return match.group(0) if match else ""
+
+
+def _firmware_efi_detected() -> bool:
+    return Path("/sys/firmware/efi").is_dir()
+
+
+def _command_stdout(args: list[str]) -> str:
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _system_storage_info(root_source: str) -> dict[str, Any]:
+    """Return enough target-disk facts to gate BIOS+GPT GRUB installs."""
+    if os.name == "nt":
+        return {"available": False}
+    if not isinstance(root_source, str) or not root_source.startswith("/dev/"):
+        return {"available": False}
+    ancestors = _command_stdout(["lsblk", "-s", "-nrpo", "NAME,TYPE", root_source])
+    disk = ""
+    for line in ancestors.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[-1] == "disk":
+            disk = fields[0]
+    if not disk:
+        return {"available": False}
+    table = _command_stdout(["lsblk", "-ndo", "PTTYPE", disk]).casefold()
+    parts = _command_stdout(["lsblk", "-nrpo", "NAME,TYPE,PARTTYPE,LABEL", disk])
+    bios_boot_present = False
+    for line in parts.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) < 3 or fields[1] != "part":
+            continue
+        parttype = fields[2].casefold()
+        label = fields[3] if len(fields) > 3 else ""
+        if parttype == BIOS_BOOT_PARTITION_GUID or label == "MING-BIOSBOOT":
+            bios_boot_present = True
+            break
+    return {
+        "available": True,
+        "disk": disk,
+        "partition_table": table,
+        "bios_boot_present": bios_boot_present,
+    }
 
 
 def _read_install_mode(path: Path) -> dict[str, Any] | None:
@@ -208,6 +263,26 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         if manual_enabled is not False:
             errors.append("Calamares manual partitioning must be disabled")
         if explicit_mode:
+            default_table = (_yaml_scalar(partition, "defaultPartitionTableType") or "").casefold()
+            required_table = (_yaml_scalar(partition, "requiredPartitionTableType") or "").casefold()
+            if default_table != "gpt" or required_table != "gpt":
+                errors.append("Calamares blank A/B layout must require GPT")
+            if partition.count('name: "MING-BIOSBOOT"') != 1:
+                errors.append("Calamares A/B partition layout must contain exactly one MING-BIOSBOOT")
+            else:
+                bios_block = _partition_layout_block(partition, "MING-BIOSBOOT")
+                if _yaml_scalar(bios_block, "filesystem") != "unformatted":
+                    errors.append("Calamares A/B MING-BIOSBOOT must be unformatted")
+                if (_yaml_scalar(bios_block, "type") or "").casefold() != BIOS_BOOT_PARTITION_GUID:
+                    errors.append("Calamares A/B MING-BIOSBOOT must use the BIOS Boot Partition GPT type")
+                if _yaml_scalar(bios_block, "mountPoint") not in (None, ""):
+                    errors.append("Calamares A/B MING-BIOSBOOT must not be mounted")
+                if (
+                    'name: "MING-BIOSBOOT"' in partition
+                    and 'name: "MING-ESP"' in partition
+                    and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-ESP"')
+                ):
+                    errors.append("Calamares A/B MING-BIOSBOOT must be before MING-ESP")
             required = _yaml_scalar(partition, "requiredStorage")
             expected_layout = {
                 "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
@@ -813,7 +888,43 @@ def _fstab_entries(text: str) -> Iterable[list[str]]:
             yield fields
 
 
-def _validate_blank_ab_install(root_path: Path, errors: list[str]) -> None:
+def _validate_blank_ab_storage(
+    *,
+    root_source: str | None,
+    firmware_efi: bool | None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None,
+    errors: list[str],
+) -> None:
+    if not root_source:
+        return
+    if firmware_efi is None:
+        firmware_efi = _firmware_efi_detected()
+    if storage_info_provider is None and os.name == "nt":
+        return
+    provider = storage_info_provider or _system_storage_info
+    try:
+        info = dict(provider(root_source))
+    except Exception as exc:  # pragma: no cover - defensive for live hosts
+        errors.append(f"Installed A/B storage contract cannot inspect target disk: {exc}")
+        return
+    if info.get("available") is False:
+        errors.append("Installed A/B storage contract cannot inspect target disk")
+        return
+    table = str(info.get("partition_table", "")).casefold()
+    if table and table != "gpt":
+        errors.append("Installed A/B target disk must use GPT")
+    if not firmware_efi and table == "gpt" and not info.get("bios_boot_present"):
+        errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
+
+
+def _validate_blank_ab_install(
+    root_path: Path,
+    errors: list[str],
+    *,
+    root_source: str | None = None,
+    firmware_efi: bool | None = None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None = None,
+) -> None:
     entries = list(_fstab_entries(_read_text(root_path / "etc/fstab")))
     entries_by_mount: dict[str, list[list[str]]] = {}
     for fields in entries:
@@ -863,6 +974,12 @@ def _validate_blank_ab_install(root_path: Path, errors: list[str]) -> None:
         for payload in ("vmlinuz", "initrd.img"):
             if not (root_path / "boot/ming-slots" / slot / payload).is_file():
                 errors.append(f"Installed A/B slot {slot} {payload} payload is missing")
+    _validate_blank_ab_storage(
+        root_source=root_source,
+        firmware_efi=firmware_efi,
+        storage_info_provider=storage_info_provider,
+        errors=errors,
+    )
 
 
 def _grub_top_level_entries(text: str) -> list[tuple[str, str]]:
@@ -1015,6 +1132,9 @@ def verify_installed(
     expected_root_uuid: str | None = None,
     expected_root_fstype: str | None = None,
     final_boot: bool = False,
+    root_source: str | None = None,
+    firmware_efi: bool | None = None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     requested_target = str(root or "")
     if root is None:
@@ -1083,7 +1203,13 @@ def verify_installed(
         major_ota = mode_payload["major_ota"]
 
     if explicit_install_mode and install_mode == "blank_ab":
-        _validate_blank_ab_install(root_path, errors)
+        _validate_blank_ab_install(
+            root_path,
+            errors,
+            root_source=root_source,
+            firmware_efi=firmware_efi,
+            storage_info_provider=storage_info_provider,
+        )
 
     if expected_root_uuid:
         grub_template = _read_text(root_path / "etc/grub.d/09_ming_os")
@@ -1229,6 +1355,8 @@ def verify_installed_from_receipt(
     final_boot: bool = False,
     attempt_path: Path | str | None = None,
     mount_info_provider: Callable[[Path], Mapping[str, Any]] | None = None,
+    firmware_efi: bool | None = None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None = None,
     lstat_func: Callable[[Path], object] = os.lstat,
     fstat_func: Callable[[int], object] = os.fstat,
 ) -> dict[str, Any]:
@@ -1245,6 +1373,9 @@ def verify_installed_from_receipt(
         expected_root_uuid=receipt["uuid"],
         expected_root_fstype=receipt["fstype"],
         final_boot=final_boot,
+        root_source=receipt["canonical_source"],
+        firmware_efi=firmware_efi,
+        storage_info_provider=storage_info_provider,
     )
 
 

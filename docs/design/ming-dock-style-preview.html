@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ming OS Dock 样式预览</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10161b; --panel:#1a232b; --panel2:#202c35; --line:#34434d; --text:#f1f5f6; --muted:#aab8c1; --accent:#65d1bd; --warm:#f2c46c; font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--text); background:var(--bg); line-height:1.45; }
+    main { width:min(1240px,calc(100% - 40px)); margin:auto; padding:44px 0 64px; }
+    header { display:flex; justify-content:space-between; align-items:end; gap:28px; padding-bottom:28px; border-bottom:1px solid var(--line); }
+    h1 { margin:0; font-size:clamp(25px,3vw,40px); letter-spacing:0; }
+    header p { max-width:620px; margin:8px 0 0; color:var(--muted); font-size:15px; }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+    button { border:1px solid var(--line); border-radius:6px; padding:9px 12px; color:var(--text); background:var(--panel2); font:inherit; font-size:13px; cursor:pointer; }
+    button:hover,button:focus-visible { border-color:var(--accent); outline:none; }
+    button[aria-pressed=true] { color:#0d2421; background:var(--accent); border-color:var(--accent); }
+    .notice { margin:24px 0 30px; padding:13px 16px; border-left:3px solid var(--accent); color:#d8eee9; background:#18251f; font-size:14px; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }
+    .option { min-width:0; border:1px solid var(--line); background:var(--panel); box-shadow:0 18px 40px rgba(0,0,0,.28); }
+    .option-head { display:flex; justify-content:space-between; gap:18px; padding:18px 20px 14px; border-bottom:1px solid var(--line); }
+    h2 { margin:0; font-size:20px; }
+    .option-head p { margin:5px 0 0; color:var(--muted); font-size:13px; }
+    .tag { flex:none; color:var(--warm); font-size:12px; white-space:nowrap; }
+    .stage { position:relative; min-height:216px; padding:18px; overflow:hidden; background:#10151a; }
+    .stage:before { content:"Ming OS desktop"; position:absolute; top:15px; left:15px; color:#71808b; font-size:11px; }
+    .workspace { position:absolute; inset:45px 18px 64px; border:1px solid #26333c; background:#162028; }
+    .widget { position:absolute; top:12px; right:12px; width:126px; padding:10px; border:1px solid #33434d; color:#d1e2e3; background:#1c2a32; font-size:11px; }
+    .widget strong { display:block; color:var(--accent); font-size:18px; }
+    .dock { position:absolute; left:50%; bottom:14px; transform:translateX(-50%); display:flex; align-items:end; gap:8px; min-height:48px; padding:7px 10px; background:#0d1115; }
+    .icon { position:relative; display:grid; place-items:center; width:34px; height:34px; border:1px solid #52636f; border-radius:8px; color:#dfe8ec; background:#2c3a43; font-size:15px; user-select:none; transition:transform .18s ease,background .18s ease,box-shadow .18s ease; }
+    .icon:hover,.icon.hover { transform:translateY(-7px) scale(1.08); background:#3f5c62; }
+    .icon.running:after { content:""; position:absolute; left:50%; bottom:-5px; width:5px; height:5px; transform:translateX(-50%); border-radius:50%; background:var(--accent); }
+    .icon.minimized { opacity:.52; }
+    .state-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; color:var(--muted); font-size:11px; }
+    .state-row span { padding:4px 7px; border:1px solid var(--line); }
+    .details { padding:16px 20px 19px; }
+    .details ul { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px 18px; margin:0; padding:0; color:#c8d2d8; list-style:none; font-size:13px; }
+    .details li:before { content:"•"; margin-right:7px; color:var(--accent); }
+    .calm .dock { padding:8px 14px; border:1px solid #56706f; border-radius:14px; background:rgba(21,35,39,.92); box-shadow:0 12px 26px rgba(0,0,0,.24); }
+    .calm .icon { border-radius:10px; background:#29413f; }
+    .calm .icon:hover,.calm .icon.hover { box-shadow:0 7px 18px rgba(101,209,189,.24); }
+    .solid .dock { left:18px; right:18px; transform:none; justify-content:center; min-height:50px; border-top:2px solid #53616a; background:#172027; }
+    .solid .icon { border-radius:5px; background:#33414a; }
+    .solid .icon:hover,.solid .icon.hover { transform:translateY(-3px); }
+    .tiles .dock { gap:6px; padding:6px; border:0; background:transparent; }
+    .tiles .icon { width:40px; height:40px; border-radius:6px; background:#222d35; }
+    .tiles .icon:hover,.tiles .icon.hover { transform:scale(1.04); }
+    .shelf .dock { bottom:18px; padding:9px 12px; border:1px solid #5d6972; border-radius:11px; background:#222c33; box-shadow:0 14px 30px rgba(0,0,0,.35); }
+    .shelf .icon:hover,.shelf .icon.hover { animation:lift .6s ease both; }
+    @keyframes lift { 0%,100%{transform:translateY(0)} 45%{transform:translateY(-9px)} }
+    .low-resource .icon { transition:none; box-shadow:none; }
+    .low-resource .icon:hover,.low-resource .icon.hover { transform:none; background:#314048; }
+    .low-resource .dock { box-shadow:none; }
+    @media(max-width:860px){ header{display:block}.controls{justify-content:flex-start;margin-top:18px}.grid{grid-template-columns:1fr} }
+    @media(max-width:540px){ main{width:calc(100% - 24px);padding-top:28px}.stage{min-height:198px}.workspace{inset-inline:12px}.widget{width:112px}.details ul{grid-template-columns:1fr} }
+    @media(prefers-reduced-motion:reduce){ *,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important} }
+  </style>
+</head>
+<body>
+  <main>
+    <header><div><h1>Ming OS Dock 样式预览</h1><p>四个候选方向，先看视觉和交互节奏，再决定是否落到真实 Plank 配置。</p></div><div class="controls"><button id="low-resource" type="button" aria-pressed="false">低资源模式：关</button><button id="replay" type="button">重放悬停动画</button></div></header>
+    <div class="notice">本页只作为设计预览，不修改真实 Plank、桌面会话或安装镜像。低资源模式会关闭缩放、阴影和回弹，便于比较老硬件表现。</div>
+    <section class="grid" aria-label="Dock 样式候选">
+      <article class="option calm"><div class="option-head"><div><h2>Calm Glass Rail</h2><p>半透明玻璃底座，运行指示柔和，动效克制。</p></div><span class="tag">平衡体验</span></div><div class="stage"><div class="workspace"><div class="widget"><strong>26°</strong>上海 · 晴<br>网络已连接</div></div><div class="dock"><span class="icon">▦</span><span class="icon hover">▤</span><span class="icon running">⌂</span><span class="icon minimized">◇</span><span class="icon">◉</span></div></div><div class="details"><div class="state-row"><span>正常</span><span>悬停</span><span>运行中</span><span>最小化恢复</span><span>低资源模式</span></div><ul><li>轻微上浮和缩放</li><li>半透明但不刺眼</li><li>适合默认桌面</li><li>低资源时静态化</li></ul></div></article>
+      <article class="option solid"><div class="option-head"><div><h2>Solid Focus Bar</h2><p>不透明底栏，低阴影，位置稳定，适合老硬件。</p></div><span class="tag">稳定优先</span></div><div class="stage"><div class="workspace"><div class="widget"><strong>26°</strong>上海 · 晴<br>网络已连接</div></div><div class="dock"><span class="icon">▦</span><span class="icon hover">▤</span><span class="icon running">⌂</span><span class="icon minimized">◇</span><span class="icon">◉</span></div></div><div class="details"><div class="state-row"><span>正常</span><span>悬停</span><span>运行中</span><span>最小化恢复</span><span>低资源模式</span></div><ul><li>固定贴近底部</li><li>无透明叠加</li><li>动画幅度最小</li><li>最适合软件渲染</li></ul></div></article>
+      <article class="option tiles"><div class="option-head"><div><h2>Compact Tiles</h2><p>独立图标块，响应最快，动效最少，密度更高。</p></div><span class="tag">效率优先</span></div><div class="stage"><div class="workspace"><div class="widget"><strong>26°</strong>上海 · 晴<br>网络已连接</div></div><div class="dock"><span class="icon">▦</span><span class="icon hover">▤</span><span class="icon running">⌂</span><span class="icon minimized">◇</span><span class="icon">◉</span></div></div><div class="details"><div class="state-row"><span>正常</span><span>悬停</span><span>运行中</span><span>最小化恢复</span><span>低资源模式</span></div><ul><li>图标块边界清晰</li><li>点击目标更大</li><li>不依赖阴影</li><li>适合低内存设备</li></ul></div></article>
+      <article class="option shelf"><div class="option-head"><div><h2>Floating Shelf</h2><p>悬浮托盘，轻微上浮和回弹，视觉更现代。</p></div><span class="tag">动效优先</span></div><div class="stage"><div class="workspace"><div class="widget"><strong>26°</strong>上海 · 晴<br>网络已连接</div></div><div class="dock"><span class="icon">▦</span><span class="icon hover">▤</span><span class="icon running">⌂</span><span class="icon minimized">◇</span><span class="icon">◉</span></div></div><div class="details"><div class="state-row"><span>正常</span><span>悬停</span><span>运行中</span><span>最小化恢复</span><span>低资源模式</span></div><ul><li>悬浮层次明显</li><li>回弹强化反馈</li><li>需要合成器</li><li>低资源时自动静态化</li></ul></div></article>
+    </section>
+  </main>
+  <script>
+    const page = document.body;
+    const lowResource = document.getElementById('low-resource');
+    lowResource.addEventListener('click', () => { const active = page.classList.toggle('low-resource'); lowResource.setAttribute('aria-pressed', String(active)); lowResource.textContent = `低资源模式：${active ? '开' : '关'}`; });
+    document.getElementById('replay').addEventListener('click', () => { document.querySelectorAll('.icon.hover').forEach((icon) => { icon.classList.remove('hover'); void icon.offsetWidth; icon.classList.add('hover'); }); });
+  </script>
+</body>
+</html>

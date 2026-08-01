@@ -109,6 +109,7 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("IconSize=38", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-glass-rail-1", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
@@ -117,27 +118,30 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
 
-    def test_compact_rail_theme_is_visibly_distinct_and_low_cost(self):
+    def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
         for marker in (
-            "TopRoundness=6",
-            "BottomRoundness=6",
-            "HorizPadding=8",
-            "ItemPadding=3",
+            "TopRoundness=12",
+            "BottomRoundness=12",
+            "HorizPadding=12",
+            "ItemPadding=4",
             "IndicatorSize=4",
+            "OuterStrokeColor=255;255;255;118",
+            "FillStartColor=255;255;255;160",
+            "FillEndColor=232;248;242;184",
             "LaunchBounceHeight=0.20",
         ):
             self.assertIn(marker, self.source)
 
-    def test_compact_rail_profile_migrates_existing_2640_users_once(self):
+    def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
-            "MingDockProfile=2641-compact-rail-1",
-            "migrate_compact_rail_profile",
+            "MingDockProfile=2641-glass-rail-1",
+            "migrate_glass_rail_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
             "s/^IconSize=.*/IconSize=38/",
             "s/^ZoomPercent=.*/ZoomPercent=112/",
         ):
             self.assertIn(marker, self.watchdog)
-        self.assertIn("migrate_compact_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
+        self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(

@@ -637,14 +637,27 @@ if initial_choice not in {"erase", "none"}:
     errors.append("partition.conf initialPartitioningChoice must be erase or none")
 if partition.get("allowManualPartitioning") is not False:
     errors.append("partition.conf must disable manual partitioning for the OTA-ready layout")
+if partition.get("defaultPartitionTableType") != "gpt" or partition.get("requiredPartitionTableType") != "gpt":
+    errors.append("partition.conf blank_ab layout must require GPT")
 layout = partition.get("partitionLayout") or []
 expected_layout = {
+    "MING-BIOSBOOT": ({"unformatted"}, None),
     "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
     "MING-BOOT": ({"ext4"}, "/boot"),
     "MING-ROOT-A": ({"ext4"}, "/"),
     "MING-ROOT-B": ({"ext4"}, None),
     "MING-HOME": ({"ext4"}, "/home"),
 }
+layout_names = [
+    item.get("name")
+    for item in layout
+    if isinstance(item, dict)
+]
+if (
+        "MING-BIOSBOOT" not in layout_names
+        or "MING-ESP" not in layout_names
+        or layout_names.index("MING-BIOSBOOT") > layout_names.index("MING-ESP")):
+    errors.append("partition.conf MING-BIOSBOOT must be before MING-ESP")
 for label, (filesystems, mountpoint) in expected_layout.items():
     entries = [item for item in layout if isinstance(item, dict) and item.get("name") == label]
     if len(entries) != 1:
@@ -655,6 +668,10 @@ for label, (filesystems, mountpoint) in expected_layout.items():
         errors.append(f"partition.conf {label} has the wrong filesystem")
     if entry.get("mountPoint") != mountpoint:
         errors.append(f"partition.conf {label} has the wrong mount point")
+    if label == "MING-BIOSBOOT" and (
+            str(entry.get("type", "")).casefold() != "21686148-6449-6E6F-744E-656564454649".casefold()
+            or str(entry.get("filesystem", "")).casefold() != "unformatted"):
+        errors.append("partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition")
 if initial_choice == "erase":
     for required_live_path in (
         "usr/local/sbin/ming-live-installer-root",
@@ -1458,7 +1475,13 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
         errors.append(f"Plank settings contains a retired agent item: {dock_item}")
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
-for marker in ["UrgentBounceTime=420", "LaunchBounceTime=150", "ItemMoveTime=130"]:
+for marker in [
+        "OuterStrokeColor=255;255;255;118",
+        "FillStartColor=255;255;255;160",
+        "FillEndColor=232;248;242;184",
+        "UrgentBounceTime=420",
+        "LaunchBounceTime=150",
+        "ItemMoveTime=130"]:
     if marker not in plank_theme:
         errors.append(f"Plank theme missing animation marker {marker}")
 

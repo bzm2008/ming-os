@@ -616,6 +616,47 @@ class InstallerReceiptContracts(unittest.TestCase):
                 rejected["errors"],
             )
 
+    def test_receipt_blank_ab_bios_gpt_requires_bios_boot_partition(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target"
+            create_installed_root(target, uuid)
+            write_blank_ab_install_contract(target, uuid, slot_b_uuid)
+            receipt = root / "run/ming-installer/target-receipt.json"
+            write_receipt(receipt, target)
+
+            accepted = verifier.verify_installed_from_receipt(
+                receipt,
+                attempt_path=receipt.with_name("target-receipt-attempt.json"),
+                mount_info_provider=lambda _target: target_mount_info(target, uuid),
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+                firmware_efi=False,
+                storage_info_provider=lambda _source: {
+                    "partition_table": "gpt",
+                    "bios_boot_present": True,
+                },
+            )
+            rejected = verifier.verify_installed_from_receipt(
+                receipt,
+                attempt_path=receipt.with_name("target-receipt-attempt.json"),
+                mount_info_provider=lambda _target: target_mount_info(target, uuid),
+                lstat_func=receipt_stat(),
+                fstat_func=receipt_stat(),
+                firmware_efi=False,
+                storage_info_provider=lambda _source: {
+                    "partition_table": "gpt",
+                    "bios_boot_present": False,
+                },
+            )
+
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(rejected["ok"], rejected)
+        self.assertTrue(any("BIOS Boot" in error for error in rejected["errors"]), rejected)
+
     def test_blank_ab_gate_rejects_boot_and_home_fstab_uuid_drift(self):
         verifier = load_verifier()
         uuid = "790ec0ef-1111-2222-3333-444444444444"
