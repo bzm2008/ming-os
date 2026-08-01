@@ -3454,6 +3454,7 @@ partitionLayout:
   - name: "MING-ESP"
     filesystem: "fat32"
     noEncrypt: true
+    type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
     mountPoint: "/boot/efi"
     size: 512M
     minSize: 256M

@@ -200,8 +200,10 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_build_locks_clean_source_identity_until_packaging_finishes(self):
         for marker in (
             "capture_build_identity",
-            'git -C "${SCRIPT_DIR}" status --porcelain',
-            'git -C "${SCRIPT_DIR}" rev-parse HEAD',
+            "assert_clean_source_tree",
+            "git_build rev-parse HEAD",
+            "git_build diff --ignore-cr-at-eol --quiet",
+            "git_build ls-files --others --exclude-standard",
             "verify_build_identity",
             'BUILD_SOURCE_COMMIT',
         ):
@@ -218,7 +220,7 @@ class ReleaseGateContracts(unittest.TestCase):
             "SHA256SUMS",
         ):
             self.assertIn(marker, self.build)
-        self.assertIn("git -C \"${SCRIPT_DIR}\" ls-tree -r --full-tree HEAD", self.build)
+        self.assertIn("git_build ls-tree -r --full-tree HEAD", self.build)
         self.assertNotIn("xargs -0 sha256sum", self.build)
 
     def test_windows_handoff_copies_iso_checksum_and_build_identity_together(self):
@@ -361,6 +363,7 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("requiredPartitionTableType", gate)
         self.assertIn("MING-BIOSBOOT", gate)
         self.assertIn("21686148-6449-6E6F-744E-656564454649", gate)
+        self.assertIn("C12A7328-F81F-11D2-BA4B-00A0C93EC93B", gate)
         for label, mountpoint in (
             ("MING-BIOSBOOT", ""),
             ("MING-ESP", "/boot/efi"),
@@ -380,6 +383,7 @@ class ReleaseGateContracts(unittest.TestCase):
             "partition.conf blank_ab layout must require GPT",
             "partition.conf MING-BIOSBOOT must be before MING-ESP",
             "partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition",
+            "partition.conf MING-ESP must be an EFI System Partition",
         ):
             self.assertIn(marker, self.build)
 

@@ -715,6 +715,9 @@ for label, (filesystems, mountpoint) in expected_layout.items():
             str(entry.get("type", "")).casefold() != "21686148-6449-6E6F-744E-656564454649".casefold()
             or str(entry.get("filesystem", "")).casefold() != "unformatted"):
         errors.append("partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition")
+    if label == "MING-ESP" and (
+            str(entry.get("type", "")).casefold() != "C12A7328-F81F-11D2-BA4B-00A0C93EC93B".casefold()):
+        errors.append("partition.conf MING-ESP must be an EFI System Partition")
 if initial_choice == "erase":
     for required_live_path in (
         "usr/local/sbin/ming-live-installer-root",
