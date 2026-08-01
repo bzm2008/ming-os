@@ -49,6 +49,7 @@ readonly ROOT_PASS="${ROOT_PASS:-}"
 BUILD_SOURCE_COMMIT=""
 BUILD_TIME_UTC=""
 BUILD_ID=""
+declare -a GIT_COMMAND=()
 # 日志颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -87,13 +88,38 @@ require_root() {
         exit 1
     fi
 }
+resolve_git_invocation() {
+    local git_file raw_gitdir drive rest drive_lower linux_gitdir
+    GIT_COMMAND=(git -C "${SCRIPT_DIR}")
+    git_file="${SCRIPT_DIR}/.git"
+    if [[ ! -f "${git_file}" ]]; then
+        return 0
+    fi
+    raw_gitdir="$(sed -n 's/^gitdir: //p' "${git_file}" | head -n 1)"
+    if [[ "${raw_gitdir}" =~ ^([A-Za-z]):/(.*)$ ]]; then
+        drive="${BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[2]}"
+        drive_lower="$(printf '%s' "${drive}" | tr '[:upper:]' '[:lower:]')"
+        linux_gitdir="/mnt/${drive_lower}/${rest}"
+        if [[ -d "${linux_gitdir}" ]]; then
+            GIT_COMMAND=(git "--git-dir=${linux_gitdir}" "--work-tree=${SCRIPT_DIR}")
+        fi
+    fi
+}
+git_build() {
+    if [[ ${#GIT_COMMAND[@]} -eq 0 ]]; then
+        resolve_git_invocation
+    fi
+    "${GIT_COMMAND[@]}" "$@"
+}
 capture_build_identity() {
     require_cmd git "apt install git"
-    if [[ -n "$(git -C "${SCRIPT_DIR}" status --porcelain)" ]]; then
+    resolve_git_invocation
+    if [[ -n "$(git_build status --porcelain)" ]]; then
         log_error "构建要求干净工作树；请先提交本次 RC2 源码与测试。"
         return 1
     fi
-    BUILD_SOURCE_COMMIT="$(git -C "${SCRIPT_DIR}" rev-parse HEAD)"
+    BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
     BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     BUILD_ID="2641-rc2-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
     export BUILD_SOURCE_COMMIT BUILD_TIME_UTC BUILD_ID
@@ -101,9 +127,9 @@ capture_build_identity() {
 
 verify_build_identity() {
     local current_commit
-    current_commit="$(git -C "${SCRIPT_DIR}" rev-parse HEAD)"
+    current_commit="$(git_build rev-parse HEAD)"
     if [[ "${current_commit}" != "${BUILD_SOURCE_COMMIT}" ]] \
-       || [[ -n "$(git -C "${SCRIPT_DIR}" status --porcelain)" ]]; then
+       || [[ -n "$(git_build status --porcelain)" ]]; then
         log_error "源码在构建期间发生变化，拒绝生成无法追溯的 ISO。"
         return 1
     fi
@@ -111,7 +137,7 @@ verify_build_identity() {
 
 write_rootfs_build_identity() {
     local source_digest
-    source_digest="$(git -C "${SCRIPT_DIR}" ls-tree -r --full-tree HEAD \
+    source_digest="$(git_build ls-tree -r --full-tree HEAD \
         | sha256sum | awk '{print $1}')"
     install -d -m 0755 "${CHROOT_DIR}/etc"
     python3 - "${CHROOT_DIR}/etc/ming-os-build.json" \

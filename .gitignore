@@ -14,6 +14,7 @@ wget-log*
 
 # Local build logs and one-off helper scripts
 build-logs/
+test-evidence/
 *.log
 *.exit
 repackage_*.sh

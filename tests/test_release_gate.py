@@ -6,6 +6,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
 BASE = ROOT / "modules" / "01_base.sh"
 BUILD = ROOT / "build_onion_os.sh"
+GITIGNORE = ROOT / ".gitignore"
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 FINALIZE = ROOT / "modules" / "07_finalize.sh"
 SMOKE = ROOT / "scratch" / "ming-release-smoke.sh"
@@ -20,6 +21,7 @@ class ReleaseGateContracts(unittest.TestCase):
         cls.desktop = DESKTOP.read_text(encoding="utf-8")
         cls.base = BASE.read_text(encoding="utf-8")
         cls.build = BUILD.read_text(encoding="utf-8")
+        cls.gitignore = GITIGNORE.read_text(encoding="utf-8")
         cls.phone = PHONE.read_text(encoding="utf-8")
 
     def test_ming_shell_assets_are_installed(self):
@@ -331,6 +333,19 @@ class ReleaseGateContracts(unittest.TestCase):
             "partition.conf must not force one-click erase; initialPartitioningChoice must be none",
             self.build,
         )
+
+    def test_build_identity_handles_windows_worktree_gitdir_under_wsl(self):
+        self.assertIn("resolve_git_invocation", self.build)
+        self.assertIn("gitdir:", self.build)
+        self.assertIn("/mnt/", self.build)
+        self.assertIn("--work-tree=${SCRIPT_DIR}", self.build)
+        self.assertIn("git_build status --porcelain", self.build)
+        self.assertIn("git_build rev-parse HEAD", self.build)
+        self.assertIn("git_build ls-tree -r --full-tree HEAD", self.build)
+        self.assertNotIn('git -C "${SCRIPT_DIR}" status --porcelain', self.build)
+
+    def test_local_evidence_logs_do_not_dirty_release_builds(self):
+        self.assertIn("test-evidence/", self.gitignore)
 
     def test_build_gate_structurally_validates_every_blank_ab_partition(self):
         gate = self.build[
