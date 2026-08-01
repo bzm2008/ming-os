@@ -90,7 +90,7 @@ require_root() {
 }
 resolve_git_invocation() {
     local git_file raw_gitdir drive rest drive_lower linux_gitdir
-    GIT_COMMAND=(git -C "${SCRIPT_DIR}")
+    GIT_COMMAND=(git -c core.filemode=false -C "${SCRIPT_DIR}")
     git_file="${SCRIPT_DIR}/.git"
     if [[ ! -f "${git_file}" ]]; then
         return 0
@@ -102,7 +102,7 @@ resolve_git_invocation() {
         drive_lower="$(printf '%s' "${drive}" | tr '[:upper:]' '[:lower:]')"
         linux_gitdir="/mnt/${drive_lower}/${rest}"
         if [[ -d "${linux_gitdir}" ]]; then
-            GIT_COMMAND=(git "--git-dir=${linux_gitdir}" "--work-tree=${SCRIPT_DIR}")
+            GIT_COMMAND=(git -c core.filemode=false "--git-dir=${linux_gitdir}" "--work-tree=${SCRIPT_DIR}")
         fi
     fi
 }

@@ -341,6 +341,7 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("\\r", self.build)
         self.assertIn("/mnt/", self.build)
         self.assertIn("--work-tree=${SCRIPT_DIR}", self.build)
+        self.assertIn("core.filemode=false", self.build)
         self.assertIn("git_build status --porcelain", self.build)
         self.assertIn("git_build rev-parse HEAD", self.build)
         self.assertIn("git_build ls-tree -r --full-tree HEAD", self.build)
