@@ -112,13 +112,27 @@ git_build() {
     fi
     "${GIT_COMMAND[@]}" "$@"
 }
-capture_build_identity() {
-    require_cmd git "apt install git"
-    resolve_git_invocation
-    if [[ -n "$(git_build status --porcelain)" ]]; then
+assert_clean_source_tree() {
+    local untracked
+    if ! git_build diff --ignore-cr-at-eol --quiet -- .; then
         log_error "构建要求干净工作树；请先提交本次 RC2 源码与测试。"
         return 1
     fi
+    if ! git_build diff --cached --ignore-cr-at-eol --quiet -- .; then
+        log_error "构建要求没有暂存但未提交的源码变化。"
+        return 1
+    fi
+    untracked="$(git_build ls-files --others --exclude-standard)"
+    if [[ -n "${untracked}" ]]; then
+        log_error "构建要求没有未跟踪源码文件；请提交或加入忽略清单。"
+        printf '%s\n' "${untracked}" >&2
+        return 1
+    fi
+}
+capture_build_identity() {
+    require_cmd git "apt install git"
+    resolve_git_invocation
+    assert_clean_source_tree
     BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
     BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     BUILD_ID="2641-rc2-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -128,11 +142,14 @@ capture_build_identity() {
 verify_build_identity() {
     local current_commit
     current_commit="$(git_build rev-parse HEAD)"
-    if [[ "${current_commit}" != "${BUILD_SOURCE_COMMIT}" ]] \
-       || [[ -n "$(git_build status --porcelain)" ]]; then
+    if [[ "${current_commit}" != "${BUILD_SOURCE_COMMIT}" ]]; then
         log_error "源码在构建期间发生变化，拒绝生成无法追溯的 ISO。"
         return 1
     fi
+    assert_clean_source_tree || {
+        log_error "源码在构建期间发生变化，拒绝生成无法追溯的 ISO。"
+        return 1
+    }
 }
 
 write_rootfs_build_identity() {
