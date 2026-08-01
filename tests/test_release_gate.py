@@ -337,6 +337,8 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_build_identity_handles_windows_worktree_gitdir_under_wsl(self):
         self.assertIn("resolve_git_invocation", self.build)
         self.assertIn("gitdir:", self.build)
+        self.assertIn("tr -d", self.build)
+        self.assertIn("\\r", self.build)
         self.assertIn("/mnt/", self.build)
         self.assertIn("--work-tree=${SCRIPT_DIR}", self.build)
         self.assertIn("git_build status --porcelain", self.build)

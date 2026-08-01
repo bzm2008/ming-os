@@ -95,7 +95,7 @@ resolve_git_invocation() {
     if [[ ! -f "${git_file}" ]]; then
         return 0
     fi
-    raw_gitdir="$(sed -n 's/^gitdir: //p' "${git_file}" | head -n 1)"
+    raw_gitdir="$(sed -n 's/^gitdir: //p' "${git_file}" | head -n 1 | tr -d '\r')"
     if [[ "${raw_gitdir}" =~ ^([A-Za-z]):/(.*)$ ]]; then
         drive="${BASH_REMATCH[1]}"
         rest="${BASH_REMATCH[2]}"
