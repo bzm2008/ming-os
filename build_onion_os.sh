@@ -737,7 +737,12 @@ if initial_choice == "erase":
                 f"blank_ab erase flow requires explicit mode/root helper: {required_live_path}"
             )
 
-partition_type_normalizer = require_file("usr/local/sbin/ming-fix-partition-types", "MING-BIOSBOOT:ef02")
+partition_type_normalizer_path = root / "usr/local/sbin/ming-fix-partition-types"
+if not partition_type_normalizer_path.is_file():
+    errors.append("missing usr/local/sbin/ming-fix-partition-types")
+    partition_type_normalizer = ""
+else:
+    partition_type_normalizer = partition_type_normalizer_path.read_text(encoding="utf-8", errors="replace")
 for marker in ("MING-BIOSBOOT:ef02", "MING-ESP:ef00", "MING-BOOT:8300", "MING-ROOT-A:8300", "MING-ROOT-B:8300", "MING-HOME:8300"):
     if marker not in partition_type_normalizer:
         errors.append(f"ming-fix-partition-types missing {marker}")

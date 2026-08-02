@@ -397,6 +397,11 @@ class ReleaseGateContracts(unittest.TestCase):
             "MING-BOOT:8300",
         ):
             self.assertIn(marker, self.build)
+        gate = self.build[
+            self.build.index('partition = load_yaml("etc/calamares/modules/partition.conf")'):
+            self.build.index('desktop_gate = load_yaml', self.build.index('partition = load_yaml'))
+        ]
+        self.assertNotIn("require_file(", gate)
 
     def test_build_gate_requires_root_helper_for_live_calamares(self):
         self.assertIn("ming-live-installer-root", self.build)
