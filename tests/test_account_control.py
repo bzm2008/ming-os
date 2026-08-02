@@ -280,6 +280,28 @@ class AdministratorBootstrapTests(unittest.TestCase):
         self.assertTrue(all("--password" in call[0] for call in calls))
         self.assertTrue(all(call[1] is None for call in calls))
 
+    def test_password_prompt_timeout_allows_slow_legacy_hardware_input(self):
+        calls = []
+        answers = iter([
+            mock.Mock(returncode=0, stdout="secret\n", stderr=""),
+            mock.Mock(returncode=0, stdout="secret\n", stderr=""),
+        ])
+
+        def fake_run(command, **kwargs):
+            calls.append((tuple(command), kwargs))
+            return next(answers)
+
+        with mock.patch.object(self.api.subprocess, "run", side_effect=fake_run):
+            password = self.api.collect_interactive_password(
+                environ={"DISPLAY": ":0"}, executable=lambda _path: True)
+
+        self.assertEqual("secret", password)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all(
+            call_kwargs["timeout"] == self.api.PASSWORD_PROMPT_TIMEOUT_SECONDS
+            for _command, call_kwargs in calls))
+        self.assertGreaterEqual(self.api.PASSWORD_PROMPT_TIMEOUT_SECONDS, 300)
+
     def test_bootstrap_entrypoint_no_longer_accepts_caller_stdin(self):
         parameters = inspect.signature(self.api.main).parameters
         self.assertNotIn("stdin", parameters)
@@ -379,6 +401,15 @@ class BuildContractTests(unittest.TestCase):
                 "ming-admin-bootstrap.py", "/usr/local/sbin/ming-admin-bootstrap",
                 "org.ming.account.bootstrap.policy"):
             self.assertIn(marker, self.base)
+
+    def test_oobe_logs_bootstrap_and_status_details_for_retry_diagnosis(self):
+        script = self.desktop.split(
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
+                "OOBEACCOUNT", 1)[0]
+        self.assertIn('bootstrap_output="$(pkexec', script)
+        self.assertIn('bootstrap_output:-admin bootstrap returned non-zero', script)
+        self.assertIn('status_output="$(/usr/local/sbin/ming-admin-bootstrap status', script)
+        self.assertIn('status_output:-admin status was not ready', script)
         bootstrap_policy = self.base.split(
             "cat > /usr/share/polkit-1/actions/org.ming.account.bootstrap.policy", 1)[1].split(
                 "ACCOUNT_BOOTSTRAP_POLICY", 2)[1]

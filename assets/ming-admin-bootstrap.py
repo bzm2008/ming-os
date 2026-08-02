@@ -24,13 +24,14 @@ except ImportError:  # Windows contract tests
 USER_PATTERN = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 LOCK_PATH = "/run/lock/ming-admin-bootstrap.lock"
 ZENITY = "/usr/bin/zenity"
+PASSWORD_PROMPT_TIMEOUT_SECONDS = 300
 
 
 def run_command(command, input_text=None):
     try:
         result = subprocess.run(
             command, input=input_text, capture_output=True, text=True,
-            errors="replace", timeout=15)
+            errors="replace", timeout=PASSWORD_PROMPT_TIMEOUT_SECONDS)
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except Exception as exc:
         return 1, "", str(exc)

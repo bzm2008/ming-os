@@ -6174,17 +6174,18 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
     fi
 
     # 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
-    if ! pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" >/dev/null 2>&1; then
-        log_oobe_event "bootstrap_failed" "admin bootstrap returned non-zero (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+    bootstrap_output=""
+    if ! bootstrap_output="$(pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" 2>&1)"; then
+        log_oobe_event "bootstrap_failed" "${bootstrap_output:-admin bootstrap returned non-zero} (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
         dialog --title="无法完成" --text="管理员初始化未成功，请重新设置。" \
             --width=400 --button="重新设置:0" 2>/dev/null || true
         continue
     fi
-    if ! /usr/local/sbin/ming-admin-bootstrap status --user "${CUR_USER}" --json \
-        | grep -Fq '"ready": true'; then
+    status_output="$(/usr/local/sbin/ming-admin-bootstrap status --user "${CUR_USER}" --json 2>&1 || true)"
+    if ! grep -Fq '"ready": true' <<<"${status_output}"; then
         dialog --title="无法完成" --text="管理员状态回读失败，请重新设置。" \
             --width=400 --button="重新设置:0" 2>/dev/null || true
-        log_oobe_event "status_not_ready" "admin status was not ready (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+        log_oobe_event "status_not_ready" "${status_output:-admin status was not ready} (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
         continue
     fi
 
