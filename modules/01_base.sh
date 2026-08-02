@@ -3310,39 +3310,95 @@ partition_type_contracts=(
     "MING-HOME:8300:0fc63daf-8483-4772-8e79-3d69d8477de4"
 )
 
+settle_partitions() {
+    udevadm settle --timeout=10 >>"${LOG}" 2>&1 || udevadm settle >>"${LOG}" 2>&1 || true
+}
+
+lsblk_snapshot() {
+    log "partition snapshot:"
+    lsblk -nrpo NAME,TYPE,PKNAME,PARTN,PARTLABEL,PARTTYPE,FSTYPE,MOUNTPOINT \
+        >>"${LOG}" 2>&1 || true
+}
+
+wait_for_part_label() {
+    local label="$1" link part
+    for _attempt in 1 2 3 4 5 6; do
+        settle_partitions
+        link="/dev/disk/by-partlabel/${label}"
+        if [[ -e "${link}" || -L "${link}" ]]; then
+            part="$(readlink -f -- "${link}" 2>>"${LOG}" || true)"
+            if [[ -b "${part}" ]]; then
+                printf '%s\n' "${part}"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    lsblk_snapshot
+    return 1
+}
+
 part_by_label() {
-    local label="$1"
-    lsblk -nrpo NAME,TYPE,PARTLABEL 2>>"${LOG}" \
-        | awk -v label="${label}" '$2 == "part" && $3 == label { print $1; exit }'
+    wait_for_part_label "$1"
 }
 
 part_disk() {
     local part="$1" parent
-    parent="$(lsblk -npo PKNAME "${part}" 2>>"${LOG}" | head -n 1 || true)"
-    [[ -n "${parent}" ]] && { printf '%s\n' "${parent}"; return 0; }
-    lsblk -npo NAME,TYPE "${part}" 2>>"${LOG}" | awk '$2 == "disk" { print $1; exit }'
+    parent="$(lsblk -nrpo PKNAME "${part}" 2>>"${LOG}" | head -n 1 || true)"
+    if [[ -n "${parent}" ]]; then
+        [[ "${parent}" == /* ]] || parent="/dev/${parent}"
+        printf '%s\n' "${parent}"
+        return 0
+    fi
+    lsblk -nrpo NAME,TYPE "${part}" 2>>"${LOG}" \
+        | awk '$2 == "disk" { print $1; exit }'
 }
 
 part_number() {
-    lsblk -no PARTN "$1" 2>>"${LOG}" | head -n 1
+    lsblk -nro PARTN "$1" 2>>"${LOG}" | head -n 1
+}
+
+part_type() {
+    lsblk -nro PARTTYPE "$1" 2>>"${LOG}" \
+        | head -n 1 | tr '[:upper:]' '[:lower:]'
+}
+
+wait_for_part_type() {
+    local part="$1" expected="$2" actual
+    for _attempt in 1 2 3 4 5 6; do
+        settle_partitions
+        actual="$(part_type "${part}")"
+        [[ "${actual}" == "${expected}" ]] && return 0
+        sleep 1
+    done
+    log "partition type did not settle for ${part}: ${actual:-missing} (expected ${expected})"
+    lsblk_snapshot
+    return 1
 }
 
 set_part_type() {
     local disk="$1" number="$2" short_code="$3" guid="$4"
-    if command -v sgdisk >/dev/null 2>&1; then
-        sgdisk --typecode="${number}:${short_code}" "${disk}" >>"${LOG}" 2>&1
-    elif command -v sfdisk >/dev/null 2>&1; then
-        sfdisk --part-type "${disk}" "${number}" "${guid}" >>"${LOG}" 2>&1
-    else
-        log "ERROR: neither sgdisk nor sfdisk is available to set GPT partition types"
-        return 1
-    fi
+    for _attempt in 1 2 3; do
+        if command -v sgdisk >/dev/null 2>&1; then
+            sgdisk --typecode="${number}:${short_code}" "${disk}" >>"${LOG}" 2>&1 && return 0
+        elif command -v sfdisk >/dev/null 2>&1; then
+            sfdisk --part-type "${disk}" "${number}" "${guid}" >>"${LOG}" 2>&1 && return 0
+        else
+            log "ERROR: neither sgdisk nor sfdisk is available to set GPT partition types"
+            return 1
+        fi
+        partprobe "${disk}" >>"${LOG}" 2>&1 || true
+        settle_partitions
+        sleep 1
+    done
+    return 1
 }
 
+settle_partitions
 changed_disks=()
 for contract in "${partition_type_contracts[@]}"; do
     IFS=: read -r label short_code guid <<<"${contract}"
-    part="$(part_by_label "${label}")"
+    part="$(part_by_label "${label}" || true)"
     [[ -n "${part}" ]] || { log "ERROR: missing partition label ${label}"; exit 31; }
     disk="$(part_disk "${part}")"
     number="$(part_number "${part}")"
@@ -3350,7 +3406,7 @@ for contract in "${partition_type_contracts[@]}"; do
         log "ERROR: cannot resolve disk/number for ${label} (${part})"
         exit 31
     }
-    actual="$(lsblk -nro PARTTYPE "${part}" 2>>"${LOG}" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    actual="$(part_type "${part}")"
     if [[ "${actual}" != "${guid}" ]]; then
         log "fix ${label}: ${actual:-missing} -> ${guid} on ${disk}#${number}"
         set_part_type "${disk}" "${number}" "${short_code}" "${guid}" || exit 31
@@ -3369,9 +3425,9 @@ fi
 
 for contract in "${partition_type_contracts[@]}"; do
     IFS=: read -r label _short_code guid <<<"${contract}"
-    part="$(part_by_label "${label}")"
-    actual="$(lsblk -nro PARTTYPE "${part}" 2>>"${LOG}" | head -n 1 | tr '[:upper:]' '[:lower:]')"
-    [[ "${actual}" == "${guid}" ]] || {
+    part="$(part_by_label "${label}" || true)"
+    [[ -n "${part}" ]] && wait_for_part_type "${part}" "${guid}" || {
+        actual="$(part_type "${part:-/dev/null}")"
         log "ERROR: ${label} PARTTYPE is ${actual:-missing}, expected ${guid}"
         exit 31
     }

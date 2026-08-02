@@ -108,6 +108,30 @@ class InstallerModeTests(unittest.TestCase):
                 self.assertLess(settings.index("  - shellprocess@ming-fix-partition-types"), settings.index("  - shellprocess@ming-installer-target-receipt-reset"))
                 self.assertLess(settings.index("  - shellprocess@ming-fix-partition-types"), settings.index("  - mount"))
 
+    def test_partition_type_normalizer_waits_for_stable_partlabel_devices(self):
+        normalizer = BASE.split(
+            "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
+        )[1].split("\nMINGFIXPARTTYPES", 1)[0]
+        self.assertIn("settle_partitions()", normalizer)
+        self.assertIn("wait_for_part_label()", normalizer)
+        self.assertIn("/dev/disk/by-partlabel", normalizer)
+        self.assertIn("readlink -f", normalizer)
+        self.assertIn("lsblk_snapshot", normalizer)
+        self.assertNotIn('$2 == \"part\" && $3 == label', normalizer)
+
+    def test_partition_type_normalizer_retries_final_parttype_after_kernel_reread(self):
+        normalizer = BASE.split(
+            "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
+        )[1].split("\nMINGFIXPARTTYPES", 1)[0]
+        self.assertIn("wait_for_part_type()", normalizer)
+        self.assertIn("sgdisk --typecode", normalizer)
+        self.assertIn("partprobe", normalizer)
+        self.assertLess(
+            normalizer.index('set_part_type "${disk}" "${number}"'),
+            normalizer.index('wait_for_part_type "${part}" "${guid}"'),
+        )
+        self.assertIn("udevadm settle", normalizer)
+
     def test_generated_blank_ab_templates_create_a_real_fat32_esp(self):
         for source in (BASE, DESKTOP):
             with self.subTest(source="base" if source is BASE else "desktop"):

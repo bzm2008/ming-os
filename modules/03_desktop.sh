@@ -3234,6 +3234,31 @@ apply_low_resource_plank_profile() {
     fi
 }
 
+plank_setting_value() {
+    local settings="$1" key="$2" fallback="$3" value
+    value="$(awk -F= -v key="${key}" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "${settings}" 2>/dev/null || true)"
+    printf '%s\n' "${value:-$fallback}"
+}
+
+apply_plank_runtime_preferences() {
+    local settings="${HOME}/.config/plank/dock1/settings"
+    local theme theme_dconf icon_size zoom_enabled zoom_percent hide_mode
+    command -v dconf >/dev/null 2>&1 || return 0
+    theme="$(plank_setting_value "${settings}" Theme Ming)"
+    theme="${theme//\'/}"
+    theme_dconf="'Ming'"
+    theme_dconf="'${theme:-Ming}'"
+    icon_size="$(plank_setting_value "${settings}" IconSize 38)"
+    zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
+    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 112)"
+    hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
+    dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
+    dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-38}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
+    dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
+    dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-112}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
+    dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
+}
+
 migrate_glass_rail_profile() {
     local settings="$1"
     grep -q '^# MingDockProfile=2641-glass-rail-1$' "${settings}" 2>/dev/null && return 0
@@ -3441,8 +3466,12 @@ stop_plank() {
 start_plank() {
     command -v plank >/dev/null 2>&1 || return 1
     stop_legacy_dock
+    export DISPLAY="${DISPLAY:-:0}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
     ensure_plank_settings
     apply_low_resource_plank_profile "${HOME}/.config/plank/dock1/settings"
+    apply_plank_runtime_preferences
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then
@@ -3454,9 +3483,6 @@ start_plank() {
         stop_plank
         sleep 1
     fi
-    export DISPLAY="${DISPLAY:-:0}"
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
     log "starting Plank DISPLAY=${DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
     (nohup plank >>"${log_file}" 2>&1 &) || return 1
     # Keep the one-shot repair within the coordinator's fixed eight-second

@@ -130,6 +130,27 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("FillStartColor=255;255;255;160", self.source)
         self.assertIn("FillEndColor=232;248;242;184", self.source)
 
+    def test_plank_runtime_dconf_is_forced_before_launching_live_dock(self):
+        self.assertIn("apply_plank_runtime_preferences()", self.watchdog)
+        runtime = re.search(
+            r"apply_plank_runtime_preferences\(\) \{(.*?)\n\}",
+            self.watchdog,
+            re.S,
+        ).group(1)
+        for marker in (
+            "/net/launchpad/plank/docks/dock1/theme",
+            "/net/launchpad/plank/docks/dock1/icon-size",
+            "/net/launchpad/plank/docks/dock1/zoom-enabled",
+            "/net/launchpad/plank/docks/dock1/zoom-percent",
+            "/net/launchpad/plank/docks/dock1/hide-mode",
+            "dconf write",
+            "'Ming'",
+        ):
+            self.assertIn(marker, runtime)
+        start = re.search(r"start_plank\(\) \{(.*?)\n\}", self.watchdog, re.S).group(1)
+        self.assertLess(start.index("apply_low_resource_plank_profile"), start.index("apply_plank_runtime_preferences"))
+        self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("nohup plank"))
+
     def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
         for marker in (
             "TopRoundness=12",
