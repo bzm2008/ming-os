@@ -126,6 +126,7 @@ ensure_resume_runtime_packages() {
 resume_main() {
     [[ "${EUID}" -ne 0 ]] && { echo "[ERROR] 需要 root 权限"; exit 1; }
 
+    capture_build_identity
     echo "[INFO] 从 03_desktop.sh 恢复构建..."
     mount_chroot
     trap 'umount_chroot' EXIT
@@ -151,6 +152,7 @@ resume_main() {
         settle_chroot_dpkg "${mod}"
         log_info "模块 ${mod} 完成"
     done
+    write_rootfs_build_identity
 
     # unpackfs 配置已由 modules/01_base.sh 正确写入 chroot，
     # resume_build 不需要也不应该在这里单独覆盖它（否则会把旧路径写回去）
