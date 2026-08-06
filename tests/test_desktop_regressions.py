@@ -994,6 +994,14 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertNotIn("prepare_calamares_runtime", session)
         self.assertNotIn("ming-calamares-preflight", session)
 
+    def test_installer_session_creates_runtime_log_directory_before_launching_calamares(self):
+        session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        launch_index = session.index("/usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log")
+        self.assertIn("install -d -m 1777 /tmp/ming-installer", session[:launch_index])
+
     def test_preflight_reapplies_selected_mode_before_live_verification(self):
         preflight = self.desktop[
             self.desktop.index("cat > /usr/local/sbin/ming-calamares-preflight"):

@@ -7299,7 +7299,9 @@ prepare_installer_disks() {
     done
 }
 while true; do
-    chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    install -d -m 1777 /tmp/ming-installer 2>/dev/null || \
+        sudo -n install -d -m 1777 /tmp/ming-installer 2>/dev/null || \
+        { mkdir -p /tmp/ming-installer 2>/dev/null && chmod 1777 /tmp/ming-installer 2>/dev/null; } || true
     close_live_notice_when_calamares_visible &
     notice_watcher_pid="$!"
     /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
