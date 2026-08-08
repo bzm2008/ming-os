@@ -692,7 +692,6 @@ if partition.get("defaultPartitionTableType") != "gpt" or partition.get("require
 layout = partition.get("partitionLayout") or []
 expected_layout = {
     "MING-BIOSBOOT": ({"unformatted"}, None),
-    "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
     "MING-BOOT": ({"ext4"}, "/boot"),
     "MING-ROOT-A": ({"ext4"}, "/"),
     "MING-ROOT-B": ({"ext4"}, None),
@@ -705,9 +704,14 @@ layout_names = [
 ]
 if (
         "MING-BIOSBOOT" not in layout_names
-        or "MING-ESP" not in layout_names
-        or layout_names.index("MING-BIOSBOOT") > layout_names.index("MING-ESP")):
-    errors.append("partition.conf MING-BIOSBOOT must be before MING-ESP")
+        or "MING-BOOT" not in layout_names
+        or layout_names.index("MING-BIOSBOOT") > layout_names.index("MING-BOOT")):
+    errors.append("partition.conf MING-BIOSBOOT must be before MING-BOOT")
+if (
+        partition.get("efiSystemPartition") is not None
+        or "MING-ESP" in layout_names
+        or any(isinstance(item, dict) and item.get("mountPoint") == "/boot/efi" for item in layout)):
+    errors.append("partition.conf must let Calamares create the only ESP")
 for label, (filesystems, mountpoint) in expected_layout.items():
     entries = [item for item in layout if isinstance(item, dict) and item.get("name") == label]
     if len(entries) != 1:
@@ -722,9 +726,6 @@ for label, (filesystems, mountpoint) in expected_layout.items():
             str(entry.get("type", "")).casefold() != "21686148-6449-6E6F-744E-656564454649".casefold()
             or str(entry.get("filesystem", "")).casefold() != "unformatted"):
         errors.append("partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition")
-    if label == "MING-ESP" and (
-            str(entry.get("type", "")).casefold() != "C12A7328-F81F-11D2-BA4B-00A0C93EC93B".casefold()):
-        errors.append("partition.conf MING-ESP must be an EFI System Partition")
 if initial_choice == "erase":
     for required_live_path in (
         "usr/local/sbin/ming-live-installer-root",
@@ -743,9 +744,15 @@ if not partition_type_normalizer_path.is_file():
     partition_type_normalizer = ""
 else:
     partition_type_normalizer = partition_type_normalizer_path.read_text(encoding="utf-8", errors="replace")
+efi_system_partition_guid = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 for marker in ("MING-BIOSBOOT:ef02", "MING-ESP:ef00", "MING-BOOT:8300", "MING-ROOT-A:8300", "MING-ROOT-B:8300", "MING-HOME:8300"):
     if marker not in partition_type_normalizer:
         errors.append(f"ming-fix-partition-types missing {marker}")
+if efi_system_partition_guid.casefold() not in partition_type_normalizer.casefold():
+    errors.append("partition type normalizer must preserve the EFI System Partition GUID")
+for marker in ("find_auto_esp_partition", "claim_auto_esp_as_ming_esp", "Calamares auto ESP", "sgdisk --change-name="):
+    if marker not in partition_type_normalizer:
+        errors.append("partition type normalizer must claim the Calamares auto ESP as MING-ESP")
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True or \

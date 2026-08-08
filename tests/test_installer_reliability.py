@@ -1362,6 +1362,20 @@ class InstallerReceiptContracts(unittest.TestCase):
         ):
             self.assertIn(marker, identity)
 
+    def test_partition_type_normalizer_renames_auto_esp_before_mount(self):
+        normalizer = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
+        )[1].split("\nMINGFIXPARTTYPES", 1)[0]
+        self.assertIn("claim_auto_esp_as_ming_esp", normalizer)
+        self.assertIn("find_auto_esp_partition", normalizer)
+        self.assertIn("Calamares auto ESP", normalizer)
+        self.assertIn("MING-ESP", normalizer)
+        self.assertIn("sgdisk --change-name=", normalizer)
+        self.assertLess(
+            normalizer.index("claim_auto_esp_as_ming_esp"),
+            normalizer.index("for contract in"),
+        )
+
     def test_installed_identity_normalizes_esp_device_paths_before_mount_check(self):
         identity = BASE_MODULE.read_text(encoding="utf-8").split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1

@@ -366,7 +366,6 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("C12A7328-F81F-11D2-BA4B-00A0C93EC93B", gate)
         for label, mountpoint in (
             ("MING-BIOSBOOT", ""),
-            ("MING-ESP", "/boot/efi"),
             ("MING-BOOT", "/boot"),
             ("MING-ROOT-A", "/"),
             ("MING-ROOT-B", ""),
@@ -381,9 +380,9 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_build_gate_rejects_blank_ab_without_gpt_and_bios_boot_contract(self):
         for marker in (
             "partition.conf blank_ab layout must require GPT",
-            "partition.conf MING-BIOSBOOT must be before MING-ESP",
+            "partition.conf must let Calamares create the only ESP",
             "partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition",
-            "partition.conf MING-ESP must be an EFI System Partition",
+            "partition type normalizer must claim the Calamares auto ESP as MING-ESP",
         ):
             self.assertIn(marker, self.build)
 

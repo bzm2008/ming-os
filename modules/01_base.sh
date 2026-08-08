@@ -3302,6 +3302,105 @@ fi
     exit 0
 }
 
+find_auto_esp_partition() {
+    local target_disk="$1"
+    python3 - "${target_disk}" <<'PY'
+import json
+import subprocess
+import sys
+
+target_disk = sys.argv[1]
+efi_guid = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+known_ming_labels = {
+    "MING-BIOSBOOT",
+    "MING-BOOT",
+    "MING-ROOT-A",
+    "MING-ROOT-B",
+    "MING-HOME",
+}
+
+try:
+    output = subprocess.check_output(
+        ["lsblk", "-Jpo", "NAME,TYPE,PKNAME,PARTN,PARTLABEL,PARTTYPE,FSTYPE"],
+        text=True,
+    )
+except Exception:
+    sys.exit(1)
+
+def walk(node):
+    yield node
+    for child in node.get("children") or []:
+        yield from walk(child)
+
+data = json.loads(output)
+candidates = []
+for root in data.get("blockdevices") or []:
+    for item in walk(root):
+        if item.get("type") != "part":
+            continue
+        if item.get("pkname") != target_disk:
+            continue
+        parttype = (item.get("parttype") or "").casefold()
+        fstype = (item.get("fstype") or "").casefold()
+        label = item.get("partlabel") or ""
+        if label in known_ming_labels:
+            continue
+        if parttype == efi_guid and fstype in {"vfat", "fat32"}:
+            candidates.append(item.get("name"))
+
+candidates = [candidate for candidate in candidates if candidate]
+if len(candidates) != 1:
+    sys.exit(1)
+print(candidates[0])
+PY
+}
+
+claim_auto_esp_as_ming_esp() {
+    local existing_part bios_part target_disk auto_esp number
+
+    existing_part="$(part_by_label "MING-ESP" || true)"
+    if [[ -n "${existing_part}" ]]; then
+        log "ok MING-ESP already exists at ${existing_part}"
+        return 0
+    fi
+
+    bios_part="$(part_by_label "MING-BIOSBOOT" || true)"
+    [[ -n "${bios_part}" ]] || {
+        log "ERROR: cannot find MING-BIOSBOOT before claiming Calamares auto ESP"
+        lsblk_snapshot
+        return 1
+    }
+    target_disk="$(part_disk "${bios_part}")"
+    [[ -b "${target_disk}" ]] || {
+        log "ERROR: cannot resolve target disk for MING-BIOSBOOT (${bios_part})"
+        lsblk_snapshot
+        return 1
+    }
+
+    auto_esp="$(find_auto_esp_partition "${target_disk}" || true)"
+    [[ -n "${auto_esp}" ]] || {
+        log "ERROR: cannot find exactly one Calamares auto ESP on ${target_disk}"
+        lsblk_snapshot
+        return 1
+    }
+    number="$(part_number "${auto_esp}")"
+    [[ -n "${number}" ]] || {
+        log "ERROR: cannot resolve partition number for Calamares auto ESP (${auto_esp})"
+        lsblk_snapshot
+        return 1
+    }
+
+    log "claim Calamares auto ESP ${auto_esp} as MING-ESP on ${target_disk}#${number}"
+    if ! command -v sgdisk >/dev/null 2>&1; then
+        log "ERROR: sgdisk is required to claim the Calamares auto ESP as MING-ESP"
+        return 1
+    fi
+    sgdisk --change-name="${number}:MING-ESP" "${target_disk}" >>"${LOG}" 2>&1 || return 1
+    partprobe "${target_disk}" >>"${LOG}" 2>&1 || true
+    settle_partitions
+    wait_for_part_label "MING-ESP" >/dev/null
+}
+
 partition_type_contracts=(
     "MING-BIOSBOOT:ef02:21686148-6449-6e6f-744e-656564454649"
     "MING-ESP:ef00:c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
@@ -3396,6 +3495,7 @@ set_part_type() {
 }
 
 settle_partitions
+claim_auto_esp_as_ming_esp || exit 31
 changed_disks=()
 for contract in "${partition_type_contracts[@]}"; do
     IFS=: read -r label short_code guid <<<"${contract}"
@@ -3618,13 +3718,6 @@ partitionLayout:
     type: "21686148-6449-6E6F-744E-656564454649"
     size: 8M
     minSize: 8M
-  - name: "MING-ESP"
-    filesystem: "fat32"
-    noEncrypt: true
-    type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
-    mountPoint: "/boot/efi"
-    size: 512M
-    minSize: 256M
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true

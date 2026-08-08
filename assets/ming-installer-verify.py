@@ -287,14 +287,18 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                 if _yaml_scalar(bios_block, "mountPoint") not in (None, ""):
                     errors.append("Calamares A/B MING-BIOSBOOT must not be mounted")
                 if (
-                    'name: "MING-BIOSBOOT"' in partition
-                    and 'name: "MING-ESP"' in partition
-                    and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-ESP"')
+                    'name: "MING-BOOT"' in partition
+                    and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-BOOT"')
                 ):
-                    errors.append("Calamares A/B MING-BIOSBOOT must be before MING-ESP")
+                    errors.append("Calamares A/B MING-BIOSBOOT must be before MING-BOOT")
+            if (
+                "efiSystemPartition" in partition
+                or 'name: "MING-ESP"' in partition
+                or 'mountPoint: "/boot/efi"' in partition
+            ):
+                errors.append("Calamares A/B partition layout must let Calamares create the only ESP")
             required = _yaml_scalar(partition, "requiredStorage")
             expected_layout = {
-                "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
                 "MING-BOOT": ({"ext4"}, "/boot"),
                 "MING-ROOT-A": ({"ext4"}, "/"),
                 "MING-ROOT-B": ({"ext4"}, None),
