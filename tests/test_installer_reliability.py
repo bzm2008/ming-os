@@ -1362,6 +1362,18 @@ class InstallerReceiptContracts(unittest.TestCase):
         ):
             self.assertIn(marker, identity)
 
+    def test_installed_identity_resolves_gpt_partition_labels_not_only_filesystem_labels(self):
+        identity = BASE_MODULE.read_text(encoding="utf-8").split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("/dev/disk/by-partlabel", identity)
+        self.assertIn("PARTLABEL=", identity)
+        self.assertNotIn('blkid -L MING-ESP', identity)
+        self.assertNotIn('blkid -L MING-BOOT', identity)
+        self.assertNotIn('blkid -L MING-ROOT-A', identity)
+        self.assertNotIn('blkid -L MING-ROOT-B', identity)
+        self.assertNotIn('blkid -L MING-HOME', identity)
+
     def test_partition_type_normalizer_renames_auto_esp_before_mount(self):
         normalizer = BASE_MODULE.read_text(encoding="utf-8").split(
             "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1

@@ -2215,12 +2215,51 @@ write_ota_ready_layout() {
         lsblk -s -nrpo NAME,TYPE "$1" 2>/dev/null \
             | awk '$2 == "disk" {print $1}' | sort -u
     }
+    partlabel_device_on_disk() {
+        local label="$1" disk="$2" link candidate candidate_disk
+        for _attempt in 1 2 3 4 5 6; do
+            udevadm settle --timeout=10 2>/dev/null || true
+            link="/dev/disk/by-partlabel/${label}"
+            candidate=""
+            if [[ -e "${link}" || -L "${link}" ]]; then
+                candidate="$(readlink -f -- "${link}" 2>/dev/null || true)"
+            fi
+            if [[ "${candidate}" == /dev/* && -b "${candidate}" ]]; then
+                candidate_disk="$(physical_disk_for_device "${candidate}")"
+                if [[ "${candidate_disk}" == "${disk}" ]]; then
+                    printf '%s\n' "${candidate}"
+                    return 0
+                fi
+            fi
+            while IFS= read -r candidate; do
+                candidate="$(readlink -f -- "${candidate}" 2>/dev/null || true)"
+                [[ "${candidate}" == /dev/* && -b "${candidate}" ]] || continue
+                candidate_disk="$(physical_disk_for_device "${candidate}")"
+                if [[ "${candidate_disk}" == "${disk}" ]]; then
+                    printf '%s\n' "${candidate}"
+                    return 0
+                fi
+            done < <(blkid -t "PARTLABEL=${label}" -o device 2>/dev/null || true)
+            candidate="$(lsblk -nrpo NAME,PARTLABEL "${disk}" 2>/dev/null \
+                | awk -v wanted="${label}" '$2 == wanted {print $1; exit}')"
+            if [[ "${candidate}" == /dev/* && -b "${candidate}" ]]; then
+                printf '%s\n' "$(readlink -f -- "${candidate}" 2>/dev/null || printf '%s' "${candidate}")"
+                return 0
+            fi
+            sleep 1
+        done
+        return 1
+    }
     udevadm settle --timeout=10 2>/dev/null || true
-    esp_device="$(blkid -L MING-ESP 2>/dev/null || true)"
-    boot_device="$(blkid -L MING-BOOT 2>/dev/null || true)"
-    root_a_device="$(blkid -L MING-ROOT-A 2>/dev/null || true)"
-    root_b_device="$(blkid -L MING-ROOT-B 2>/dev/null || true)"
-    home_device="$(blkid -L MING-HOME 2>/dev/null || true)"
+    target_disk="$(physical_disk_for_device "${root_source}")"
+    [[ -n "${target_disk}" && "${target_disk}" != *$'\n'* ]] || {
+        echo "ERROR: cannot identify one OTA-ready target disk" >&2; return 1;
+    }
+    esp_device="$(partlabel_device_on_disk MING-ESP "${target_disk}" || true)"
+    boot_device="$(partlabel_device_on_disk MING-BOOT "${target_disk}" || true)"
+    root_a_device="$(partlabel_device_on_disk MING-ROOT-A "${target_disk}" || true)"
+    root_b_device="$(partlabel_device_on_disk MING-ROOT-B "${target_disk}" || true)"
+    home_device="$(partlabel_device_on_disk MING-HOME "${target_disk}" || true)"
     if [[ "${esp_device}" == /dev/* ]]; then
         esp_device="$(readlink -f -- "${esp_device}" 2>/dev/null || true)"
     fi
@@ -2249,10 +2288,6 @@ write_ota_ready_layout() {
             echo "ERROR: OTA-ready partition labels are incomplete" >&2; return 1;
         }
     done
-    target_disk="$(physical_disk_for_device "${root_source}")"
-    [[ -n "${target_disk}" && "${target_disk}" != *$'\n'* ]] || {
-        echo "ERROR: cannot identify one OTA-ready target disk" >&2; return 1;
-    }
     for device in "${esp_device}" "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
         candidate_disk="$(physical_disk_for_device "${device}")"
         [[ "${candidate_disk}" == "${target_disk}" ]] || {
