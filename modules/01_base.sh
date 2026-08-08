@@ -3798,10 +3798,6 @@ extraMounts:
     fs: none
     mountPoint: /dev
     options: bind
-  - device: /run
-    fs: none
-    mountPoint: /run
-    options: bind
 MOUNTCONF
 
     # Installer defaults for Chinese users. Keep the physical keyboard as US

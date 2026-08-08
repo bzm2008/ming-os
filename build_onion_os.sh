@@ -692,6 +692,13 @@ else:
     if item.get("source") != "/run/ming-installer/filesystem.squashfs":
         errors.append(f"unpackfs.conf must use the stable Ming runtime source, got {item.get('source')!r}")
 
+mount = load_yaml("etc/calamares/modules/mount.conf")
+for item in mount.get("extraMounts") or []:
+    if not isinstance(item, dict):
+        continue
+    if item.get("mountPoint") == "/run" or item.get("device") == "/run":
+        errors.append("mount.conf must not bind the Live /run into the target before unpackfs")
+
 partition = load_yaml("etc/calamares/modules/partition.conf")
 initial_choice = partition.get("initialPartitioningChoice")
 if initial_choice not in {"erase", "none"}:

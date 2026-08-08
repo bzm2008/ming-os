@@ -402,6 +402,15 @@ class ReleaseGateContracts(unittest.TestCase):
         ]
         self.assertNotIn("require_file(", gate)
 
+    def test_build_gate_rejects_live_run_bind_before_unpackfs(self):
+        for marker in (
+            'mount = load_yaml("etc/calamares/modules/mount.conf")',
+            "mount.conf must not bind the Live /run into the target before unpackfs",
+            "mountPoint",
+            "/run",
+        ):
+            self.assertIn(marker, self.build)
+
     def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
         self.assertIn("/usr/local/sbin/apt-build", self.build)
     def test_build_installs_noninteractive_apt_wrapper_for_modules(self):

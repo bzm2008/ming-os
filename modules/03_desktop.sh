@@ -2196,8 +2196,6 @@ OuterStrokeColor=255;255;255;118
 FillStartColor=255;255;255;160
 FillEndColor=232;248;242;184
 InnerStrokeColor=255;255;255;196
-
-[PlankDockTheme]
 HorizPadding=12
 TopPadding=-4
 BottomPadding=5
@@ -3292,6 +3290,7 @@ migrate_glass_rail_profile() {
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
     printf '# MingDockProfile=2641-glass-rail-1\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
+    MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"
 }
 
@@ -3309,6 +3308,7 @@ ensure_plank_settings() {
         restored=true
         log "restored complete Plank settings profile"
     fi
+    MING_PLANK_RELOAD_REQUIRED=0
     migrate_glass_rail_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
         sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
@@ -3472,6 +3472,11 @@ start_plank() {
     ensure_plank_settings
     apply_low_resource_plank_profile "${HOME}/.config/plank/dock1/settings"
     apply_plank_runtime_preferences
+    if [[ "${MING_PLANK_RELOAD_REQUIRED:-0}" == "1" ]] && pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+        log "restarting Plank so the glass rail theme replaces the previous running Dock"
+        stop_plank || true
+        sleep 0.5
+    fi
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then

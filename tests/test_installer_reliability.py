@@ -986,6 +986,17 @@ class InstallerReceiptContracts(unittest.TestCase):
             positions = [settings.index(value) for value in ordered]
             self.assertEqual(sorted(positions), positions)
 
+    def test_mount_conf_does_not_bind_live_run_before_unpackfs(self):
+        base = BASE_MODULE.read_text(encoding="utf-8")
+        mount_conf = base.split("cat > /etc/calamares/modules/mount.conf << 'MOUNTCONF'", 1)[1].split(
+            "MOUNTCONF", 1
+        )[0]
+        self.assertIn("/proc", mount_conf)
+        self.assertIn("/sys", mount_conf)
+        self.assertIn("/dev", mount_conf)
+        self.assertNotIn("mountPoint: /run", mount_conf)
+        self.assertNotIn("device: /run", mount_conf)
+
     def test_generated_receipt_job_executes_globalstorage_success_and_error_contracts(self):
         desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
         job_source = desktop.split(

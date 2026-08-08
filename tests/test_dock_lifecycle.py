@@ -165,6 +165,24 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.source)
 
+    def test_glass_rail_theme_uses_only_the_plank_theme_section(self):
+        theme = self.source.split('cat > "${theme_dir}/dock.theme" << \'PLANKTHEME\'', 1)[1].split(
+            "\nPLANKTHEME", 1
+        )[0]
+        self.assertIn("[PlankTheme]", theme)
+        self.assertNotIn("[PlankDockTheme]", theme)
+        self.assertEqual(1, theme.count("FillStartColor="))
+        plank_theme = theme.split("[PlankTheme]", 1)[1]
+        for marker in (
+            "HorizPadding=12",
+            "TopPadding=-4",
+            "BottomPadding=5",
+            "ItemPadding=4",
+            "LaunchBounceTime=150",
+            "ItemMoveTime=130",
+        ):
+            self.assertIn(marker, plank_theme)
+
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
             "MingDockProfile=2641-glass-rail-1",
@@ -175,6 +193,19 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.watchdog)
         self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
+
+    def test_plank_restarts_once_after_glass_theme_migration(self):
+        migrate = re.search(
+            r"migrate_glass_rail_profile\(\) \{(.*?)\n\}",
+            self.watchdog,
+            re.S,
+        ).group(1)
+        self.assertIn("MING_PLANK_RELOAD_REQUIRED=1", migrate)
+        start = re.search(r"start_plank\(\) \{(.*?)\n\}", self.watchdog, re.S).group(1)
+        self.assertIn("MING_PLANK_RELOAD_REQUIRED", start)
+        self.assertIn("stop_plank", start)
+        self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("plank_health_reason"))
+        self.assertLess(start.index("MING_PLANK_RELOAD_REQUIRED"), start.index("plank_health_reason"))
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(
