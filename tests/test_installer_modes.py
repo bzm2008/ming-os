@@ -92,6 +92,25 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
 
+    def test_blank_ab_uses_custom_ming_esp_without_auto_esp_helper(self):
+        mode = load_mode()
+        partition = mode.partition_config("blank_ab")
+        self.assertNotIn("efiSystemPartition", partition)
+        self.assertEqual(1, partition.count('mountPoint: "/boot/efi"'))
+        self.assertEqual(1, partition.count('name: "MING-ESP"'))
+
+        for source in (BASE, DESKTOP):
+            with self.subTest(source="base" if source is BASE else "desktop"):
+                tail = source.split(
+                    "cat > /etc/calamares/modules/partition.conf << '",
+                    1,
+                )[1]
+                delimiter = tail.split("'", 1)[0]
+                template = tail.split("\n", 1)[1].split("\n" + delimiter, 1)[0]
+                self.assertNotIn("efiSystemPartition", template)
+                self.assertEqual(1, template.count('mountPoint: "/boot/efi"'))
+                self.assertEqual(1, template.count('name: "MING-ESP"'))
+
     def test_blank_ab_templates_normalize_real_partition_types_after_partitioning(self):
         for source in (BASE, DESKTOP):
             with self.subTest(source="base" if source is BASE else "desktop"):

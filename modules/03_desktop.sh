@@ -6754,7 +6754,6 @@ STATICCALASETTINGS
 
     cat > /etc/calamares/modules/partition.conf << 'STATICPARTCONF'
 ---
-efiSystemPartition: "/boot/efi"
 userSwapChoices:
   - none
   - small

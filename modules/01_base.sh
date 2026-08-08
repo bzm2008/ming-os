@@ -3594,7 +3594,6 @@ UNPACKFSCONF
     # the partition step when the target disk had no usable label yet.
     cat > /etc/calamares/modules/partition.conf << 'PARTITIONCONF'
 ---
-efiSystemPartition: "/boot/efi"
 userSwapChoices:
   - none
   - small

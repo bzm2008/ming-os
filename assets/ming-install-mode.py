@@ -25,7 +25,6 @@ MODES = {
 
 
 BLANK_AB_PARTITION = """---
-efiSystemPartition: "/boot/efi"
 userSwapChoices:
   - none
 drawNestedPartitions: false
