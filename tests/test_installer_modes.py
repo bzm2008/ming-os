@@ -181,6 +181,11 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("initialPartitioningChoice: erase", partition)
         self.assertNotIn("initialPartitioningChoice: none", partition)
 
+    def test_chroot_apt_network_has_bounded_retries(self):
+        self.assertIn('Acquire::Retries "3";', BASE)
+        self.assertIn('Acquire::http::Timeout "45";', BASE)
+        self.assertIn('Acquire::https::Timeout "45";', BASE)
+
     def test_dual_boot_payload_disables_major_ota_and_requires_manual_partitioning(self):
         mode = load_mode()
         payload = mode.build_mode_payload("dual_boot_preserve")

@@ -35,6 +35,13 @@ deb https://deb.debian.org/debian/ trixie-updates main contrib non-free non-free
 deb https://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
 APTSRC
 
+    cat > /etc/apt/apt.conf.d/99ming-network << 'APTNETWORK'
+Acquire::Retries "3";
+Acquire::http::Timeout "45";
+Acquire::https::Timeout "45";
+Acquire::http::Pipeline-Depth "0";
+APTNETWORK
+
     # Host dependency installation may use its own skip flag to avoid a
     # redundant host apt update. Do not let that leak into the target rootfs:
     # after rewriting sources.list, chroot apt must refresh so contrib,
