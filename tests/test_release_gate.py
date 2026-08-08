@@ -402,6 +402,16 @@ class ReleaseGateContracts(unittest.TestCase):
         ]
         self.assertNotIn("require_file(", gate)
 
+    def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
+        self.assertIn("/usr/local/sbin/apt-build", self.build)
+    def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
+        self.assertIn("/usr/local/sbin/apt-build", self.build)
+        self.assertIn("/usr/local/sbin/apt\" <<", self.build)
+        self.assertIn("Acquire::Retries=3", self.build)
+        self.assertIn("Acquire::http::Timeout=45", self.build)
+        self.assertIn("Acquire::https::Timeout=45", self.build)
+        self.assertIn("exec /usr/local/sbin/apt-build", self.build)
+
     def test_build_gate_requires_root_helper_for_live_calamares(self):
         self.assertIn("ming-live-installer-root", self.build)
         self.assertIn("org.ming.live.installer.policy", self.build)

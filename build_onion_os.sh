@@ -378,9 +378,20 @@ exec env \
     -o APT::Install-Recommends=false \
     -o Dpkg::Options::="--force-confold" \
     -o Dpkg::Options::="--force-confdef" \
+    -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=45 \
+    -o Acquire::https::Timeout=45 \
+    -o Acquire::http::Pipeline-Depth=0 \
     "$@" </dev/null
 APT_BUILD_WRAPPER
     chmod 0755 "${CHROOT_DIR}/usr/local/sbin/apt-build"
+
+    cat > "${CHROOT_DIR}/usr/local/sbin/apt" << 'APT_FRONTEND_WRAPPER'
+#!/bin/sh
+# Route module-time apt calls through the non-interactive apt-get wrapper.
+exec /usr/local/sbin/apt-build "$@"
+APT_FRONTEND_WRAPPER
+    chmod 0755 "${CHROOT_DIR}/usr/local/sbin/apt"
 }
 # ======================== 模块脚本执行 ========================
 run_modules() {
