@@ -22,6 +22,16 @@ echo "[INFO] ISO_VOLUME_ID=${ISO_VOLUME_ID}"
 echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
+configure_resume_apt_sources() {
+    log_warn "chroot APT 源不可用，切换到 Debian 官方源后重试"
+    cat > "${CHROOT_DIR}/etc/apt/sources.list" <<APTSRC
+deb https://deb.debian.org/debian/ ${DEBIAN_SUITE} main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian/ ${DEBIAN_SUITE}-updates main contrib non-free non-free-firmware
+deb https://security.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib non-free non-free-firmware
+APTSRC
+    rm -rf "${CHROOT_DIR}/var/lib/apt/lists/"*
+}
+
 ensure_resume_runtime_packages() {
     log_step "补齐 resume 构建新增运行时依赖"
     # Interrupted b43 installer postinst scripts download from GitHub and can
@@ -31,8 +41,11 @@ ensure_resume_runtime_packages() {
         firmware-b43-installer firmware-b43legacy-installer \
         >/dev/null 2>&1 || true
     if ! chroot_exec apt-get update; then
-        log_error "resume 构建无法更新 APT 索引"
-        return 1
+        configure_resume_apt_sources
+        if ! chroot_exec apt-get update; then
+            log_error "resume 构建无法更新 APT 索引"
+            return 1
+        fi
     fi
     if ! chroot_exec /usr/local/sbin/apt-build install \
         xserver-xorg \

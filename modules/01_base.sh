@@ -14,7 +14,7 @@
 #   配置完成的 chroot 根文件系统
 #
 # 关键步骤：
-#   1. 配置清华 TUNA APT 源
+#   1. 配置 Debian 官方 APT 源
 #   2. 安装 Linux 内核、systemd、基础工具
 #   3. 配置语言环境 (zh_CN.UTF-8) 与时区 (Asia/Shanghai)
 #   4. 创建默认用户 ming 并配置 sudo
@@ -27,11 +27,12 @@ set -uo pipefail
 # ======================== APT 源配置 ========================
 
 configure_apt_sources() {
-    # 使用清华大学 TUNA 镜像源，加速国内下载
+    # Use Debian's official CDN by default. A single regional mirror returning
+    # 403 must not make the installed system unable to receive patch updates.
     cat > /etc/apt/sources.list << APTSRC
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ trixie main contrib non-free non-free-firmware
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ trixie-updates main contrib non-free non-free-firmware
-deb https://mirrors.tuna.tsinghua.edu.cn/debian-security trixie-security main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian/ trixie main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian/ trixie-updates main contrib non-free non-free-firmware
+deb https://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
 APTSRC
 
     # Host dependency installation may use its own skip flag to avoid a

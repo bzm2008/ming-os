@@ -9,6 +9,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
+BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 RESUME = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
 
@@ -211,6 +212,29 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('if ! chroot_exec /usr/local/sbin/apt-build install', function)
         self.assertIn('dpkg-query -W -f=', function)
         self.assertIn('resume required runtime package is not installed', function)
+
+    def test_build_and_target_apt_sources_do_not_depend_on_single_tuna_mirror(self):
+        self.assertIn(
+            'readonly DEBIAN_MIRROR="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"',
+            BUILD,
+        )
+        self.assertIn("deb https://deb.debian.org/debian/ trixie main", BASE)
+        self.assertIn("deb https://security.debian.org/debian-security trixie-security main", BASE)
+        self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BUILD)
+        self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BASE)
+
+    def test_resume_rewrites_chroot_sources_to_official_debian_and_retries_update(self):
+        self.assertIn("configure_resume_apt_sources()", RESUME)
+        helper = RESUME.split("configure_resume_apt_sources() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("deb.debian.org/debian", helper)
+        self.assertIn("security.debian.org/debian-security", helper)
+        function = RESUME.split("ensure_resume_runtime_packages() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(
+            function.index('if ! chroot_exec apt-get update'),
+            function.index("configure_resume_apt_sources"),
+        )
+        self.assertIn('if ! chroot_exec apt-get update; then', function)
+        self.assertIn("resume 构建无法更新 APT 索引", function)
 
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]
