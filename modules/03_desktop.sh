@@ -3243,12 +3243,18 @@ plank_setting_value() {
 
 apply_plank_runtime_preferences() {
     local settings="${HOME}/.config/plank/dock1/settings"
-    local theme theme_dconf icon_size zoom_enabled zoom_percent hide_mode
+    local theme theme_dconf current_theme icon_size zoom_enabled zoom_percent hide_mode
     command -v dconf >/dev/null 2>&1 || return 0
     theme="$(plank_setting_value "${settings}" Theme Ming)"
     theme="${theme//\'/}"
     theme_dconf="'Ming'"
     theme_dconf="'${theme:-Ming}'"
+    current_theme="$(dconf read /net/launchpad/plank/docks/dock1/theme 2>/dev/null || true)"
+    if pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 \
+        && [[ "${current_theme}" != "${theme_dconf}" ]]; then
+        MING_PLANK_RELOAD_REQUIRED=1
+        log "existing Plank theme ${current_theme:-unset} differs from ${theme_dconf}; one reload required"
+    fi
     icon_size="$(plank_setting_value "${settings}" IconSize 38)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
     zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 112)"
@@ -3929,19 +3935,18 @@ start_phone_desktop() {
 }
 
 start_plank_dock() {
-    local started_at finished_at deadline_at
-    if plank_window_visible; then
-        plank_recovered=true
-        return 0
-    fi
+    local started_at finished_at deadline_at was_running=false
+    plank_running && was_running=true
     command -v ming-plank-watchdog >/dev/null 2>&1 || {
         log 'ming-plank-watchdog is unavailable'
         return 1
     }
-    plank_restarts=$((plank_restarts + 1))
+    if [[ "${was_running}" != "true" ]]; then
+        plank_restarts=$((plank_restarts + 1))
+    fi
     started_at="$(now_ms)"
     deadline_at=$((started_at + PLANK_STARTUP_DEADLINE * 1000))
-    log "starting Plank Dock (deadline=${PLANK_STARTUP_DEADLINE}s)"
+    log "applying Plank runtime theme and checking Dock (deadline=${PLANK_STARTUP_DEADLINE}s)"
     (run_bounded "${PLANK_STARTUP_DEADLINE}" \
         /usr/local/bin/ming-plank-watchdog >>"${health_log}" 2>&1 &) || true
     if wait_for_process_until plank "${deadline_at}"; then
@@ -4229,6 +4234,21 @@ MINGTERM
     cat > /usr/local/bin/ming-lock << 'MINGLOCK'
 #!/usr/bin/env bash
 set -uo pipefail
+
+lock_is_deferred() {
+    if grep -qwE "boot=live|live-config|ming.installer=1" /proc/cmdline 2>/dev/null \
+        || [[ -f /.disk/info || -d /lib/live/mount/medium ]]; then
+        return 0
+    fi
+    local marker="${HOME}/.config/ming-os/oobe-account-done"
+    [[ -r "${marker}" ]] && grep -Fxq configured "${marker}" 2>/dev/null && return 1
+    return 0
+}
+
+if lock_is_deferred; then
+    notify-send "Ming OS" "Live 或首次设置期间暂不锁屏。" 2>/dev/null || true
+    exit 0
+fi
 
 if command -v xfce4-screensaver-command >/dev/null 2>&1; then
     xfce4-screensaver-command --lock >/tmp/ming-lock.log 2>&1 && exit 0
@@ -5746,6 +5766,11 @@ SCREENSAVERHELPER
     cat > /usr/local/bin/ming-install-disable-locking << 'DISABLELOCK'
 #!/usr/bin/env bash
 set -u
+if command -v xset >/dev/null 2>&1; then
+    xset s off >/dev/null 2>&1 || true
+    xset s noblank >/dev/null 2>&1 || true
+    xset -dpms >/dev/null 2>&1 || true
+fi
 if command -v xfconf-query >/dev/null 2>&1; then
     xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false 2>/dev/null || true
     xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s false 2>/dev/null || true
@@ -5755,6 +5780,7 @@ if command -v xfconf-query >/dev/null 2>&1; then
 fi
 xfce4-screensaver-command --exit >/dev/null 2>&1 || true
 pkill -TERM -u "$(id -u)" -x xfce4-screensaver >/dev/null 2>&1 || true
+pkill -TERM -u "$(id -u)" -x light-locker >/dev/null 2>&1 || true
 DISABLELOCK
     chmod 0755 /usr/local/bin/ming-install-disable-locking
 
@@ -7403,6 +7429,9 @@ APPLYWALLPAPER
     # mouse focus. Calamares is maximized and automatically restarted on exit.
 cat > /usr/local/bin/ming-installer-session << 'KIOSK'
 #!/usr/bin/env bash
+if command -v ming-install-disable-locking >/dev/null 2>&1; then
+    ming-install-disable-locking >/tmp/ming-installer-disable-locking.log 2>&1 || true
+fi
 if command -v ming-apply-wallpaper >/dev/null 2>&1; then
     if ! ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png; then
         echo "Live wallpaper failed; using light fallback" >&2
@@ -7476,6 +7505,9 @@ prepare_installer_disks() {
     done
 }
 while true; do
+    if command -v ming-install-disable-locking >/dev/null 2>&1; then
+        ming-install-disable-locking >/tmp/ming-installer-disable-locking.log 2>&1 || true
+    fi
     install -d -m 1777 /tmp/ming-installer 2>/dev/null || \
         sudo -n install -d -m 1777 /tmp/ming-installer 2>/dev/null || \
         { mkdir -p /tmp/ming-installer 2>/dev/null && chmod 1777 /tmp/ming-installer 2>/dev/null; } || true

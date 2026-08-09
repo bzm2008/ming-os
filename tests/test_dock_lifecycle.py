@@ -143,7 +143,9 @@ class DockLifecycleContracts(unittest.TestCase):
             "/net/launchpad/plank/docks/dock1/zoom-enabled",
             "/net/launchpad/plank/docks/dock1/zoom-percent",
             "/net/launchpad/plank/docks/dock1/hide-mode",
+            "dconf read",
             "dconf write",
+            "MING_PLANK_RELOAD_REQUIRED=1",
             "'Ming'",
         ):
             self.assertIn(marker, runtime)
@@ -274,6 +276,22 @@ class DockLifecycleContracts(unittest.TestCase):
         ).group(1)
         self.assertIn("ming-plank-watchdog --check", session_probe)
         self.assertIn("run_bounded", session_probe)
+
+    def test_session_applies_plank_runtime_theme_before_accepting_visible_dock(self):
+        session_start = re.search(
+            r"start_plank_dock\(\) \{(.*?)\n\}", self.session_healthcheck, re.S
+        ).group(1)
+        self.assertIn("/usr/local/bin/ming-plank-watchdog", session_start)
+        health_acceptance = [
+            session_start.index(marker)
+            for marker in ("plank_window_visible", "wait_for_process_until plank")
+            if marker in session_start
+        ]
+        self.assertTrue(health_acceptance)
+        self.assertLess(
+            session_start.index("/usr/local/bin/ming-plank-watchdog"),
+            min(health_acceptance),
+        )
 
     def test_healthcheck_has_json_repair_and_component_state(self):
         for marker in (

@@ -30,6 +30,14 @@ def load_verifier():
     return module
 
 
+def extract_heredoc_bytes(path, marker, delimiter):
+    data = path.read_bytes()
+    start = data.index(marker)
+    start = data.index(b"\n", start) + 1
+    end = data.index(b"\n" + delimiter, start)
+    return data[start:end]
+
+
 def write_installed_desktop(root, uuid):
     def write(relative, content="", executable=False):
         path = root / relative
@@ -130,6 +138,18 @@ class InstallerModeTests(unittest.TestCase):
         self.assertNotIn("claim_auto_esp_as_ming_esp", normalizer)
         self.assertNotIn("find_auto_esp_partition", normalizer)
         self.assertNotIn("sgdisk --change-name=", normalizer)
+
+    def test_partition_type_normalizer_is_lf_only(self):
+        normalizer = extract_heredoc_bytes(
+            ROOT / "modules" / "01_base.sh",
+            b"cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'",
+            b"MINGFIXPARTTYPES",
+        )
+        self.assertNotIn(
+            b"\r",
+            normalizer,
+            "CRLF in ming-fix-partition-types breaks Calamares shellprocess with $'\\r'",
+        )
 
     def test_blank_ab_templates_normalize_real_partition_types_after_partitioning(self):
         for source in (BASE, DESKTOP):

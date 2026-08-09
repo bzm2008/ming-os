@@ -767,6 +767,8 @@ if not partition_type_normalizer_path.is_file():
     errors.append("missing usr/local/sbin/ming-fix-partition-types")
     partition_type_normalizer = ""
 else:
+    if b"\r" in partition_type_normalizer_path.read_bytes():
+        errors.append("usr/local/sbin/ming-fix-partition-types must use LF line endings")
     partition_type_normalizer = partition_type_normalizer_path.read_text(encoding="utf-8", errors="replace")
 efi_system_partition_guid = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 for marker in ("MING-BIOSBOOT:ef02", "MING-ESP:ef00", "MING-BOOT:8300", "MING-ROOT-A:8300", "MING-ROOT-B:8300", "MING-HOME:8300"):

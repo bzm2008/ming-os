@@ -107,6 +107,30 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("xfce4-screensaver-command --exit", disable)
         self.assertIn("pkill -TERM -u", disable)
         self.assertIn("xfce4-screensaver", disable)
+        self.assertIn("light-locker", disable)
+        self.assertIn("xset s off", disable)
+        self.assertIn("xset s noblank", disable)
+        self.assertIn("xset -dpms", disable)
+
+        lock = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-lock"):
+            self.desktop.index("\nMINGLOCK", self.desktop.index("cat > /usr/local/bin/ming-lock"))
+        ]
+        self.assertIn('boot=live|live-config|ming.installer=1', lock)
+        self.assertIn("/.disk/info", lock)
+        self.assertIn("/lib/live/mount/medium", lock)
+        self.assertIn("oobe-account-done", lock)
+        self.assertLess(lock.index("oobe-account-done"), lock.index("xfce4-screensaver-command --lock"))
+
+        installer_session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"))
+        ]
+        self.assertGreaterEqual(installer_session.count("ming-install-disable-locking"), 2)
+        self.assertLess(
+            installer_session.index("ming-install-disable-locking"),
+            installer_session.index("ming-calamares-launcher"),
+        )
 
     def test_live_phone_desktop_keeps_a_reopenable_installer_entry(self):
         core_start = self.phone.index("CORE_NAMES = {")
