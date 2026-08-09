@@ -304,9 +304,14 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=255;255;255;118", self.build)
-        self.assertIn("FillStartColor=255;255;255;160", self.build)
-        self.assertIn("FillEndColor=232;248;242;184", self.build)
+        self.assertIn("OuterStrokeColor=255;255;255;180", self.build)
+        self.assertIn("FillStartColor=255;255;255;222", self.build)
+        self.assertIn("FillEndColor=238;248;246;214", self.build)
+
+    def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
+        self.assertIn('require_file("usr/local/bin/ming-install-mode-chooser", "Gtk.ResponseType.OK")', self.build)
+        self.assertIn('require_file("usr/local/bin/ming-calamares-launcher", "ming-install-mode-chooser")', self.build)
+        self.assertIn("keyboard-hostile Zenity radiolist chooser", self.build)
 
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""

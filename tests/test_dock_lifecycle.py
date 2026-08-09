@@ -109,7 +109,7 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("IconSize=38", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.plank_settings)
-        self.assertIn("MingDockProfile=2641-glass-rail-1", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-glass-rail-2", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
@@ -127,8 +127,8 @@ class DockLifecycleContracts(unittest.TestCase):
         ).group(1)
         self.assertIn("Theme=Ming", migrate)
         self.assertIn('sed -i "s/^Theme=.*/Theme=Ming/"', migrate)
-        self.assertIn("FillStartColor=255;255;255;160", self.source)
-        self.assertIn("FillEndColor=232;248;242;184", self.source)
+        self.assertIn("FillStartColor=255;255;255;222", self.source)
+        self.assertIn("FillEndColor=238;248;246;214", self.source)
 
     def test_plank_runtime_dconf_is_forced_before_launching_live_dock(self):
         self.assertIn("apply_plank_runtime_preferences()", self.watchdog)
@@ -158,9 +158,9 @@ class DockLifecycleContracts(unittest.TestCase):
             "HorizPadding=12",
             "ItemPadding=4",
             "IndicatorSize=4",
-            "OuterStrokeColor=255;255;255;118",
-            "FillStartColor=255;255;255;160",
-            "FillEndColor=232;248;242;184",
+            "OuterStrokeColor=255;255;255;180",
+            "FillStartColor=255;255;255;222",
+            "FillEndColor=238;248;246;214",
             "LaunchBounceHeight=0.20",
         ):
             self.assertIn(marker, self.source)
@@ -185,13 +185,14 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
-            "MingDockProfile=2641-glass-rail-1",
+            "MingDockProfile=2641-glass-rail-2",
             "migrate_glass_rail_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
             "s/^IconSize=.*/IconSize=38/",
             "s/^ZoomPercent=.*/ZoomPercent=112/",
         ):
             self.assertIn(marker, self.watchdog)
+        self.assertIn("2641-glass-rail-1", self.watchdog)
         self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
     def test_plank_restarts_once_after_glass_theme_migration(self):

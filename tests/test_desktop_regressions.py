@@ -997,9 +997,18 @@ class DesktopSourceTests(unittest.TestCase):
             self.desktop.index("cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'"):
             self.desktop.index("\nCALAMARESLAUNCHER", self.desktop.index("cat > /usr/local/bin/ming-calamares-launcher"))
         ]
+        chooser = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-install-mode-chooser << 'INSTALLMODECHOOSER'"):
+            self.desktop.index("\nINSTALLMODECHOOSER", self.desktop.index("cat > /usr/local/bin/ming-install-mode-chooser"))
+        ]
         self.assertIn("ming-live-installer-root", launcher)
+        self.assertIn("/usr/local/bin/ming-install-mode-chooser", launcher)
+        self.assertIn("空白盘自动安装（支持 A/B OTA）", chooser)
+        self.assertIn("保留双系统（禁用 major A/B OTA）", chooser)
+        self.assertIn("self.blank_button.grab_focus()", chooser)
         self.assertNotIn("exec pkexec calamares -d", launcher)
         self.assertNotIn("sudo -n /usr/local/sbin/ming-calamares-preflight", launcher)
+        self.assertNotIn("--radiolist", launcher)
 
     def test_installer_session_does_not_run_a_second_preflight(self):
         session = self.desktop[

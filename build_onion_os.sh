@@ -748,6 +748,7 @@ if initial_choice == "erase":
     for required_live_path in (
         "usr/local/sbin/ming-live-installer-root",
         "usr/local/bin/ming-calamares-launcher",
+        "usr/local/bin/ming-install-mode-chooser",
         "usr/local/sbin/ming-install-mode",
         "usr/share/polkit-1/actions/org.ming.live.installer.policy",
     ):
@@ -874,6 +875,7 @@ for relative_path in [
     "usr/local/sbin/ming-install-bootloader",
     "usr/local/sbin/ming-installer-verify",
     "usr/local/sbin/ming-finish-install-reboot",
+    "usr/local/bin/ming-install-mode-chooser",
     "usr/local/bin/ming-calamares-launcher",
     "usr/local/bin/ming-live-installer.sh",
     "usr/local/bin/ming-installer-session",
@@ -938,10 +940,18 @@ for relative_path in [
         if relative_path.endswith("ming-calamares-launcher"):
             if "is_live_or_installer" not in text:
                 errors.append(f"{relative_path} must refuse to run outside Live/installer sessions")
-            if "choose_install_mode" not in text or "ming-live-installer-root" not in text:
+            if "choose_install_mode" not in text or "ming-install-mode-chooser" not in text or "ming-live-installer-root" not in text:
                 errors.append(f"{relative_path} must choose an install mode before invoking the root helper")
+            if "zenity --list --radiolist" in text:
+                errors.append(f"{relative_path} must not use the keyboard-hostile Zenity radiolist chooser")
+        if relative_path.endswith("ming-install-mode-chooser"):
+            if "Gtk.ResponseType.OK" not in text or "self.blank_button.grab_focus()" not in text:
+                errors.append(f"{relative_path} must provide a keyboard-accessible default install choice")
         if relative_path.endswith(("ming-live-installer.sh", "ming-installer-session")) and "ming-calamares-launcher" not in text:
             errors.append(f"{relative_path} must launch Calamares through ming-calamares-launcher")
+
+require_file("usr/local/bin/ming-install-mode-chooser", "Gtk.ResponseType.OK")
+require_file("usr/local/bin/ming-calamares-launcher", "ming-install-mode-chooser")
 
 for relative_path in [
     "usr/share/applications/calamares.desktop",
@@ -1564,9 +1574,9 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=255;255;255;118",
-        "FillStartColor=255;255;255;160",
-        "FillEndColor=232;248;242;184",
+        "OuterStrokeColor=255;255;255;180",
+        "FillStartColor=255;255;255;222",
+        "FillEndColor=238;248;246;214",
         "UrgentBounceTime=420",
         "LaunchBounceTime=150",
         "ItemMoveTime=130"]:

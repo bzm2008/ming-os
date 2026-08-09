@@ -224,10 +224,12 @@ class InstallerModeTests(unittest.TestCase):
 
     def test_launcher_requires_a_mode_before_starting_calamares(self):
         self.assertIn("ming-install-mode", DESKTOP)
+        self.assertIn("ming-install-mode-chooser", DESKTOP)
         launcher = DESKTOP.split(
             "cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'", 1
         )[1].split("\nCALAMARESLAUNCHER", 1)[0]
         self.assertIn("选择安装模式", launcher)
+        self.assertIn("/usr/local/bin/ming-install-mode-chooser", launcher)
         self.assertIn("ming-live-installer-root", launcher)
         helper = DESKTOP.split(
             "cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'", 1
@@ -235,20 +237,30 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("install-mode.json", helper)
         self.assertLess(helper.index("ming-install-mode write"), helper.index("calamares -d"))
 
-    def test_launcher_treats_empty_confirmed_zenity_choice_as_default_blank_ab(self):
+    def test_launcher_uses_keyboard_accessible_mode_chooser(self):
         launcher = DESKTOP.split(
             "cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'", 1
         )[1].split("\nCALAMARESLAUNCHER", 1)[0]
-        self.assertIn("zenity_status", launcher)
-        self.assertIn('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then', launcher)
-        self.assertIn("choice=blank_ab", launcher)
-        self.assertLess(
-            launcher.index('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then'),
-            launcher.index('case "${choice}" in'),
-        )
+        chooser = DESKTOP.split(
+            "cat > /usr/local/bin/ming-install-mode-chooser << 'INSTALLMODECHOOSER'", 1
+        )[1].split("\nINSTALLMODECHOOSER", 1)[0]
+        self.assertNotIn("--radiolist", launcher)
+        self.assertNotIn("zenity_status", launcher)
+        self.assertIn('choice="$(/usr/local/bin/ming-install-mode-chooser', launcher)
+        for marker in (
+            "gi.require_version('Gtk', '3.0')",
+            "gi.require_version('Gdk', '3.0')",
+            "self.blank_button.grab_focus()",
+            "connect('key-press-event'",
+            "Gdk.KEY_Return",
+            "Gdk.KEY_space",
+            "Gtk.ResponseType.OK",
+            "print(dialog.selected_mode)",
+        ):
+            self.assertIn(marker, chooser)
         cancelled = launcher[
-            launcher.index('if [ "${zenity_status}" -ne 0 ]; then'):
-            launcher.index('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then')
+            launcher.index('if ! choice="$(/usr/local/bin/ming-install-mode-chooser'):
+            launcher.index('selected_mode="${choice}"')
         ]
         self.assertIn("return 1", cancelled)
         self.assertIn("未选择安装方式", cancelled)

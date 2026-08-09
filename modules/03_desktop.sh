@@ -2067,7 +2067,7 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、半透明玻璃底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-glass-rail-1
+# MingDockProfile=2641-glass-rail-2
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -2192,10 +2192,10 @@ MINGREFRESHDOCK
 TopRoundness=12
 BottomRoundness=12
 LineWidth=1
-OuterStrokeColor=255;255;255;118
-FillStartColor=255;255;255;160
-FillEndColor=232;248;242;184
-InnerStrokeColor=255;255;255;196
+OuterStrokeColor=255;255;255;180
+FillStartColor=255;255;255;222
+FillEndColor=238;248;246;214
+InnerStrokeColor=255;255;255;232
 HorizPadding=12
 TopPadding=-4
 BottomPadding=5
@@ -3186,7 +3186,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-glass-rail-1
+# MingDockProfile=2641-glass-rail-2
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
@@ -3259,7 +3259,7 @@ apply_plank_runtime_preferences() {
 
 migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-glass-rail-1$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-glass-rail-2$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3288,7 +3288,8 @@ migrate_glass_rail_profile() {
         printf 'Theme=Ming\n' >>"${settings}"
     fi
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-glass-rail-1\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-glass-rail-1$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-glass-rail-2\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"
@@ -6929,6 +6930,148 @@ LIVEINSTALLERROOT
 </policyconfig>
 LIVEINSTALLERPOLICY
 
+    cat > /usr/local/bin/ming-install-mode-chooser << 'INSTALLMODECHOOSER'
+#!/usr/bin/env python3
+import sys
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gtk
+
+CSS = b'''
+dialog {
+  background: #f6faf8;
+}
+.mode-title {
+  font-size: 21px;
+  font-weight: 700;
+  color: #17231f;
+}
+.mode-help {
+  color: #4c5f58;
+}
+.mode-card {
+  border-radius: 14px;
+  padding: 14px;
+  border: 1px solid rgba(47, 138, 125, 0.22);
+  background: rgba(255, 255, 255, 0.92);
+}
+.mode-card:focus,
+.mode-card:hover {
+  border-color: rgba(47, 138, 125, 0.66);
+  background: rgba(255, 255, 255, 0.98);
+}
+.mode-card-primary {
+  border-color: rgba(47, 138, 125, 0.72);
+}
+.card-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #14362f;
+}
+.card-body {
+  color: #34453f;
+}
+'''
+
+
+class InstallModeChooser(Gtk.Dialog):
+    def __init__(self):
+        super().__init__(title='选择安装模式')
+        self.selected_mode = 'blank_ab'
+        self.set_default_size(760, 360)
+        self.set_resizable(False)
+        self.set_modal(True)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.add_button('取消', Gtk.ResponseType.CANCEL)
+        self.add_button('继续安装', Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        self.connect('key-press-event', self.on_key_press)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        root.set_border_width(18)
+        self.get_content_area().add(root)
+
+        title = Gtk.Label(label='安装 Ming OS 前，请先选择安装方式')
+        title.set_xalign(0)
+        title.get_style_context().add_class('mode-title')
+        root.pack_start(title, False, False, 0)
+
+        help_text = Gtk.Label(
+            label='空白盘自动安装会创建完整 A/B 分区并支持大版本 OTA 回滚；保留双系统会保护另一个系统，但大版本 A/B OTA 会禁用。'
+        )
+        help_text.set_xalign(0)
+        help_text.set_line_wrap(True)
+        help_text.get_style_context().add_class('mode-help')
+        root.pack_start(help_text, False, False, 0)
+
+        cards = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.pack_start(cards, True, True, 0)
+        self.blank_button = self.mode_button(
+            'blank_ab',
+            '空白盘自动安装（支持 A/B OTA）',
+            '需要至少 48GB；会创建 MING-ESP、/boot、A/B root 和独立 /home，并支持自动回滚。'
+        )
+        self.dual_button = self.mode_button(
+            'dual_boot_preserve',
+            '保留双系统（禁用 major A/B OTA）',
+            '手动选择空闲空间或目标分区；保留另一个系统，只允许签名 patch/minor 更新。'
+        )
+        cards.pack_start(self.blank_button, False, False, 0)
+        cards.pack_start(self.dual_button, False, False, 0)
+        self.blank_button.grab_focus()
+        self.show_all()
+
+    def mode_button(self, mode, title, body):
+        button = Gtk.Button()
+        button.set_relief(Gtk.ReliefStyle.NONE)
+        button.get_style_context().add_class('mode-card')
+        if mode == 'blank_ab':
+            button.get_style_context().add_class('mode-card-primary')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        label = Gtk.Label(label=title)
+        label.set_xalign(0)
+        label.get_style_context().add_class('card-title')
+        detail = Gtk.Label(label=body)
+        detail.set_xalign(0)
+        detail.set_line_wrap(True)
+        detail.get_style_context().add_class('card-body')
+        box.pack_start(label, False, False, 0)
+        box.pack_start(detail, False, False, 0)
+        button.add(box)
+        button.connect('clicked', lambda *_args: self.choose(mode))
+        return button
+
+    def choose(self, mode):
+        self.selected_mode = mode
+        self.response(Gtk.ResponseType.OK)
+
+    def on_key_press(self, _widget, event):
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            self.response(Gtk.ResponseType.OK)
+            return True
+        if event.keyval == Gdk.KEY_Escape:
+            self.response(Gtk.ResponseType.CANCEL)
+            return True
+        return False
+
+
+dialog = InstallModeChooser()
+response = dialog.run()
+if response == Gtk.ResponseType.OK and dialog.selected_mode in ('blank_ab', 'dual_boot_preserve'):
+    print(dialog.selected_mode)
+    sys.exit(0)
+sys.exit(1)
+INSTALLMODECHOOSER
+    chmod 0755 /usr/local/bin/ming-install-mode-chooser
+
     cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'
 #!/usr/bin/env bash
 set -e
@@ -6965,33 +7108,22 @@ show_preflight_error() {
 }
 
 choose_install_mode() {
+    # 选择安装模式：由专用 GTK 选择器处理鼠标、Enter 和 Space。
     local choice=""
-    local zenity_status=1
-    if command -v zenity >/dev/null 2>&1; then
-        set +e
-        choice="$(zenity --list --radiolist --title='选择安装模式' --width=780 --height=340 \
-            --text='请先选择安装方式。保留双系统不会自动清空其他系统，但大版本 A/B OTA 将被禁用。' \
-            --column='' --column='安装方式' --column='说明' \
-            TRUE '空白盘自动安装（支持 A/B OTA）' '需要至少 48GB，将创建 Ming OS A/B 系统槽并支持自动回滚。' \
-            FALSE '保留双系统（禁用 major A/B OTA）' '只使用手动选择的空闲空间；保留其他系统，支持签名 patch/minor 更新。' \
-            2>/dev/null)"
-        zenity_status=$?
-        set -e
+    if [ ! -x /usr/local/bin/ming-install-mode-chooser ]; then
+        zenity --error --title='安装器缺少组件' \
+            --text='缺少安装方式选择器，安装程序不会启动。请重新构建或修复系统镜像。' \
+            2>/dev/null || true
+        return 1
     fi
-    if [ "${zenity_status}" -ne 0 ]; then
+    if ! choice="$(/usr/local/bin/ming-install-mode-chooser 2>>/tmp/ming-installer/mode-chooser.log)"; then
         zenity --warning --title='未选择安装方式' \
             --text='未选择安装方式，安装程序不会启动。请从“安装 Ming OS”再次打开并选择。' \
             2>/dev/null || true
         return 1
     fi
-    if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then
-        # Keyboard-only activation can confirm the highlighted default row
-        # without toggling the radiolist cell in some GTK/Zenity builds.
-        choice=blank_ab
-    fi
     case "${choice}" in
-        '空白盘自动安装（支持 A/B OTA）') choice=blank_ab ;;
-        '保留双系统（禁用 major A/B OTA）') choice=dual_boot_preserve ;;
+        blank_ab|dual_boot_preserve) ;;
         *)
             zenity --warning --title='未选择安装方式' \
                 --text='未选择安装方式，安装程序不会启动。请从“安装 Ming OS”再次打开并选择。' \
@@ -7015,6 +7147,9 @@ helper=(/usr/local/sbin/ming-live-installer-root
     --mode "${selected_mode}"
     --display "${DISPLAY:-:0}"
     --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}")
+if command -v xhost >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+    xhost +SI:localuser:root >/tmp/ming-installer/xhost.log 2>&1 || true
+fi
 if [ "$(id -u)" -eq 0 ]; then
     "${helper[@]}" || {
         show_preflight_error
