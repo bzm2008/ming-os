@@ -5738,6 +5738,21 @@ exit 0
 SCREENSAVERHELPER
     chmod 0755 /usr/local/bin/ming-screensaver-after-oobe
 
+    cat > /usr/local/bin/ming-install-disable-locking << 'DISABLELOCK'
+#!/usr/bin/env bash
+set -u
+if command -v xfconf-query >/dev/null 2>&1; then
+    xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s false 2>/dev/null || true
+    xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s false 2>/dev/null || true
+    xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
+    xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
+fi
+xfce4-screensaver-command --exit >/dev/null 2>&1 || true
+pkill -TERM -u "$(id -u)" -x xfce4-screensaver >/dev/null 2>&1 || true
+DISABLELOCK
+    chmod 0755 /usr/local/bin/ming-install-disable-locking
+
     cat > "${autostart_dir}/xfce4-screensaver.desktop" << SCREENSAVERAUTO
 [Desktop Entry]
 Type=Application
@@ -6951,13 +6966,28 @@ show_preflight_error() {
 
 choose_install_mode() {
     local choice=""
+    local zenity_status=1
     if command -v zenity >/dev/null 2>&1; then
+        set +e
         choice="$(zenity --list --radiolist --title='选择安装模式' --width=780 --height=340 \
             --text='请先选择安装方式。保留双系统不会自动清空其他系统，但大版本 A/B OTA 将被禁用。' \
             --column='' --column='安装方式' --column='说明' \
             TRUE '空白盘自动安装（支持 A/B OTA）' '需要至少 48GB，将创建 Ming OS A/B 系统槽并支持自动回滚。' \
             FALSE '保留双系统（禁用 major A/B OTA）' '只使用手动选择的空闲空间；保留其他系统，支持签名 patch/minor 更新。' \
-            2>/dev/null || true)"
+            2>/dev/null)"
+        zenity_status=$?
+        set -e
+    fi
+    if [ "${zenity_status}" -ne 0 ]; then
+        zenity --warning --title='未选择安装方式' \
+            --text='未选择安装方式，安装程序不会启动。请从“安装 Ming OS”再次打开并选择。' \
+            2>/dev/null || true
+        return 1
+    fi
+    if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then
+        # Keyboard-only activation can confirm the highlighted default row
+        # without toggling the radiolist cell in some GTK/Zenity builds.
+        choice=blank_ab
     fi
     case "${choice}" in
         '空白盘自动安装（支持 A/B OTA）') choice=blank_ab ;;
@@ -7064,6 +7094,7 @@ if is_live_environment || is_installer_boot; then
     fi
     mkdir -p /tmp/ming-installer
     chmod 1777 /tmp/ming-installer 2>/dev/null || sudo -n chmod 1777 /tmp/ming-installer 2>/dev/null || true
+    /usr/local/bin/ming-install-disable-locking >/tmp/ming-installer/disable-locking.log 2>&1 || true
 
     if command -v calamares &>/dev/null; then
         # -style/maximize handled by calamares window manager hint; keep retrying
@@ -7635,6 +7666,18 @@ XSETTINGSCFG
 </channel>
 SCREENSAVERCFG
 
+    cat > "/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml" << 'KEYBOARDSHORTCUTSCFG'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-keyboard-shortcuts" version="1.0">
+  <property name="commands" type="empty">
+    <property name="custom" type="empty">
+      <property name="&lt;Primary&gt;&lt;Alt&gt;t" type="string" value="ming-terminal"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;l" type="string" value="ming-lock"/>
+    </property>
+  </property>
+</channel>
+KEYBOARDSHORTCUTSCFG
+
     # Whisker Menu 配置（26.4.1 玻璃主题版）
     mkdir -p "/home/${MING_USER}/.config/xfce4/panel"
     cat > "/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc" << 'WHISKERRC'
@@ -7752,6 +7795,8 @@ xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
 oobe_ready=false
 if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
     && grep -Fxq configured "${HOME}/.config/ming-os/oobe-account-done" 2>/dev/null; then
@@ -7764,8 +7809,12 @@ if "${oobe_ready}"; then
     xfconf-query -c xfce4-screensaver -p /lock/saver-activation/enabled -n -t bool -s true 2>/dev/null || true
     xfconf-query -c xfce4-screensaver -p /lock/saver-activation/delay -n -t int -s 5 2>/dev/null || true
 else
-    xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false 2>/dev/null || true
-    xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s false 2>/dev/null || true
+    if command -v ming-install-disable-locking >/dev/null 2>&1; then
+        ming-install-disable-locking >/dev/null 2>&1 || true
+    else
+        xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false 2>/dev/null || true
+        xfconf-query -c xfce4-screensaver -p /lock/enabled -n -t bool -s false 2>/dev/null || true
+    fi
 fi
 
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)

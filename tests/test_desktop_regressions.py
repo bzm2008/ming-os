@@ -93,6 +93,21 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("Exec=/usr/bin/true", self.desktop)
         self.assertIn("ming-phone-desktop --sync", self.desktop)
 
+    def test_ctrl_alt_t_is_for_terminal_not_lock_during_live_and_oobe(self):
+        self.assertIn("xfce4-keyboard-shortcuts.xml", self.desktop)
+        self.assertIn("&lt;Primary&gt;&lt;Alt&gt;t", self.desktop)
+        self.assertIn('value="ming-terminal"', self.desktop)
+        self.assertIn('/commands/custom/<Primary><Alt>t', self.desktop)
+        self.assertNotIn('/commands/custom/<Primary><Alt>t" -n -t string -s "ming-lock"', self.desktop)
+        self.assertIn("ming-install-disable-locking", self.desktop)
+        disable = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-install-disable-locking"):
+            self.desktop.index("\nDISABLELOCK", self.desktop.index("cat > /usr/local/bin/ming-install-disable-locking"))
+        ]
+        self.assertIn("xfce4-screensaver-command --exit", disable)
+        self.assertIn("pkill -TERM -u", disable)
+        self.assertIn("xfce4-screensaver", disable)
+
     def test_live_phone_desktop_keeps_a_reopenable_installer_entry(self):
         core_start = self.phone.index("CORE_NAMES = {")
         core = self.phone[core_start:self.phone.index("}\nDESKTOP_ORDER", core_start)]

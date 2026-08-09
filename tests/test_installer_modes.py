@@ -235,6 +235,24 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("install-mode.json", helper)
         self.assertLess(helper.index("ming-install-mode write"), helper.index("calamares -d"))
 
+    def test_launcher_treats_empty_confirmed_zenity_choice_as_default_blank_ab(self):
+        launcher = DESKTOP.split(
+            "cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'", 1
+        )[1].split("\nCALAMARESLAUNCHER", 1)[0]
+        self.assertIn("zenity_status", launcher)
+        self.assertIn('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then', launcher)
+        self.assertIn("choice=blank_ab", launcher)
+        self.assertLess(
+            launcher.index('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then'),
+            launcher.index('case "${choice}" in'),
+        )
+        cancelled = launcher[
+            launcher.index('if [ "${zenity_status}" -ne 0 ]; then'):
+            launcher.index('if [ "${zenity_status}" -eq 0 ] && [ -z "${choice}" ]; then')
+        ]
+        self.assertIn("return 1", cancelled)
+        self.assertIn("未选择安装方式", cancelled)
+
     def test_identity_branches_and_marks_dual_boot_install(self):
         identity = BASE.split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1
