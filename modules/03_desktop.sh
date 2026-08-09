@@ -2067,7 +2067,7 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-frosted-white-rail-1
+# MingDockProfile=2641-frosted-white-rail-2
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -2190,8 +2190,8 @@ MINGREFRESHDOCK
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=18
-BottomRoundness=18
+TopRoundness=22
+BottomRoundness=22
 LineWidth=1
 OuterStrokeColor=255;255;255;210
 FillStartColor=255;255;255;238
@@ -2199,7 +2199,7 @@ FillEndColor=246;250;249;230
 InnerStrokeColor=255;255;255;245
 HorizPadding=16
 TopPadding=6
-BottomPadding=14
+BottomPadding=20
 ItemPadding=4
 IndicatorSize=4
 IconShadowSize=1
@@ -3187,7 +3187,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-frosted-white-rail-1
+# MingDockProfile=2641-frosted-white-rail-2
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
@@ -3260,7 +3260,7 @@ apply_plank_runtime_preferences() {
 
 migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-frosted-white-rail-1$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-frosted-white-rail-2$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3291,7 +3291,7 @@ migrate_glass_rail_profile() {
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-glass-rail-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-glass-rail-2$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-frosted-white-rail-1\n' >>"${settings}"
+    printf '# MingDockProfile=2641-frosted-white-rail-2\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"
@@ -6788,6 +6788,7 @@ requiredPartitionTableType: gpt
 defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
+  - "fat32"
 initialPartitioningChoice: erase
 initialSwapChoice: none
 partitionLayout:
@@ -6797,6 +6798,15 @@ partitionLayout:
     type: "21686148-6449-6E6F-744E-656564454649"
     size: 8M
     minSize: 8M
+  - name: "MING-ESP"
+    filesystem: "fat32"
+    noEncrypt: true
+    mountPoint: "/boot/efi"
+    type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+    size: 512M
+    minSize: 300M
+    flags:
+      - esp
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true

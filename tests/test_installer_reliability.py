@@ -1385,19 +1385,17 @@ class InstallerReceiptContracts(unittest.TestCase):
         self.assertNotIn('blkid -L MING-ROOT-B', identity)
         self.assertNotIn('blkid -L MING-HOME', identity)
 
-    def test_partition_type_normalizer_renames_auto_esp_before_mount(self):
+    def test_partition_type_normalizer_requires_explicit_esp_before_mount(self):
         normalizer = BASE_MODULE.read_text(encoding="utf-8").split(
             "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
         )[1].split("\nMINGFIXPARTTYPES", 1)[0]
-        self.assertIn("claim_auto_esp_as_ming_esp", normalizer)
-        self.assertIn("find_auto_esp_partition", normalizer)
-        self.assertIn("Calamares auto ESP", normalizer)
         self.assertIn("MING-ESP", normalizer)
-        self.assertIn("sgdisk --change-name=", normalizer)
-        self.assertLess(
-            normalizer.index("claim_auto_esp_as_ming_esp"),
-            normalizer.index("for contract in"),
-        )
+        self.assertIn("MING-ESP:ef00", normalizer)
+        self.assertIn("missing partition label ${label}", normalizer)
+        self.assertNotIn("claim_auto_esp_as_ming_esp", normalizer)
+        self.assertNotIn("find_auto_esp_partition", normalizer)
+        self.assertNotIn("Calamares auto ESP", normalizer)
+        self.assertNotIn("sgdisk --change-name=", normalizer)
 
     def test_installed_identity_normalizes_esp_device_paths_before_mount_check(self):
         identity = BASE_MODULE.read_text(encoding="utf-8").split(

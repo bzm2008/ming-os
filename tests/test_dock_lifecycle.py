@@ -109,7 +109,7 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("IconSize=38", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.plank_settings)
-        self.assertIn("MingDockProfile=2641-frosted-white-rail-1", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-frosted-white-rail-2", self.plank_settings)
         self.assertIn("ZoomPercent=112", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
@@ -153,11 +153,11 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
         for marker in (
-            "TopRoundness=18",
-            "BottomRoundness=18",
+            "TopRoundness=22",
+            "BottomRoundness=22",
             "HorizPadding=16",
             "TopPadding=6",
-            "BottomPadding=14",
+            "BottomPadding=20",
             "ItemPadding=4",
             "IndicatorSize=4",
             "OuterStrokeColor=255;255;255;210",
@@ -179,7 +179,7 @@ class DockLifecycleContracts(unittest.TestCase):
         for marker in (
             "HorizPadding=16",
             "TopPadding=6",
-            "BottomPadding=14",
+            "BottomPadding=20",
             "ItemPadding=4",
             "LaunchBounceTime=150",
             "ItemMoveTime=130",
@@ -188,7 +188,7 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
-            "MingDockProfile=2641-frosted-white-rail-1",
+            "MingDockProfile=2641-frosted-white-rail-2",
             "migrate_glass_rail_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
             "s/^IconSize=.*/IconSize=38/",

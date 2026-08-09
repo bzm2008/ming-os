@@ -79,19 +79,23 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn('name: "MING-BIOSBOOT"', partition)
         self.assertIn('filesystem: "unformatted"', partition)
         self.assertIn('type: "21686148-6449-6E6F-744E-656564454649"', partition)
-        self.assertNotIn('name: "MING-ESP"', partition)
-        self.assertNotIn('mountPoint: "/boot/efi"', partition)
+        self.assertIn('name: "MING-ESP"', partition)
+        self.assertIn('filesystem: "fat32"', partition)
+        self.assertIn('type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"', partition)
+        self.assertIn('mountPoint: "/boot/efi"', partition)
         self.assertIn('name: "MING-ROOT-A"', partition)
         self.assertIn('name: "MING-ROOT-B"', partition)
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
+        self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
+        self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
 
-    def test_blank_ab_uses_custom_ming_esp_without_auto_esp_helper(self):
+    def test_blank_ab_uses_explicit_ming_esp_without_auto_esp_helper(self):
         mode = load_mode()
         partition = mode.partition_config("blank_ab")
         self.assertNotIn("efiSystemPartition", partition)
-        self.assertNotIn('mountPoint: "/boot/efi"', partition)
-        self.assertNotIn('name: "MING-ESP"', partition)
+        self.assertIn('mountPoint: "/boot/efi"', partition)
+        self.assertIn('name: "MING-ESP"', partition)
 
         for source in (BASE, DESKTOP):
             with self.subTest(source="base" if source is BASE else "desktop"):
@@ -102,20 +106,18 @@ class InstallerModeTests(unittest.TestCase):
                 delimiter = tail.split("'", 1)[0]
                 template = tail.split("\n", 1)[1].split("\n" + delimiter, 1)[0]
                 self.assertNotIn("efiSystemPartition", template)
-                self.assertNotIn('mountPoint: "/boot/efi"', template)
-                self.assertNotIn('name: "MING-ESP"', template)
+                self.assertIn('mountPoint: "/boot/efi"', template)
+                self.assertIn('name: "MING-ESP"', template)
 
-    def test_partition_type_normalizer_claims_calamares_auto_esp_as_ming_esp(self):
+    def test_partition_type_normalizer_requires_explicit_ming_esp(self):
         normalizer = BASE.split(
             "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
         )[1].split("\nMINGFIXPARTTYPES", 1)[0]
-        self.assertIn("claim_auto_esp_as_ming_esp()", normalizer)
-        self.assertIn("find_auto_esp_partition", normalizer)
-        self.assertIn("sgdisk --change-name=", normalizer)
-        self.assertLess(
-            normalizer.index("claim_auto_esp_as_ming_esp"),
-            normalizer.index("partition_type_contracts=("),
-        )
+        self.assertIn("MING-ESP:ef00", normalizer)
+        self.assertIn("missing partition label ${label}", normalizer)
+        self.assertNotIn("claim_auto_esp_as_ming_esp", normalizer)
+        self.assertNotIn("find_auto_esp_partition", normalizer)
+        self.assertNotIn("sgdisk --change-name=", normalizer)
 
     def test_blank_ab_templates_normalize_real_partition_types_after_partitioning(self):
         for source in (BASE, DESKTOP):
@@ -171,9 +173,12 @@ class InstallerModeTests(unittest.TestCase):
                 self.assertIn('name: "MING-BIOSBOOT"', template)
                 self.assertIn('filesystem: "unformatted"', template)
                 self.assertIn('type: "21686148-6449-6E6F-744E-656564454649"', template)
-                self.assertNotIn('name: "MING-ESP"', template)
-                self.assertNotIn('mountPoint: "/boot/efi"', template)
-                self.assertLess(template.index('name: "MING-BIOSBOOT"'), template.index('name: "MING-BOOT"'))
+                self.assertIn('name: "MING-ESP"', template)
+                self.assertIn('filesystem: "fat32"', template)
+                self.assertIn('type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"', template)
+                self.assertIn('mountPoint: "/boot/efi"', template)
+                self.assertLess(template.index('name: "MING-BIOSBOOT"'), template.index('name: "MING-ESP"'))
+                self.assertLess(template.index('name: "MING-ESP"'), template.index('name: "MING-BOOT"'))
 
     def test_blank_ab_payload_defaults_to_erase_disk_flow(self):
         mode = load_mode()

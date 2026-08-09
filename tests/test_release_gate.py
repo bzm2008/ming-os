@@ -307,7 +307,7 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("OuterStrokeColor=255;255;255;210", self.build)
         self.assertIn("FillStartColor=255;255;255;238", self.build)
         self.assertIn("FillEndColor=246;250;249;230", self.build)
-        self.assertIn("BottomPadding=14", self.build)
+        self.assertIn("BottomPadding=20", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
         self.assertIn('chooser_path = root / "usr/local/bin/ming-install-mode-chooser"', self.build)
@@ -377,6 +377,7 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("C12A7328-F81F-11D2-BA4B-00A0C93EC93B", gate)
         for label, mountpoint in (
             ("MING-BIOSBOOT", ""),
+            ("MING-ESP", "/boot/efi"),
             ("MING-BOOT", "/boot"),
             ("MING-ROOT-A", "/"),
             ("MING-ROOT-B", ""),
@@ -391,9 +392,9 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_build_gate_rejects_blank_ab_without_gpt_and_bios_boot_contract(self):
         for marker in (
             "partition.conf blank_ab layout must require GPT",
-            "partition.conf must let Calamares create the only ESP",
+            "partition.conf must create explicit MING-ESP FAT EFI partition",
             "partition.conf MING-BIOSBOOT must be an unformatted BIOS Boot Partition",
-            "partition type normalizer must claim the Calamares auto ESP as MING-ESP",
+            "partition type normalizer must require explicit MING-ESP",
         ):
             self.assertIn(marker, self.build)
 

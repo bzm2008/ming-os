@@ -66,6 +66,7 @@ INSTALL_MODE_POLICIES = {
     "dual_boot_preserve": "disabled_dual_boot",
 }
 BIOS_BOOT_PARTITION_GUID = "21686148-6449-6e6f-744e-656564454649"
+ESP_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 
 class TargetReceiptError(RuntimeError):
@@ -291,14 +292,31 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                     and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-BOOT"')
                 ):
                     errors.append("Calamares A/B MING-BIOSBOOT must be before MING-BOOT")
-            if (
-                "efiSystemPartition" in partition
-                or 'name: "MING-ESP"' in partition
-                or 'mountPoint: "/boot/efi"' in partition
-            ):
-                errors.append("Calamares A/B partition layout must let Calamares create the only ESP")
+            if "efiSystemPartition" in partition:
+                errors.append("Calamares A/B partition layout must use explicit MING-ESP instead of efiSystemPartition")
+            if partition.count('name: "MING-ESP"') != 1:
+                errors.append("Calamares A/B partition layout must contain exactly one MING-ESP")
+            else:
+                esp_block = _partition_layout_block(partition, "MING-ESP")
+                if _yaml_scalar(esp_block, "filesystem") not in {"fat32", "vfat"}:
+                    errors.append("Calamares A/B MING-ESP must use fat32/vfat")
+                if _yaml_scalar(esp_block, "mountPoint") != "/boot/efi":
+                    errors.append("Calamares A/B MING-ESP must mount at /boot/efi")
+                if (_yaml_scalar(esp_block, "type") or "").casefold() != ESP_GUID:
+                    errors.append("Calamares A/B MING-ESP must use the EFI System Partition GPT type")
+                if (
+                    'name: "MING-BIOSBOOT"' in partition
+                    and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-ESP"')
+                ):
+                    errors.append("Calamares A/B MING-ESP must be after MING-BIOSBOOT")
+                if (
+                    'name: "MING-BOOT"' in partition
+                    and partition.index('name: "MING-ESP"') > partition.index('name: "MING-BOOT"')
+                ):
+                    errors.append("Calamares A/B MING-ESP must be before MING-BOOT")
             required = _yaml_scalar(partition, "requiredStorage")
             expected_layout = {
+                "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
                 "MING-BOOT": ({"ext4"}, "/boot"),
                 "MING-ROOT-A": ({"ext4"}, "/"),
                 "MING-ROOT-B": ({"ext4"}, None),
