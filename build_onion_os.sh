@@ -1593,10 +1593,11 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
         errors.append(f"Plank settings contains a retired agent item: {dock_item}")
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
+plank_default_theme = require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=255;;255;;255;;210",
-        "FillStartColor=255;;255;;255;;238",
-        "FillEndColor=246;;250;;249;;230",
+        "OuterStrokeColor=255;;255;;255;;255",
+        "FillStartColor=252;;255;;254;;255",
+        "FillEndColor=238;;244;;242;;255",
         "[PlankDockTheme]",
         "TopRoundness=22",
         "BottomRoundness=22",
@@ -1606,6 +1607,8 @@ for marker in [
         "ItemMoveTime=130"]:
     if marker not in plank_theme:
         errors.append(f"Plank theme missing animation marker {marker}")
+    if marker not in plank_default_theme:
+        errors.append(f"Default Plank theme missing animation marker {marker}")
 
 for path, marker in [
     ("usr/local/lib/ming-os/ming-shell-common.py", "DesktopEntry"),

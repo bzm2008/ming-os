@@ -304,9 +304,13 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=255;;255;;255;;210", self.build)
-        self.assertIn("FillStartColor=255;;255;;255;;238", self.build)
-        self.assertIn("FillEndColor=246;;250;;249;;230", self.build)
+        self.assertIn(
+            'require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")',
+            self.build,
+        )
+        self.assertIn("OuterStrokeColor=255;;255;;255;;255", self.build)
+        self.assertIn("FillStartColor=252;;255;;254;;255", self.build)
+        self.assertIn("FillEndColor=238;;244;;242;;255", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
         self.assertIn("BottomPadding=20", self.build)
 

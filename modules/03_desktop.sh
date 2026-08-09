@@ -2186,17 +2186,18 @@ MINGREFRESHDOCK
 
     # Ming 磨砂白悬浮 Dock 主题。Plank 不做实时模糊，这里用高透明白色、
     # 双层描边和底部透明 padding 模拟磨砂白效果，同时保持低资源机器稳定。
-    local theme_dir="/usr/share/plank/themes/Ming"
+    local theme_dir
+    for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
 TopRoundness=22
 BottomRoundness=22
 LineWidth=1
-OuterStrokeColor=255;;255;;255;;210
-FillStartColor=255;;255;;255;;238
-FillEndColor=246;;250;;249;;230
-InnerStrokeColor=255;;255;;255;;245
+OuterStrokeColor=255;;255;;255;;255
+FillStartColor=252;;255;;254;;255
+FillEndColor=238;;244;;242;;255
+InnerStrokeColor=255;;255;;255;;255
 
 [PlankDockTheme]
 HorizPadding=16
@@ -2222,6 +2223,7 @@ UrgentHueShift=86
 ItemMoveTime=130
 CascadeHide=false
 PLANKTHEME
+    done
 
     cat > /usr/local/bin/ming-dock << 'MINGDOCK'
 #!/usr/bin/env python3
