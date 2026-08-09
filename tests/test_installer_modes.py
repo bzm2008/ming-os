@@ -40,11 +40,23 @@ def write_installed_desktop(root, uuid):
         return path
 
     write("etc/fstab", f"UUID={uuid} / ext4 defaults 0 1\n")
+    write(
+        "etc/passwd",
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "user:x:1000:1000:Ming OS User:/home/user:/bin/bash\n",
+    )
+    write(
+        "etc/group",
+        "root:x:0:\nuser:x:1000:\nsudo:x:27:user\n",
+    )
+    write("etc/sudoers", "root ALL=(ALL:ALL) ALL\n%sudo ALL=(ALL:ALL) ALL\n")
     write("etc/systemd/system/default.target", "/lib/systemd/system/graphical.target\n")
     write("etc/systemd/system/display-manager.service", "/lib/systemd/system/lightdm.service\n")
     write("etc/lightdm/lightdm.conf.d/60-ming-autologin.conf", "autologin-session=xfce\n")
     for relative in (
         "usr/sbin/lightdm",
+        "usr/bin/sudo",
+        "usr/bin/pkexec",
         "usr/bin/startxfce4",
         "usr/bin/xfce4-session",
         "usr/local/bin/ming-phone-desktop",

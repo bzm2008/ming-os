@@ -304,10 +304,24 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=255;255;255;210", self.build)
-        self.assertIn("FillStartColor=255;255;255;238", self.build)
-        self.assertIn("FillEndColor=246;250;249;230", self.build)
+        self.assertIn("OuterStrokeColor=255;;255;;255;;210", self.build)
+        self.assertIn("FillStartColor=255;;255;;255;;238", self.build)
+        self.assertIn("FillEndColor=246;;250;;249;;230", self.build)
+        self.assertIn("[PlankDockTheme]", self.build)
         self.assertIn("BottomPadding=20", self.build)
+
+    def test_rootfs_gate_requires_a_maintainable_installed_administrator_chain(self):
+        for marker in (
+            'require_file("usr/bin/sudo")',
+            'require_file("usr/bin/pkexec")',
+            'require_file("etc/sudoers", "%sudo")',
+            "installed primary user is not in the sudo group",
+            "installed identity repair must keep the primary user in sudo",
+            "ensure_ming_user || exit 30",
+        ):
+            self.assertIn(marker, self.build)
+        self.assertIn('gpasswd -d "${user_name}" sudo', self.build)
+        self.assertIn("must not remove the primary user from sudo", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
         self.assertIn('chooser_path = root / "usr/local/bin/ming-install-mode-chooser"', self.build)

@@ -1470,6 +1470,9 @@ admin_bootstrap = require_file("usr/local/sbin/ming-admin-bootstrap", "administr
 for marker in ["bootstrap_administrator", "caller_matches_user", "usable_administrator_exists"]:
     if marker not in admin_bootstrap:
         errors.append(f"ming-admin-bootstrap missing boundary marker {marker}")
+require_file("usr/bin/sudo")
+require_file("usr/bin/pkexec")
+require_file("etc/sudoers", "%sudo")
 require_file("usr/share/polkit-1/actions/org.ming.account.bootstrap.policy",
              "/usr/local/sbin/ming-admin-bootstrap")
 validate_generated_executable("usr/local/sbin/ming-admin-bootstrap", "python")
@@ -1589,9 +1592,10 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=255;255;255;210",
-        "FillStartColor=255;255;255;238",
-        "FillEndColor=246;250;249;230",
+        "OuterStrokeColor=255;;255;;255;;210",
+        "FillStartColor=255;;255;;255;;238",
+        "FillEndColor=246;;250;;249;;230",
+        "[PlankDockTheme]",
         "TopRoundness=22",
         "BottomRoundness=22",
         "BottomPadding=20",
@@ -2119,6 +2123,13 @@ for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in f"\n{network_modules}\n":
         errors.append(f"modules-load.d must not force Broadcom module {conflicting_module}")
 installed_identity = require_file("usr/local/sbin/ming-fix-installed-identity")
+for marker in ["scanner bluetooth sudo nopasswdlogin autologin",
+               "installed primary user is not in the sudo group",
+               "ensure_ming_user || exit 30"]:
+    if marker not in installed_identity:
+        errors.append("installed identity repair must keep the primary user in sudo")
+if 'gpasswd -d "${user_name}" sudo' in installed_identity:
+    errors.append("installed identity repair must not remove the primary user from sudo")
 for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in installed_identity:
         errors.append(f"installed identity repair must not force Broadcom module {conflicting_module}")

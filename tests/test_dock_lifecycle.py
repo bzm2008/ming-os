@@ -127,8 +127,8 @@ class DockLifecycleContracts(unittest.TestCase):
         ).group(1)
         self.assertIn("Theme=Ming", migrate)
         self.assertIn('sed -i "s/^Theme=.*/Theme=Ming/"', migrate)
-        self.assertIn("FillStartColor=255;255;255;238", self.source)
-        self.assertIn("FillEndColor=246;250;249;230", self.source)
+        self.assertIn("FillStartColor=255;;255;;255;;238", self.source)
+        self.assertIn("FillEndColor=246;;250;;249;;230", self.source)
 
     def test_plank_runtime_dconf_is_forced_before_launching_live_dock(self):
         self.assertIn("apply_plank_runtime_preferences()", self.watchdog)
@@ -160,22 +160,30 @@ class DockLifecycleContracts(unittest.TestCase):
             "BottomPadding=20",
             "ItemPadding=4",
             "IndicatorSize=4",
-            "OuterStrokeColor=255;255;255;210",
-            "FillStartColor=255;255;255;238",
-            "FillEndColor=246;250;249;230",
-            "InnerStrokeColor=255;255;255;245",
+            "OuterStrokeColor=255;;255;;255;;210",
+            "FillStartColor=255;;255;;255;;238",
+            "FillEndColor=246;;250;;249;;230",
+            "InnerStrokeColor=255;;255;;255;;245",
             "LaunchBounceHeight=0.20",
         ):
             self.assertIn(marker, self.source)
 
-    def test_glass_rail_theme_uses_only_the_plank_theme_section(self):
+    def test_glass_rail_theme_uses_plank_color_and_dock_sections(self):
         theme = self.source.split('cat > "${theme_dir}/dock.theme" << \'PLANKTHEME\'', 1)[1].split(
             "\nPLANKTHEME", 1
         )[0]
         self.assertIn("[PlankTheme]", theme)
-        self.assertNotIn("[PlankDockTheme]", theme)
+        self.assertIn("[PlankDockTheme]", theme)
         self.assertEqual(1, theme.count("FillStartColor="))
-        plank_theme = theme.split("[PlankTheme]", 1)[1]
+        plank_theme = theme.split("[PlankTheme]", 1)[1].split("[PlankDockTheme]", 1)[0]
+        dock_theme = theme.split("[PlankDockTheme]", 1)[1]
+        for marker in (
+            "OuterStrokeColor=255;;255;;255;;210",
+            "FillStartColor=255;;255;;255;;238",
+            "FillEndColor=246;;250;;249;;230",
+            "InnerStrokeColor=255;;255;;255;;245",
+        ):
+            self.assertIn(marker, plank_theme)
         for marker in (
             "HorizPadding=16",
             "TopPadding=6",
@@ -184,7 +192,7 @@ class DockLifecycleContracts(unittest.TestCase):
             "LaunchBounceTime=150",
             "ItemMoveTime=130",
         ):
-            self.assertIn(marker, plank_theme)
+            self.assertIn(marker, dock_theme)
 
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (

@@ -44,6 +44,22 @@ def write(root, relative, content="", executable=False):
 
 def create_installed_root(root, uuid="790ec0ef-1111-2222-3333-444444444444"):
     write(root, "etc/fstab", f"UUID={uuid} / ext4 defaults 0 1\n")
+    write(
+        root,
+        "etc/passwd",
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "user:x:1000:1000:Ming OS User:/home/user:/bin/bash\n",
+    )
+    write(
+        root,
+        "etc/group",
+        "root:x:0:\nuser:x:1000:\nsudo:x:27:user\n",
+    )
+    write(
+        root,
+        "etc/sudoers",
+        "root ALL=(ALL:ALL) ALL\n%sudo ALL=(ALL:ALL) ALL\n",
+    )
     write(root, "etc/systemd/system/default.target", "/lib/systemd/system/graphical.target\n")
     write(root, "etc/systemd/system/display-manager.service", "/lib/systemd/system/lightdm.service\n")
     write(
@@ -53,6 +69,8 @@ def create_installed_root(root, uuid="790ec0ef-1111-2222-3333-444444444444"):
     )
     for relative in (
         "usr/sbin/lightdm",
+        "usr/bin/sudo",
+        "usr/bin/pkexec",
         "usr/bin/startxfce4",
         "usr/bin/xfce4-session",
         "usr/local/bin/ming-phone-desktop",
@@ -209,6 +227,36 @@ def shell_executable():
 
 
 class InstallerReceiptContracts(unittest.TestCase):
+    def test_installed_admin_gate_reads_only_boundary_checked_files(self):
+        verifier = load_verifier()
+        for relative in (
+            "etc/passwd",
+            "etc/group",
+            "etc/sudoers",
+            "usr/bin/sudo",
+            "usr/bin/pkexec",
+        ):
+            self.assertIn(relative, verifier.TARGET_BOUNDARY_FILES)
+
+    def test_installed_gate_rejects_primary_user_outside_sudo_group(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target)
+            write(
+                target,
+                "etc/group",
+                "root:x:0:\nuser:x:1000:\nsudo:x:27:\n",
+            )
+
+            result = verifier.verify_installed(target)
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(
+            any("primary user must belong to sudo" in item for item in result["errors"]),
+            result,
+        )
+
     def test_receipt_bound_installed_gate_rejects_missing_ab_layout(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:

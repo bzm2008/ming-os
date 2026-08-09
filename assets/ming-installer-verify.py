@@ -56,6 +56,10 @@ REQUIRED_DESKTOP_EXECUTABLES = (
     "usr/local/bin/ming-phone-desktop",
     "usr/local/bin/ming-session-healthcheck",
 )
+REQUIRED_ADMIN_EXECUTABLES = (
+    "usr/bin/sudo",
+    "usr/bin/pkexec",
+)
 REQUIRED_DESKTOP_FILES = (
     "usr/share/xsessions/xfce.desktop",
     "home/user/.config/autostart/ming-session-healthcheck.desktop",
@@ -479,10 +483,15 @@ TARGET_BOUNDARY_DIRECTORIES = (
 )
 TARGET_BOUNDARY_FILES = (
     "etc/fstab",
+    "etc/passwd",
+    "etc/group",
+    "etc/sudoers",
     "etc/grub.d/09_ming_os",
     "boot/grub/grub.cfg",
     "etc/lightdm/lightdm.conf.d/60-ming-autologin.conf",
     "usr/sbin/lightdm",
+    "usr/bin/sudo",
+    "usr/bin/pkexec",
     "usr/bin/startxfce4",
     "usr/bin/xfce4-session",
     "usr/local/bin/ming-phone-desktop",
@@ -546,6 +555,50 @@ def validate_target_boundary(root: Path | str) -> Path:
     for relative in TARGET_BOUNDARY_FILES:
         _validate_target_boundary_entry(root_path, relative, expect_directory=False)
     return root_path
+
+
+def _passwd_has_user(root_path: Path, user: str) -> bool:
+    for line in _read_text(root_path / "etc/passwd").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(":")
+        if len(fields) >= 7 and fields[0] == user:
+            return True
+    return False
+
+
+def _group_members(root_path: Path, group: str) -> set[str]:
+    for line in _read_text(root_path / "etc/group").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(":")
+        if len(fields) >= 4 and fields[0] == group:
+            return {member for member in fields[3].split(",") if member}
+    return set()
+
+
+def _sudoers_allows_sudo_group(root_path: Path) -> bool:
+    for line in _read_text(root_path / "etc/sudoers").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if re.match(r"^%sudo\s+ALL\s*=", stripped):
+            return True
+    return False
+
+
+def _validate_installed_admin(root_path: Path, errors: list[str]) -> None:
+    """The installed desktop must remain maintainable after the ISO is removed."""
+    if not _passwd_has_user(root_path, "user"):
+        errors.append("Installed primary user account is missing")
+    if "user" not in _group_members(root_path, "sudo"):
+        errors.append("Installed primary user must belong to sudo group")
+    if not _sudoers_allows_sudo_group(root_path):
+        errors.append("Installed sudoers does not authorize the sudo group")
+    for relative in REQUIRED_ADMIN_EXECUTABLES:
+        path = root_path / relative
+        if not path.is_file() or not os.access(path, os.X_OK):
+            errors.append(f"Installed administrator executable is missing: {relative}")
 
 
 def _read_regular_at(directory_fd: int, name: str, relative: str) -> str:
@@ -1368,6 +1421,7 @@ def verify_installed(
     for relative in REQUIRED_DESKTOP_FILES:
         if not (root_path / relative).is_file():
             errors.append(f"Installed desktop file is missing: {relative}")
+    _validate_installed_admin(root_path, errors)
     autologin = _read_text(root_path / "etc/lightdm/lightdm.conf.d/60-ming-autologin.conf")
     if "autologin-session=xfce" not in autologin:
         errors.append("Installed LightDM configuration does not select the Xfce session")

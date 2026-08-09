@@ -2393,7 +2393,7 @@ ensure_ming_user() {
     local user_home="/home/${user_name}"
     local groups=(
         users adm cdrom dip plugdev lp lpadmin netdev audio video render input
-        scanner bluetooth nopasswdlogin autologin
+        scanner bluetooth sudo nopasswdlogin autologin
     )
     local grp
 
@@ -2404,8 +2404,6 @@ ensure_ming_user() {
             || chroot "${target}" groupadd -r "${grp}" >/dev/null 2>&1 \
             || true
     done
-    chroot "${target}" gpasswd -d "${user_name}" sudo >/dev/null 2>&1 || true
-
     if chroot "${target}" getent passwd "${user_name}" >/dev/null 2>&1; then
         chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     else
@@ -2419,6 +2417,10 @@ ensure_ming_user() {
             && chroot "${target}" usermod -aG "${grp}" "${user_name}" >/dev/null 2>&1 \
             || true
     done
+    if ! chroot "${target}" id -nG "${user_name}" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then
+        echo "ERROR: installed primary user is not in the sudo group" >&2
+        return 1
+    fi
 
     chroot "${target}" chown "${user_name}:${user_name}" "${user_home}" >/dev/null 2>&1 || true
 }
@@ -2617,7 +2619,7 @@ BACKSPACE="guess"
 TARGETKEYBOARD
 
 restore_ota_home || exit $?
-ensure_ming_user
+ensure_ming_user || exit 30
 ensure_kernel_boot_links
 
 kernel="$(find "${target}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"

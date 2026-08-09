@@ -2193,10 +2193,12 @@ MINGREFRESHDOCK
 TopRoundness=22
 BottomRoundness=22
 LineWidth=1
-OuterStrokeColor=255;255;255;210
-FillStartColor=255;255;255;238
-FillEndColor=246;250;249;230
-InnerStrokeColor=255;255;255;245
+OuterStrokeColor=255;;255;;255;;210
+FillStartColor=255;;255;;255;;238
+FillEndColor=246;;250;;249;;230
+InnerStrokeColor=255;;255;;255;;245
+
+[PlankDockTheme]
 HorizPadding=16
 TopPadding=6
 BottomPadding=20

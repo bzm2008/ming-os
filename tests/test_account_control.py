@@ -379,6 +379,16 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn('echo "user:user"', self.base)
         self.assertNotIn('> /etc/ming-os/identity', self.base.split('user:user')[0] if 'user:user' in self.base else '')
 
+    def test_installed_identity_keeps_primary_user_in_password_backed_sudo_group(self):
+        identity = self.base.split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("scanner bluetooth sudo nopasswdlogin autologin", identity)
+        self.assertNotIn('gpasswd -d "${user_name}" sudo', identity)
+        self.assertIn('id -nG "${user_name}"', identity)
+        self.assertIn("installed primary user is not in the sudo group", identity)
+        self.assertIn("ensure_ming_user || exit 30", identity)
+
     def test_welcome_waits_for_account_oobe_before_presenting(self):
         welcome = self.desktop.split("cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'", 1)[1].split(
             "\nWELCOMEPY", 1
