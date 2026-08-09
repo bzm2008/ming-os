@@ -310,9 +310,14 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("BottomPadding=14", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
-        self.assertIn('require_file("usr/local/bin/ming-install-mode-chooser", "Gtk.ResponseType.OK")', self.build)
-        self.assertIn('require_file("usr/local/bin/ming-calamares-launcher", "ming-install-mode-chooser")', self.build)
+        self.assertIn('chooser_path = root / "usr/local/bin/ming-install-mode-chooser"', self.build)
+        self.assertIn('launcher_path = root / "usr/local/bin/ming-calamares-launcher"', self.build)
         self.assertIn("keyboard-hostile Zenity radiolist chooser", self.build)
+        calamares_validator = self.build.split("validate_calamares_config() {", 1)[1].split(
+            "validate_iso_grub_config() {", 1
+        )[0]
+        self.assertNotIn('require_file("usr/local/bin/ming-install-mode-chooser"', calamares_validator)
+        self.assertNotIn('require_file("usr/local/bin/ming-calamares-launcher"', calamares_validator)
 
     def test_rootfs_gate_requires_every_task6_recovery_contract(self):
         """Release validation must retain every stability recovery surface."""

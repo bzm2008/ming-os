@@ -950,8 +950,18 @@ for relative_path in [
         if relative_path.endswith(("ming-live-installer.sh", "ming-installer-session")) and "ming-calamares-launcher" not in text:
             errors.append(f"{relative_path} must launch Calamares through ming-calamares-launcher")
 
-require_file("usr/local/bin/ming-install-mode-chooser", "Gtk.ResponseType.OK")
-require_file("usr/local/bin/ming-calamares-launcher", "ming-install-mode-chooser")
+chooser_path = root / "usr/local/bin/ming-install-mode-chooser"
+launcher_path = root / "usr/local/bin/ming-calamares-launcher"
+for path, marker, label in (
+    (chooser_path, "Gtk.ResponseType.OK", "ming-install-mode-chooser"),
+    (launcher_path, "ming-install-mode-chooser", "ming-calamares-launcher"),
+):
+    if not path.is_file() or path.stat().st_size == 0:
+        errors.append(f"{label} missing or empty")
+        continue
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if marker not in text:
+        errors.append(f"{label} missing required marker {marker}")
 
 for relative_path in [
     "usr/share/applications/calamares.desktop",
