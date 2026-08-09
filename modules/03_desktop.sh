@@ -2064,10 +2064,10 @@ configure_plank_dock() {
     local plank_dir="/home/${MING_USER}/.config/plank/dock1"
     mkdir -p "${plank_dir}/launchers"
 
-    # Dock 行为与外观：底部居中、轻放大、半透明玻璃底座；避免老机动画压力过大。
+    # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-glass-rail-2
+# MingDockProfile=2641-frosted-white-rail-1
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -2184,21 +2184,22 @@ MINGREFRESHDOCK
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
-    # Ming 半透明玻璃 Dock 主题
+    # Ming 磨砂白悬浮 Dock 主题。Plank 不做实时模糊，这里用高透明白色、
+    # 双层描边和底部透明 padding 模拟磨砂白效果，同时保持低资源机器稳定。
     local theme_dir="/usr/share/plank/themes/Ming"
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=12
-BottomRoundness=12
+TopRoundness=18
+BottomRoundness=18
 LineWidth=1
-OuterStrokeColor=255;255;255;180
-FillStartColor=255;255;255;222
-FillEndColor=238;248;246;214
-InnerStrokeColor=255;255;255;232
-HorizPadding=12
-TopPadding=-4
-BottomPadding=5
+OuterStrokeColor=255;255;255;210
+FillStartColor=255;255;255;238
+FillEndColor=246;250;249;230
+InnerStrokeColor=255;255;255;245
+HorizPadding=16
+TopPadding=6
+BottomPadding=14
 ItemPadding=4
 IndicatorSize=4
 IconShadowSize=1
@@ -3186,7 +3187,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-glass-rail-2
+# MingDockProfile=2641-frosted-white-rail-1
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
@@ -3259,7 +3260,7 @@ apply_plank_runtime_preferences() {
 
 migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-glass-rail-2$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-frosted-white-rail-1$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3289,7 +3290,8 @@ migrate_glass_rail_profile() {
     fi
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-glass-rail-1$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-glass-rail-2\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-glass-rail-2$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-frosted-white-rail-1\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"

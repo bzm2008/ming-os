@@ -1574,9 +1574,10 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
 
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=255;255;255;180",
-        "FillStartColor=255;255;255;222",
-        "FillEndColor=238;248;246;214",
+        "OuterStrokeColor=255;255;255;210",
+        "FillStartColor=255;255;255;238",
+        "FillEndColor=246;250;249;230",
+        "BottomPadding=14",
         "UrgentBounceTime=420",
         "LaunchBounceTime=150",
         "ItemMoveTime=130"]:

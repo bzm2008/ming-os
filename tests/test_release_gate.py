@@ -304,9 +304,10 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=255;255;255;180", self.build)
-        self.assertIn("FillStartColor=255;255;255;222", self.build)
-        self.assertIn("FillEndColor=238;248;246;214", self.build)
+        self.assertIn("OuterStrokeColor=255;255;255;210", self.build)
+        self.assertIn("FillStartColor=255;255;255;238", self.build)
+        self.assertIn("FillEndColor=246;250;249;230", self.build)
+        self.assertIn("BottomPadding=14", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
         self.assertIn('require_file("usr/local/bin/ming-install-mode-chooser", "Gtk.ResponseType.OK")', self.build)
