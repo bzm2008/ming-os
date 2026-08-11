@@ -6222,10 +6222,6 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
     FULLNAME=$(echo "${FORM}" | cut -d'|' -f1)
     ensure_autologin
 
-    if [[ -n "${FULLNAME}" ]]; then
-        pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>/dev/null || true
-    fi
-
     # 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
     bootstrap_output=""
     if ! bootstrap_output="$(pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" 2>&1)"; then
@@ -6240,6 +6236,11 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
             --width=400 --button="重新设置:0" 2>/dev/null || true
         log_oobe_event "status_not_ready" "${status_output:-admin status was not ready} (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
         continue
+    fi
+    if [[ -n "${FULLNAME}" ]]; then
+        if ! fullname_output="$(pkexec chfn -f "${FULLNAME}" "${CUR_USER}" 2>&1)"; then
+            log_oobe_event "fullname_update_failed" "${fullname_output:-chfn returned non-zero} (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
+        fi
     fi
 
     mkdir -p "$(dirname "${MARKER}")"

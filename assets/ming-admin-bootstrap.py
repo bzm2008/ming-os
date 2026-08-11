@@ -104,13 +104,13 @@ def collect_interactive_password(runner=run_command, environ=None, executable=os
     if not environ.get("DISPLAY") or not executable(ZENITY):
         raise ValueError("a visible local password dialog is required")
     prompts = (
-        "创建本机管理员密码",
-        "再次输入管理员密码",
+        ("Ming OS 管理员初始化（1/2）", "请输入新的管理员密码（第 1 次）"),
+        ("Ming OS 管理员初始化（2/2）", "请再次输入同一密码（第 2 次）"),
     )
     values = []
-    for prompt in prompts:
+    for title, prompt in prompts:
         rc, output, error = runner([
-            ZENITY, "--password", "--title=Ming OS 管理员初始化",
+            ZENITY, "--password", "--title=%s" % title,
             "--text=%s" % prompt, "--width=440",
         ])
         if rc != 0:

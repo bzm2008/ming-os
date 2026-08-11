@@ -31,6 +31,33 @@ class FakeRunner:
 
 
 class PackageInstallerInspectTests(unittest.TestCase):
+    def test_inspect_accepts_real_dpkg_deb_labeled_field_output(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"not-a-real-deb-but-a-regular-file")
+            command = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            runner = FakeRunner({
+                command: (
+                    0,
+                    "Package: sample-app\nVersion: 1.2.3\nArchitecture: amd64\n",
+                    "",
+                )
+            })
+
+            result = installer.PackageInstaller(
+                runner=runner,
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).inspect(package)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("sample-app", result["package"])
+        self.assertEqual("1.2.3", result["version"])
+        self.assertEqual("amd64", result["architecture"])
+
     def test_inspect_returns_verified_amd64_deb_metadata(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:

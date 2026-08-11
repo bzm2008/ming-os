@@ -280,6 +280,13 @@ class AdministratorBootstrapTests(unittest.TestCase):
         self.assertTrue(all("--password" in call[0] for call in calls))
         self.assertTrue(all(call[1] is None for call in calls))
 
+    def test_password_prompts_identify_initial_and_confirmation_steps(self):
+        source = pathlib.Path(self.api.__file__).read_text(encoding="utf-8")
+        self.assertIn("管理员初始化（1/2）", source)
+        self.assertIn("管理员初始化（2/2）", source)
+        self.assertIn("第 1 次", source)
+        self.assertIn("第 2 次", source)
+
     def test_password_prompt_timeout_allows_slow_legacy_hardware_input(self):
         calls = []
         answers = iter([
@@ -431,6 +438,21 @@ class BuildContractTests(unittest.TestCase):
             "cat > /usr/share/polkit-1/actions/org.ming.account.control.policy", 1)[1].split(
                 "ACCOUNT_CONTROL_POLICY", 2)[1]
         self.assertIn("<allow_active>auth_admin_keep</allow_active>", account_policy)
+
+    def test_oobe_bootstraps_administrator_before_any_account_pkexec_mutation(self):
+        script = self.desktop.split(
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
+                "OOBEACCOUNT", 1)[0]
+        self.assertIn("pkexec /usr/local/sbin/ming-admin-bootstrap", script)
+        self.assertIn("pkexec chfn", script)
+        self.assertLess(
+            script.index("pkexec /usr/local/sbin/ming-admin-bootstrap"),
+            script.index("pkexec chfn"),
+        )
+        self.assertLess(
+            script.index('status_output="$(/usr/local/sbin/ming-admin-bootstrap status'),
+            script.index("pkexec chfn"),
+        )
 
     def test_account_helper_install_command_has_one_source_and_one_destination(self):
         line = next(

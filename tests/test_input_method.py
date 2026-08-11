@@ -94,11 +94,19 @@ class MingInputMethodContractTests(unittest.TestCase):
         source = install_fcitx5_source()
         autostart = source.split("FCITX5AUTO'\n", 1)[1].split("\nFCITX5AUTO", 1)[0]
         xinputrc = source.split("MINGXINPUTRC'\n", 1)[1].split("\nMINGXINPUTRC", 1)[0]
-        self.assertIn("Exec=sh -c 'sleep 2; fcitx5 -d --replace'", autostart)
+        self.assertIn("Exec=/usr/local/bin/ming-fcitx5-watchdog", autostart)
         self.assertNotIn("run_im fcitx5", xinputrc)
         self.assertNotIn("fcitx5 -d --replace", xinputrc)
         self.assertNotIn("cat >> /etc/environment", source)
         self.assertIn("sed -i", source)
+
+    def test_autostart_has_a_memory_guard_for_fcitx5_growth(self):
+        source = install_fcitx5_source()
+        self.assertIn("ming-fcitx5-watchdog", source)
+        self.assertIn("VmRSS", source)
+        self.assertIn("MING_FCITX5_RSS_LIMIT_MB", source)
+        self.assertIn("flock", source)
+        self.assertIn("Exec=/usr/local/bin/ming-fcitx5-watchdog", source)
 
     def test_build_gate_accepts_environment_only_xinputrc_and_checks_rime_assets(self):
         self.assertIn(
@@ -110,12 +118,14 @@ class MingInputMethodContractTests(unittest.TestCase):
         for marker in [
             '"Name=rime"',
             '"usr/local/share/fcitx5/themes/Ming-Candidate/theme.conf"',
+            '"usr/local/bin/ming-fcitx5-watchdog"',
             '"usr/local/sbin/ming-input-control"',
             '"usr/local/sbin/ming-input-repair"',
             "fcitx5-rime",
             "rime-data-luna-pinyin",
         ]:
             self.assertIn(marker, BUILD)
+        self.assertIn('"ming-fcitx5-watchdog"', BUILD)
 
     def test_input_repair_migrates_existing_users_without_im_config_conflict(self):
         source = input_repair_source()

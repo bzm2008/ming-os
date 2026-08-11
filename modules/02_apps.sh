@@ -1406,12 +1406,55 @@ export GLFW_IM_MODULE=fcitx
 MINGXINPUTRC
     fi
 
+    cat > /usr/local/bin/ming-fcitx5-watchdog << 'MINGFCITXWATCHDOG'
+#!/usr/bin/env bash
+set -u
+
+limit_mb="${MING_FCITX5_RSS_LIMIT_MB:-384}"
+interval="${MING_FCITX5_CHECK_INTERVAL_SECONDS:-30}"
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/ming-os"
+log_file="${state_dir}/fcitx5-watchdog.log"
+user_id="$(id -u)"
+
+mkdir -p "${runtime_dir}" "${state_dir}" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"${runtime_dir}/ming-fcitx5-watchdog.lock"
+    flock -n 9 || exit 0
+fi
+
+start_fcitx() {
+    pgrep -u "${user_id}" -x fcitx5 >/dev/null 2>&1 && return 0
+    fcitx5 -d --replace >>"${log_file}" 2>&1 &
+}
+
+check_fcitx_memory() {
+    local pid rss_kb
+    while read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        rss_kb="$(awk '/^VmRSS:/ {print $2; exit}' "/proc/${pid}/status" 2>/dev/null || echo 0)"
+        if [[ "${rss_kb:-0}" =~ ^[0-9]+$ ]] && (( rss_kb > limit_mb * 1024 )); then
+            printf '%s fcitx5 pid=%s rss_kb=%s limit_mb=%s; restarting\n' \
+                "$(date --iso-8601=seconds)" "${pid}" "${rss_kb}" "${limit_mb}" >>"${log_file}"
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done < <(pgrep -u "${user_id}" -x fcitx5 2>/dev/null || true)
+    start_fcitx
+}
+
+start_fcitx
+while sleep "${interval}"; do
+    check_fcitx_memory
+done
+MINGFCITXWATCHDOG
+    chmod 0755 /usr/local/bin/ming-fcitx5-watchdog
+
     cat > "${skel_root}/.config/autostart/fcitx5.desktop" << 'FCITX5AUTO'
 [Desktop Entry]
 Type=Application
 Name=Fcitx 5
 Comment=Start Chinese input method
-Exec=sh -c 'sleep 2; fcitx5 -d --replace'
+Exec=/usr/local/bin/ming-fcitx5-watchdog
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -1782,7 +1825,7 @@ write_autostart() {
 [Desktop Entry]
 Type=Application
 Name=Fcitx5
-Exec=sh -c 'sleep 2; fcitx5 -d --replace'
+Exec=/usr/local/bin/ming-fcitx5-watchdog
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true
 MINGREPAIREDAUTO

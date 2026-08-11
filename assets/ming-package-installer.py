@@ -113,6 +113,19 @@ class PackageInstaller:
             return None, "只能安装 .deb 软件包。"
         return resolved, ""
 
+    @staticmethod
+    def _metadata_fields(output):
+        expected = ("Package", "Version", "Architecture")
+        labeled = {}
+        for line in output.splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name.strip() in expected:
+                labeled[name.strip()] = value.strip()
+        if all(labeled.get(name) for name in expected):
+            return tuple(labeled[name] for name in expected)
+        fields = tuple(line.strip() for line in output.splitlines() if line.strip())
+        return fields if len(fields) == len(expected) else ()
+
     def inspect(self, package_file):
         path, error = self._package_file(package_file)
         if error:
@@ -126,7 +139,7 @@ class PackageInstaller:
                 state="validation_failed",
                 error="无法读取 DEB 软件包元数据：%s" % (command_error.strip() or "dpkg-deb 失败"),
             )
-        fields = [line.strip() for line in output.splitlines()]
+        fields = self._metadata_fields(output)
         if len(fields) != 3 or not all(fields):
             return self._result(
                 False, file=str(path), state="validation_failed",

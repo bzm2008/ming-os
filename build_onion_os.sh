@@ -2180,13 +2180,14 @@ fcitx_profile = require_file("home/user/.config/fcitx5/profile", "DefaultIM=piny
 for marker in ["Name=pinyin", "Name=rime"]:
     if marker not in fcitx_profile:
         errors.append(f"Fcitx5 profile must include {marker}")
-require_file("home/user/.config/autostart/fcitx5.desktop", "fcitx5 -d --replace")
+require_file("home/user/.config/autostart/fcitx5.desktop", "ming-fcitx5-watchdog")
 xinputrc = require_file("home/user/.xinputrc", "XMODIFIERS=@im=fcitx")
 if "run_im fcitx5" in xinputrc or "fcitx5 -d --replace" in xinputrc:
     errors.append("xinputrc must not start a second Fcitx5 daemon")
 require_file("etc/X11/Xsession.d/80-ming-fcitx5", "XMODIFIERS=@im=fcitx")
 require_file("etc/skel/.config/fcitx5/profile", "Name=rime")
-require_file("etc/skel/.config/autostart/fcitx5.desktop", "fcitx5 -d --replace")
+require_file("etc/skel/.config/autostart/fcitx5.desktop", "ming-fcitx5-watchdog")
+require_file("usr/local/bin/ming-fcitx5-watchdog", "VmRSS")
 input_theme = require_file("usr/local/share/fcitx5/themes/Ming-Candidate/theme.conf", "Name=Ming Candidate")
 for marker in ["NormalColor", "HighlightCandidateColor"]:
     if marker not in input_theme:

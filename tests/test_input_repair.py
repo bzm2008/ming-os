@@ -39,7 +39,7 @@ class InputRepairTests(unittest.TestCase):
             self.assertNotIn("run_im fcitx5", text)
             self.assertNotIn("fcitx5 -d --replace", text)
             autostart = home / ".config" / "autostart" / "fcitx5.desktop"
-            self.assertIn("Exec=sh -c 'sleep 2; fcitx5 -d --replace'", autostart.read_text(encoding="utf-8"))
+            self.assertIn("Exec=/usr/local/bin/ming-fcitx5-watchdog", autostart.read_text(encoding="utf-8"))
 
     def test_idempotent_when_ming_files_already_exist(self):
         with tempfile.TemporaryDirectory() as directory:
