@@ -972,6 +972,8 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("systemd-detect-virt", picom)
         self.assertIn("virtual-machine", picom)
         self.assertIn("picom-fallback.conf", picom)
+        self.assertIn('config="${fallback_conf}"', picom)
+        self.assertIn('reason="virtual-machine-xrender"', picom)
         fallback_start = self.desktop.index("picom-fallback.conf << 'PICOMFALLBACK'")
         fallback_body = self.desktop.index('backend = "xrender"', fallback_start)
         fallback = self.desktop[fallback_body:self.desktop.index("\nPICOMFALLBACK", fallback_body)]
@@ -979,6 +981,9 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("fading = false;", fallback)
         self.assertIn("opacity = 1.0", fallback)
         self.assertIn("shadow = false", fallback)
+        self.assertIn("corner-radius = 24;", fallback)
+        self.assertIn("detect-rounded-corners = true;", fallback)
+        self.assertNotIn('"window_type = \'dock\'"', fallback.split("rounded-corners-exclude", 1)[1])
 
     def test_thunar_final_menu_supports_deb_and_appimage_without_script_install(self):
         menu = self.desktop[self.desktop.index("configure_simplified_menus()"):

@@ -5285,7 +5285,6 @@ shadow-exclude = [
 corner-radius = 12;
 rounded-corners-exclude = [
   "class_g = 'Firefox'",
-  "window_type = 'dock'",
   "window_type = 'desktop'",
   "window_type = 'notification'",
 ];
@@ -5338,9 +5337,17 @@ shadow-exclude = [
   "window_type = 'desktop'",
 ];
 fading = false;
+corner-radius = 24;
+rounded-corners-exclude = [
+  "window_type = 'desktop'",
+  "window_type = 'notification'",
+];
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
+detect-rounded-corners = true;
+detect-client-opacity = true;
+detect-transient = true;
 wintypes:
 {
   dock = { shadow = false; opacity = 1.0; };
@@ -5374,7 +5381,6 @@ shadow-exclude = [
 # 圆角保留（纯 CPU 开销极低）
 corner-radius = 10;
 rounded-corners-exclude = [
-  "window_type = 'dock'",
   "window_type = 'desktop'",
 ];
 
@@ -5422,12 +5428,14 @@ elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${
     disabled_reason="safe-graphics-cmdline"
 elif [[ ! -d /dev/dri ]]; then
     disabled_reason="no-dri"
+elif [[ "${renderer}" == *svga3d* ]] +    || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox|QEMU' +    || [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
+    # Virtual GPUs need compositing for Plank alpha/rounded corners, but not
+    # animations, blur, or shadows. XRender keeps the Dock polished without the
+    # flicker-prone GLX path that caused trouble on older VirtualBox sessions.
+    config="${fallback_conf}"
+    reason="virtual-machine-xrender"
 elif [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]]; then
     disabled_reason="software-renderer"
-elif [[ "${renderer}" == *svga3d* ]] || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox|QEMU'; then
-    disabled_reason="virtual-machine-gpu"
-elif [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
-    disabled_reason="virtual-machine-${virt}"
 elif [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]]; then
     config="${lowmem_conf}"
     reason="balanced-low-memory-${mem_mb}mb"

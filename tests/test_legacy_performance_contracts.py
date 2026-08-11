@@ -9,7 +9,7 @@ PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
 
 
 class LegacyPerformanceContracts(unittest.TestCase):
-    def test_picom_is_disabled_by_policy_on_legacy_and_virtual_renderers(self):
+    def test_picom_is_disabled_by_policy_on_legacy_not_virtual_renderers(self):
         picom = DESKTOP.split("cat > /usr/local/bin/ming-picom << 'MINGPICOM'", 1)[1].split(
             "\nMINGPICOM", 1
         )[0]
@@ -19,12 +19,15 @@ class LegacyPerformanceContracts(unittest.TestCase):
             "softpipe",
             "nomodeset",
             "/dev/dri",
-            "VirtualBox",
-            "QEMU",
-            "VMware",
             "2.6",
         ):
             self.assertIn(marker, picom)
+        self.assertIn("VirtualBox", picom)
+        self.assertIn("QEMU", picom)
+        self.assertIn("VMware", picom)
+        self.assertIn('config="${fallback_conf}"', picom)
+        self.assertIn('reason="virtual-machine-xrender"', picom)
+        self.assertLess(picom.index('config="${fallback_conf}"'), picom.index("llvmpipe"))
 
     def test_session_health_accepts_compositor_disabled_by_policy(self):
         health = DESKTOP.split("cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'", 1)[1].split(
