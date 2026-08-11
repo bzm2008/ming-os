@@ -1574,7 +1574,7 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["IconSize=38", "ZoomEnabled=true", "ZoomPercent=112", "HideMode=0", "Theme=Ming"]:
+for marker in ["MingDockProfile=2641-macos-frosted-centered-1", "Alignment=3", "Offset=0", "IconSize=32", "ZoomEnabled=true", "ZoomPercent=110", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
@@ -1596,12 +1596,14 @@ plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorS
 plank_default_theme = require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")
 for marker in [
         "OuterStrokeColor=255;;255;;255;;255",
-        "FillStartColor=252;;255;;254;;255",
-        "FillEndColor=238;;244;;242;;255",
+        "FillStartColor=255;;255;;255;;230",
+        "FillEndColor=246;;248;;250;;214",
         "[PlankDockTheme]",
-        "TopRoundness=22",
-        "BottomRoundness=22",
-        "BottomPadding=20",
+        "TopRoundness=24",
+        "BottomRoundness=24",
+        "BottomPadding=10",
+        "HorizPadding=14",
+        "ItemPadding=3",
         "UrgentBounceTime=420",
         "LaunchBounceTime=150",
         "ItemMoveTime=130"]:

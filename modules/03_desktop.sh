@@ -2067,19 +2067,22 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-frosted-white-rail-2
+# MingDockProfile=2641-macos-frosted-centered-1
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
+#居中偏移：必须为 0，避免继承旧用户设置导致 Dock 偏右或偏左
+Offset=0
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=38
+IconSize=32
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
-ZoomPercent=112
+ZoomPercent=110
+# VisualBottomGap=10
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
 #自动隐藏延迟
@@ -2184,26 +2187,26 @@ MINGREFRESHDOCK
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
-    # Ming 磨砂白悬浮 Dock 主题。Plank 不做实时模糊，这里用高透明白色、
-    # 双层描边和底部透明 padding 模拟磨砂白效果，同时保持低资源机器稳定。
+    # Ming 磨砂白悬浮 Dock 主题。Plank 不做实时模糊，这里用半透明白色、
+    # 圆角、轻描边和紧凑 padding 模拟 macOS Dock，同时保持低资源机器稳定。
     local theme_dir
     for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=22
-BottomRoundness=22
+TopRoundness=24
+BottomRoundness=24
 LineWidth=1
 OuterStrokeColor=255;;255;;255;;255
-FillStartColor=252;;255;;254;;255
-FillEndColor=238;;244;;242;;255
+FillStartColor=255;;255;;255;;230
+FillEndColor=246;;248;;250;;214
 InnerStrokeColor=255;;255;;255;;255
 
 [PlankDockTheme]
-HorizPadding=16
-TopPadding=6
-BottomPadding=20
-ItemPadding=4
+HorizPadding=14
+TopPadding=4
+BottomPadding=10
+ItemPadding=3
 IndicatorSize=4
 IconShadowSize=1
 UrgentBounceHeight=1.20
@@ -3191,13 +3194,15 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-frosted-white-rail-2
+# MingDockProfile=2641-macos-frosted-centered-1
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
-IconSize=38
+Offset=0
+IconSize=32
 ZoomEnabled=true
-ZoomPercent=112
+ZoomPercent=110
+# VisualBottomGap=10
 HideMode=0
 UnhideDelay=0
 HideDelay=0
@@ -3223,13 +3228,13 @@ apply_low_resource_plank_profile() {
         || [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]] \
         || [[ "${cmdline}" == *nomodeset* ]]; then
         sed -i \
-            -e 's/^IconSize=.*/IconSize=36/' \
+            -e 's/^IconSize=.*/IconSize=32/' \
             -e 's/^ZoomEnabled=.*/ZoomEnabled=false/' \
             -e 's/^ZoomPercent=.*/ZoomPercent=100/' \
             -e 's/^FadeOpacity=.*/FadeOpacity=1.0/' \
             -e 's/^HideMode=.*/HideMode=0/' \
             "${settings}" 2>/dev/null || true
-        grep -q '^IconSize=' "${settings}" || printf 'IconSize=36\n' >>"${settings}"
+        grep -q '^IconSize=' "${settings}" || printf 'IconSize=32\n' >>"${settings}"
         grep -q '^ZoomEnabled=' "${settings}" || printf 'ZoomEnabled=false\n' >>"${settings}"
         grep -q '^ZoomPercent=' "${settings}" || printf 'ZoomPercent=100\n' >>"${settings}"
         grep -q '^FadeOpacity=' "${settings}" || printf 'FadeOpacity=1.0\n' >>"${settings}"
@@ -3245,32 +3250,61 @@ plank_setting_value() {
 
 apply_plank_runtime_preferences() {
     local settings="${HOME}/.config/plank/dock1/settings"
-    local theme theme_dconf current_theme icon_size zoom_enabled zoom_percent hide_mode
-    command -v dconf >/dev/null 2>&1 || return 0
+    local theme theme_dconf current_theme icon_size zoom_enabled zoom_percent hide_mode hide_mode_runtime offset
+    local plank_schema='net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/'
     theme="$(plank_setting_value "${settings}" Theme Ming)"
     theme="${theme//\'/}"
     theme_dconf="'Ming'"
     theme_dconf="'${theme:-Ming}'"
-    current_theme="$(dconf read /net/launchpad/plank/docks/dock1/theme 2>/dev/null || true)"
+    if command -v gsettings >/dev/null 2>&1; then
+        current_theme="$(gsettings get "${plank_schema}" theme 2>/dev/null || true)"
+    elif command -v dconf >/dev/null 2>&1; then
+        current_theme="$(dconf read /net/launchpad/plank/docks/dock1/theme 2>/dev/null || true)"
+    else
+        log "neither gsettings nor dconf is available; Plank runtime preferences were not applied"
+        return 1
+    fi
     if pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 \
         && [[ "${current_theme}" != "${theme_dconf}" ]]; then
         MING_PLANK_RELOAD_REQUIRED=1
         log "existing Plank theme ${current_theme:-unset} differs from ${theme_dconf}; one reload required"
     fi
-    icon_size="$(plank_setting_value "${settings}" IconSize 38)"
+    icon_size="$(plank_setting_value "${settings}" IconSize 32)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
-    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 112)"
+    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 110)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
-    dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
-    dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-38}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
-    dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
-    dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-112}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
-    dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
+    offset="$(plank_setting_value "${settings}" Offset 0)"
+    case "${hide_mode}" in
+        0) hide_mode_runtime=none ;;
+        1) hide_mode_runtime=intelligent ;;
+        2) hide_mode_runtime=auto ;;
+        *) hide_mode_runtime=none ;;
+    esac
+    if command -v gsettings >/dev/null 2>&1; then
+        gsettings set "${plank_schema}" theme "${theme:-Ming}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings theme"
+        gsettings set "${plank_schema}" icon-size "${icon_size:-32}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
+        gsettings set "${plank_schema}" zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-enabled"
+        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-110}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
+        gsettings set "${plank_schema}" hide-mode "${hide_mode_runtime}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings hide-mode"
+        gsettings set "${plank_schema}" position bottom >>"${log_file}" 2>&1 || log "could not write Plank gsettings position"
+        gsettings set "${plank_schema}" alignment center >>"${log_file}" 2>&1 || log "could not write Plank gsettings alignment"
+        gsettings set "${plank_schema}" items-alignment center >>"${log_file}" 2>&1 || log "could not write Plank gsettings item alignment"
+        gsettings set "${plank_schema}" offset "${offset:-0}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings offset"
+    else
+        dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
+        dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-32}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
+        dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
+        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-110}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
+        dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
+        dconf write /net/launchpad/plank/docks/dock1/alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf alignment"
+        dconf write /net/launchpad/plank/docks/dock1/items-alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf item alignment"
+        dconf write /net/launchpad/plank/docks/dock1/offset "${offset:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf offset"
+    fi
 }
 
 migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-frosted-white-rail-2$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-macos-frosted-centered-1$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3279,19 +3313,34 @@ migrate_glass_rail_profile() {
         printf 'DockItems=%s\n' "${dock_items}" >>"${settings}"
     fi
     if grep -q '^IconSize=' "${settings}"; then
-        sed -i "s/^IconSize=.*/IconSize=38/" "${settings}" 2>/dev/null || true
+        sed -i "s/^IconSize=.*/IconSize=32/" "${settings}" 2>/dev/null || true
     else
-        printf 'IconSize=38\n' >>"${settings}"
+        printf 'IconSize=32\n' >>"${settings}"
     fi
     if grep -q '^ZoomPercent=' "${settings}"; then
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=112/" "${settings}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=110/" "${settings}" 2>/dev/null || true
     else
-        printf 'ZoomPercent=112\n' >>"${settings}"
+        printf 'ZoomPercent=110\n' >>"${settings}"
     fi
     if grep -q '^ZoomEnabled=' "${settings}"; then
         sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${settings}" 2>/dev/null || true
     else
         printf 'ZoomEnabled=true\n' >>"${settings}"
+    fi
+    if grep -q '^Alignment=' "${settings}"; then
+        sed -i "s/^Alignment=.*/Alignment=3/" "${settings}" 2>/dev/null || true
+    else
+        printf 'Alignment=3\n' >>"${settings}"
+    fi
+    if grep -q '^Offset=' "${settings}"; then
+        sed -i "s/^Offset=.*/Offset=0/" "${settings}" 2>/dev/null || true
+    else
+        printf 'Offset=0\n' >>"${settings}"
+    fi
+    if grep -q '^ItemsAlignment=' "${settings}"; then
+        sed -i "s/^ItemsAlignment=.*/ItemsAlignment=3/" "${settings}" 2>/dev/null || true
+    else
+        printf 'ItemsAlignment=3\n' >>"${settings}"
     fi
     if grep -q '^Theme=' "${settings}"; then
         sed -i "s/^Theme=.*/Theme=Ming/" "${settings}" 2>/dev/null || true
@@ -3301,7 +3350,9 @@ migrate_glass_rail_profile() {
     sed -i '/^# MingDockProfile=2641-compact-rail-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-glass-rail-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-glass-rail-2$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-frosted-white-rail-2\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-frosted-white-rail-2$/d' "${settings}" 2>/dev/null || true
+    sed -i '/^# MingDockProfile=2641-macos-compact-glass-1$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-macos-frosted-centered-1\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"
@@ -8006,7 +8057,7 @@ fi
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
-    sed -i "s/^IconSize=.*/IconSize=36/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^IconSize=.*/IconSize=32/" "${PLANK_SETTINGS}" 2>/dev/null || true
     sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
     sed -i "s/^ZoomPercent=.*/ZoomPercent=100/" "${PLANK_SETTINGS}" 2>/dev/null || true
 fi

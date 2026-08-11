@@ -309,10 +309,11 @@ class ReleaseGateContracts(unittest.TestCase):
             self.build,
         )
         self.assertIn("OuterStrokeColor=255;;255;;255;;255", self.build)
-        self.assertIn("FillStartColor=252;;255;;254;;255", self.build)
-        self.assertIn("FillEndColor=238;;244;;242;;255", self.build)
+        self.assertIn("FillStartColor=255;;255;;255;;230", self.build)
+        self.assertIn("FillEndColor=246;;248;;250;;214", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
-        self.assertIn("BottomPadding=20", self.build)
+        self.assertIn("BottomPadding=10", self.build)
+        self.assertIn("Offset=0", self.build)
 
     def test_rootfs_gate_requires_a_maintainable_installed_administrator_chain(self):
         for marker in (

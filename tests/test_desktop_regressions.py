@@ -1119,6 +1119,9 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
+        self.assertIn("Offset=0", self.desktop)
+        self.assertIn('gsettings set "${plank_schema}" alignment center', self.desktop)
+        self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.desktop)
         self.assertIn("UrgentBounceTime=420", self.desktop)
         self.assertNotIn("Exec=/usr/local/bin/ming-dock-watchdog --session", self.desktop)
 

@@ -64,7 +64,8 @@ class LegacyPerformanceContracts(unittest.TestCase):
         self.assertIn("apply_low_resource_plank_profile", watchdog)
         self.assertLess(watchdog.index("apply_low_resource_plank_profile"), watchdog.index("nohup plank"))
         self.assertIn("ZoomEnabled=false", watchdog)
-        self.assertIn("IconSize=36", watchdog)
+        self.assertIn("IconSize=32", watchdog)
+        self.assertIn("Offset=0", watchdog)
 
     def test_desktop_catalog_uses_event_first_and_slow_fallback_scan(self):
         self.assertIn("timeout_add_seconds(15, self.refresh_if_apps_changed)", PHONE)

@@ -106,17 +106,47 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("ming-refresh-dock-launchers", settings)
 
     def test_light_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
-        self.assertIn("IconSize=38", self.plank_settings)
+        self.assertIn("IconSize=32", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
-        self.assertIn("ZoomPercent=112", self.plank_settings)
-        self.assertIn("MingDockProfile=2641-frosted-white-rail-2", self.plank_settings)
-        self.assertIn("ZoomPercent=112", self.watchdog)
+        self.assertIn("ZoomPercent=110", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-macos-frosted-centered-1", self.plank_settings)
+        self.assertIn("Alignment=3", self.plank_settings)
+        self.assertIn("Offset=0", self.plank_settings)
+        self.assertIn("ZoomPercent=110", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
         self.assertIn("dock_zoom=false", self.source)
-        self.assertIn('"ZoomPercent=112"', self.build)
+        self.assertIn('"ZoomPercent=110"', self.build)
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
+
+    def test_compact_macos_dock_profile_is_applied_at_runtime(self):
+        for marker in (
+            "IconSize=32",
+            "TopPadding=4",
+            "BottomPadding=10",
+            "VisualBottomGap=10",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertIn("command -v gsettings", self.watchdog)
+        self.assertIn("net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/", self.watchdog)
+        self.assertIn('gsettings set "${plank_schema}"', self.watchdog)
+        self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.watchdog)
+        self.assertIn("dconf write /net/launchpad/plank/docks/dock1/offset", self.watchdog)
+        self.assertNotIn("apply_dock_bottom_margin", self.watchdog)
+
+    def test_macos_dock_forces_center_alignment_without_window_dragging(self):
+        for marker in (
+            "Alignment=3",
+            "Offset=0",
+            "ItemsAlignment=3",
+            'gsettings set "${plank_schema}" alignment center',
+            'gsettings set "${plank_schema}" items-alignment center',
+            'gsettings set "${plank_schema}" offset "${offset:-0}"',
+        ):
+            self.assertIn(marker, self.watchdog)
+        self.assertNotIn("xdotool getactivewindow windowmove", self.watchdog)
+        self.assertNotIn('wmctrl -i -r "${window_id}" -e', self.watchdog)
 
     def test_glass_rail_profile_forces_theme_on_existing_live_user_settings(self):
         self.assertIn("Theme=Ming", self.plank_settings)
@@ -127,8 +157,8 @@ class DockLifecycleContracts(unittest.TestCase):
         ).group(1)
         self.assertIn("Theme=Ming", migrate)
         self.assertIn('sed -i "s/^Theme=.*/Theme=Ming/"', migrate)
-        self.assertIn("FillStartColor=252;;255;;254;;255", self.source)
-        self.assertIn("FillEndColor=238;;244;;242;;255", self.source)
+        self.assertIn("FillStartColor=255;;255;;255;;230", self.source)
+        self.assertIn("FillEndColor=246;;248;;250;;214", self.source)
 
     def test_default_plank_theme_is_also_frosted_white(self):
         theme_setup = self.source[
@@ -137,7 +167,7 @@ class DockLifecycleContracts(unittest.TestCase):
         ]
         self.assertIn("/usr/share/plank/themes/Ming", theme_setup)
         self.assertIn("/usr/share/plank/themes/Default", theme_setup)
-        self.assertIn("FillStartColor=252;;255;;254;;255", theme_setup)
+        self.assertIn("FillStartColor=255;;255;;255;;230", theme_setup)
 
     def test_plank_runtime_dconf_is_forced_before_launching_live_dock(self):
         self.assertIn("apply_plank_runtime_preferences()", self.watchdog)
@@ -164,16 +194,16 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
         for marker in (
-            "TopRoundness=22",
-            "BottomRoundness=22",
-            "HorizPadding=16",
-            "TopPadding=6",
-            "BottomPadding=20",
-            "ItemPadding=4",
+            "TopRoundness=24",
+            "BottomRoundness=24",
+            "HorizPadding=14",
+            "TopPadding=4",
+            "BottomPadding=10",
+            "ItemPadding=3",
             "IndicatorSize=4",
             "OuterStrokeColor=255;;255;;255;;255",
-            "FillStartColor=252;;255;;254;;255",
-            "FillEndColor=238;;244;;242;;255",
+            "FillStartColor=255;;255;;255;;230",
+            "FillEndColor=246;;248;;250;;214",
             "InnerStrokeColor=255;;255;;255;;255",
             "LaunchBounceHeight=0.20",
         ):
@@ -190,16 +220,16 @@ class DockLifecycleContracts(unittest.TestCase):
         dock_theme = theme.split("[PlankDockTheme]", 1)[1]
         for marker in (
             "OuterStrokeColor=255;;255;;255;;255",
-            "FillStartColor=252;;255;;254;;255",
-            "FillEndColor=238;;244;;242;;255",
+            "FillStartColor=255;;255;;255;;230",
+            "FillEndColor=246;;248;;250;;214",
             "InnerStrokeColor=255;;255;;255;;255",
         ):
             self.assertIn(marker, plank_theme)
         for marker in (
-            "HorizPadding=16",
-            "TopPadding=6",
-            "BottomPadding=20",
-            "ItemPadding=4",
+            "HorizPadding=14",
+            "TopPadding=4",
+            "BottomPadding=10",
+            "ItemPadding=3",
             "LaunchBounceTime=150",
             "ItemMoveTime=130",
         ):
@@ -207,15 +237,16 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
-            "MingDockProfile=2641-frosted-white-rail-2",
+            "MingDockProfile=2641-macos-frosted-centered-1",
             "migrate_glass_rail_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
-            "s/^IconSize=.*/IconSize=38/",
-            "s/^ZoomPercent=.*/ZoomPercent=112/",
+            "s/^IconSize=.*/IconSize=32/",
+            "s/^ZoomPercent=.*/ZoomPercent=110/",
         ):
             self.assertIn(marker, self.watchdog)
         self.assertIn("2641-glass-rail-2", self.watchdog)
         self.assertIn("2641-glass-rail-1", self.watchdog)
+        self.assertIn("2641-macos-compact-glass-1", self.watchdog)
         self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
     def test_plank_restarts_once_after_glass_theme_migration(self):
