@@ -298,8 +298,22 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                     errors.append("Calamares A/B MING-BIOSBOOT must be before MING-BOOT")
             if "efiSystemPartition" in partition:
                 errors.append("Calamares A/B partition layout must use explicit MING-ESP instead of efiSystemPartition")
-            if partition.count('name: "MING-ESP"') != 1:
-                errors.append("Calamares A/B partition layout must contain exactly one MING-ESP")
+            efi_marker = "\nefi:\n"
+            uses_auto_efi = efi_marker in partition
+            if uses_auto_efi:
+                efi_block = partition.split(efi_marker, 1)[1].split("\npartitionLayout:", 1)[0]
+                if partition.count('name: "MING-ESP"') != 0:
+                    errors.append("Calamares UEFI A/B layout must not duplicate MING-ESP in partitionLayout")
+                if _yaml_scalar(efi_block, "label") != "MING-ESP":
+                    errors.append("Calamares UEFI automatic ESP must use the MING-ESP label")
+                if _yaml_scalar(efi_block, "mountPoint") != "/boot/efi":
+                    errors.append("Calamares UEFI automatic ESP must mount at /boot/efi")
+                if _yaml_scalar(efi_block, "recommendedSize") != "512M":
+                    errors.append("Calamares UEFI automatic ESP must recommend 512M")
+                if _yaml_scalar(efi_block, "minimumSize") != "300M":
+                    errors.append("Calamares UEFI automatic ESP must require at least 300M")
+            elif partition.count('name: "MING-ESP"') != 1:
+                errors.append("Calamares BIOS A/B partition layout must contain exactly one MING-ESP")
             else:
                 esp_block = _partition_layout_block(partition, "MING-ESP")
                 if _yaml_scalar(esp_block, "filesystem") not in {"fat32", "vfat"}:
@@ -320,12 +334,13 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                     errors.append("Calamares A/B MING-ESP must be before MING-BOOT")
             required = _yaml_scalar(partition, "requiredStorage")
             expected_layout = {
-                "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
                 "MING-BOOT": ({"ext4"}, "/boot"),
                 "MING-ROOT-A": ({"ext4"}, "/"),
                 "MING-ROOT-B": ({"ext4"}, None),
                 "MING-HOME": ({"ext4"}, "/home"),
             }
+            if not uses_auto_efi:
+                expected_layout["MING-ESP"] = ({"fat32", "vfat"}, "/boot/efi")
             for label, (filesystems, mountpoint) in expected_layout.items():
                 if partition.count(f'name: "{label}"') != 1:
                     errors.append(f"Calamares A/B partition layout must contain exactly one {label}")

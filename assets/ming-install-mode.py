@@ -24,7 +24,7 @@ MODES = {
 }
 
 
-BLANK_AB_PARTITION = """---
+BLANK_AB_COMMON = """---
 userSwapChoices:
   - none
 drawNestedPartitions: false
@@ -37,7 +37,10 @@ availableFileSystemTypes:
   - "fat32"
 initialPartitioningChoice: erase
 initialSwapChoice: none
-partitionLayout:
+"""
+
+
+BLANK_AB_BIOS_ESP = """partitionLayout:
   - name: "MING-BIOSBOOT"
     filesystem: "unformatted"
     noEncrypt: true
@@ -53,6 +56,25 @@ partitionLayout:
     minSize: 300M
     flags:
       - esp
+"""
+
+
+BLANK_AB_UEFI_ESP = """efi:
+  mountPoint: "/boot/efi"
+  recommendedSize: 512M
+  minimumSize: 300M
+  label: "MING-ESP"
+partitionLayout:
+  - name: "MING-BIOSBOOT"
+    filesystem: "unformatted"
+    noEncrypt: true
+    type: "21686148-6449-6E6F-744E-656564454649"
+    size: 8M
+    minSize: 8M
+"""
+
+
+BLANK_AB_LAYOUT_TAIL = """
   - name: "MING-BOOT"
     filesystem: "ext4"
     noEncrypt: true
@@ -117,9 +139,19 @@ def validate_mode_payload(payload):
     return expected
 
 
-def partition_config(mode):
+def detect_firmware(sys_firmware_efi="/sys/firmware/efi"):
+    return "uefi" if pathlib.Path(sys_firmware_efi).is_dir() else "bios"
+
+
+def partition_config(mode, firmware=None):
     build_mode_payload(mode)
-    return BLANK_AB_PARTITION if mode == "blank_ab" else DUAL_BOOT_PARTITION
+    if mode != "blank_ab":
+        return DUAL_BOOT_PARTITION
+    selected_firmware = firmware or detect_firmware()
+    if selected_firmware not in {"bios", "uefi"}:
+        raise ValueError("unsupported firmware mode")
+    esp = BLANK_AB_UEFI_ESP if selected_firmware == "uefi" else BLANK_AB_BIOS_ESP
+    return BLANK_AB_COMMON + esp + BLANK_AB_LAYOUT_TAIL
 
 
 def _atomic_write(path, content, mode):
@@ -152,8 +184,8 @@ def write_mode(path, mode):
     return payload
 
 
-def write_partition(path, mode):
-    _atomic_write(path, partition_config(mode), 0o644)
+def write_partition(path, mode, firmware=None):
+    _atomic_write(path, partition_config(mode, firmware=firmware), 0o644)
 
 
 def read_mode(path):
@@ -171,6 +203,7 @@ def main(argv=None):
     write.add_argument("--mode", dest="mode_option", choices=sorted(MODES))
     write.add_argument("--state", default="/run/ming-installer/install-mode.json")
     write.add_argument("--partition", default="/etc/calamares/modules/partition.conf")
+    write.add_argument("--firmware", choices=("auto", "bios", "uefi"), default="auto")
     show = subcommands.add_parser("show")
     show.add_argument("--state", default="/run/ming-installer/install-mode.json")
     args = parser.parse_args(argv)
@@ -179,7 +212,8 @@ def main(argv=None):
         if not selected:
             parser.error("write requires an install mode")
         write_mode(args.state, selected)
-        write_partition(args.partition, selected)
+        firmware = None if args.firmware == "auto" else args.firmware
+        write_partition(args.partition, selected, firmware=firmware)
         return 0
     payload = read_mode(args.state)
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))

@@ -7468,7 +7468,9 @@ close_live_notice_when_calamares_visible() {
         local calamares_window
         calamares_window="$(
             timeout --foreground 2s wmctrl -lx 2>/dev/null |
-                awk 'tolower($0) ~ /calamares/ && $1 ~ /^0[xX][0-9a-fA-F]+$/ { print $1; exit }'
+                awk 'tolower($0) ~ /calamares/ || tolower($0) ~ /ming os 安装程序/ || $0 ~ /安装程序/ {
+                    if ($1 ~ /^0[xX][0-9a-fA-F]+$/) { print $1; exit }
+                }'
         )"
         if [ -n "${calamares_window}" ]; then
             timeout --foreground 2s wmctrl -i -r "${calamares_window}" -b add,maximized_vert,maximized_horz 2>/dev/null || true

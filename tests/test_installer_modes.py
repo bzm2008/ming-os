@@ -110,9 +110,9 @@ class InstallerModeTests(unittest.TestCase):
         self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
         self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
 
-    def test_blank_ab_uses_explicit_ming_esp_without_auto_esp_helper(self):
+    def test_blank_ab_bios_uses_explicit_ming_esp_without_auto_esp_helper(self):
         mode = load_mode()
-        partition = mode.partition_config("blank_ab")
+        partition = mode.partition_config("blank_ab", firmware="bios")
         self.assertNotIn("efiSystemPartition", partition)
         self.assertIn('mountPoint: "/boot/efi"', partition)
         self.assertIn('name: "MING-ESP"', partition)
@@ -128,6 +128,19 @@ class InstallerModeTests(unittest.TestCase):
                 self.assertNotIn("efiSystemPartition", template)
                 self.assertIn('mountPoint: "/boot/efi"', template)
                 self.assertIn('name: "MING-ESP"', template)
+
+    def test_blank_ab_uefi_names_auto_esp_without_duplicate_layout_esp(self):
+        mode = load_mode()
+        partition = mode.partition_config("blank_ab", firmware="uefi")
+        self.assertIn("efi:", partition)
+        self.assertIn('label: "MING-ESP"', partition)
+        self.assertIn('mountPoint: "/boot/efi"', partition)
+        self.assertIn("recommendedSize: 512M", partition)
+        self.assertIn("minimumSize: 300M", partition)
+        layout = partition.split("partitionLayout:", 1)[1]
+        self.assertIn('name: "MING-BIOSBOOT"', layout)
+        self.assertNotIn('name: "MING-ESP"', layout)
+        self.assertIn('name: "MING-BOOT"', layout)
 
     def test_partition_type_normalizer_requires_explicit_ming_esp(self):
         normalizer = BASE.split(
@@ -340,6 +353,32 @@ class InstallerModeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("dual_boot_preserve", result["install_mode"])
         self.assertEqual("enabled", result["manual_partitioning"])
+
+    def test_live_verifier_accepts_blank_ab_uefi_auto_esp_without_duplicate(self):
+        mode = load_mode()
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "run/ming-installer/filesystem.squashfs"
+            source.parent.mkdir(parents=True)
+            source.write_text("rootfs", encoding="utf-8")
+            settings = root / "etc/calamares/settings.conf"
+            settings.parent.mkdir(parents=True)
+            settings.write_text("sequence:\n  - show:\n      - partition\n", encoding="utf-8")
+            partition = root / "etc/calamares/modules/partition.conf"
+            partition.parent.mkdir(parents=True)
+            partition.write_text(
+                mode.partition_config("blank_ab", firmware="uefi"), encoding="utf-8"
+            )
+            unpack = root / "etc/calamares/modules/unpackfs.conf"
+            unpack.write_text(
+                "source: /run/ming-installer/filesystem.squashfs\n", encoding="utf-8"
+            )
+            mode.write_mode(root / "run/ming-installer/install-mode.json", "blank_ab")
+
+            result = verifier.verify_live(root=root, source=source)
+
+        self.assertTrue(result["ok"], result)
 
     def test_live_verifier_rejects_blank_ab_partition_attribute_drift(self):
         mode = load_mode()

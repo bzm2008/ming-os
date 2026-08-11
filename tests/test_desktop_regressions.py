@@ -1070,6 +1070,8 @@ class DesktopSourceTests(unittest.TestCase):
         ]
         self.assertIn("wmctrl -lx", installer)
         self.assertIn("tolower($0) ~ /calamares/", installer)
+        self.assertIn("ming os 安装程序", installer.casefold())
+        self.assertIn("安装程序", installer)
         self.assertIn("wmctrl -i -r", installer)
         self.assertIn("wmctrl -x -a calamares.calamares", installer)
         self.assertIn("wmctrl -i -a", installer)
