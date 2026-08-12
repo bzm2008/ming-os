@@ -1974,7 +1974,7 @@ for marker in ["sleep 10", "ming-window-control repair", "window-manager.log"]:
 require_file("home/user/.config/autostart/ming-window-manager.desktop", "ming-window-manager-watchdog --session")
 
 picom_wrapper = require_file("usr/local/bin/ming-picom", "/tmp/ming-picom.log")
-for marker in ["low-memory", "safe-graphics-cmdline", "software-renderer", "virtual-machine-gpu", "no-dri", "old-intel-gpu"]:
+for marker in ["low-memory", "safe-graphics-cmdline", "software-renderer", "virtual-machine-xrender", "VirtualBox", "QEMU", "VMware", "no-dri", "old-intel-gpu"]:
     if marker not in picom_wrapper:
         errors.append(f"ming-picom missing backend selection marker {marker}")
 
