@@ -447,9 +447,11 @@ class ReleaseGateContracts(unittest.TestCase):
     def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
         self.assertIn("/usr/local/sbin/apt-build", self.build)
         self.assertIn("/usr/local/sbin/apt\" <<", self.build)
-        self.assertIn("Acquire::Retries=3", self.build)
-        self.assertIn("Acquire::http::Timeout=45", self.build)
-        self.assertIn("Acquire::https::Timeout=45", self.build)
+        self.assertIn("Acquire::Retries=5", self.build)
+        self.assertIn("Acquire::ForceIPv4=true", self.build)
+        self.assertIn("Acquire::http::Timeout=15", self.build)
+        self.assertIn("Acquire::https::Timeout=15", self.build)
+        self.assertIn("Acquire::Queue-Mode=access", self.build)
         self.assertIn("exec /usr/local/sbin/apt-build", self.build)
 
     def test_build_gate_requires_root_helper_for_live_calamares(self):

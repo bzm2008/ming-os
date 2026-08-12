@@ -232,9 +232,11 @@ class InstallerModeTests(unittest.TestCase):
         self.assertNotIn("initialPartitioningChoice: none", partition)
 
     def test_chroot_apt_network_has_bounded_retries(self):
-        self.assertIn('Acquire::Retries "3";', BASE)
-        self.assertIn('Acquire::http::Timeout "45";', BASE)
-        self.assertIn('Acquire::https::Timeout "45";', BASE)
+        self.assertIn('Acquire::Retries "5";', BASE)
+        self.assertIn('Acquire::ForceIPv4 "true";', BASE)
+        self.assertIn('Acquire::http::Timeout "15";', BASE)
+        self.assertIn('Acquire::https::Timeout "15";', BASE)
+        self.assertIn('Acquire::Queue-Mode "access";', BASE)
 
     def test_dual_boot_payload_disables_major_ota_and_requires_manual_partitioning(self):
         mode = load_mode()

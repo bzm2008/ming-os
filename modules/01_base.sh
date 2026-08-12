@@ -36,10 +36,14 @@ deb https://security.debian.org/debian-security trixie-security main contrib non
 APTSRC
 
     cat > /etc/apt/apt.conf.d/99ming-network << 'APTNETWORK'
-Acquire::Retries "3";
-Acquire::http::Timeout "45";
-Acquire::https::Timeout "45";
+Acquire::Retries "5";
+Acquire::ForceIPv4 "true";
+Acquire::http::Timeout "15";
+Acquire::https::Timeout "15";
 Acquire::http::Pipeline-Depth "0";
+Acquire::Queue-Mode "access";
+Acquire::http::No-Cache "true";
+Acquire::https::No-Cache "true";
 APTNETWORK
 
     # Host dependency installation may use its own skip flag to avoid a

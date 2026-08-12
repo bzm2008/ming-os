@@ -378,10 +378,14 @@ exec env \
     -o APT::Install-Recommends=false \
     -o Dpkg::Options::="--force-confold" \
     -o Dpkg::Options::="--force-confdef" \
-    -o Acquire::Retries=3 \
-    -o Acquire::http::Timeout=45 \
-    -o Acquire::https::Timeout=45 \
+    -o Acquire::Retries=5 \
+    -o Acquire::ForceIPv4=true \
+    -o Acquire::http::Timeout=15 \
+    -o Acquire::https::Timeout=15 \
     -o Acquire::http::Pipeline-Depth=0 \
+    -o Acquire::Queue-Mode=access \
+    -o Acquire::http::No-Cache=true \
+    -o Acquire::https::No-Cache=true \
     "$@" </dev/null
 APT_BUILD_WRAPPER
     chmod 0755 "${CHROOT_DIR}/usr/local/sbin/apt-build"
