@@ -176,21 +176,42 @@ class PackageInstallerInspectTests(unittest.TestCase):
 class PackageInstallerInstallTests(unittest.TestCase):
     def test_refresh_caches_updates_system_and_local_desktop_databases(self):
         installer = load_installer()
-        local_desktops = ("update-desktop-database", "/usr/local/share/applications")
-        system_desktops = ("update-desktop-database", "/usr/share/applications")
-        refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
-        runner = FakeRunner({
-            local_desktops: (0, "", ""),
-            system_desktops: (0, "", ""),
-            refresh_icons: (0, "", ""),
-        })
-        service = installer.PackageInstaller(runner=runner)
-        service._refresh_desktop_state = lambda: True
+        with tempfile.TemporaryDirectory() as directory:
+            local_dir = pathlib.Path(directory) / "applications"
+            local_dir.mkdir()
+            local_desktops = ("update-desktop-database", local_dir.as_posix())
+            system_desktops = ("update-desktop-database", "/usr/share/applications")
+            refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+            runner = FakeRunner({
+                local_desktops: (0, "", ""),
+                system_desktops: (0, "", ""),
+                refresh_icons: (0, "", ""),
+            })
+            service = installer.PackageInstaller(runner=runner, proxy_dir=local_dir)
+            service._refresh_desktop_state = lambda: True
 
-        result = service._refresh_caches()
+            result = service._refresh_caches()
 
         self.assertTrue(result["desktop_database"])
         self.assertEqual([local_desktops, system_desktops, refresh_icons], runner.commands)
+
+    def test_refresh_caches_ignores_missing_optional_proxy_desktop_database(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            missing_proxy_dir = pathlib.Path(directory) / "missing-applications"
+            system_desktops = ("update-desktop-database", "/usr/share/applications")
+            refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+            runner = FakeRunner({
+                system_desktops: (0, "", ""),
+                refresh_icons: (0, "", ""),
+            })
+            service = installer.PackageInstaller(runner=runner, proxy_dir=missing_proxy_dir)
+            service._refresh_desktop_state = lambda: True
+
+            result = service._refresh_caches()
+
+        self.assertTrue(result["desktop_database"])
+        self.assertEqual([system_desktops, refresh_icons], runner.commands)
 
     def test_install_publishes_package_launchers_before_refreshing_desktop_state(self):
         installer = load_installer()
@@ -416,7 +437,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
             [metadata, apt_install, fix_dependencies, apt_install, verify,
-             list_files, refresh_local_desktops, refresh_desktops, refresh_icons],
+             list_files, refresh_desktops, refresh_icons],
             runner.commands,
         )
 
@@ -615,8 +636,8 @@ class PackageInstallerRepairTests(unittest.TestCase):
         self.assertEqual("repaired", result["state"])
         self.assertEqual("sample-app", result["package"])
         self.assertEqual(
-            [reinstall, verify, list_files, refresh_local_desktops,
-             refresh_desktops, refresh_icons], runner.commands)
+            [reinstall, verify, list_files, refresh_desktops, refresh_icons],
+            runner.commands)
 
 
 class PackageInstallerCliTests(unittest.TestCase):

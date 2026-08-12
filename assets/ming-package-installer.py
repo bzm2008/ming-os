@@ -206,6 +206,8 @@ class PackageInstaller:
         refresh = {}
         desktop_results = []
         for directory in (self.proxy_dir, pathlib.Path("/usr/share/applications")):
+            if directory == self.proxy_dir and not directory.exists():
+                continue
             command = ("update-desktop-database", directory.as_posix())
             returncode, _output, _error = self._call(command, timeout=30)
             desktop_results.append(returncode == 0)
