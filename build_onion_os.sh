@@ -28,7 +28,7 @@ set -euo pipefail
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
 readonly MING_OS_VERSION="26.4.1"
-readonly MING_OS_BUILD_SUFFIX="rc2"
+readonly MING_OS_BUILD_SUFFIX="rc3"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2641"
@@ -115,7 +115,7 @@ git_build() {
 assert_clean_source_tree() {
     local untracked
     if ! git_build diff --ignore-cr-at-eol --quiet -- .; then
-        log_error "构建要求干净工作树；请先提交本次 RC2 源码与测试。"
+        log_error "构建要求干净工作树；请先提交本次 RC3 源码与测试。"
         return 1
     fi
     if ! git_build diff --cached --ignore-cr-at-eol --quiet -- .; then
@@ -135,7 +135,7 @@ capture_build_identity() {
     assert_clean_source_tree
     BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
     BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    BUILD_ID="2641-rc2-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+    BUILD_ID="2641-rc3-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
     export BUILD_SOURCE_COMMIT BUILD_TIME_UTC BUILD_ID
 }
 
@@ -1599,7 +1599,7 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["MingDockProfile=2641-macos-frosted-centered-2", "Alignment=3", "Offset=0", "IconSize=30", "ZoomEnabled=true", "ZoomPercent=106", "HideMode=0", "Theme=Ming"]:
+for marker in ["MingDockProfile=2640-legacy-centered", "Alignment=3", "Offset=0", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
@@ -1620,15 +1620,15 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
 plank_default_theme = require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=255;;255;;255;;255",
-        "FillStartColor=255;;255;;255;;230",
-        "FillEndColor=246;;248;;250;;214",
+        "OuterStrokeColor=31;;98;;84;;54",
+        "FillStartColor=255;;255;;255;;226",
+        "FillEndColor=242;;250;;247;;238",
         "[PlankDockTheme]",
-        "TopRoundness=24",
-        "BottomRoundness=24",
-        "BottomPadding=14",
-        "HorizPadding=10",
-        "ItemPadding=2",
+        "TopRoundness=14",
+        "BottomRoundness=0",
+        "BottomPadding=2",
+        "HorizPadding=16",
+        "ItemPadding=4",
         "UrgentBounceTime=420",
         "LaunchBounceTime=150",
         "ItemMoveTime=130"]:
@@ -1636,6 +1636,10 @@ for marker in [
         errors.append(f"Plank theme missing animation marker {marker}")
     if marker not in plank_default_theme:
         errors.append(f"Default Plank theme missing animation marker {marker}")
+
+require_file("usr/share/themes/Ming-Dark/gtk-3.0/gtk.css", "#151A18")
+require_file("usr/share/themes/Ming-Dark/xfce-notify-4.0/gtk.css", "window#XfceNotifyWindow")
+require_file("usr/share/themes/Ming-Dark/index.theme", "GtkTheme=Ming-Dark")
 
 for path, marker in [
     ("usr/local/lib/ming-os/ming-shell-common.py", "DesktopEntry"),

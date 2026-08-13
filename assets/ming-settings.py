@@ -26,7 +26,16 @@ STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
 APPEARANCE_CONTROL_HELPER = "/usr/local/bin/ming-appearance-control"
 APPEARANCE_THEMES = ["system", "light", "dark"]
 APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
-APPEARANCE_WALLPAPERS = ["default", "light", "dark"]
+WALLPAPER_DIR = "/usr/share/backgrounds/ming-os"
+BUILTIN_WALLPAPERS = {
+    "default": "/usr/share/backgrounds/ming-os/default.png",
+    "light": "/usr/share/backgrounds/ming-os/default-light.png",
+    "dark": "/usr/share/backgrounds/ming-os/default-dark.png",
+    "2640": "/usr/share/backgrounds/ming-os/default-2640.png",
+    "macos": "/usr/share/backgrounds/ming-os/default-macos.png",
+}
+APPEARANCE_WALLPAPERS = list(BUILTIN_WALLPAPERS)
+WALLPAPER_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 LIBINPUT_PROPERTIES = {
     "left_handed": ("libinput Left Handed Enabled",),
     "natural_scroll": ("libinput Natural Scrolling Enabled",),
@@ -82,6 +91,36 @@ def audio_failure_summary(result, fallback=""):
         if action == "no_internal_output":
             return "未检测到可用的内置扬声器输出，请刷新设备或检查 BIOS 声卡设置。"
     return summarize_feedback_text(fallback or "请检查声卡和输出设备。")
+
+
+def discover_builtin_wallpapers(directory=WALLPAPER_DIR):
+    """Return built-in wallpapers plus every supported image installed by the build."""
+    wallpapers = dict(BUILTIN_WALLPAPERS)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return wallpapers
+    used_keys = set(wallpapers)
+    for name in names:
+        if not name.lower().endswith(WALLPAPER_IMAGE_SUFFIXES):
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        key = os.path.splitext(name)[0]
+        if key.startswith("default-"):
+            key = key[len("default-"):]
+        key = key.replace("wallpaper-", "")
+        if key in used_keys:
+            continue
+        base = key or os.path.splitext(name)[0]
+        index = 2
+        while key in used_keys:
+            key = "%s-%d" % (base, index)
+            index += 1
+        wallpapers[key] = path
+        used_keys.add(key)
+    return wallpapers
 
 
 def write_wifi_connect_event(event, network=None, reason_code="", detail=""):
@@ -795,7 +834,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.nav_list.select_row(self.nav_list.get_row_at_index(initial_index))
 
     def install_css(self):
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+        self.style_manager = Adw.StyleManager.get_default()
         css = b"""
         window.ming-settings-window {
             background: #F4F7F3;
@@ -923,6 +962,41 @@ class MingSettings(Adw.ApplicationWindow):
             color: alpha(#21302A, 0.66);
         }
 
+        .ming-settings-window.ming-settings-dark {
+            background: #151A18;
+            color: #E7EEE9;
+        }
+
+        .ming-settings-window.ming-settings-dark .ming-settings-sidebar {
+            background: #1B211E;
+            border-right-color: alpha(#9FE7D7, 0.12);
+        }
+
+        .ming-settings-window.ming-settings-dark .ming-settings-content {
+            background: #151A18;
+        }
+
+        .ming-settings-window.ming-settings-dark headerbar {
+            background: #1B211E;
+            color: #E7EEE9;
+            border-bottom-color: alpha(#9FE7D7, 0.10);
+        }
+
+        .ming-settings-window.ming-settings-dark preferencesgroup > box {
+            background: #202824;
+            color: #E7EEE9;
+            border-color: alpha(#9FE7D7, 0.10);
+        }
+
+        .ming-settings-window.ming-settings-dark row.ming-nav-row:selected {
+            background: alpha(#62C9B5, 0.16);
+            color: #E7EEE9;
+        }
+
+        .ming-settings-window.ming-settings-dark label.dim-label {
+            color: alpha(#E7EEE9, 0.68);
+        }
+
         .ming-feedback-dialog {
             background: #10201D;
             color: #FFFFFF;
@@ -960,6 +1034,15 @@ class MingSettings(Adw.ApplicationWindow):
                 provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
+
+    def apply_settings_theme(self, theme):
+        dark = theme == "dark"
+        if theme == "system":
+            dark = bool(self.style_manager.get_dark())
+        if dark:
+            self.add_css_class("ming-settings-dark")
+        else:
+            self.remove_css_class("ming-settings-dark")
 
     def on_nav_selected(self, listbox, row):
         if not row:
@@ -2117,7 +2200,36 @@ class MingSettings(Adw.ApplicationWindow):
         choice("主题", APPEARANCE_THEMES, ["跟随系统", "浅色", "深色"], "--theme")
         choice("字体大小", APPEARANCE_FONT_SIZES,
                [str(value) for value in APPEARANCE_FONT_SIZES], "--font-size")
-        choice("内置壁纸", APPEARANCE_WALLPAPERS, ["默认", "浅色", "深色"], "--wallpaper")
+        wallpaper_group = Adw.PreferencesGroup(
+            title="内置壁纸", description="点击缩略图后立即应用，并在写入后读取确认。")
+        box.append(wallpaper_group)
+        wallpaper_flow = Gtk.FlowBox()
+        wallpaper_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        wallpaper_flow.set_max_children_per_line(3)
+        wallpaper_flow.set_column_spacing(10)
+        wallpaper_flow.set_row_spacing(10)
+        self.wallpaper_buttons = {}
+        self.available_wallpapers = discover_builtin_wallpapers()
+        wallpaper_labels = {
+            "default": "默认", "light": "浅色", "dark": "深色",
+            "2640": "26.4.0", "macos": "浅山",
+        }
+        for key, path in self.available_wallpapers.items():
+            apply_value = key if key in BUILTIN_WALLPAPERS else path
+            button = Gtk.Button()
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            picture = Gtk.Picture.new_for_filename(path)
+            picture.set_size_request(160, 90)
+            picture.set_content_fit(Gtk.ContentFit.COVER)
+            card.append(picture)
+            card.append(Gtk.Label(label=wallpaper_labels.get(key, key)))
+            button.set_child(card)
+            button.connect(
+                "clicked", lambda _button, wallpaper=apply_value:
+                self.apply_appearance(["--wallpaper", wallpaper]))
+            wallpaper_flow.append(button)
+            self.wallpaper_buttons[key] = button
+        wallpaper_group.add(wallpaper_flow)
         restore = Gtk.Button(label="恢复默认壁纸")
         restore.connect("clicked", lambda _button: self.apply_appearance(["--wallpaper", "default"]))
         appearance.add(self.button_row("壁纸", "恢复当前 26.4.0 兼容的默认壁纸。", restore))
@@ -2154,6 +2266,13 @@ class MingSettings(Adw.ApplicationWindow):
                 status = {}
             values = [status.get("theme", "system"), status.get("font_size", 11),
                       status.get("wallpaper", "default")]
+            if values[0] == "dark":
+                self.style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+            elif values[0] == "light":
+                self.style_manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+            else:
+                self.style_manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
+            self.apply_settings_theme(values[0])
             for control, value, choices in zip(
                     self.appearance_controls, values,
                     (APPEARANCE_THEMES, APPEARANCE_FONT_SIZES, APPEARANCE_WALLPAPERS)):

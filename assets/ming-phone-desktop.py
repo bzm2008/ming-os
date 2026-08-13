@@ -19,10 +19,14 @@ def widget_state_path():
     return Path.home() / ".config" / "ming-os" / "status-widget.json"
 
 
+def appearance_config_path():
+    return Path.home() / ".config" / "ming-os" / "appearance.json"
+
+
 METRIC_MODES = ("memory", "cpu", "network")
-COMPACT_BATTERY_REFRESH_SECONDS = 30
-STATUS_SUMMARY_REFRESH_SECONDS = 30
-STATUS_RESOURCE_REFRESH_SECONDS = 15
+COMPACT_BATTERY_REFRESH_SECONDS = 60
+STATUS_SUMMARY_REFRESH_SECONDS = 45
+STATUS_RESOURCE_REFRESH_SECONDS = 30
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 
 
@@ -66,6 +70,27 @@ def save_widget_state(collapsed, path=None, metric_mode="memory"):
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def system_prefers_dark():
+    try:
+        completed = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            timeout=1, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "prefer-dark" in (completed.stdout or "")
+
+
+def load_appearance_theme(path=None):
+    target = Path(path) if path else appearance_config_path()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "system"
+    theme = data.get("theme") if isinstance(data, dict) else "system"
+    return theme if theme in {"system", "light", "dark"} else "system"
 
 
 def _proc_lines(path):
@@ -337,7 +362,7 @@ CLOCK_MARGIN_X = 26
 # layouts; the desktop coordinator owns the remaining vertical spacing.
 CLOCK_MARGIN_Y = 8
 STATUS_WIDGET_COMPACT_HEIGHT = 58
-STATUS_WIDGET_EXPANDED_HEIGHT = 248
+STATUS_WIDGET_EXPANDED_HEIGHT = 220
 STATUS_WIDGET_TOP_GAP_MAX = 8
 
 
@@ -430,7 +455,7 @@ window.ming-desktop {
 }
 .status-widget {
   border-radius: 14px;
-  padding: 12px 16px;
+  padding: 8px 16px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.78);
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
@@ -463,6 +488,34 @@ window.ming-desktop {
   color: #21302A;
 }
 .status-button:hover { background: rgba(255, 255, 255, 0.88); }
+.ming-desktop-dark .clock-widget,
+.ming-desktop-dark .status-widget {
+  background: rgba(32, 40, 36, 0.88);
+  border-color: rgba(159, 231, 215, 0.18);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.ming-desktop-dark .clock-time,
+.ming-desktop-dark .status-compact-time,
+.ming-desktop-dark .notification-title {
+  color: #E7EEE9;
+}
+.ming-desktop-dark .clock-date,
+.ming-desktop-dark .clock-battery,
+.ming-desktop-dark .clock-subdate,
+.ming-desktop-dark .status-compact-date,
+.ming-desktop-dark .status-compact-battery,
+.ming-desktop-dark .launch-detail {
+  color: #A9BDB5;
+}
+.ming-desktop-dark .status-compact-pill,
+.ming-desktop-dark .status-button {
+  background: rgba(32, 40, 36, 0.88);
+  border-color: rgba(159, 231, 215, 0.18);
+  color: #E7EEE9;
+}
+.ming-desktop-dark .status-compact-arrow {
+  color: #62C9B5;
+}
 .status-scale trough {
   min-height: 7px;
   border-radius: 4px;
@@ -2153,7 +2206,7 @@ class StatusWidget(Gtk.Box):
         self._display_height = (
             STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
             else STATUS_WIDGET_EXPANDED_HEIGHT)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         box.get_style_context().add_class("status-widget")
         box.set_halign(Gtk.Align.FILL)
         box.set_hexpand(True)
@@ -2283,7 +2336,7 @@ class StatusWidget(Gtk.Box):
         controls.attach(self.display_button, 2, 2, 1, 1)
         controls.attach(self.brightness_scale, 0, 3, 3, 1)
 
-        expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         expanded.set_valign(Gtk.Align.START)
         expanded.set_vexpand(False)
         expanded.set_margin_top(0)
@@ -2406,6 +2459,7 @@ class StatusWidget(Gtk.Box):
         if result.get("available"):
             self.resource_label.set_text("%s %s%s" % (
                 label, result.get("value"), result.get("unit", "")))
+            log("resource metric %s" % json.dumps(result, ensure_ascii=False, sort_keys=True))
         else:
             self.resource_label.set_text("%s %s" % (label, "采样中" if result.get("reason") else "不可用"))
         return False
@@ -2574,7 +2628,15 @@ class StatusWidget(Gtk.Box):
             if not self.device_controller:
                 result = {"ok": False, "error": "设备控制服务不可用", "value": None}
             elif kind == "volume":
-                result = self.device_controller.set_volume(value)
+                repair = self.device_controller.audio_repair_playback()
+                if repair.get("ok"):
+                    result = self.device_controller.set_volume(value)
+                else:
+                    result = {
+                        "ok": False,
+                        "error": repair.get("error") or "无法恢复默认音频输出",
+                        "value": None,
+                    }
             else:
                 result = self.device_controller.set_brightness(value)
             GLib.idle_add(self.apply_control_result, kind, generation, result)
@@ -3108,6 +3170,7 @@ class StatusWidget(Gtk.Box):
         volume_state = self.control_states["volume"]
         if not volume_state.should_hold_status():
             self.volume_scale.set_value(max(0, min(100, volume or 0)))
+            volume_state.confirmed_value = volume if audio_available else None
             self.volume_label.set_text(
                 "音量 %d%%" % volume if audio_available else "未检测到输出设备")
         elif volume_state.optimistic_value is not None:
@@ -3191,6 +3254,8 @@ class PhoneDesktop(Gtk.Window):
             pass
         self.set_name("ming-desktop-window")
         self.get_style_context().add_class("ming-desktop")
+        self.appearance_monitor = None
+        self.apply_desktop_theme(load_appearance_theme())
         self.set_decorated(False)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
@@ -3265,6 +3330,7 @@ class PhoneDesktop(Gtk.Window):
         self.layout_stamp = self.current_layout_stamp()
         self.catalog_stamp = app_catalog_fingerprint()
         self.render()
+        self.watch_appearance_theme()
         GLib.timeout_add_seconds(2, self.mark_ready)
         # Package installers and Spark trigger refresh_desktop immediately.  This
         # timer is only a bounded fallback for changes made outside Ming tools.
@@ -3281,6 +3347,29 @@ class PhoneDesktop(Gtk.Window):
             except Exception:
                 pass
         return 0, 0
+
+    def apply_desktop_theme(self, theme):
+        dark = theme == "dark" or (theme == "system" and system_prefers_dark())
+        style = self.get_style_context()
+        if dark:
+            style.add_class("ming-desktop-dark")
+        else:
+            style.remove_class("ming-desktop-dark")
+        return False
+
+    def watch_appearance_theme(self):
+        path = appearance_config_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            monitor = Gio.File.new_for_path(str(path)).monitor_file(
+                Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self.on_appearance_theme_changed)
+            self.appearance_monitor = monitor
+        except Exception as exc:
+            log("could not watch appearance theme: %s" % exc)
+
+    def on_appearance_theme_changed(self, *_args):
+        GLib.idle_add(self.apply_desktop_theme, load_appearance_theme())
 
     def mark_ready(self):
         try:

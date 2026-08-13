@@ -68,8 +68,9 @@ class LegacyPerformanceContracts(unittest.TestCase):
         )[0]
         self.assertIn("apply_low_resource_plank_profile", watchdog)
         self.assertLess(watchdog.index("apply_low_resource_plank_profile"), watchdog.index("nohup plank"))
-        self.assertIn("ZoomEnabled=false", watchdog)
-        self.assertIn("IconSize=30", watchdog)
+        self.assertIn("legacy Plank geometry retained", watchdog)
+        self.assertIn("IconSize=40", watchdog)
+        self.assertIn("ZoomPercent=148", watchdog)
         self.assertIn("Offset=0", watchdog)
 
     def test_desktop_catalog_uses_event_first_and_slow_fallback_scan(self):

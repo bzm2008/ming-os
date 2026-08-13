@@ -20,7 +20,7 @@ DEFAULTS = {
     "font_size": 11,
     "desktop_icon_scale": 1.0,
     "desktop_icon_size": 48,
-    "dock_icon_size": 48,
+    "dock_icon_size": 40,
     "wallpaper": "default",
     "motion": "normal",
     "compositor_profile": "auto",
@@ -36,6 +36,8 @@ BUILTIN_WALLPAPERS = {
     "default": pathlib.Path("/usr/share/backgrounds/ming-os/default.png"),
     "light": pathlib.Path("/usr/share/backgrounds/ming-os/default-light.png"),
     "dark": pathlib.Path("/usr/share/backgrounds/ming-os/default-dark.png"),
+    "2640": pathlib.Path("/usr/share/backgrounds/ming-os/default-2640.png"),
+    "macos": pathlib.Path("/usr/share/backgrounds/ming-os/default-macos.png"),
 }
 
 
@@ -375,6 +377,40 @@ def sync_gtk_font_settings(font_name):
         gtk2_text, "gtk-font-name", '"%s"' % font_name))
 
 
+def sync_terminal_theme(config):
+    dark = config.get("theme") == "dark"
+    terminal_path = home_path() / ".config/xfce4/terminal/terminalrc"
+    try:
+        text = terminal_path.read_text(encoding="utf-8")
+    except OSError:
+        text = "[Configuration]\n"
+    if "[Configuration]" not in text:
+        text = "[Configuration]\n" + text
+    for key, value in {
+        "ColorForeground": "#D4F7F1" if dark else "#1D2421",
+        "ColorBackground": "#1D2421" if dark else "#F7FAF7",
+        "ColorCursor": "#9FE7D7" if dark else "#2F8A7D",
+        "BackgroundMode": "TERMINAL_BACKGROUND_SOLID",
+        "BackgroundDarkness": "1.00",
+        "BackgroundOpacity": "1.00",
+    }.items():
+        text = _replace_setting_line(text, key, value)
+    atomic_write_text(terminal_path, text)
+
+
+def sync_notification_theme(config):
+    if not shutil.which("xfconf-query"):
+        return
+    theme = "Ming-Dark" if config.get("theme") == "dark" else "Ming-Glass"
+    try:
+        subprocess.run([
+            "xfconf-query", "-c", "xfce4-notifyd", "-p", "/theme",
+            "-n", "-t", "string", "-s", theme,
+        ], timeout=4, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def sync_dock_runtime(config, reload_dock=False):
     """Keep Plank's dconf and keyfile in sync, then request one bounded reload."""
     dock_size = int(config["dock_icon_size"])
@@ -446,8 +482,9 @@ def apply_runtime(config, reload_dock=False):
             raise OSError("%s readback did not match the requested value" % label)
 
     theme = config["theme"]
-    gtk_theme = "Adwaita-dark" if theme == "dark" else "Ming-Glass"
+    gtk_theme = "Ming-Dark" if theme == "dark" else "Ming-Glass"
     xfconf_set("xsettings", "/Net/ThemeName", gtk_theme, "GTK theme")
+    xfconf_set("xfwm4", "/general/theme", gtk_theme, "window manager theme")
     xfconf_set(
         "xsettings", "/Gtk/FontName", "%s %s" % (config["font_family"], config["font_size"]),
         "GTK font")
@@ -474,6 +511,8 @@ def apply_runtime(config, reload_dock=False):
     if font_name not in gsettings_font_actual:
         raise OSError("GTK4 font readback did not match the requested value")
     sync_gtk_font_settings(font_name)
+    sync_terminal_theme(config)
+    sync_notification_theme(config)
 
     wallpaper = BUILTIN_WALLPAPERS.get(config["wallpaper"], pathlib.Path(config["wallpaper"]))
     if wallpaper.is_file():

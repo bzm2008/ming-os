@@ -2132,6 +2132,11 @@ administrator_ready() {
 }
 
 require_root_for_mutation() {
+    if [ -d /run/live ] || [ -d /lib/live/mount ] || grep -qw 'boot=live' /proc/cmdline 2>/dev/null; then
+        echo "Live 模式只支持浏览星火应用商店。请先安装 Ming OS，并完成首次账户设置后再安装软件。" >&2
+        json_log live_install_blocked "请先安装 Ming OS"
+        exit 7
+    fi
     if [ "$(id -u)" -ne 0 ]; then
         echo "安装软件需要管理员授权。" >&2
         json_log permission_denied "not root"
@@ -2187,6 +2192,16 @@ refresh_desktop() {
     fi
 }
 
+verify_packages_installed() {
+    for package in "$@"; do
+        if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii '; then
+            echo "软件包安装后未能读回已安装状态：$package" >&2
+            json_log install_readback_failed "$package"
+            exit 8
+        fi
+    done
+}
+
 apm_backend_ready() {
     version="$(dpkg-query -W -f='${Version}' apm 2>/dev/null || true)"
     [ -n "$version" ] || return 1
@@ -2196,6 +2211,21 @@ apm_backend_ready() {
 
 ace_backend_ready() {
     command -v bookworm-run >/dev/null 2>&1 || command -v trixie-run >/dev/null 2>&1
+}
+
+verify_apm_installed() {
+    local installed package
+    installed="$(/usr/bin/apm list --installed 2>/dev/null | \
+        sed 's/\x1b\[[0-9;]*m//g' | \
+        grep -vE '^Listing|^$|^\[INFO\]|^警告' | \
+        awk -F/ '/\// {print $1}' | sort -u)" || installed=""
+    for package in "$@"; do
+        if ! printf '%s\n' "${installed}" | grep -Fx -- "${package}" >/dev/null 2>&1; then
+            echo "APM 安装后未能读回已安装状态：${package}" >&2
+            json_log apm_readback_failed "${package}"
+            exit 8
+        fi
+    done
 }
 
 action="${1:-}"
@@ -2216,6 +2246,7 @@ case "$action" in
         if [ "$action" = install ]; then
             /usr/bin/aptss update
             /usr/bin/aptss install "$@" -y
+            verify_packages_installed "$@"
         else
             /usr/bin/aptss remove "$@" -y
         fi
@@ -2233,6 +2264,7 @@ case "$action" in
                 if [ "$subaction" = install ]; then
                     /usr/bin/aptss update
                     /usr/bin/aptss install "$@" -y
+                    verify_packages_installed "$@"
                 else
                     /usr/bin/aptss remove "$@" -y
                 fi
@@ -2280,6 +2312,11 @@ case "$action" in
                 ;;
         esac
         /usr/bin/apm "$subaction" "$@"
+        case "$subaction" in
+            install|ssinstall)
+                verify_apm_installed "$@"
+                ;;
+        esac
         refresh_desktop
         json_log "apm:$subaction" "$*"
         ;;

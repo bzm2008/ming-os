@@ -308,12 +308,20 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=255;;255;;255;;255", self.build)
-        self.assertIn("FillStartColor=255;;255;;255;;230", self.build)
-        self.assertIn("FillEndColor=246;;248;;250;;214", self.build)
+        self.assertIn("OuterStrokeColor=31;;98;;84;;54", self.build)
+        self.assertIn("FillStartColor=255;;255;;255;;226", self.build)
+        self.assertIn("FillEndColor=242;;250;;247;;238", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
-        self.assertIn("BottomPadding=14", self.build)
+        self.assertIn("BottomPadding=2", self.build)
         self.assertIn("Offset=0", self.build)
+
+    def test_rootfs_gate_requires_static_dark_theme_assets(self):
+        for marker in (
+            'require_file("usr/share/themes/Ming-Dark/gtk-3.0/gtk.css", "#151A18")',
+            'require_file("usr/share/themes/Ming-Dark/xfce-notify-4.0/gtk.css", "window#XfceNotifyWindow")',
+            'require_file("usr/share/themes/Ming-Dark/index.theme", "GtkTheme=Ming-Dark")',
+        ):
+            self.assertIn(marker, self.build)
 
     def test_rootfs_gate_requires_a_maintainable_installed_administrator_chain(self):
         for marker in (

@@ -569,7 +569,7 @@ fi
 
     def test_status_widget_uses_the_final_264_named_height_contract(self):
         self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT = 58", PHONE)
-        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 248", PHONE)
+        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 220", PHONE)
         status = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
         self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed", status)
         self.assertIn("else STATUS_WIDGET_EXPANDED_HEIGHT", status)

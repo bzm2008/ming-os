@@ -105,27 +105,26 @@ class DockLifecycleContracts(unittest.TestCase):
             self.assertIn(marker, self.watchdog)
         self.assertIn("ming-refresh-dock-launchers", settings)
 
-    def test_light_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
-        self.assertIn("IconSize=30", self.plank_settings)
+    def test_legacy_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
+        self.assertIn("IconSize=40", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
-        self.assertIn("ZoomPercent=106", self.plank_settings)
-        self.assertIn("MingDockProfile=2641-macos-frosted-centered-2", self.plank_settings)
+        self.assertIn("ZoomPercent=148", self.plank_settings)
+        self.assertIn("MingDockProfile=2640-legacy-centered", self.plank_settings)
         self.assertIn("Alignment=3", self.plank_settings)
         self.assertIn("Offset=0", self.plank_settings)
-        self.assertIn("ZoomPercent=106", self.watchdog)
+        self.assertIn("ZoomPercent=148", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
         self.assertIn("dock_zoom=false", self.source)
-        self.assertIn('"ZoomPercent=106"', self.build)
+        self.assertIn('"ZoomPercent=148"', self.build)
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
 
-    def test_compact_macos_dock_profile_is_applied_at_runtime(self):
+    def test_legacy_dock_profile_is_applied_at_runtime(self):
         for marker in (
-            "IconSize=30",
-            "TopPadding=4",
-            "BottomPadding=14",
-            "VisualBottomGap=18",
+            "IconSize=40",
+            "TopPadding=6",
+            "BottomPadding=2",
         ):
             self.assertIn(marker, self.source)
         self.assertIn("command -v gsettings", self.watchdog)
@@ -148,26 +147,26 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertNotIn("xdotool getactivewindow windowmove", self.watchdog)
         self.assertNotIn('wmctrl -i -r "${window_id}" -e', self.watchdog)
 
-    def test_glass_rail_profile_forces_theme_on_existing_live_user_settings(self):
+    def test_legacy_profile_forces_theme_on_existing_live_user_settings(self):
         self.assertIn("Theme=Ming", self.plank_settings)
         migrate = re.search(
-            r"migrate_glass_rail_profile\(\) \{(.*?)\n\}",
+            r"migrate_legacy_dock_profile\(\) \{(.*?)\n\}",
             self.watchdog,
             re.S,
         ).group(1)
         self.assertIn("Theme=Ming", migrate)
         self.assertIn('sed -i "s/^Theme=.*/Theme=Ming/"', migrate)
-        self.assertIn("FillStartColor=255;;255;;255;;230", self.source)
-        self.assertIn("FillEndColor=246;;248;;250;;214", self.source)
+        self.assertIn("FillStartColor=255;;255;;255;;226", self.source)
+        self.assertIn("FillEndColor=242;;250;;247;;238", self.source)
 
-    def test_default_plank_theme_is_also_frosted_white(self):
+    def test_default_plank_theme_is_also_legacy(self):
         theme_setup = self.source[
-            self.source.index("# Ming 磨砂白悬浮 Dock 主题"):
-            self.source.index("cat > /usr/local/bin/ming-dock", self.source.index("# Ming 磨砂白悬浮 Dock 主题"))
+            self.source.index("# Ming 26.4.0 / 26.3.2 经典底部 Dock 主题"):
+            self.source.index("cat > /usr/local/bin/ming-dock", self.source.index("# Ming 26.4.0 / 26.3.2 经典底部 Dock 主题"))
         ]
         self.assertIn("/usr/share/plank/themes/Ming", theme_setup)
         self.assertIn("/usr/share/plank/themes/Default", theme_setup)
-        self.assertIn("FillStartColor=255;;255;;255;;230", theme_setup)
+        self.assertIn("FillStartColor=255;;255;;255;;226", theme_setup)
 
     def test_plank_runtime_dconf_is_forced_before_launching_live_dock(self):
         self.assertIn("apply_plank_runtime_preferences()", self.watchdog)
@@ -192,24 +191,24 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertLess(start.index("apply_low_resource_plank_profile"), start.index("apply_plank_runtime_preferences"))
         self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("nohup plank"))
 
-    def test_glass_rail_theme_is_visibly_distinct_and_low_cost(self):
+    def test_legacy_theme_matches_2640_geometry_and_low_cost(self):
         for marker in (
-            "TopRoundness=24",
-            "BottomRoundness=24",
-            "HorizPadding=10",
-            "TopPadding=4",
-            "BottomPadding=14",
-            "ItemPadding=2",
+            "TopRoundness=14",
+            "BottomRoundness=0",
+            "HorizPadding=16",
+            "TopPadding=6",
+            "BottomPadding=2",
+            "ItemPadding=4",
             "IndicatorSize=4",
-            "OuterStrokeColor=255;;255;;255;;255",
-            "FillStartColor=255;;255;;255;;230",
-            "FillEndColor=246;;248;;250;;214",
-            "InnerStrokeColor=255;;255;;255;;255",
+            "OuterStrokeColor=31;;98;;84;;54",
+            "FillStartColor=255;;255;;255;;226",
+            "FillEndColor=242;;250;;247;;238",
+            "InnerStrokeColor=255;;255;;255;;176",
             "LaunchBounceHeight=0.20",
         ):
             self.assertIn(marker, self.source)
 
-    def test_glass_rail_theme_uses_plank_color_and_dock_sections(self):
+    def test_legacy_theme_uses_plank_color_and_dock_sections(self):
         theme = self.source.split('cat > "${theme_dir}/dock.theme" << \'PLANKTHEME\'', 1)[1].split(
             "\nPLANKTHEME", 1
         )[0]
@@ -219,29 +218,29 @@ class DockLifecycleContracts(unittest.TestCase):
         plank_theme = theme.split("[PlankTheme]", 1)[1].split("[PlankDockTheme]", 1)[0]
         dock_theme = theme.split("[PlankDockTheme]", 1)[1]
         for marker in (
-            "OuterStrokeColor=255;;255;;255;;255",
-            "FillStartColor=255;;255;;255;;230",
-            "FillEndColor=246;;248;;250;;214",
-            "InnerStrokeColor=255;;255;;255;;255",
+            "OuterStrokeColor=31;;98;;84;;54",
+            "FillStartColor=255;;255;;255;;226",
+            "FillEndColor=242;;250;;247;;238",
+            "InnerStrokeColor=255;;255;;255;;176",
         ):
             self.assertIn(marker, plank_theme)
         for marker in (
-            "HorizPadding=10",
-            "TopPadding=4",
-            "BottomPadding=14",
-            "ItemPadding=2",
+            "HorizPadding=16",
+            "TopPadding=6",
+            "BottomPadding=2",
+            "ItemPadding=4",
             "LaunchBounceTime=150",
             "ItemMoveTime=130",
         ):
             self.assertIn(marker, dock_theme)
 
-    def test_glass_rail_profile_migrates_existing_2640_users_once(self):
+    def test_legacy_profile_migrates_existing_frosted_users_once(self):
         for marker in (
-            "MingDockProfile=2641-macos-frosted-centered-2",
-            "migrate_glass_rail_profile",
+            "MingDockProfile=2640-legacy-centered",
+            "migrate_legacy_dock_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
-            "s/^IconSize=.*/IconSize=30/",
-            "s/^ZoomPercent=.*/ZoomPercent=106/",
+            "s/^IconSize=.*/IconSize=40/",
+            "s/^ZoomPercent=.*/ZoomPercent=148/",
             "s/^Offset=.*/Offset=0/",
         ):
             self.assertIn(marker, self.watchdog)
@@ -249,11 +248,11 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("2641-glass-rail-1", self.watchdog)
         self.assertIn("2641-macos-compact-glass-1", self.watchdog)
         self.assertIn("2641-macos-frosted-centered-1", self.watchdog)
-        self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
+        self.assertIn("migrate_legacy_dock_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
-    def test_plank_restarts_once_after_glass_theme_migration(self):
+    def test_plank_restarts_once_after_legacy_theme_migration(self):
         migrate = re.search(
-            r"migrate_glass_rail_profile\(\) \{(.*?)\n\}",
+            r"migrate_legacy_dock_profile\(\) \{(.*?)\n\}",
             self.watchdog,
             re.S,
         ).group(1)
@@ -268,7 +267,8 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertNotIn("dock+above", self.watchdog)
         self.assertNotIn("plank above", self.watchdog.lower())
         self.assertIn("avoid_covering_windows", self.watchdog)
-        self.assertIn("reserve_bottom_workarea", self.watchdog)
+        self.assertNotIn("reserve_bottom_workarea", self.watchdog)
+        self.assertIn("-remove _NET_WM_STRUT", self.watchdog)
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(

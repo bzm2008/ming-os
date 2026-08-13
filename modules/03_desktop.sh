@@ -1795,6 +1795,123 @@ MetacityTheme=Ming-Glass
 IconTheme=Papirus
 CursorTheme=Adwaita
 THEMEINDEX
+
+    # Ming-Dark stays static for old GPUs: the same type scale and controls as
+    # Ming-Glass, with solid surfaces that remain readable without a compositor.
+    mkdir -p /usr/share/themes/Ming-Dark/gtk-3.0 \
+        /usr/share/themes/Ming-Dark/xfce-notify-4.0
+    cat > /usr/share/themes/Ming-Dark/gtk-3.0/gtk.css << 'MINGDARKCSS'
+@define-color theme_bg_color #151A18;
+@define-color theme_fg_color #E7EEE9;
+@define-color theme_selected_bg_color #2F8A7D;
+@define-color theme_selected_fg_color #FFFFFF;
+@define-color borders rgba(159, 231, 215, 0.16);
+@define-color theme_base_color #202824;
+@define-color theme_text_color #E7EEE9;
+@define-color insensitive_bg_color #272F2B;
+@define-color insensitive_fg_color #93A19A;
+
+* {
+  -GtkWidget-cursor-aspect-ratio: 0.05;
+}
+
+label, button, entry, menuitem, notebook tab {
+  font-family: "Noto Sans CJK SC", sans-serif;
+  font-weight: 400;
+}
+
+label.title, headerbar label {
+  font-weight: 600;
+}
+
+window, .view, iconview {
+  background-color: @theme_bg_color;
+  color: @theme_fg_color;
+}
+
+headerbar, toolbar, notebook header, menu, .menu {
+  background-color: #1B211E;
+  color: @theme_fg_color;
+  border-color: @borders;
+}
+
+button, entry, checkbutton check, radiobutton radio {
+  background-image: none;
+  background-color: #202824;
+  color: @theme_fg_color;
+  border: 1px solid @borders;
+  border-radius: 10px;
+}
+
+button:hover, entry:focus {
+  background-color: #29342F;
+  border-color: rgba(159, 231, 215, 0.34);
+}
+
+button.suggested-action, switch:checked, progressbar progress {
+  background-image: none;
+  background-color: #2F8A7D;
+  color: #FFFFFF;
+  border-color: #2F8A7D;
+}
+
+button:disabled {
+  background-color: @insensitive_bg_color;
+  color: @insensitive_fg_color;
+}
+
+tooltip {
+  background-color: #101513;
+  color: #FFFFFF;
+  border: 1px solid @borders;
+}
+
+scrollbar slider, scale slider {
+  background-color: #62C9B5;
+}
+
+scale trough, progressbar trough {
+  background-color: #29342F;
+}
+MINGDARKCSS
+    cat > /usr/share/themes/Ming-Dark/xfce-notify-4.0/gtk.css << 'MINGDARKNOTIFY'
+window#XfceNotifyWindow {
+  background-color: #202824;
+  color: #E7EEE9;
+  border: 1px solid rgba(159, 231, 215, 0.28);
+  border-radius: 10px;
+}
+
+window#XfceNotifyWindow label {
+  color: #E7EEE9;
+}
+MINGDARKNOTIFY
+    if [[ -d /usr/share/themes/Arc-Darker/xfwm4 ]]; then
+        rm -rf /usr/share/themes/Ming-Dark/xfwm4
+        cp -a /usr/share/themes/Arc-Darker/xfwm4 /usr/share/themes/Ming-Dark/xfwm4
+        cat >> /usr/share/themes/Ming-Dark/xfwm4/themerc << 'XFWMDARK'
+
+active_text_color=#E7EEE9
+inactive_text_color=#93A19A
+button_offset=4
+button_spacing=2
+full_width_title=true
+title_alignment=center
+XFWMDARK
+    fi
+    cat > /usr/share/themes/Ming-Dark/index.theme << 'DARKTHEMEINDEX'
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=Ming Dark
+Comment=Ming OS static dark theme
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=Ming-Dark
+MetacityTheme=Ming-Dark
+IconTheme=Papirus
+CursorTheme=Adwaita
+DARKTHEMEINDEX
 }
 
 # ======================== 壁纸生成 ========================
@@ -2099,7 +2216,7 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-macos-frosted-centered-2
+# MingDockProfile=2640-legacy-centered
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -2109,12 +2226,11 @@ Alignment=3
 #居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
 Offset=0
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=30
+IconSize=40
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
-ZoomPercent=106
-# VisualBottomGap=18
+ZoomPercent=148
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
 #自动隐藏延迟
@@ -2219,26 +2335,25 @@ MINGREFRESHDOCK
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
-    # Ming 磨砂白悬浮 Dock 主题。Plank 不做实时模糊，这里用半透明白色、
-    # 圆角、轻描边和紧凑 padding 模拟 macOS Dock，同时保持低资源机器稳定。
+    # Ming 26.4.0 / 26.3.2 经典底部 Dock 主题。
     local theme_dir
     for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
-TopRoundness=24
-BottomRoundness=24
+TopRoundness=14
+BottomRoundness=0
 LineWidth=1
-OuterStrokeColor=255;;255;;255;;255
-FillStartColor=255;;255;;255;;230
-FillEndColor=246;;248;;250;;214
-InnerStrokeColor=255;;255;;255;;255
+OuterStrokeColor=31;;98;;84;;54
+FillStartColor=255;;255;;255;;226
+FillEndColor=242;;250;;247;;238
+InnerStrokeColor=255;;255;;255;;176
 
 [PlankDockTheme]
-HorizPadding=10
-TopPadding=4
-BottomPadding=14
-ItemPadding=2
+HorizPadding=16
+TopPadding=6
+BottomPadding=2
+ItemPadding=4
 IndicatorSize=4
 IconShadowSize=1
 UrgentBounceHeight=1.20
@@ -3224,15 +3339,14 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-macos-frosted-centered-2
+# MingDockProfile=2640-legacy-centered
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 Offset=0
-IconSize=30
+IconSize=40
 ZoomEnabled=true
-ZoomPercent=106
-# VisualBottomGap=18
+ZoomPercent=148
 HideMode=0
 UnhideDelay=0
 HideDelay=0
@@ -3253,23 +3367,9 @@ apply_low_resource_plank_profile() {
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//' || true)"
-    if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 4200 ]] \
-        || [[ -n "${virt}" && "${virt}" != "none" ]] \
-        || [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]] \
-        || [[ "${cmdline}" == *nomodeset* ]]; then
-        sed -i \
-            -e 's/^IconSize=.*/IconSize=30/' \
-            -e 's/^ZoomEnabled=.*/ZoomEnabled=false/' \
-            -e 's/^ZoomPercent=.*/ZoomPercent=100/' \
-            -e 's/^FadeOpacity=.*/FadeOpacity=1.0/' \
-            -e 's/^HideMode=.*/HideMode=0/' \
-            "${settings}" 2>/dev/null || true
-        grep -q '^IconSize=' "${settings}" || printf 'IconSize=30\n' >>"${settings}"
-        grep -q '^ZoomEnabled=' "${settings}" || printf 'ZoomEnabled=false\n' >>"${settings}"
-        grep -q '^ZoomPercent=' "${settings}" || printf 'ZoomPercent=100\n' >>"${settings}"
-        grep -q '^FadeOpacity=' "${settings}" || printf 'FadeOpacity=1.0\n' >>"${settings}"
-        log "low-resource Plank profile applied (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown})"
-    fi
+    # Keep the approved 26.4.0 Dock geometry on every machine.  Low-resource
+    # savings come from compositor/session policy, not a visually different Dock.
+    log "legacy Plank geometry retained (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown} cmdline=${cmdline:-none})"
 }
 
 plank_setting_value() {
@@ -3299,9 +3399,9 @@ apply_plank_runtime_preferences() {
         MING_PLANK_RELOAD_REQUIRED=1
         log "existing Plank theme ${current_theme:-unset} differs from ${theme_dconf}; one reload required"
     fi
-    icon_size="$(plank_setting_value "${settings}" IconSize 30)"
+    icon_size="$(plank_setting_value "${settings}" IconSize 40)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
-    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 106)"
+    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
     case "${hide_mode}" in
@@ -3312,9 +3412,9 @@ apply_plank_runtime_preferences() {
     esac
     if command -v gsettings >/dev/null 2>&1; then
         gsettings set "${plank_schema}" theme "${theme:-Ming}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings theme"
-        gsettings set "${plank_schema}" icon-size "${icon_size:-30}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
+        gsettings set "${plank_schema}" icon-size "${icon_size:-40}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
         gsettings set "${plank_schema}" zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-enabled"
-        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-106}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
+        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-148}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
         gsettings set "${plank_schema}" hide-mode "${hide_mode_runtime}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings hide-mode"
         gsettings set "${plank_schema}" position bottom >>"${log_file}" 2>&1 || log "could not write Plank gsettings position"
         gsettings set "${plank_schema}" alignment center >>"${log_file}" 2>&1 || log "could not write Plank gsettings alignment"
@@ -3322,9 +3422,9 @@ apply_plank_runtime_preferences() {
         gsettings set "${plank_schema}" offset "${offset:-0}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings offset"
     else
         dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
-        dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-30}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
+        dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-40}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
         dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
-        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-106}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
+        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-148}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
         dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
         dconf write /net/launchpad/plank/docks/dock1/alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf alignment"
         dconf write /net/launchpad/plank/docks/dock1/items-alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf item alignment"
@@ -3332,9 +3432,9 @@ apply_plank_runtime_preferences() {
     fi
 }
 
-migrate_glass_rail_profile() {
+migrate_legacy_dock_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-macos-frosted-centered-2$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2640-legacy-centered$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3343,14 +3443,14 @@ migrate_glass_rail_profile() {
         printf 'DockItems=%s\n' "${dock_items}" >>"${settings}"
     fi
     if grep -q '^IconSize=' "${settings}"; then
-        sed -i "s/^IconSize=.*/IconSize=30/" "${settings}" 2>/dev/null || true
+        sed -i "s/^IconSize=.*/IconSize=40/" "${settings}" 2>/dev/null || true
     else
-        printf 'IconSize=30\n' >>"${settings}"
+        printf 'IconSize=40\n' >>"${settings}"
     fi
     if grep -q '^ZoomPercent=' "${settings}"; then
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=106/" "${settings}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=148/" "${settings}" 2>/dev/null || true
     else
-        printf 'ZoomPercent=106\n' >>"${settings}"
+        printf 'ZoomPercent=148\n' >>"${settings}"
     fi
     if grep -q '^ZoomEnabled=' "${settings}"; then
         sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${settings}" 2>/dev/null || true
@@ -3383,10 +3483,11 @@ migrate_glass_rail_profile() {
     sed -i '/^# MingDockProfile=2641-frosted-white-rail-2$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-compact-glass-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-1$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-macos-frosted-centered-2\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-macos-frosted-centered-2$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2640-legacy-centered\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
-    log "migrated Dock to 26.4.1 glass rail profile"
+    log "migrated Dock to the 26.4.0 legacy profile"
 }
 
 ensure_plank_settings() {
@@ -3404,7 +3505,7 @@ ensure_plank_settings() {
         log "restored complete Plank settings profile"
     fi
     MING_PLANK_RELOAD_REQUIRED=0
-    migrate_glass_rail_profile "${settings}"
+    migrate_legacy_dock_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
         sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
     else
@@ -3527,29 +3628,14 @@ repair_plank_stacking() {
     x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || return 1
 }
 
-reserve_bottom_workarea() {
-    local window_id="${1:-}" geometry screen x y width height sx sy sw sh bottom_reserved
-    valid_window_id "${window_id}" || return 1
-    command -v xprop >/dev/null 2>&1 || return 1
-    geometry="$(window_geometry "${window_id}")"
-    screen="$(screen_geometry)"
-    read -r x y width height <<<"${geometry}"
-    read -r sx sy sw sh <<<"${screen}"
-    [[ "${x:-}" =~ ^-?[0-9]+$ && "${y:-}" =~ ^-?[0-9]+$ && "${width:-}" =~ ^[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
-    [[ "${sx:-}" =~ ^-?[0-9]+$ && "${sw:-}" =~ ^[0-9]+$ ]] || return 1
-    bottom_reserved=$((height + 18))
-    x11_call xprop -id "${window_id}" \
-        -f _NET_WM_STRUT 32c -set _NET_WM_STRUT "0, 0, 0, ${bottom_reserved}" \
-        -f _NET_WM_STRUT_PARTIAL 32c -set _NET_WM_STRUT_PARTIAL \
-        "0, 0, 0, ${bottom_reserved}, 0, 0, 0, 0, 0, 0, ${sx}, $((sx + sw - 1))" \
-        >/dev/null 2>&1
-}
-
 avoid_covering_windows() {
     local window_id
     window_id="$(plank_window_id)"
     valid_window_id "${window_id}" || return 0
-    reserve_bottom_workarea "${window_id}" || log "could not reserve bottom workarea for Dock"
+    if command -v xprop >/dev/null 2>&1; then
+        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT >/dev/null 2>&1 || true
+        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT_PARTIAL >/dev/null 2>&1 || true
+    fi
     repair_plank_stacking || log "could not keep Dock sticky across workspaces"
 }
 
@@ -5045,6 +5131,9 @@ ColorBackground=#1D2421
 ColorCursor=#9FE7D7
 ColorSelection=#2FAE8F
 ColorSelectionUseDefault=FALSE
+BackgroundMode=TERMINAL_BACKGROUND_SOLID
+BackgroundDarkness=1.00
+BackgroundOpacity=1.00
 ColorPalette=#1D2421;#D75D66;#58B88F;#D7B95A;#5A8CCF;#7B72B9;#4DB9B1;#D4F7F1;#51635C;#E9747C;#7ED6AD;#E5CB72;#78A9E5;#9C92D8;#72D3CC;#FFFFFF
 TERMINALRC
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/xfce4/terminal"
@@ -8129,9 +8218,7 @@ fi
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
-    sed -i "s/^IconSize=.*/IconSize=30/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
-    sed -i "s/^ZoomPercent=.*/ZoomPercent=100/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    printf '[ming-appearance] low-memory host keeps approved legacy Dock geometry\n' >&2
 fi
 
 # Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
