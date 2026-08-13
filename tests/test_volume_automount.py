@@ -38,6 +38,39 @@ class VolumeAutomountTests(unittest.TestCase):
         self.assertEqual("already-mounted", skipped["/dev/sda1"])
         self.assertEqual("missing-filesystem", skipped["/dev/sda2"])
 
+    def test_exposes_frugal_live_ext4_partition_root_in_file_manager(self):
+        rows = [
+            {
+                "name": "sdb1",
+                "type": "part",
+                "fstype": "ext4",
+                "uuid": "frugal-uuid",
+                "label": "MingData",
+                "mountpoint": "/run/live/medium/ming",
+            },
+            {
+                "name": "sdb2",
+                "type": "part",
+                "fstype": "ext4",
+                "uuid": "root-uuid",
+                "label": "",
+                "mountpoint": "/",
+            },
+        ]
+
+        plan = self.volume.build_mount_plan(rows, user="zero")
+
+        self.assertEqual([], plan["mount"])
+        self.assertEqual(
+            [{"device": "/dev/sdb1", "target": "/media/zero/MingData", "source": "/run/live/medium"}],
+            [
+                {key: item[key] for key in ("device", "target", "source")}
+                for item in plan["expose"]
+            ],
+        )
+        skipped = {item["device"]: item["reason"] for item in plan["skip"]}
+        self.assertEqual("already-mounted", skipped["/dev/sdb2"])
+
     def test_rejects_system_crypto_swap_and_unknown_partitions(self):
         rows = [
             {"name": "nvme0n1p1", "type": "part", "fstype": "vfat", "uuid": "efi", "label": "EFI", "mountpoint": "", "partlabel": "EFI System"},

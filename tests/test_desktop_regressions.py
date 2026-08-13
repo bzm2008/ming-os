@@ -205,6 +205,14 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("padding: 12px 16px;", css)
         self.assertNotIn("font-weight: 800;", css)
 
+    def test_status_notifications_use_opaque_readable_cards(self):
+        css = self.phone[self.phone.index('CSS = b"""'):self.phone.index('"""\n\n\ndef log')]
+        self.assertIn(".notification-panel { padding: 12px; background: #F9FCFA;", css)
+        self.assertIn("border-radius: 12px;", css)
+        self.assertIn(".launch-feedback", css)
+        self.assertIn("background: rgba(252, 254, 252, 0.98);", css)
+        self.assertNotIn("background: rgba(252, 254, 252, 0.94);", css)
+
     def test_app_drawer_activates_on_explicit_primary_release(self):
         self.assertIn('button.connect("button-release-event", self._activate_button, app)', self.drawer)
         self.assertIn("def _activate_button", self.drawer)

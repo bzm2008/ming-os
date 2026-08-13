@@ -199,6 +199,10 @@ class PowerProfileContracts(unittest.TestCase):
             "MING_OTA",
             "not_formatted",
             "already_mounted",
+            "live_media_root",
+            "expose_existing_mount",
+            "/run/live/medium",
+            "/lib/live/mount/medium",
         ):
             self.assertIn(marker, helper)
         self.assertNotIn("mkfs", helper)

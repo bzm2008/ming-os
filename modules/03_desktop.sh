@@ -356,6 +356,42 @@ if [[ -z "${package_file}" || ! -f "${package_file}" ]]; then
     exit 2
 fi
 
+show_blocking_error() {
+    local message="$1"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="无法安装软件" --text="${message}" --width=460 2>/dev/null || true
+    else
+        notify-send -u critical "无法安装软件" "${message}" 2>/dev/null || true
+    fi
+}
+
+current_user="$(id -un)"
+admin_status="$(/usr/local/sbin/ming-admin-bootstrap status \
+    --user "${current_user}" --json 2>/dev/null || true)"
+if ! grep -Fq '"ready": true' <<<"${admin_status}"; then
+    show_blocking_error "请先完成首次开机账户设置，再安装需要管理员权限的软件。"
+    if [[ -x /usr/local/bin/ming-oobe-account ]]; then
+        nohup /usr/local/bin/ming-oobe-account \
+            >"${XDG_RUNTIME_DIR:-/tmp}/ming-oobe-account.log" 2>&1 </dev/null &
+    fi
+    exit 4
+fi
+
+polkit_agent_pattern='lxpolkit|polkit-gnome-authentication-agent'
+if ! pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1; then
+    if command -v lxpolkit >/dev/null 2>&1; then
+        nohup lxpolkit >"${XDG_RUNTIME_DIR:-/tmp}/ming-polkit-agent.log" 2>&1 </dev/null &
+        for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+            pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1 && break
+            sleep 0.2
+        done
+    fi
+fi
+if ! pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1; then
+    show_blocking_error "系统授权服务尚未就绪，请注销并重新登录后再试。"
+    exit 5
+fi
+
 result_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-package-result.XXXXXX" 2>/dev/null || true)"
 if [[ -z "${result_file}" ]]; then
     notify-send -u critical "安装 DEB 软件包" "无法创建安装结果文件。" 2>/dev/null || true
@@ -1389,6 +1425,7 @@ gtk-button-images=0
 gtk-menu-images=0
 gtk-enable-event-sounds=0
 gtk-enable-input-feedback-sounds=0
+gtk-enable-animations=0
 gtk-application-prefer-dark-theme=0
 gtk-decoration-layout=close,minimize,maximize:
 GTKSETTINGS
@@ -1404,6 +1441,7 @@ gtk-button-images=0
 gtk-menu-images=0
 gtk-enable-event-sounds=0
 gtk-enable-input-feedback-sounds=0
+gtk-enable-animations=0
 GTK2SETTINGS
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/gtk-3.0/settings.ini" "/home/${MING_USER}/.gtkrc-2.0"
 
@@ -1451,7 +1489,6 @@ window {
 
 window decoration {
   border-radius: 12px;
-  box-shadow: 0 12px 28px rgba(26, 67, 56, 0.09);
   margin: 0;
 }
 
@@ -1462,14 +1499,12 @@ button {
   background-image: none;
   background-color: rgba(255, 255, 255, 0.90);
   color: @theme_fg_color;
-  transition: background-color 160ms ease-out, border-color 160ms ease-out, box-shadow 180ms ease-out;
   min-height: 32px;
 }
 
 button:hover {
   background-color: #FFFFFF;
   border-color: rgba(47, 138, 125, 0.24);
-  box-shadow: 0 4px 12px rgba(30, 70, 58, 0.06);
 }
 
 button:active {
@@ -1510,7 +1545,7 @@ entry {
 
 entry:focus {
   border-color: #2F8A7D;
-  box-shadow: 0 0 0 2px rgba(47, 138, 125, 0.10);
+  background-color: #FFFFFF;
 }
 
 notebook header {
@@ -1558,7 +1593,6 @@ menu, .menu {
   border: 1px solid @borders;
   border-radius: 12px;
   padding: 4px;
-  box-shadow: 0 10px 24px rgba(30, 70, 58, 0.07);
 }
 
 menuitem {
@@ -1708,7 +1742,6 @@ spinbutton button {
   border: 1px solid rgba(31, 98, 84, 0.10);
   border-radius: 14px;
   margin: 6px 8px 4px 8px;
-  box-shadow: 0 8px 22px rgba(30, 70, 58, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.60);
   padding: 2px 6px;
 }
 
@@ -1718,7 +1751,6 @@ spinbutton button {
   margin: 2px 4px;
   border: 1px solid transparent;
   background-color: transparent;
-  transition: all 200ms ease;
   min-width: 36px;
   min-height: 36px;
 }
@@ -2067,22 +2099,22 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-macos-frosted-centered-1
+# MingDockProfile=2641-macos-frosted-centered-2
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
-#居中偏移：必须为 0，避免继承旧用户设置导致 Dock 偏右或偏左
+#居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
 Offset=0
 #图标大小（ming-scale 会按分辨率覆盖）
-IconSize=32
+IconSize=30
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
-ZoomPercent=110
-# VisualBottomGap=10
+ZoomPercent=106
+# VisualBottomGap=18
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=0
 #自动隐藏延迟
@@ -2203,10 +2235,10 @@ FillEndColor=246;;248;;250;;214
 InnerStrokeColor=255;;255;;255;;255
 
 [PlankDockTheme]
-HorizPadding=14
+HorizPadding=10
 TopPadding=4
-BottomPadding=10
-ItemPadding=3
+BottomPadding=14
+ItemPadding=2
 IndicatorSize=4
 IconShadowSize=1
 UrgentBounceHeight=1.20
@@ -2860,9 +2892,7 @@ window_stacking() {
         properties="$(x11_call xprop -id "${id}" 2>/dev/null || true)"
     fi
     if [[ "${role}" == "dock" ]]; then
-        if grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"${properties}" && grep -q '_NET_WM_STATE_ABOVE' <<<"${properties}"; then
-            printf 'dock+above'
-        elif grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"${properties}"; then
+        if grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"${properties}"; then
             printf 'dock'
         else
             printf 'normal'
@@ -2931,7 +2961,7 @@ if [[ -n "${dock_id}" ]]; then
        geometry_is_in_bounds "${dock_geometry}" "$(screen_geometry)" && \
        geometry_is_bottom "${dock_geometry}" "$(screen_geometry)"; then
         dock_visible=true
-        if [[ "${dock_stacking}" == "dock" || "${dock_stacking}" == "dock+above" ]]; then
+        if [[ "${dock_stacking}" == "dock" ]]; then
             dock_healthy=true
         fi
     else
@@ -3194,15 +3224,15 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-macos-frosted-centered-1
+# MingDockProfile=2641-macos-frosted-centered-2
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 Offset=0
-IconSize=32
+IconSize=30
 ZoomEnabled=true
-ZoomPercent=110
-# VisualBottomGap=10
+ZoomPercent=106
+# VisualBottomGap=18
 HideMode=0
 UnhideDelay=0
 HideDelay=0
@@ -3228,13 +3258,13 @@ apply_low_resource_plank_profile() {
         || [[ "${renderer}" == *llvmpipe* || "${renderer}" == *softpipe* ]] \
         || [[ "${cmdline}" == *nomodeset* ]]; then
         sed -i \
-            -e 's/^IconSize=.*/IconSize=32/' \
+            -e 's/^IconSize=.*/IconSize=30/' \
             -e 's/^ZoomEnabled=.*/ZoomEnabled=false/' \
             -e 's/^ZoomPercent=.*/ZoomPercent=100/' \
             -e 's/^FadeOpacity=.*/FadeOpacity=1.0/' \
             -e 's/^HideMode=.*/HideMode=0/' \
             "${settings}" 2>/dev/null || true
-        grep -q '^IconSize=' "${settings}" || printf 'IconSize=32\n' >>"${settings}"
+        grep -q '^IconSize=' "${settings}" || printf 'IconSize=30\n' >>"${settings}"
         grep -q '^ZoomEnabled=' "${settings}" || printf 'ZoomEnabled=false\n' >>"${settings}"
         grep -q '^ZoomPercent=' "${settings}" || printf 'ZoomPercent=100\n' >>"${settings}"
         grep -q '^FadeOpacity=' "${settings}" || printf 'FadeOpacity=1.0\n' >>"${settings}"
@@ -3269,9 +3299,9 @@ apply_plank_runtime_preferences() {
         MING_PLANK_RELOAD_REQUIRED=1
         log "existing Plank theme ${current_theme:-unset} differs from ${theme_dconf}; one reload required"
     fi
-    icon_size="$(plank_setting_value "${settings}" IconSize 32)"
+    icon_size="$(plank_setting_value "${settings}" IconSize 30)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
-    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 110)"
+    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 106)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
     case "${hide_mode}" in
@@ -3282,9 +3312,9 @@ apply_plank_runtime_preferences() {
     esac
     if command -v gsettings >/dev/null 2>&1; then
         gsettings set "${plank_schema}" theme "${theme:-Ming}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings theme"
-        gsettings set "${plank_schema}" icon-size "${icon_size:-32}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
+        gsettings set "${plank_schema}" icon-size "${icon_size:-30}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
         gsettings set "${plank_schema}" zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-enabled"
-        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-110}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
+        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-106}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
         gsettings set "${plank_schema}" hide-mode "${hide_mode_runtime}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings hide-mode"
         gsettings set "${plank_schema}" position bottom >>"${log_file}" 2>&1 || log "could not write Plank gsettings position"
         gsettings set "${plank_schema}" alignment center >>"${log_file}" 2>&1 || log "could not write Plank gsettings alignment"
@@ -3292,9 +3322,9 @@ apply_plank_runtime_preferences() {
         gsettings set "${plank_schema}" offset "${offset:-0}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings offset"
     else
         dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
-        dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-32}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
+        dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-30}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
         dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
-        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-110}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
+        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-106}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
         dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
         dconf write /net/launchpad/plank/docks/dock1/alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf alignment"
         dconf write /net/launchpad/plank/docks/dock1/items-alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf item alignment"
@@ -3304,7 +3334,7 @@ apply_plank_runtime_preferences() {
 
 migrate_glass_rail_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-macos-frosted-centered-1$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-macos-frosted-centered-2$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -3313,14 +3343,14 @@ migrate_glass_rail_profile() {
         printf 'DockItems=%s\n' "${dock_items}" >>"${settings}"
     fi
     if grep -q '^IconSize=' "${settings}"; then
-        sed -i "s/^IconSize=.*/IconSize=32/" "${settings}" 2>/dev/null || true
+        sed -i "s/^IconSize=.*/IconSize=30/" "${settings}" 2>/dev/null || true
     else
-        printf 'IconSize=32\n' >>"${settings}"
+        printf 'IconSize=30\n' >>"${settings}"
     fi
     if grep -q '^ZoomPercent=' "${settings}"; then
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=110/" "${settings}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=106/" "${settings}" 2>/dev/null || true
     else
-        printf 'ZoomPercent=110\n' >>"${settings}"
+        printf 'ZoomPercent=106\n' >>"${settings}"
     fi
     if grep -q '^ZoomEnabled=' "${settings}"; then
         sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${settings}" 2>/dev/null || true
@@ -3352,7 +3382,8 @@ migrate_glass_rail_profile() {
     sed -i '/^# MingDockProfile=2641-glass-rail-2$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-frosted-white-rail-2$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-compact-glass-1$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-macos-frosted-centered-1\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=2641-macos-frosted-centered-1$/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-macos-frosted-centered-2\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to 26.4.1 glass rail profile"
@@ -3493,7 +3524,33 @@ repair_plank_stacking() {
     local window_id
     window_id="$(plank_window_id)"
     valid_window_id "${window_id}" || return 1
-    x11_call wmctrl -i -r "${window_id}" -b add,above,sticky >/dev/null 2>&1 || return 1
+    x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || return 1
+}
+
+reserve_bottom_workarea() {
+    local window_id="${1:-}" geometry screen x y width height sx sy sw sh bottom_reserved
+    valid_window_id "${window_id}" || return 1
+    command -v xprop >/dev/null 2>&1 || return 1
+    geometry="$(window_geometry "${window_id}")"
+    screen="$(screen_geometry)"
+    read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${x:-}" =~ ^-?[0-9]+$ && "${y:-}" =~ ^-?[0-9]+$ && "${width:-}" =~ ^[0-9]+$ && "${height:-}" =~ ^[0-9]+$ ]] || return 1
+    [[ "${sx:-}" =~ ^-?[0-9]+$ && "${sw:-}" =~ ^[0-9]+$ ]] || return 1
+    bottom_reserved=$((height + 18))
+    x11_call xprop -id "${window_id}" \
+        -f _NET_WM_STRUT 32c -set _NET_WM_STRUT "0, 0, 0, ${bottom_reserved}" \
+        -f _NET_WM_STRUT_PARTIAL 32c -set _NET_WM_STRUT_PARTIAL \
+        "0, 0, 0, ${bottom_reserved}, 0, 0, 0, 0, 0, 0, ${sx}, $((sx + sw - 1))" \
+        >/dev/null 2>&1
+}
+
+avoid_covering_windows() {
+    local window_id
+    window_id="$(plank_window_id)"
+    valid_window_id "${window_id}" || return 0
+    reserve_bottom_workarea "${window_id}" || log "could not reserve bottom workarea for Dock"
+    repair_plank_stacking || log "could not keep Dock sticky across workspaces"
 }
 
 diagnose_and_promote_stacking() {
@@ -3507,8 +3564,8 @@ diagnose_and_promote_stacking() {
     if ! window_has_property "${window_id}" '_NET_WM_STATE_ABOVE'; then
         [[ "${stacking_promotion_attempted_for}" == "${window_id}" ]] && return 0
         stacking_promotion_attempted_for="${window_id}"
-        log "not-above: ABOVE state is absent; requesting one non-destructive promotion"
-        repair_plank_stacking || log "ABOVE promotion request was not accepted"
+        log "not-above: ABOVE state is absent; reserving Dock workarea without forcing topmost"
+        avoid_covering_windows
     fi
     return 0
 }
@@ -3544,6 +3601,7 @@ start_plank() {
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then
+        avoid_covering_windows
         diagnose_and_promote_stacking
         return 0
     fi
@@ -3559,6 +3617,7 @@ start_plank() {
     for _ready_try in $(seq 1 32); do
         reason="$(plank_health_reason)"
         if [[ "${reason}" == "healthy" ]]; then
+            avoid_covering_windows
             diagnose_and_promote_stacking
             log "Plank recovery succeeded"
             return 0
@@ -4910,7 +4969,7 @@ case "${1:-}" in
         ;;
     install-wechat)
         if confirm "将下载安装腾讯官方 Linux 版微信。这个过程需要联网，可能需要几分钟。" "安装微信"; then
-            if pkexec /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1 || sudo /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1; then
+            if /usr/local/bin/ming-install-wechat >/tmp/ming-install-wechat.log 2>&1; then
                 info "微信已安装。现在可以从 Dock 或开始菜单打开。"
             else
                 warn "微信安装没有完成。请先确认网络可用，再点一次“安装微信”。"
@@ -4938,7 +4997,8 @@ case "${1:-}" in
         ;;
     repair-store)
         if confirm "将修复或重新安装星火应用商店。这个过程需要联网。" "修复商店"; then
-            if pkexec /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1 || sudo /usr/local/bin/ming-install-spark-store >/tmp/ming-spark.log 2>&1; then
+            spark_deb="/usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
+            if /usr/local/bin/ming-package-install-gui "${spark_deb}" >/tmp/ming-spark.log 2>&1; then
                 info "星火应用商店已就绪。"
             else
                 warn "商店修复没有完成。请先连接网络，再点一次“修复应用商店”。"
@@ -5428,7 +5488,9 @@ elif [[ "${cmdline}" == *nomodeset* || "${cmdline}" == *"i915.modeset=0"* || "${
     disabled_reason="safe-graphics-cmdline"
 elif [[ ! -d /dev/dri ]]; then
     disabled_reason="no-dri"
-elif [[ "${renderer}" == *svga3d* ]] +    || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox|QEMU' +    || [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
+elif [[ "${renderer}" == *svga3d* ]] \
+    || echo "${gpu}" | grep -Eiq 'VMware.*SVGA|VirtualBox|QEMU' \
+    || [[ "${virt}" == "oracle" || "${virt}" == "vbox" || "${virt}" == "vmware" || "${virt}" == "qemu" ]]; then
     # Virtual GPUs need compositing for Plank alpha/rounded corners, but not
     # animations, blur, or shadows. XRender keeps the Dock polished without the
     # flicker-prone GLX path that caused trouble on older VirtualBox sessions.
@@ -7918,6 +7980,8 @@ SCREENSAVERCFG
     <property name="custom" type="empty">
       <property name="&lt;Primary&gt;&lt;Alt&gt;t" type="string" value="ming-terminal"/>
       <property name="&lt;Primary&gt;&lt;Alt&gt;l" type="string" value="ming-lock"/>
+      <property name="&lt;Super&gt;e" type="string" value="ming-files"/>
+      <property name="&lt;Super&gt;i" type="string" value="ming-control-center"/>
     </property>
   </property>
 </channel>
@@ -8065,7 +8129,7 @@ fi
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096)
 PLANK_SETTINGS="${HOME}/.config/plank/dock1/settings"
 if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
-    sed -i "s/^IconSize=.*/IconSize=32/" "${PLANK_SETTINGS}" 2>/dev/null || true
+    sed -i "s/^IconSize=.*/IconSize=30/" "${PLANK_SETTINGS}" 2>/dev/null || true
     sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/" "${PLANK_SETTINGS}" 2>/dev/null || true
     sed -i "s/^ZoomPercent=.*/ZoomPercent=100/" "${PLANK_SETTINGS}" 2>/dev/null || true
 fi

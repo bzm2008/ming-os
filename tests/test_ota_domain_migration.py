@@ -94,6 +94,10 @@ get_config '.update_server'
     @staticmethod
     def signed_manifest(**overrides):
         manifest = {
+            "schema": "ming.update.discovery.v1",
+            "available": True,
+            "delivery": "iso",
+            "capability": "transactional-slot-v1",
             "has_update": True,
             "ready": True,
             "version": "26.4.1",
@@ -144,21 +148,21 @@ get_config '.update_server'
         self.assertNotIn("structure", result.stderr.lower())
         self.assertEqual("https://ming.scallion.uno", saved["update_server"])
 
-    def test_default_new_domain_uses_same_preflight_and_falls_back_on_invalid_schema(self):
+    def test_default_new_domain_keeps_preferred_server_on_invalid_schema(self):
         result, saved, _args = self.run_migration(
             {"available": False}, current_server="https://ming.sca-hub.cn"
         )
 
         self.assertNotEqual(0, result.returncode)
-        self.assertEqual("https://ming.scallion.uno", saved["update_server"])
+        self.assertEqual("https://ming.sca-hub.cn", saved["update_server"])
 
-    def test_default_new_domain_falls_back_when_tls_probe_fails(self):
+    def test_default_new_domain_keeps_preferred_server_when_tls_probe_fails(self):
         result, saved, _args = self.run_migration(
             {}, current_server="https://ming.sca-hub.cn", curl_ok=False
         )
 
         self.assertNotEqual(0, result.returncode)
-        self.assertEqual("https://ming.scallion.uno", saved["update_server"])
+        self.assertEqual("https://ming.sca-hub.cn", saved["update_server"])
 
     def test_module_keeps_online_discovery_closed_until_candidate_validation(self):
         module = OTA.read_text(encoding="utf-8")

@@ -31,6 +31,36 @@ class FakeRunner:
 
 
 class PackageInstallerInspectTests(unittest.TestCase):
+    def test_pkexec_install_rejects_caller_without_ready_administrator_state(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "sample-app.deb"
+            package.write_bytes(b"local package")
+            metadata = (
+                "dpkg-deb", "--field", str(package),
+                "Package", "Version", "Architecture",
+            )
+            caller = ("getent", "passwd", "1000")
+            password = ("passwd", "-S", "minguser")
+            groups = ("id", "-nG", "minguser")
+            runner = FakeRunner({
+                metadata: (0, "sample-app\n1.0\namd64\n", ""),
+                caller: (0, "minguser:x:1000:1000:Ming:/home/minguser:/bin/bash\n", ""),
+                password: (0, "minguser L 2026-08-13 0 99999 7 -1\n", ""),
+                groups: (0, "minguser sudo\n", ""),
+            })
+            result = installer.PackageInstaller(
+                runner=runner,
+                uid_getter=lambda: 0,
+                environ={"PKEXEC_UID": "1000"},
+                log_path=pathlib.Path(directory) / "installer.log",
+            ).install(package)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("administrator_not_ready", result["state"])
+        self.assertIn("首次开机账户设置", result["error"])
+        self.assertEqual([metadata, caller, password, groups], runner.commands)
+
     def test_inspect_accepts_real_dpkg_deb_labeled_field_output(self):
         installer = load_installer()
         with tempfile.TemporaryDirectory() as directory:

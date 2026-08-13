@@ -48,6 +48,46 @@ class GrubThemeContractTests(unittest.TestCase):
         self.assertIn("/boot/grub/fonts/unicode.pf2", self.build)
         self.assertIn("required GRUB unicode font is missing", self.build)
 
+    def test_live_bios_grub_has_one_visible_entry_and_one_second_timeout(self):
+        generated = self.build.split(
+            'cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBCFG', 1
+        )[1].split("\nGRUBCFG", 1)[0]
+        self.assertIn("set timeout=1", generated)
+        self.assertIn('menuentry "启动/安装 Ming OS ${MING_OS_VERSION}"', generated)
+        self.assertEqual(1, generated.count("menuentry \"启动/安装 Ming OS"))
+        self.assertIn("if keystatus --shift; then", generated)
+        visible = generated.split("if keystatus --shift; then", 1)[0]
+        self.assertNotIn("安全显卡", visible)
+        self.assertNotIn("高级兼容启动", visible)
+
+    def test_isolinux_fallback_has_one_default_entry_and_one_second_timeout(self):
+        generated = self.build.split(
+            'cat > "${iso_workdir}/isolinux/isolinux.cfg" << \'ISOLINUXCFG\'', 1
+        )[1].split("\nISOLINUXCFG", 1)[0]
+        self.assertIn("DEFAULT ming", generated)
+        self.assertIn("ONTIMEOUT ming", generated)
+        self.assertIn("TIMEOUT 10", generated)
+        self.assertEqual(1, generated.count("\nLABEL "))
+        self.assertIn("\nLABEL ming", generated)
+        self.assertIn("MENU LABEL Boot / Install Ming OS", generated)
+        self.assertNotIn("LABEL safe", generated)
+        self.assertNotIn("LABEL oldpc", generated)
+
+    def test_installed_grub_records_boot_mode_mismatch_diagnostics(self):
+        for marker in [
+            "ming-installer-boot-mode.json",
+            '"firmware_mode"',
+            '"uefi_fallback"',
+            '"bios_grub_verified"',
+            "启动模式不一致",
+        ]:
+            self.assertIn(marker, self.base)
+
+    def test_bios_grub_install_failure_is_a_hard_gate(self):
+        self.assertIn("install_bios_grub || {", self.base)
+        self.assertIn("BIOS bootloader installation failed", self.base)
+        self.assertIn("exit 23", self.base)
+
 
 if __name__ == "__main__":
     unittest.main()

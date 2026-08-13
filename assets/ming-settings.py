@@ -15,6 +15,7 @@ import threading
 import shutil
 import re
 import sys
+import time
 
 USER = getpass.getuser()
 HOME = os.path.expanduser("~")
@@ -43,6 +44,74 @@ _DEVICE_CONTROL_MODULE = None
 _DEVICE_CONTROL_LOADED = False
 _DEVICE_CONTROL_LOADING = False
 _DEVICE_CONTROL_CONDITION = threading.Condition()
+FEEDBACK_LOG = os.path.join(HOME, ".cache", "ming-os", "settings-feedback.log")
+WIFI_CONNECT_LOG = os.path.join(
+    HOME, ".local", "state", "ming-os", "wifi-connect.jsonl")
+MING_LOGO_PATH = "/usr/share/pixmaps/ming-os-logo.png"
+
+
+def write_feedback_detail_log(text):
+    try:
+        os.makedirs(os.path.dirname(FEEDBACK_LOG), exist_ok=True)
+        with open(FEEDBACK_LOG, "a", encoding="utf-8") as handle:
+            handle.write(str(text).strip() + "\n")
+        return FEEDBACK_LOG
+    except OSError:
+        return ""
+
+
+def summarize_feedback_text(text, limit=220):
+    raw = str(text or "操作未返回可读结果。").strip()
+    if raw.startswith("{"):
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = {}
+        if isinstance(value, dict):
+            raw = str(value.get("error") or value.get("message") or raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw if len(raw) <= limit else raw[:limit - 1].rstrip() + "…"
+
+
+def audio_failure_summary(result, fallback=""):
+    if isinstance(result, dict):
+        error = result.get("error")
+        action = result.get("action")
+        if error:
+            return summarize_feedback_text(error)
+        if action == "no_internal_output":
+            return "未检测到可用的内置扬声器输出，请刷新设备或检查 BIOS 声卡设置。"
+    return summarize_feedback_text(fallback or "请检查声卡和输出设备。")
+
+
+def write_wifi_connect_event(event, network=None, reason_code="", detail=""):
+    """Write privacy-safe Wi-Fi UI evidence without SSIDs or credentials."""
+    network = network if isinstance(network, dict) else {}
+    payload = {
+        "schema": "ming.wifi-connect.ui.v1",
+        "timestamp": int(time.time()),
+        "event": str(event or "unknown")[:64],
+        "reason_code": str(reason_code or "")[:96],
+        "network_id": str(network.get("network_id") or "")[:64],
+        "bssid": str(network.get("bssid") or "")[:32],
+        "ifname": str(network.get("ifname") or "")[:32],
+        "security": str(network.get("security") or "")[:64],
+        "detail": re.sub(r"\s+", " ", str(detail or "")).strip()[:320],
+    }
+    try:
+        directory = os.path.dirname(WIFI_CONNECT_LOG)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        descriptor = os.open(
+            WIFI_CONNECT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        try:
+            os.chmod(WIFI_CONNECT_LOG, 0o600)
+        except OSError:
+            pass
+        return WIFI_CONNECT_LOG
+    except OSError:
+        return ""
 
 
 def load_device_control():
@@ -610,6 +679,7 @@ def hardware_probe_snapshot():
 
 
 PAGE_ALIASES = {
+    "home": "常用操作",
     "account": "账户",
     "network": "网络与蓝牙",
     "storage": "存储",
@@ -631,6 +701,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.backend_timers = {}
         self.page_built = set()
         self.page_builders = {}
+        self.nav_rows = {}
         self.hardware_probe_state = GenerationState()
         self.wifi_probe_state = GenerationState()
         self.wifi_connect_state = GenerationState()
@@ -669,9 +740,12 @@ class MingSettings(Adw.ApplicationWindow):
 
         # 右侧内容容器
         self.content_stack = Gtk.Stack()
-        self.content_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        # Page changes are deliberately instantaneous: this keeps the settings
+        # hub responsive on older GPUs and avoids transition flicker in VMs.
+        self.content_stack.set_transition_type(Gtk.StackTransitionType.NONE)
         self.content_stack.set_vexpand(True)
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content_box.set_spacing(12)
         content_box.add_css_class("ming-settings-content")
         c_header = Adw.HeaderBar()
         self.content_title = Adw.WindowTitle(title="", subtitle="")
@@ -683,6 +757,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         # 注册分类页（图标, 标题, 构建函数）
         self.pages = [
+            ("view-grid-symbolic", "常用操作", self.build_home),
             ("avatar-default-symbolic", "账户", self.build_account),
             ("security-high-symbolic", "安全", self.build_security),
             ("network-wireless-symbolic", "网络与蓝牙", self.build_network),
@@ -707,6 +782,7 @@ class MingSettings(Adw.ApplicationWindow):
             row.set_child(hb)
             row.page_title = title
             self.nav_list.append(row)
+            self.nav_rows[title] = row
             self.page_builders[title] = builder
             placeholder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             self.content_stack.add_named(placeholder, title)
@@ -725,7 +801,13 @@ class MingSettings(Adw.ApplicationWindow):
             background: #F4F7F3;
             color: #1B2320;
             font-family: "Noto Sans CJK SC", sans-serif;
+            font-size: 15px;
             font-weight: 400;
+        }
+
+        .ming-settings-window label {
+            font-size: 15px;
+            line-height: 1.35;
         }
 
         .ming-settings-window .title,
@@ -806,7 +888,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window button {
             border-radius: 10px;
-            min-height: 36px;
+            min-height: 40px;
             padding: 6px 12px;
         }
 
@@ -822,7 +904,7 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
             border-radius: 10px;
-            min-height: 36px;
+            min-height: 40px;
             padding: 6px 12px;
         }
 
@@ -893,6 +975,14 @@ class MingSettings(Adw.ApplicationWindow):
         self.content_stack.set_visible_child_name(title)
         self.content_title.set_title(title)
 
+    def navigate_to_page(self, title):
+        """Open one existing settings page without duplicating its controls."""
+        row = self.nav_rows.get(title)
+        if row is None:
+            self.toast("该设置页面暂不可用。", "warning")
+            return
+        self.nav_list.select_row(row)
+
     def on_close_request(self, _window):
         self.hardware_probe_state.invalidate()
         self.wifi_probe_state.invalidate()
@@ -920,7 +1010,11 @@ class MingSettings(Adw.ApplicationWindow):
 
     def toast(self, text, severity=None):
         """Show actionable feedback with opaque, WCAG-AA contrast."""
-        text = text or "操作未返回可读结果。"
+        detail = str(text or "操作未返回可读结果。")
+        text = summarize_feedback_text(detail)
+        log_path = write_feedback_detail_log(detail)
+        if detail != text and log_path:
+            text = "%s\n\n详情已写入：%s" % (text, log_path)
         if severity not in {"info", "warning", "error"}:
             severity = "error" if any(word in text for word in ("失败", "错误", "不可用", "未成功", "拒绝")) else "info"
         headings = {
@@ -1154,6 +1248,43 @@ class MingSettings(Adw.ApplicationWindow):
             [SETTINGS_BACKEND, "autostart", "list"], timeout=8, on_done=loaded)
 
     # ---- 1. 账户管理：重设密码 ----
+    def build_home(self):
+        sc, box = self.page_scroller()
+        intro = Adw.PreferencesGroup(
+            title="常用操作",
+            description="把最常用的系统操作放在一起；点击后进入对应页面完成操作。")
+        box.append(intro)
+        intro.add(Adw.ActionRow(
+            title="从这里开始",
+            subtitle="网络、更新、屏幕、声音和账户设置都无需打开原始 Xfce 设置工具。"))
+
+        actions = Adw.PreferencesGroup(title="快速入口")
+        box.append(actions)
+        wifi = Gtk.Button(label="打开网络")
+        wifi.connect("clicked", lambda _button: self.navigate_to_page("网络与蓝牙"))
+        actions.add(self.button_row("连接 Wi-Fi", "扫描网络、输入密码并查看连接结果。", wifi))
+
+        update = Gtk.Button(label="检查更新")
+        update.connect("clicked", lambda _button: self.navigate_to_page("系统更新"))
+        actions.add(self.button_row("检查更新", "查看已签名的系统更新，不会自动安装。", update))
+
+        display = Gtk.Button(label="打开显示")
+        display.connect("clicked", lambda _button: self.navigate_to_page("显示与无障碍"))
+        actions.add(self.button_row("调节屏幕", "调整分辨率、方向和界面大小。", display))
+
+        appearance = Gtk.Button(label="打开外观")
+        appearance.connect("clicked", lambda _button: self.navigate_to_page("外观与指针"))
+        actions.add(self.button_row("换壁纸", "选择主题、字体大小和内置壁纸。", appearance))
+
+        audio = Gtk.Button(label="打开声音")
+        audio.connect("clicked", lambda _button: self.navigate_to_page("高级设置"))
+        actions.add(self.button_row("修复声音", "选择输出设备或运行声音播放修复。", audio))
+
+        account = Gtk.Button(label="打开账户")
+        account.connect("clicked", lambda _button: self.navigate_to_page("账户"))
+        actions.add(self.button_row("重设密码", "设置本机管理员密码，用于安装软件和系统操作。", account))
+        return sc
+
     def build_account(self):
         sc, box = self.page_scroller()
         grp = Adw.PreferencesGroup(title="当前账户", description="用户名：%s" % USER)
@@ -1815,46 +1946,129 @@ class MingSettings(Adw.ApplicationWindow):
         run_task_async(wifi_scan_snapshot, done)
 
     def on_wifi_connect(self, _btn, network):
-        network_id = network["network_id"]
-        ssid = network["ssid"]
-        bssid = network["bssid"]
-        ifname = network["ifname"]
-        dlg = Adw.MessageDialog(
-            transient_for=self, heading="连接到 %s" % ssid,
-            body="将绑定到 BSSID %s（接口 %s）。如需密码，会仅通过标准输入安全传给 NetworkManager，绝不会写入命令参数、日志或诊断数据。" % (bssid, ifname))
-        entry = Gtk.PasswordEntry(show_peek_icon=True)
-        entry.set_placeholder_text("开放网络可留空")
-        dlg.set_extra_child(entry)
-        dlg.add_response("cancel", "取消")
-        dlg.add_response("ok", "连接")
-        dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
-        def on_resp(d, resp):
-            if resp == "ok":
-                generation = self.wifi_connect_state.begin()
-                secret = entry.get_text()
-                entry.set_text("")
-                if _btn:
-                    _btn.set_sensitive(False)
-                    _btn.set_label("正在连接...")
-                def connected(result, error):
-                    self.apply_wifi_connect_result(generation, ssid, bssid, result, error, _btn)
+        network = network if isinstance(network, dict) else {}
 
-                def parse_connected(rc, output, error):
-                    try:
-                        result = json.loads(output) if output else None
-                    except (TypeError, ValueError):
-                        result = None
-                    connected(result, error if rc != 0 else "")
+        def restore_button():
+            if _btn:
+                _btn.set_sensitive(True)
+                _btn.set_label("连接")
 
-                command = wifi_connect_command(network_id, ifname, with_secret=bool(secret))
-                if secret:
-                    run_capture_stdin_async(command, secret + "\n", timeout=40, on_done=parse_connected)
+        def fail(reason_code, user_text, detail=""):
+            restore_button()
+            if _btn:
+                _btn.set_label("连接失败")
+            write_wifi_connect_event("ui_failure", network, reason_code, detail)
+            self.toast(user_text, "error")
+
+        required = ("network_id", "ssid", "bssid", "ifname")
+        missing = [field for field in required if not network.get(field)]
+        if missing:
+            fail(
+                "E_WIFI_SCAN_RECORD",
+                "无法连接：网络信息已经失效，请重新扫描后再试。",
+                "missing scan fields: %s" % ",".join(missing))
+            return False
+
+        network_id = str(network["network_id"])
+        ssid = str(network["ssid"])
+        bssid = str(network["bssid"])
+        ifname = str(network["ifname"])
+        security = str(network.get("security") or "").strip().upper()
+        encrypted = security not in {"", "--", "NONE", "OPEN"}
+
+        def start_connect(secret=None):
+            generation = self.wifi_connect_state.begin()
+            if _btn:
+                _btn.set_sensitive(False)
+                _btn.set_label("正在连接...")
+
+            def parse_connected(rc, output, error):
+                try:
+                    result = json.loads(output) if output else None
+                except (TypeError, ValueError):
+                    result = None
+                self.apply_wifi_connect_result(
+                    generation, ssid, bssid, result,
+                    error if rc != 0 else "", _btn, network)
+
+            command = wifi_connect_command(
+                network_id, ifname, with_secret=secret is not None)
+            try:
+                if secret is not None:
+                    run_capture_stdin_async(
+                        command, secret + "\n", timeout=40, on_done=parse_connected)
                 else:
                     run_capture_async(command, timeout=40, on_done=parse_connected)
-        dlg.connect("response", on_resp)
-        dlg.present()
+            except Exception as exc:
+                fail(
+                    "E_WIFI_ASYNC_START",
+                    "无法开始无线连接，请重新扫描后再试。",
+                    "%s: %s" % (type(exc).__name__, exc))
+                return False
+            write_wifi_connect_event("connect_started", network)
+            return True
 
-    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error, button=None):
+        if not encrypted:
+            return start_connect()
+
+        try:
+            dlg = Adw.MessageDialog(
+                transient_for=self, heading="连接到 %s" % ssid,
+                body="请输入无线网络密码。密码只会安全传给 NetworkManager，不会写入命令参数、日志或诊断数据。" )
+            entry = Gtk.PasswordEntry(show_peek_icon=True)
+            entry.set_placeholder_text("请输入无线网络密码")
+            dlg.set_extra_child(entry)
+            dlg.add_response("cancel", "取消")
+            dlg.add_response("ok", "连接")
+            dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        except Exception as exc:
+            fail(
+                "E_WIFI_DIALOG_CREATE",
+                "无法显示无线密码输入框，请关闭设置后重新打开。",
+                "%s: %s" % (type(exc).__name__, exc))
+            return False
+
+        def on_resp(_dialog, response):
+            self.wifi_connect_dialog = None
+            if response != "ok":
+                write_wifi_connect_event("cancelled", network)
+                restore_button()
+                return
+            try:
+                secret = entry.get_text()
+                entry.set_text("")
+                if not secret:
+                    fail(
+                        "E_WIFI_PASSWORD_EMPTY",
+                        "该无线网络需要密码，请输入密码后再连接。")
+                    return
+                start_connect(secret)
+            except Exception as exc:
+                try:
+                    entry.set_text("")
+                except Exception:
+                    pass
+                fail(
+                    "E_WIFI_RESPONSE",
+                    "无法开始无线连接，请重新扫描后再试。",
+                    "%s: %s" % (type(exc).__name__, exc))
+
+        try:
+            dlg.connect("response", on_resp)
+            self.wifi_connect_dialog = dlg
+            dlg.present()
+            write_wifi_connect_event("password_prompt_presented", network)
+        except Exception as exc:
+            self.wifi_connect_dialog = None
+            fail(
+                "E_WIFI_DIALOG_PRESENT",
+                "无法显示无线密码输入框，请关闭设置后重新打开。",
+                "%s: %s" % (type(exc).__name__, exc))
+            return False
+        return True
+
+    def apply_wifi_connect_result(self, generation, ssid, bssid, result, error, button=None,
+                                  network=None):
         if not self.wifi_connect_state.accept(generation):
             return False
         if self.network_page.get_root() is not self:
@@ -1863,6 +2077,11 @@ class MingSettings(Adw.ApplicationWindow):
             button.set_sensitive(True)
             button.set_label("连接")
         result = result or {"ok": False, "error": error or "无线连接失败。"}
+        write_wifi_connect_event(
+            "connected" if result.get("ok") else "connect_failed",
+            network or {"bssid": bssid},
+            result.get("reason_code") or ("" if result.get("ok") else "E_WIFI_CONNECT_FAILED"),
+            result.get("reason_text") or result.get("error") or error)
         self.toast(
             "已连接 %s（%s）。" % (ssid, bssid) if result.get("ok")
             else "连接失败：%s" % (
@@ -2141,6 +2360,29 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_manifest_path = ""
         self.update_manifest_sha256 = ""
 
+        logo = Gtk.Picture.new_for_filename(MING_LOGO_PATH)
+        logo.set_content_fit(Gtk.ContentFit.CONTAIN)
+        logo.set_size_request(320, 150)
+        logo.set_halign(Gtk.Align.CENTER)
+        logo.set_valign(Gtk.Align.CENTER)
+        logo.add_css_class("ming-update-logo")
+        grp.add(logo)
+
+        slogan = Gtk.Label(label="草木不争高，争的是生生不息。", xalign=0.5)
+        slogan.set_wrap(True)
+        slogan.set_justify(Gtk.Justification.CENTER)
+        slogan.set_margin_top(4)
+        slogan.set_margin_bottom(8)
+        slogan.add_css_class("ming-update-slogan")
+        grp.add(slogan)
+
+        self.update_action_button = Gtk.Button(label="检查更新")
+        self.update_action_button.add_css_class("suggested-action")
+        self.update_action_button.set_halign(Gtk.Align.CENTER)
+        self.update_action_button.set_margin_bottom(8)
+        self.update_action_button.connect("clicked", self.on_update_action)
+        grp.add(self.update_action_button)
+
         self.update_status = Gtk.Label(label="点击“检查更新”了解是否有新版本。", xalign=0, wrap=True)
         self.update_status.set_margin_top(6)
         grp.add(self.update_status)
@@ -2155,11 +2397,6 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_margin_top(10)
         grp.add(self.update_bar)
 
-        self.update_action_button = Gtk.Button(label="检查更新")
-        self.update_action_button.add_css_class("suggested-action")
-        self.update_action_button.set_margin_top(12)
-        self.update_action_button.connect("clicked", self.on_update_action)
-        grp.add(self.update_action_button)
         GLib.idle_add(self.refresh_update_status)
         return sc
 
@@ -2909,8 +3146,8 @@ class MingSettings(Adw.ApplicationWindow):
                            else "当前有效输出保持不变。")
                 self.toast(message, "info")
             else:
-                reason = (result.get("error") if isinstance(result, dict) else "") or error or output
-                self.toast("声音播放未恢复：%s" % (reason or "请检查声卡和输出设备。"), "error")
+                reason = audio_failure_summary(result, error or output)
+                self.toast("声音播放未恢复：%s" % reason, "error")
                 self.refresh_audio_output_devices()
             return False
 

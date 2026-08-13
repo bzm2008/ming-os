@@ -2392,12 +2392,58 @@ write_file() {
     cat > "${target}${path}"
 }
 
+validate_posix_user_name() {
+    [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$1" != "root" && "$1" != "nobody" ]]
+}
+
+passwd_record_for_user() {
+    local user_name="$1"
+    chroot "${target}" getent passwd "${user_name}" 2>/dev/null | head -n 1 || true
+}
+
+resolve_primary_user() {
+    local candidates count resolved
+    candidates="$(chroot "${target}" getent passwd 2>/dev/null \
+        | awk -F: '$1 ~ /^[a-z_][a-z0-9_-]{0,31}$/ && $1 != "nobody" && $1 !~ /^systemd-/ && $3 >= 1000 && $3 < 60000 {print $3 ":" $1}' \
+        | sort -t: -k1,1n || true)"
+    count="$(printf '%s\n' "${candidates}" | awk 'NF {count++} END {print count+0}')"
+    if [[ "${count}" -gt 0 ]]; then
+        resolved="$(printf '%s\n' "${candidates}" | awk -F: 'NF {print $2; exit}')"
+        if [[ "${count}" -gt 1 ]]; then
+            echo "ERROR: multiple local primary users found; refusing to guess an administrator" >&2
+            return 1
+        fi
+        if validate_posix_user_name "${resolved}"; then
+            printf '%s\n' "${resolved}"
+            return 0
+        fi
+    fi
+    printf 'user\n'
+}
+
+resolve_user_home() {
+    local user_name="$1" home record
+    record="$(passwd_record_for_user "${user_name}")"
+    home="$(awk -F: 'NR == 1 {print $6}' <<<"${record}" || true)"
+    case "${home}" in
+        /home/*) ;;
+        *) home="/home/${user_name}" ;;
+    esac
+    case "${home}" in
+        *'/../'*|*'/./'*|'') home="/home/${user_name}" ;;
+    esac
+    printf '%s\n' "${home}"
+}
+
 ensure_ming_user() {
-    local user_name="user"
-    local user_home="/home/${user_name}"
+    local user_name
+    user_name="$(resolve_primary_user)" || return 1
+    validate_posix_user_name "${user_name}" || { echo "ERROR: resolved primary user is invalid" >&2; return 1; }
+    local user_home
+    user_home="$(resolve_user_home "${user_name}")"
     local groups=(
         users adm cdrom dip plugdev lp lpadmin netdev audio video render input
-        scanner bluetooth sudo nopasswdlogin autologin
+        scanner bluetooth nopasswdlogin autologin
     )
     local grp
 
@@ -2408,12 +2454,18 @@ ensure_ming_user() {
             || chroot "${target}" groupadd -r "${grp}" >/dev/null 2>&1 \
             || true
     done
+    chroot "${target}" getent group sudo >/dev/null 2>&1 \
+        || chroot "${target}" groupadd -r sudo >/dev/null 2>&1 \
+        || return 1
     if chroot "${target}" getent passwd "${user_name}" >/dev/null 2>&1; then
         chroot "${target}" usermod -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     else
         chroot "${target}" useradd -m -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     fi
-    chroot "${target}" passwd -d "${user_name}" >/dev/null 2>&1 || return 1
+    # The active-session bootstrap policy can set the first password without
+    # an existing administrator. Until that succeeds, keep this account locked
+    # and out of sudo so auto-login cannot become passwordless root access.
+    chroot "${target}" passwd -l "${user_name}" >/dev/null 2>&1 || return 1
     chroot "${target}" passwd -l root >/dev/null 2>&1 || return 1
 
     for grp in "${groups[@]}"; do
@@ -2421,12 +2473,15 @@ ensure_ming_user() {
             && chroot "${target}" usermod -aG "${grp}" "${user_name}" >/dev/null 2>&1 \
             || true
     done
-    if ! chroot "${target}" id -nG "${user_name}" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then
-        echo "ERROR: installed primary user is not in the sudo group" >&2
+    chroot "${target}" gpasswd -d "${user_name}" sudo >/dev/null 2>&1 || true
+    if chroot "${target}" id -nG "${user_name}" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then
+        echo "ERROR: installed primary user unexpectedly has sudo before OOBE" >&2
         return 1
     fi
 
     chroot "${target}" chown "${user_name}:${user_name}" "${user_home}" >/dev/null 2>&1 || true
+    MING_PRIMARY_USER="${user_name}"
+    MING_PRIMARY_HOME="${user_home}"
 }
 
 ensure_kernel_boot_links() {
@@ -2851,7 +2906,7 @@ MACHINEINFO
 mkdir -p "${target}/etc/lightdm/lightdm.conf.d"
 cat > "${target}/etc/lightdm/lightdm.conf.d/60-ming-autologin.conf" <<LIGHTDM
 [Seat:*]
-autologin-user=user
+autologin-user=${MING_PRIMARY_USER}
 autologin-user-timeout=0
 autologin-session=xfce
 user-session=xfce
@@ -3154,17 +3209,51 @@ prefer_ming_uefi_boot() {
     fi
 }
 
+firmware_mode="bios"
+uefi_nvram=false
+uefi_fallback=false
+bios_grub_verified=false
 if [ -d /sys/firmware/efi ]; then
+    firmware_mode="uefi"
     install_uefi_grub || {
         echo "ERROR: UEFI bootloader installation failed; refusing an unusable BIOS fallback"
         exit 23
     }
+    [ -s "${root}/boot/efi/EFI/BOOT/BOOTX64.EFI" ] && uefi_fallback=true
+    if command -v efibootmgr >/dev/null 2>&1 \
+        && efibootmgr 2>/dev/null | grep -Eq '^Boot[0-9A-Fa-f]{4}\*?.*Ming OS'; then
+        uefi_nvram=true
+    fi
+    if [[ "${uefi_nvram}" != true && "${uefi_fallback}" != true ]]; then
+        echo "ERROR: UEFI install produced neither a Ming OS NVRAM entry nor BOOTX64.EFI fallback"
+        exit 23
+    fi
     echo "Ming UEFI bootloader path completed"
     prefer_ming_uefi_boot
 else
-    install_bios_grub
+    install_bios_grub || {
+        echo "ERROR: BIOS bootloader installation failed"
+        exit 23
+    }
+    bios_grub_verified=true
     echo "Ming BIOS bootloader path completed"
 fi
+
+boot_mode_report="${root}/var/log/ming-installer-boot-mode.json"
+install -d -m 0755 "${root}/var/log"
+jq -n \
+    --arg firmware_mode "${firmware_mode}" \
+    --argjson uefi_nvram "${uefi_nvram}" \
+    --argjson uefi_fallback "${uefi_fallback}" \
+    --argjson bios_grub_verified "${bios_grub_verified}" \
+    --arg warning "安装介质启动模式与电脑后续硬盘启动模式不一致时，固件可能看不到 Ming OS；UEFI 安装请保持 UEFI，BIOS 安装请保持 Legacy/CSM。" \
+    '{"firmware_mode":$firmware_mode, "uefi_nvram":$uefi_nvram, "uefi_fallback":$uefi_fallback, "bios_grub_verified":$bios_grub_verified, "mismatch_warning":$warning}' \
+    >"${boot_mode_report}.tmp"
+chmod 0644 "${boot_mode_report}.tmp"
+mv -f "${boot_mode_report}.tmp" "${boot_mode_report}"
+cp -f "${boot_mode_report}" /run/ming-installer/ming-installer-boot-mode.json
+echo "boot_mode_report=${boot_mode_report}"
+echo "启动模式不一致提示：安装介质以 ${firmware_mode} 模式启动并安装，请保持电脑硬盘启动模式一致。"
 
 # Discover a second OS only after the target ESP is mounted.  An empty helper
 # output is valid and keeps single-OS installations at two top-level entries.
@@ -4744,6 +4833,40 @@ protected_sources() {
     findmnt -R -no SOURCE / "${MING_TARGET_HOME}" 2>/dev/null | sed '/^$/d' | sort -u
 }
 
+live_media_root() {
+    local mountpoint="$1"
+    case "${mountpoint}" in
+        /run/live/medium|/run/live/medium/*) printf '%s\n' "/run/live/medium"; return 0 ;;
+        /lib/live/mount/medium|/lib/live/mount/medium/*) printf '%s\n' "/lib/live/mount/medium"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+expose_existing_mount() {
+    local dev="$1" label="$2" uuid="$3" source="$4"
+    local base target
+    base="$(safe_name "${label}")"
+    [[ "${base}" != volume && "${base}" != "_" ]] || base="$(safe_name "${uuid}")"
+    [[ "${base}" != volume && "${base}" != "_" ]] || base="$(basename "${dev}")"
+    target="/media/${MING_TARGET_USER}/${base}"
+    mkdir -p "/media/${MING_TARGET_USER}" 2>/dev/null || true
+    if [[ -L "${target}" && "$(readlink -- "${target}" 2>/dev/null)" == "${source}" ]]; then
+        emit "${dev}" exposed "${target} -> ${source}"
+        return 0
+    fi
+    if [[ -e "${target}" && ! -L "${target}" ]]; then
+        emit "${dev}" expose_failed "target exists: ${target}"
+        return 1
+    fi
+    rm -f -- "${target}" 2>/dev/null || true
+    if ln -s -- "${source}" "${target}" 2>/dev/null; then
+        emit "${dev}" exposed "${target} -> ${source}"
+        return 0
+    fi
+    emit "${dev}" expose_failed "could not create ${target}"
+    return 1
+}
+
 try_mount() {
     local dev="$1" label="$2" uuid="$3"
     local base detail
@@ -4796,7 +4919,15 @@ scan_once() {
             continue
         fi
         if [[ -n "${MOUNTPOINT}" ]]; then
-            emit "${dev}" already_mounted "${MOUNTPOINT}"
+            if printf '%s\n' "${protected}" | grep -Fxq "${dev}"; then
+                emit "${dev}" already_mounted "protected root or home source"
+                continue
+            fi
+            if live_root="$(live_media_root "${MOUNTPOINT}")"; then
+                expose_existing_mount "${dev}" "${LABEL}" "${UUID}" "${live_root}" || true
+            else
+                emit "${dev}" already_mounted "${MOUNTPOINT}"
+            fi
             continue
         fi
         if excluded_label "${LABEL}"; then

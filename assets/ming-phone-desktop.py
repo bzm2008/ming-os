@@ -501,12 +501,13 @@ window.ming-desktop {
 .status-scale:disabled progress { background: rgba(47, 138, 125, 0.34); }
 .status-scale:disabled slider { background: transparent; }
 .notification-panel { padding: 12px; background: #F9FCFA; }
+.notification-panel { border-radius: 12px; border: 1px solid rgba(47, 138, 125, 0.14); }
 .notification-title { font-weight: 700; color: #17231F; }
 .notification-body { color: #596760; font-size: 10px; font-weight: 400; }
 .launch-feedback {
   border-radius: 14px;
   padding: 12px 16px;
-  background: rgba(252, 254, 252, 0.94);
+  background: rgba(252, 254, 252, 0.98);
   border: 1px solid rgba(47, 138, 125, 0.16);
   box-shadow: 0 14px 36px rgba(21, 68, 56, 0.16);
 }

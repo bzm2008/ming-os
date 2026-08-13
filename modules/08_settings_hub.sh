@@ -103,12 +103,18 @@ FACTORYSVC
 deploy_settings_hub() {
     echo "[08_settings_hub] 部署 GTK4 设置中心 ..."
     local src="/tmp/ming-build/assets/ming-settings.py"
+    local logo="/tmp/ming-build/assets/ming-os-logo.png"
     if [[ -f "${src}" ]]; then
         install -m 0755 "${src}" /usr/local/bin/ming-settings
     else
         echo "[08_settings_hub][WARN] 未找到 ming-settings.py，跳过设置中心安装"
         return 0
     fi
+    if [[ ! -s "${logo}" ]]; then
+        echo "[08_settings_hub][ERROR] 未找到 Ming OS 更新页 logo: ${logo}" >&2
+        return 1
+    fi
+    install -D -m 0644 "${logo}" /usr/share/pixmaps/ming-os-logo.png
     # 构建期自检：语法 + 关键依赖（gi/Adw 不一定在 chroot 可导入，仅校验语法）
     python3 -m py_compile /usr/local/bin/ming-settings 2>/dev/null \
         && echo "[08_settings_hub] ming-settings 语法校验通过" \
@@ -140,9 +146,9 @@ SETTINGSDESKTOP
 # ======================== 主流程 ========================
 main() {
     echo "=====> [08_settings_hub] 开始部署统一设置中心 <====="
-    deploy_factory_snapshot
-    deploy_settings_hub
-    deploy_settings_launchers
+    deploy_factory_snapshot || return 1
+    deploy_settings_hub || return 1
+    deploy_settings_launchers || return 1
     echo "=====> [08_settings_hub] 设置中心部署完成 <====="
 }
 

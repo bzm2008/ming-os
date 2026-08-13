@@ -312,7 +312,7 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("FillStartColor=255;;255;;255;;230", self.build)
         self.assertIn("FillEndColor=246;;248;;250;;214", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
-        self.assertIn("BottomPadding=10", self.build)
+        self.assertIn("BottomPadding=14", self.build)
         self.assertIn("Offset=0", self.build)
 
     def test_rootfs_gate_requires_a_maintainable_installed_administrator_chain(self):
@@ -320,13 +320,16 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/bin/sudo")',
             'require_file("usr/bin/pkexec")',
             'require_file("etc/sudoers", "%sudo")',
-            "installed primary user is not in the sudo group",
-            "installed identity repair must keep the primary user in sudo",
+            "installed primary user unexpectedly has sudo before OOBE",
+            "installed identity repair must defer sudo until password-backed OOBE",
             "ensure_ming_user || exit 30",
         ):
             self.assertIn(marker, self.build)
-        self.assertIn('gpasswd -d "${user_name}" sudo', self.build)
-        self.assertIn("must not remove the primary user from sudo", self.build)
+        self.assertIn('gpasswd -d \\"${user_name}\\" sudo', self.build)
+        self.assertIn('passwd -l \\"${user_name}\\"', self.build)
+        self.assertIn("installed identity repair must not add pre-OOBE user to sudo", self.build)
+        self.assertIn("ming-admin-bootstrap must add sudo only after password setup succeeds", self.build)
+        self.assertNotIn("installed identity repair must keep the primary user in sudo", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
         self.assertIn('chooser_path = root / "usr/local/bin/ming-install-mode-chooser"', self.build)

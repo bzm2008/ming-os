@@ -31,6 +31,7 @@ OPT_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
 OPT_PROXY_MANIFEST = pathlib.Path("/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 OPT_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
 OPT_PROXY_NAME_PATTERN = re.compile(r"^ming-opt-[0-9a-f]{64}\.desktop$")
+LOCAL_USER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def _run(command, timeout=20):
@@ -47,7 +48,7 @@ def _run(command, timeout=20):
 class PackageInstaller:
     def __init__(self, runner=None, log_path=None, uid_getter=None, logger=None,
                  opt_apps_root=OPT_APPS_ROOT, proxy_dir=OPT_PROXY_DIR,
-                 proxy_manifest=OPT_PROXY_MANIFEST):
+                 proxy_manifest=OPT_PROXY_MANIFEST, environ=None):
         self.runner = runner or _run
         self.log_path = pathlib.Path(log_path or "/var/log/ming-package-installer.log")
         self.uid_getter = uid_getter or getattr(os, "geteuid", lambda: 1)
@@ -55,6 +56,7 @@ class PackageInstaller:
         self.opt_apps_root = pathlib.Path(opt_apps_root)
         self.proxy_dir = pathlib.Path(proxy_dir)
         self.proxy_manifest = pathlib.Path(proxy_manifest)
+        self.environ = os.environ if environ is None else environ
 
     def _result(self, ok, **values):
         result = {
@@ -96,6 +98,31 @@ class PackageInstaller:
         except OSError as exception:
             return 127, "", str(exception)
         return int(returncode), output or "", error or ""
+
+    def _pkexec_caller_administrator_ready(self):
+        """Verify the desktop caller when this helper crossed Polkit.
+
+        Direct root calls are retained for the image build and recovery tools.
+        A Polkit call always carries PKEXEC_UID and must map to one password-
+        backed local administrator before any package mutation starts.
+        """
+        caller_uid = str(self.environ.get("PKEXEC_UID") or "").strip()
+        if not caller_uid:
+            return True
+        if not caller_uid.isdigit() or not 1000 <= int(caller_uid) < 60000:
+            return False
+        rc, record, _error = self._call(("getent", "passwd", caller_uid), timeout=5)
+        fields = record.strip().split(":")
+        if (rc != 0 or len(fields) < 7 or not LOCAL_USER_PATTERN.fullmatch(fields[0])
+                or fields[0] in {"root", "nobody"} or fields[2] != caller_uid):
+            return False
+        user_name = fields[0]
+        status_rc, status, _error = self._call(("passwd", "-S", user_name), timeout=5)
+        groups_rc, groups, _error = self._call(("id", "-nG", user_name), timeout=5)
+        status_fields = status.split()
+        password_ready = status_rc == 0 and len(status_fields) >= 2 and status_fields[1] == "P"
+        administrator = groups_rc == 0 and "sudo" in set(groups.split())
+        return password_ready and administrator
 
     def _package_file(self, package_file):
         path = pathlib.Path(package_file).expanduser()
@@ -563,6 +590,18 @@ class PackageInstaller:
                 architecture=inspected["architecture"],
                 error="安装 DEB 软件包需要管理员权限。",
             )
+        if not self._pkexec_caller_administrator_ready():
+            return self._result(
+                False,
+                action="install",
+                state="administrator_not_ready",
+                error_code="E_ADMINISTRATOR_NOT_READY",
+                file=inspected["file"],
+                package=inspected["package"],
+                version=inspected["version"],
+                architecture=inspected["architecture"],
+                error="请先完成首次开机账户设置，再安装需要管理员权限的软件。",
+            )
 
         command = self._apt_install_command(inspected["file"])
         returncode, _output, error = self._call(command, timeout=180)
@@ -666,6 +705,15 @@ class PackageInstaller:
                 state="permission_denied",
                 package=package,
                 error="修复软件包需要管理员权限。",
+            )
+        if not self._pkexec_caller_administrator_ready():
+            return self._result(
+                False,
+                action="repair",
+                state="administrator_not_ready",
+                error_code="E_ADMINISTRATOR_NOT_READY",
+                package=package,
+                error="请先完成首次开机账户设置，再修复需要管理员权限的软件。",
             )
         command = self._apt_reinstall_command(package)
         returncode, _output, error = self._call(command, timeout=180)

@@ -28,6 +28,8 @@ class LegacyPerformanceContracts(unittest.TestCase):
         self.assertIn('config="${fallback_conf}"', picom)
         self.assertIn('reason="virtual-machine-xrender"', picom)
         self.assertLess(picom.index('config="${fallback_conf}"'), picom.index("llvmpipe"))
+        self.assertNotIn("]] +", picom)
+        self.assertNotIn("' +    ||", picom)
 
     def test_session_health_accepts_compositor_disabled_by_policy(self):
         health = DESKTOP.split("cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'", 1)[1].split(
@@ -67,7 +69,7 @@ class LegacyPerformanceContracts(unittest.TestCase):
         self.assertIn("apply_low_resource_plank_profile", watchdog)
         self.assertLess(watchdog.index("apply_low_resource_plank_profile"), watchdog.index("nohup plank"))
         self.assertIn("ZoomEnabled=false", watchdog)
-        self.assertIn("IconSize=32", watchdog)
+        self.assertIn("IconSize=30", watchdog)
         self.assertIn("Offset=0", watchdog)
 
     def test_desktop_catalog_uses_event_first_and_slow_fallback_scan(self):

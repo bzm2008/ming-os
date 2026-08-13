@@ -21,6 +21,14 @@ def load_model():
     return module
 
 
+def load_ui():
+    spec = importlib.util.spec_from_file_location("ming_files", UI_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class MingFilesAssetTests(unittest.TestCase):
     def test_ming_files_assets_exist(self):
         self.assertTrue(MODEL_PATH.is_file(), "missing ming-files-model.py")
@@ -475,6 +483,37 @@ class MingFilesUiSourceTests(unittest.TestCase):
             "eject_with_operation(",
         ]:
             self.assertIn(marker, self.source)
+
+    def test_sidebar_exposes_user_media_entries_created_for_frugal_live_boot(self):
+        for marker in [
+            "def user_media_locations",
+            "已挂载数据",
+            "user_media_locations(home)",
+            "mounted_uris",
+        ]:
+            self.assertIn(marker, self.source)
+
+    def test_user_media_locations_returns_real_directories_and_links(self):
+        ui = load_ui()
+        with tempfile.TemporaryDirectory() as temp:
+            base = pathlib.Path(temp) / "media"
+            home = pathlib.Path(temp) / "zero"
+            root = base / home.name
+            root.mkdir(parents=True)
+            data = root / "data"
+            data.mkdir()
+            source = pathlib.Path(temp) / "live-medium"
+            source.mkdir()
+            try:
+                (root / "MingData").symlink_to(source, target_is_directory=True)
+            except OSError:
+                (root / "MingData").mkdir()
+            (root / "note.txt").write_text("not a location", encoding="utf-8")
+
+            self.assertEqual(
+                ["data", "MingData"],
+                [entry.name for entry in ui.user_media_locations(home, base)],
+            )
 
     def test_toolbar_and_views_cover_primary_file_workflows(self):
         for marker in [

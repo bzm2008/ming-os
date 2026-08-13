@@ -957,21 +957,23 @@ install_wechat() {
 #!/usr/bin/env bash
 set -euo pipefail
 url="https://dldir1.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
-deb="/tmp/WeChatLinux_x86_64.deb"
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    deb="/tmp/WeChatLinux_x86_64.deb"
+else
+    cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os"
+    mkdir -p "${cache_dir}"
+    deb="${cache_dir}/WeChatLinux_x86_64.deb"
+fi
 trap 'rm -f "${deb}"' EXIT
 echo "Downloading official WeChat for Linux..."
 wget -c --show-progress -O "${deb}" "${url}"
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    echo "Administrator privileges are required to install WeChat." >&2
-    exit 1
-fi
-if [[ -x /usr/local/sbin/ming-package-installer ]]; then
+if [[ ${EUID:-$(id -u)} -eq 0 && -x /usr/local/sbin/ming-package-installer ]]; then
     /usr/local/sbin/ming-package-installer install "${deb}"
+elif [[ -x /usr/local/bin/ming-package-install-gui ]]; then
+    /usr/local/bin/ming-package-install-gui "${deb}"
 else
-    # The image-build fallback is still verified, because 03_desktop deploys
-    # the common installer after this optional application phase.
-    apt-get -y -o Dpkg::Use-Pty=0 install "${deb}" \
-        || { apt-get -y -o Dpkg::Use-Pty=0 -f install && apt-get -y -o Dpkg::Use-Pty=0 install "${deb}"; }
+    echo "Administrator privileges are required through Ming package installer, but the graphical installer is unavailable." >&2
+    exit 1
 fi
 echo "WeChat installed."
 WECHATINSTALL
@@ -1024,9 +1026,9 @@ WECHATDESKTOPPY
         fi
     done
 
-    # Keep direct package-owned executables and legacy paths as a fallback for
-    # packages that do not supply a desktop entry.  They are passed as one argv
-    # item, never through a shell.
+    # Packages without a desktop file may still expose a dpkg-owned binary.
+    # Do not accept legacy fixed paths or the user's PATH: the supported client
+    # is the official Linux package installed through the Ming package chain.
     for package in wechat weixin com.tencent.wechat; do
         while IFS= read -r candidate; do
             if [[ -x "${candidate}" ]] && [[ "${candidate}" != */share/applications/* ]]; then
@@ -1035,23 +1037,6 @@ WECHATDESKTOPPY
             fi
         done < <(dpkg-query -L "${package}" 2>/dev/null || true)
     done
-    for candidate in \
-        /usr/bin/wechat \
-        /usr/bin/weixin \
-        /opt/wechat/wechat \
-        /opt/weixin/weixin \
-        /opt/apps/com.tencent.wechat/files/wechat \
-        /opt/apps/com.tencent.wechat/files/bin/wechat; do
-        if [[ -x "${candidate}" ]]; then
-            printf '%s\0' "${candidate}"
-            return 0
-        fi
-    done
-    candidate="$(command -v wechat 2>/dev/null || command -v weixin 2>/dev/null || true)"
-    if [[ -n "${candidate}" ]]; then
-        printf '%s\0' "${candidate}"
-        return 0
-    fi
     return 1
 }
 
@@ -1067,7 +1052,7 @@ if (( ${#wechat_argv[@]} == 0 )); then
             --text="未找到微信。是否现在下载安装官方 Linux 版？" \
             --ok-label="安装" --cancel-label="取消" 2>/dev/null || exit 1
     fi
-    pkexec /usr/local/bin/ming-install-wechat || sudo /usr/local/bin/ming-install-wechat || exit 1
+    /usr/local/bin/ming-install-wechat || exit 1
     mapfile -d '' -t wechat_argv < <(find_wechat_argv || true)
 fi
 
@@ -1151,9 +1136,9 @@ Name=Install WeChat
 Name[zh_CN]=安装微信
 Comment=Download and install official WeChat for Linux on demand
 Comment[zh_CN]=按需下载安装腾讯官方 Linux 版微信
-Exec=pkexec /usr/local/bin/ming-install-wechat
+Exec=/usr/local/bin/ming-install-wechat
 Icon=wechat
-Terminal=true
+Terminal=false
 Type=Application
 Categories=Network;InstantMessaging;
 StartupNotify=true
@@ -2025,6 +2010,394 @@ install_app_store() {
         echo "[ERROR] Spark Store package was not installed" >&2
         return 1
     fi
+
+    cat > /usr/local/bin/ming-spark-backend-status << 'MINGSPARKSTATUS'
+#!/usr/bin/env bash
+set -uo pipefail
+
+APM_MIN_VERSION=1.2.2
+
+command_path() {
+    command -v "$1" 2>/dev/null || true
+}
+
+apm_version() {
+    dpkg-query -W -f='${Version}' apm 2>/dev/null || true
+}
+
+apm_ready() {
+    version="$(apm_version)"
+    [ -n "$version" ] || return 1
+    command -v apm >/dev/null 2>&1 || return 1
+    dpkg --compare-versions "$version" ge "$APM_MIN_VERSION"
+}
+
+ace_ready() {
+    command -v bookworm-run >/dev/null 2>&1 || command -v trixie-run >/dev/null 2>&1
+}
+
+if [ "${1:-}" = "--json" ]; then
+    aptss_path="$(command_path aptss)"
+    ssinstall_path="$(command_path ssinstall)"
+    apm_path="$(command_path apm)"
+    version="$(apm_version)"
+    apm_ok=false
+    ace_ok=false
+    apm_ready && apm_ok=true
+    ace_ready && ace_ok=true
+    if [ "$apm_ok" = true ]; then
+        apm_reason="APM 后端可用。"
+    elif [ -z "$apm_path" ]; then
+        apm_reason="APM 后端未安装。"
+    elif [ -z "$version" ]; then
+        apm_reason="APM 后端版本未知。"
+    else
+        apm_reason="APM 后端版本过低，需要 $APM_MIN_VERSION+，当前为 $version。"
+    fi
+    python3 - "$aptss_path" "$ssinstall_path" "$apm_path" "$version" "$apm_ok" "$ace_ok" "$apm_reason" <<'PY'
+import json
+import sys
+
+aptss_path, ssinstall_path, apm_path, version, apm_ok, ace_ok, apm_reason = sys.argv[1:]
+payload = {
+    "schema": "ming.spark.backends.v1",
+    "aptss": {"available": bool(aptss_path), "path": aptss_path},
+    "ssinstall": {"available": bool(ssinstall_path), "path": ssinstall_path},
+    "apm": {
+        "available": apm_ok == "true",
+        "path": apm_path,
+        "version": version,
+        "min_version": "1.2.2",
+        "reason": apm_reason,
+    },
+    "ace": {"available": ace_ok == "true"},
+}
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
+    exit 0
+fi
+
+/usr/local/bin/ming-spark-backend-status --json
+MINGSPARKSTATUS
+    chmod 0755 /usr/local/bin/ming-spark-backend-status
+
+    cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+MING_SPARK_PACKAGE_PATTERN='^[A-Za-z0-9][A-Za-z0-9.+-]{0,127}$'
+MING_SPARK_PATH_PATTERN='^/[A-Za-z0-9._/+:-]+[.]deb$'
+LOG=/var/log/ming-spark-package-control.jsonl
+
+json_log() {
+    event="$1"
+    detail="${2:-}"
+    install -d -m 0755 "$(dirname "$LOG")"
+    python3 - "$LOG" "$event" "$detail" "${PKEXEC_UID:-}" <<'PY' 2>/dev/null || true
+import json
+import sys
+from datetime import datetime, timezone
+
+path, event, detail, pkexec_uid = sys.argv[1:]
+record = {
+    "timestamp": datetime.now(timezone.utc).isoformat(),
+    "event": event,
+    "detail": detail[:500],
+    "pkexec_uid": pkexec_uid,
+}
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+PY
+}
+
+caller_user() {
+    if [ -n "${PKEXEC_UID:-}" ]; then
+        getent passwd "$PKEXEC_UID" 2>/dev/null | cut -d: -f1
+        return 0
+    fi
+    if [ -n "${SUDO_USER:-}" ]; then
+        printf '%s\n' "$SUDO_USER"
+        return 0
+    fi
+    return 1
+}
+
+administrator_ready() {
+    user_name="$(caller_user || true)"
+    [ -n "$user_name" ] || return 1
+    status="$(passwd -S "$user_name" 2>/dev/null || true)"
+    groups="$(id -nG "$user_name" 2>/dev/null || true)"
+    [ "${status#"$user_name P "}" != "$status" ] || return 1
+    tr ' ' '\n' <<<"$groups" | grep -Fxq sudo
+}
+
+require_root_for_mutation() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "安装软件需要管理员授权。" >&2
+        json_log permission_denied "not root"
+        exit 3
+    fi
+    if ! administrator_ready; then
+        echo "请先完成首次开机账户设置：当前用户还不是可验证的本机管理员。" >&2
+        json_log administrator_not_ready "sudo/password/polkit state is incomplete"
+        exit 4
+    fi
+}
+
+valid_package() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9.+-]{0,127}$ ]]
+}
+
+valid_deb_path() {
+    [[ "$1" =~ ^/[A-Za-z0-9._/+:-]+[.]deb$ ]] && [[ "$1" != *"/../"* ]] && [[ -f "$1" ]]
+}
+
+validate_packages() {
+    for item in "$@"; do
+        if ! valid_package "$item"; then
+            echo "软件包名称不安全：$item" >&2
+            json_log unsafe_package "$item"
+            exit 2
+        fi
+    done
+}
+
+validate_deb_paths() {
+    for item in "$@"; do
+        if ! valid_deb_path "$item"; then
+            echo "DEB 路径不安全或文件不存在：$item" >&2
+            json_log unsafe_deb_path "$item"
+            exit 2
+        fi
+    done
+}
+
+refresh_desktop() {
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    target_user="$(caller_user || true)"
+    if [ -n "$target_user" ]; then
+        runuser -u "$target_user" -- ming-phone-desktop --sync >/dev/null 2>&1 || true
+        if [ -x /usr/local/bin/ming-refresh-desktop-state ]; then
+            runuser -u "$target_user" -- ming-refresh-desktop-state >/dev/null 2>&1 || true
+        fi
+        if [ -x /usr/local/sbin/ming-refresh-dock-launchers ]; then
+            /usr/local/sbin/ming-refresh-dock-launchers "$target_user" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+apm_backend_ready() {
+    version="$(dpkg-query -W -f='${Version}' apm 2>/dev/null || true)"
+    [ -n "$version" ] || return 1
+    command -v apm >/dev/null 2>&1 || return 1
+    dpkg --compare-versions "$version" ge "1.2.2"
+}
+
+ace_backend_ready() {
+    command -v bookworm-run >/dev/null 2>&1 || command -v trixie-run >/dev/null 2>&1
+}
+
+action="${1:-}"
+shift || true
+case "$action" in
+    status)
+        exec /usr/local/bin/ming-spark-backend-status --json
+        ;;
+    refresh)
+        require_root_for_mutation
+        refresh_desktop
+        json_log refresh "desktop state refreshed"
+        ;;
+    install|remove)
+        require_root_for_mutation
+        validate_packages "$@"
+        command -v aptss >/dev/null 2>&1 || { echo "aptss 后端不可用。" >&2; exit 5; }
+        if [ "$action" = install ]; then
+            /usr/bin/aptss update
+            /usr/bin/aptss install "$@" -y
+        else
+            /usr/bin/aptss remove "$@" -y
+        fi
+        refresh_desktop
+        json_log "$action" "$*"
+        ;;
+    aptss)
+        require_root_for_mutation
+        subaction="${1:-}"
+        shift || true
+        command -v aptss >/dev/null 2>&1 || { echo "aptss 后端不可用。" >&2; exit 5; }
+        case "$subaction" in
+            install|remove)
+                validate_packages "$@"
+                if [ "$subaction" = install ]; then
+                    /usr/bin/aptss update
+                    /usr/bin/aptss install "$@" -y
+                else
+                    /usr/bin/aptss remove "$@" -y
+                fi
+                ;;
+            ssupdate|update)
+                /usr/bin/aptss ssupdate
+                ;;
+            *)
+                echo "拒绝执行 aptss 白名单外的指令：$subaction" >&2
+                exit 2
+                ;;
+        esac
+        refresh_desktop
+        json_log "aptss:$subaction" "$*"
+        ;;
+    ssinstall)
+        require_root_for_mutation
+        validate_deb_paths "$@"
+        command -v ssinstall >/dev/null 2>&1 || { echo "ssinstall 后端不可用。" >&2; exit 5; }
+        /usr/bin/ssinstall "$@" --native
+        refresh_desktop
+        json_log ssinstall "$*"
+        ;;
+    apm)
+        require_root_for_mutation
+        if ! apm_backend_ready || ! ace_backend_ready; then
+            /usr/local/bin/ming-spark-backend-status --json
+            echo "APM/ACE 后端未就绪：APM 需要 1.2.2+，并且需要可用的 ACE runtime。" >&2
+            json_log apm_unavailable "backend preflight"
+            exit 6
+        fi
+        subaction="${1:-}"
+        shift || true
+        case "$subaction" in
+            debug|ssaudit|"")
+                echo "拒绝执行 APM 白名单外或已弃用的指令：$subaction" >&2
+                exit 2
+                ;;
+            install|remove|ssinstall)
+                validate_packages "$@"
+                ;;
+            *)
+                echo "拒绝执行 APM 白名单外的指令：$subaction" >&2
+                exit 2
+                ;;
+        esac
+        /usr/bin/apm "$subaction" "$@"
+        refresh_desktop
+        json_log "apm:$subaction" "$*"
+        ;;
+    *)
+        echo "usage: ming-spark-package-control {aptss|ssinstall|apm|install|remove|refresh|status} ..." >&2
+        echo "仅允许 install|remove|refresh|status 以及 aptss|ssinstall|apm 子命令。" >&2
+        exit 2
+        ;;
+esac
+MINGSPARKCONTROL
+    chmod 0755 /usr/local/sbin/ming-spark-package-control
+
+    cat > /usr/share/polkit-1/actions/org.ming.spark.package-control.policy << 'MINGSPARKPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming.spark.package-control">
+    <description>Install or remove Spark applications through Ming OS</description>
+    <message>安装或卸载星火应用需要本机管理员授权。</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-spark-package-control</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+MINGSPARKPOLICY
+
+    for spark_shell_caller in \
+        /opt/spark-store/bin/extras/shell-caller.sh \
+        /opt/spark-store/extras/shell-caller.sh; do
+        if [[ -e "$spark_shell_caller" || -L "$spark_shell_caller" ]]; then
+            cat > "$spark_shell_caller" << 'MINGSPARKCALLER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+    exec /usr/local/sbin/ming-spark-package-control "$@"
+fi
+if [[ "${1:-}" == "apm" ]]; then
+    subaction="${2:-}"
+    case "${subaction}" in
+        list|search|show|start|launch)
+            shift 2
+            exec /usr/bin/apm "$subaction" "$@"
+            ;;
+    esac
+fi
+exec pkexec /usr/local/sbin/ming-spark-package-control "$@"
+MINGSPARKCALLER
+            chmod 0755 "$spark_shell_caller"
+        fi
+    done
+
+    if [[ -e /opt/durapps/spark-store/bin/store-helper/pass-auth.sh ]]; then
+        cat > /opt/durapps/spark-store/bin/store-helper/pass-auth.sh << 'MINGSPARKPASSAUTH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+    /opt/spark-store/bin/extras/shell-caller.sh)
+        shift
+        exec /opt/spark-store/bin/extras/shell-caller.sh "$@"
+        ;;
+    /opt/spark-store/extras/shell-caller.sh)
+        shift
+        exec /opt/spark-store/extras/shell-caller.sh "$@"
+        ;;
+    *)
+        echo "拒绝执行未经 Ming OS 验证的星火提权命令。" >&2
+        exit 2
+        ;;
+esac
+MINGSPARKPASSAUTH
+        chmod 0755 /opt/durapps/spark-store/bin/store-helper/pass-auth.sh
+    fi
+
+    cat > /usr/share/polkit-1/actions/store.spark-app.spark-store.policy << 'SPARKSTOREPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="store.spark-app.spark-store">
+    <description>Run Spark Store package actions through Ming OS</description>
+    <message>星火应用管理需要本机管理员授权。</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/extras/shell-caller.sh</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+SPARKSTOREPOLICY
+
+    cat > /usr/share/polkit-1/actions/store.spark-app.ssinstall.policy << 'SPARKSSINSTALLPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="store.spark-app.ssinstall">
+    <description>Install Spark Store packages through Ming OS</description>
+    <message>安装星火应用需要本机管理员授权。</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-spark-package-control</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+SPARKSSINSTALLPOLICY
 
     cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'
 #!/usr/bin/env bash

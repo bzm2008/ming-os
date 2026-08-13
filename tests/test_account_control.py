@@ -368,6 +368,7 @@ class BuildContractTests(unittest.TestCase):
         cls.base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
         cls.desktop = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
         cls.settings = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
+        cls.bootstrap = (ROOT / "assets" / "ming-admin-bootstrap.py").read_text(encoding="utf-8")
 
     def test_no_known_password_or_oobe_shell_concat(self):
         base = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
@@ -386,15 +387,69 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn('echo "user:user"', self.base)
         self.assertNotIn('> /etc/ming-os/identity', self.base.split('user:user')[0] if 'user:user' in self.base else '')
 
-    def test_installed_identity_keeps_primary_user_in_password_backed_sudo_group(self):
+    def test_installed_identity_defers_sudo_until_password_backed_oobe(self):
         identity = self.base.split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1
         )[1].split("\nMINGIDENTITY", 1)[0]
-        self.assertIn("scanner bluetooth sudo nopasswdlogin autologin", identity)
-        self.assertNotIn('gpasswd -d "${user_name}" sudo', identity)
-        self.assertIn('id -nG "${user_name}"', identity)
-        self.assertIn("installed primary user is not in the sudo group", identity)
+        self.assertIn("scanner bluetooth nopasswdlogin autologin", identity)
+        self.assertNotIn("scanner bluetooth sudo nopasswdlogin autologin", identity)
+        self.assertIn('gpasswd -d "${user_name}" sudo', identity)
+        self.assertIn('passwd -l "${user_name}"', identity)
+        self.assertNotIn('chroot "${target}" passwd -d "${user_name}"', identity)
+        self.assertIn("installed primary user unexpectedly has sudo before OOBE", identity)
         self.assertIn("ensure_ming_user || exit 30", identity)
+        self.assertIn('["usermod", "-aG", "sudo", user]', self.bootstrap)
+
+    def test_installed_identity_resolves_the_real_primary_user_before_repair(self):
+        identity = self.base.split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("resolve_primary_user()", identity)
+        self.assertIn("getent passwd", identity)
+        self.assertIn("$3 >= 1000 && $3 < 60000", identity)
+        self.assertIn('user_name="$(resolve_primary_user)"', identity)
+        self.assertNotIn('local user_name="user"', identity)
+
+    def test_installed_identity_uses_resolved_primary_user_for_home_and_lightdm(self):
+        identity = self.base.split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn('MING_PRIMARY_USER="${user_name}"', identity)
+        self.assertIn('MING_PRIMARY_HOME="${user_home}"', identity)
+        self.assertIn('passwd_record_for_user "${user_name}"', identity)
+        self.assertIn("autologin-user=${MING_PRIMARY_USER}", identity)
+        self.assertNotIn("autologin-user=user\nautologin-user-timeout=0\nautologin-session=xfce", identity)
+
+    def test_installed_identity_rejects_ambiguous_primary_users(self):
+        identity = self.base.split(
+            "cat > /usr/local/sbin/ming-fix-installed-identity", 1
+        )[1].split("\nMINGIDENTITY", 1)[0]
+        self.assertIn("sort -t: -k1,1n", identity)
+        self.assertIn("multiple local primary users", identity)
+        self.assertIn('if [[ "${count}" -gt 1 ]]', identity)
+        self.assertIn("return 1", identity)
+        self.assertIn('user_name="$(resolve_primary_user)" || return 1', identity)
+        self.assertIn("printf 'user\\n'", identity)
+        self.assertIn('$1 != "nobody"', identity)
+        self.assertIn('$1 !~ /^systemd-/', identity)
+        self.assertIn('validate_posix_user_name "${user_name}"', identity)
+
+    def test_package_gui_blocks_before_pkexec_when_administrator_is_not_ready(self):
+        gui = self.desktop.split(
+            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
+        )[1].split("\nMINGPACKAGEGUI", 1)[0]
+        self.assertIn("ming-admin-bootstrap status", gui)
+        self.assertIn("ming-oobe-account", gui)
+        self.assertIn("请先完成首次开机账户设置", gui)
+        self.assertLess(gui.index("ming-admin-bootstrap status"), gui.index("pkexec /usr/local/sbin/ming-package-installer"))
+
+    def test_package_gui_requires_an_active_polkit_agent(self):
+        gui = self.desktop.split(
+            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
+        )[1].split("\nMINGPACKAGEGUI", 1)[0]
+        self.assertIn("pgrep -u", gui)
+        self.assertIn("lxpolkit|polkit-gnome-authentication-agent", gui)
+        self.assertIn("系统授权服务尚未就绪", gui)
 
     def test_welcome_waits_for_account_oobe_before_presenting(self):
         welcome = self.desktop.split("cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'", 1)[1].split(

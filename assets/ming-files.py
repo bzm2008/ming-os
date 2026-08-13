@@ -53,6 +53,18 @@ BUILTIN_LOCATIONS = (
 )
 
 
+def user_media_locations(home, media_base=Path("/media")):
+    """Return safe, user-visible data entries created by the mount helper."""
+    root = Path(media_base) / Path(home).name
+    try:
+        return sorted(
+            (entry for entry in root.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name.casefold(),
+        )
+    except OSError:
+        return []
+
+
 if GTK_AVAILABLE:
     class FileObject(GObject.Object):
         def __init__(self, item):
@@ -75,9 +87,12 @@ if GTK_AVAILABLE:
             self.current_popover = None
             self.volume_monitor = Gio.VolumeMonitor.get()
             self.volume_signal_ids = []
+            self.media_root_monitor = None
+            self.user_media_monitor = None
             self._build_ui()
             self._install_css()
             self._watch_volumes()
+            self._watch_user_media()
             self.refresh_sidebar()
             self.reload(initial_uri)
 
@@ -367,15 +382,18 @@ if GTK_AVAILABLE:
             separator.set_child(section)
             self.sidebar.append(separator)
             mounted_volumes = set()
+            mounted_uris = set()
             for mount in self.volume_monitor.get_mounts():
                 volume = mount.get_volume()
                 if volume:
                     mounted_volumes.add(volume)
+                mount_uri = mount.get_root().get_uri()
+                mounted_uris.add(mount_uri)
                 self.sidebar.append(
                     self._sidebar_row(
                         mount.get_name(),
                         "drive-removable-media-symbolic",
-                        uri=mount.get_root().get_uri(),
+                        uri=mount_uri,
                         mount=mount,
                         volume=volume,
                     )
@@ -386,7 +404,29 @@ if GTK_AVAILABLE:
                         self._sidebar_row(
                             volume.get_name(),
                             "drive-removable-media-symbolic",
-                            volume=volume,
+                        volume=volume,
+                    )
+                )
+            self._watch_user_media_directory()
+            media_locations = [
+                location for location in user_media_locations(home)
+                if Gio.File.new_for_path(str(location)).get_uri() not in mounted_uris
+            ]
+            if media_locations:
+                data_separator = Gtk.ListBoxRow(selectable=False, activatable=False)
+                data_section = Gtk.Label(label="已挂载数据", xalign=0)
+                data_section.add_css_class("heading")
+                data_section.set_margin_start(14)
+                data_section.set_margin_top(12)
+                data_section.set_margin_bottom(6)
+                data_separator.set_child(data_section)
+                self.sidebar.append(data_separator)
+                for location in media_locations:
+                    self.sidebar.append(
+                        self._sidebar_row(
+                            location.name,
+                            "drive-harddisk-symbolic",
+                            uri=Gio.File.new_for_path(str(location)).get_uri(),
                         )
                     )
 
@@ -423,6 +463,35 @@ if GTK_AVAILABLE:
                         signal, lambda *_args: GLib.idle_add(self.refresh_sidebar)
                     )
                 )
+
+        def _watch_user_media(self):
+            def changed(*_args):
+                GLib.idle_add(self._watch_user_media_directory)
+                return GLib.idle_add(self.refresh_sidebar)
+
+            try:
+                media_root = Gio.File.new_for_path("/media")
+                self.media_root_monitor = media_root.monitor_directory(
+                    Gio.FileMonitorFlags.NONE, None)
+                self.media_root_monitor.connect("changed", changed)
+            except GLib.Error:
+                self.media_root_monitor = None
+            self._watch_user_media_directory()
+
+        def _watch_user_media_directory(self):
+            if self.user_media_monitor is not None:
+                return
+            user_media = Path("/media") / Path.home().name
+            if not user_media.is_dir():
+                return
+            try:
+                media_root = Gio.File.new_for_path(str(user_media))
+                self.user_media_monitor = media_root.monitor_directory(
+                    Gio.FileMonitorFlags.NONE, None)
+                self.user_media_monitor.connect(
+                    "changed", lambda *_args: GLib.idle_add(self.refresh_sidebar))
+            except GLib.Error:
+                self.user_media_monitor = None
 
         def _on_sidebar_activated(self, _listbox, row):
             if row.location_uri:

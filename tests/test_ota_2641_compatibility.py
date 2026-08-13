@@ -53,6 +53,10 @@ class Ota2641CompatibilityTests(unittest.TestCase):
 
     def check(self, source):
         response = json.dumps({
+            "schema": "ming.update.discovery.v1",
+            "available": True,
+            "delivery": "iso",
+            "capability": "transactional-slot-v1",
             "has_update": True,
             "ready": True,
             "version": "26.4.1",
@@ -211,6 +215,25 @@ minisign() { return 0; }
         self.assertIn('validate_update_route "$(current_version)" "${version}"', download)
         self.assertIn('validate_update_route "$(current_version)" "${version}"', install)
         self.assertIn('validate_update_route "$(current_version)" "${target_version}"', apply)
+
+    def test_preferred_server_validation_failure_does_not_persist_legacy_server(self):
+        migration = self.cli.split("maybe_migrate_update_server() {", 1)[1].split(
+            "check_network() {", 1)[0]
+        self.assertNotIn("set_config '.update_server' \"${LEGACY_UPDATE_SERVER}\"", migration)
+        self.assertIn("系统 OTA 清单", migration)
+
+    def test_valid_json_without_system_ota_signature_is_not_retried_on_legacy_domain(self):
+        check = self.cli.split("check_update() {", 1)[1].split("download_update() {", 1)[0]
+        self.assertIn("classify_ota_response", check)
+        self.assertIn("服务器尚未发布可信的系统 OTA 清单", check)
+        signature_branch = check.split("classify_ota_response", 1)[1]
+        self.assertNotIn("legacy_api_url", signature_branch)
+
+    def test_schema_requires_the_system_discovery_contract(self):
+        schema = self.cli.split("validate_ota_discovery_schema() {", 1)[1].split(
+            "verify_signed_ota_manifest() {", 1)[0]
+        self.assertIn('ming.update.discovery.v1', schema)
+        self.assertIn('validate_ota_manifest_schema', schema)
 
 
 if __name__ == "__main__":

@@ -540,11 +540,24 @@ class DeviceController:
             defaults = self._pactl_info_defaults(info)
             default_sink = defaults["sink"]
             if not default_sink or default_sink.lower() == "auto_null":
+                # Keep the real sink/card inventory even when PulseAudio has
+                # not selected a default yet.  The repair action uses this
+                # inventory to recover an internal analog output.
+                sinks_rc, sinks_output, _sinks_error = self._run(
+                    ["pactl", "list", "short", "sinks"])
+                cards_rc, cards_output, _cards_error = self._run(
+                    ["pactl", "list", "cards"])
+                playback_devices = (
+                    self._pactl_sink_records(sinks_output, "")
+                    if sinks_rc == 0 else [])
+                cards = self._pactl_cards(cards_output) if cards_rc == 0 else []
                 if wpctl_status is not None:
                     return wpctl_status
                 return self._audio_status_result(
                     state="no_default_sink", backend="pactl", server_available=True,
                     default_source=defaults["source"],
+                    playback_devices=playback_devices,
+                    cards=cards,
                     error="PulseAudio 没有可用的默认输出设备。")
 
             volume_rc, volume_output, volume_error = self._run(

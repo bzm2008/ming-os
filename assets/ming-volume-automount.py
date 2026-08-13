@@ -19,6 +19,10 @@ SYSTEM_PARTTYPE_PREFIXES = (
 )
 SYSTEM_LABEL_MARKERS = ("efi", "esp", "msr", "system reserved", "recovery")
 INSTALLER_LABEL_MARKERS = ("ming os", "ming_os", "onion os", "live", "installer", "iso")
+LIVE_MEDIA_ROOTS = (
+    "/run/live/medium",
+    "/lib/live/mount/medium",
+)
 
 
 def _text(row, key):
@@ -47,6 +51,17 @@ def _is_mounted(row):
         return True
     mountpoints = row.get("mountpoints")
     return isinstance(mountpoints, list) and any(bool(item) for item in mountpoints)
+
+
+def _mountpoints(row):
+    values = []
+    mountpoint = _text(row, "mountpoint")
+    if mountpoint:
+        values.append(mountpoint)
+    for item in row.get("mountpoints") or []:
+        if item:
+            values.append(str(item))
+    return values
 
 
 def _label(row):
@@ -101,11 +116,45 @@ def target_for(row, user):
     return "/" + "/".join(("media", user, safe_mount_name(row)))
 
 
+def _live_media_root(path):
+    normalized = "/" + str(path or "").strip("/")
+    for root in LIVE_MEDIA_ROOTS:
+        if normalized == root or normalized.startswith(root + "/"):
+            return root
+    return ""
+
+
+def frugal_live_source(row):
+    """Return the visible root of a disk-backed Live/frugal boot medium."""
+    fstype = _normal_fstype(row)
+    if fstype not in SUPPORTED_FILESYSTEMS:
+        return ""
+    if _is_system_partition(row):
+        return ""
+    for mountpoint in _mountpoints(row):
+        source = _live_media_root(mountpoint)
+        if source:
+            return source
+    return ""
+
+
 def build_mount_plan(rows, user):
-    plan = {"ok": True, "mount": [], "skip": []}
+    plan = {"ok": True, "mount": [], "expose": [], "skip": []}
     for row in rows:
         device = device_path(row)
         if not device:
+            continue
+        exposed_source = frugal_live_source(row)
+        if exposed_source:
+            plan["expose"].append({
+                "device": device,
+                "fstype": _normal_fstype(row),
+                "uuid": _text(row, "uuid"),
+                "label": _label(row),
+                "source": exposed_source,
+                "target": target_for(row, user),
+                "reason": "frugal-live-medium",
+            })
             continue
         eligible, reason = classify_partition(row)
         record = {
@@ -176,6 +225,27 @@ def mount_record(record, runner=None):
     return record
 
 
+def expose_record(record):
+    source = pathlib.Path(record["source"])
+    target = pathlib.Path(record["target"])
+    target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if target.is_symlink():
+        if pathlib.Path(os.readlink(target)) == source:
+            record["exposed"] = True
+            record["changed"] = False
+            return record
+        target.unlink()
+    elif target.exists():
+        record["exposed"] = False
+        record["changed"] = False
+        record["error"] = "target already exists"
+        return record
+    os.symlink(source, target, target_is_directory=True)
+    record["exposed"] = True
+    record["changed"] = True
+    return record
+
+
 def default_user():
     for key in ("SUDO_USER", "LOGNAME", "USER"):
         value = os.environ.get(key)
@@ -189,7 +259,11 @@ def run(user=None, dry_run=False, rows=None):
     plan = build_mount_plan(rows if rows is not None else read_partitions(), user=user)
     if not dry_run:
         plan["mount"] = [mount_record(dict(record)) for record in plan["mount"]]
-        plan["ok"] = all(record.get("mounted") for record in plan["mount"])
+        plan["expose"] = [expose_record(dict(record)) for record in plan["expose"]]
+        plan["ok"] = (
+            all(record.get("mounted") for record in plan["mount"])
+            and all(record.get("exposed") for record in plan["expose"])
+        )
     return plan
 
 

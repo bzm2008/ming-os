@@ -1,6 +1,8 @@
 import ast
 import json
 import pathlib
+import re
+import tempfile
 import textwrap
 import threading
 import time
@@ -312,11 +314,195 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertNotIn('heading="提示"', toast)
         self.assertIn("操作结果", toast)
         self.assertIn("操作失败", toast)
+        self.assertIn("summarize_feedback_text", toast)
+        self.assertIn("write_feedback_detail_log", toast)
+        self.assertIn("详情已写入", toast)
         self.assertIn("ming-feedback-dialog", SETTINGS_SOURCE)
         self.assertIn("#FFFFFF", SETTINGS_SOURCE)
 
+    def test_audio_repair_failure_shows_summary_not_raw_json_blob(self):
+        repair = function_source("on_audio_repair_playback", "MingSettings")
+
+        self.assertIn("audio_failure_summary", SETTINGS_SOURCE)
+        self.assertIn("audio_failure_summary(", repair)
+        self.assertNotIn('self.toast("声音播放未恢复：%s" % (reason', repair)
+
 
 class SettingsAsyncBehaviorTests(unittest.TestCase):
+    @staticmethod
+    def _wifi_connect_fixture(*, dialog_error=None, present_error=None,
+                              async_error=None, password_error=None, security="WPA2"):
+        dialogs = []
+        entries = []
+        events = []
+        jobs = []
+
+        class Dialog:
+            def __init__(self, **_kwargs):
+                if dialog_error:
+                    raise RuntimeError(dialog_error)
+                self.response_handler = None
+                self.presented = False
+                dialogs.append(self)
+
+            def set_extra_child(self, _child):
+                pass
+
+            def add_response(self, *_args):
+                pass
+
+            def set_response_appearance(self, *_args):
+                pass
+
+            def connect(self, _signal, handler):
+                self.response_handler = handler
+
+            def present(self):
+                if present_error:
+                    raise RuntimeError(present_error)
+                self.presented = True
+
+        class PasswordEntry:
+            def __init__(self, **_kwargs):
+                if password_error:
+                    raise RuntimeError(password_error)
+                self.text = "super-secret"
+                entries.append(self)
+
+            def set_placeholder_text(self, _text):
+                pass
+
+            def get_text(self):
+                return self.text
+
+            def set_text(self, text):
+                self.text = text
+
+        class FakeAdw:
+            MessageDialog = Dialog
+            ResponseAppearance = types.SimpleNamespace(SUGGESTED=object())
+
+        FakeGtk = types.SimpleNamespace(PasswordEntry=PasswordEntry)
+
+        def capture(command, timeout, on_done):
+            if async_error:
+                raise RuntimeError(async_error)
+            jobs.append((tuple(command), timeout, on_done))
+
+        def capture_stdin(command, input_text, timeout, on_done):
+            if async_error:
+                raise RuntimeError(async_error)
+            jobs.append((tuple(command), input_text, timeout, on_done))
+
+        connect = executable_function("on_wifi_connect", {
+            "Adw": FakeAdw,
+            "Gtk": FakeGtk,
+            "json": json,
+            "wifi_connect_command": lambda network_id, ifname, with_secret=False: [
+                "wifi-connect", network_id, ifname,
+                "--password-stdin" if with_secret else "--no-password"],
+            "run_capture_async": capture,
+            "run_capture_stdin_async": capture_stdin,
+            "write_wifi_connect_event": lambda *args, **kwargs: events.append((args, kwargs)),
+        }, "MingSettings")
+        GenerationState = generation_state_type()
+        button = Recorder()
+        window = types.SimpleNamespace(
+            wifi_connect_state=GenerationState(), toasts=[], wifi_connect_dialog=None)
+        window.toast = lambda text, severity="info": window.toasts.append((text, severity))
+        window.apply_wifi_connect_result = lambda *_args: None
+        network = {
+            "network_id": "a" * 32,
+            "ssid": "Office",
+            "bssid": "AA:BB:CC:DD:EE:FF",
+            "ifname": "wlan0",
+            "security": security,
+        }
+        return connect, window, button, network, dialogs, entries, events, jobs
+
+    def test_wifi_connect_missing_scan_fields_is_visible_and_logged(self):
+        connect, window, button, network, _dialogs, _entries, events, jobs = \
+            self._wifi_connect_fixture()
+        del network["network_id"]
+
+        connect(window, button, network)
+
+        self.assertIn(("sensitive", True), button.calls)
+        self.assertIn(("label", "连接"), button.calls)
+        self.assertTrue(window.toasts)
+        self.assertEqual("error", window.toasts[-1][1])
+        self.assertTrue(events)
+        self.assertEqual([], jobs)
+
+    def test_wifi_connect_dialog_construction_and_present_failures_are_not_silent(self):
+        for option in ({"dialog_error": "dialog unavailable"},
+                       {"password_error": "password entry unavailable"},
+                       {"present_error": "display unavailable"}):
+            with self.subTest(option=option):
+                connect, window, button, network, _dialogs, _entries, events, jobs = \
+                    self._wifi_connect_fixture(**option)
+
+                connect(window, button, network)
+
+                self.assertIn(("sensitive", True), button.calls)
+                self.assertTrue(window.toasts)
+                self.assertEqual("error", window.toasts[-1][1])
+                self.assertTrue(events)
+                self.assertEqual([], jobs)
+
+    def test_encrypted_wifi_presents_password_dialog_and_launch_failure_restores_button(self):
+        connect, window, button, network, dialogs, entries, events, jobs = \
+            self._wifi_connect_fixture(async_error="thread unavailable")
+
+        connect(window, button, network)
+        self.assertTrue(dialogs[0].presented)
+        self.assertEqual(1, len(entries))
+        dialogs[0].response_handler(dialogs[0], "ok")
+
+        self.assertEqual("", entries[0].text)
+        self.assertIn(("sensitive", True), button.calls)
+        self.assertIn(("label", "连接"), button.calls)
+        self.assertTrue(window.toasts)
+        self.assertTrue(events)
+        self.assertNotIn("super-secret", repr(events))
+        self.assertEqual([], jobs)
+
+    def test_open_wifi_connects_without_constructing_a_password_dialog(self):
+        connect, window, button, network, dialogs, entries, events, jobs = \
+            self._wifi_connect_fixture(security="--")
+
+        connect(window, button, network)
+
+        self.assertEqual([], dialogs)
+        self.assertEqual([], entries)
+        self.assertEqual(1, len(jobs))
+        self.assertEqual("--no-password", jobs[0][0][-1])
+        self.assertIn(("sensitive", False), button.calls)
+        self.assertTrue(events)
+
+    def test_wifi_connect_jsonl_log_is_structured_and_omits_ssid_and_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = pathlib.Path(directory) / "wifi-connect.jsonl"
+            write_event = executable_function("write_wifi_connect_event", {
+                "WIFI_CONNECT_LOG": str(log_path),
+                "json": json,
+                "os": __import__("os"),
+                "re": re,
+                "time": time,
+            })
+            write_event(
+                "ui_failure",
+                {"network_id": "a" * 32, "ssid": "Private Name", "bssid": "AA:BB:CC:DD:EE:FF",
+                 "ifname": "wlan0", "security": "WPA2", "password": "super-secret"},
+                "E_WIFI_DIALOG", "dialog unavailable")
+
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+            self.assertEqual("ui_failure", payload["event"])
+            self.assertEqual("E_WIFI_DIALOG", payload["reason_code"])
+            self.assertNotIn("ssid", payload)
+            self.assertNotIn("password", payload)
+            self.assertNotIn("super-secret", log_path.read_text(encoding="utf-8"))
+
     def test_concurrent_device_control_load_waits_for_one_completed_module(self):
         entered = threading.Event()
         release = threading.Event()

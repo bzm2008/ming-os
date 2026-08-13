@@ -8,6 +8,12 @@ BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
+LIVE_GRUB = BUILD.split(
+    'cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBCFG', 1
+)[1].split("\nGRUBCFG", 1)[0]
+ISOLINUX = BUILD.split(
+    'cat > "${iso_workdir}/isolinux/isolinux.cfg" << \'ISOLINUXCFG\'', 1
+)[1].split("\nISOLINUXCFG", 1)[0]
 
 
 FORBIDDEN_NORMAL = re.compile(
@@ -21,7 +27,7 @@ def menuentry_blocks(source):
 
 class GrubPerformanceContracts(unittest.TestCase):
     def test_normal_grub_entries_use_kernel_modesetting_and_safe_entry_is_explicit(self):
-        for source in (BUILD, BASE):
+        for source in (LIVE_GRUB, BASE):
             blocks = menuentry_blocks(source)
             self.assertTrue(blocks, "expected generated GRUB menu entries")
             safe_blocks = [block for block in blocks if any(marker in block for marker in (
@@ -38,13 +44,11 @@ class GrubPerformanceContracts(unittest.TestCase):
                 )
 
     def test_isolinux_default_does_not_disable_kernel_modesetting(self):
-        section = BUILD[BUILD.index("cat > \"${iso_workdir}/isolinux/isolinux.cfg\""):]
-        install = re.search(r"LABEL install.*?(?=\nLABEL safe)", section, re.S)
-        self.assertIsNotNone(install)
-        self.assertIsNone(FORBIDDEN_NORMAL.search(install.group(0)))
-        safe = re.search(r"LABEL safe.*?(?=\nLABEL oldpc|ISOLINUXCFG)", section, re.S)
-        self.assertIsNotNone(safe)
-        self.assertIn("nomodeset", safe.group(0))
+        self.assertIn("DEFAULT ming", ISOLINUX)
+        self.assertIn("ONTIMEOUT ming", ISOLINUX)
+        self.assertIn("TIMEOUT 10", ISOLINUX)
+        self.assertEqual(1, ISOLINUX.count("\nLABEL "))
+        self.assertIsNone(FORBIDDEN_NORMAL.search(ISOLINUX))
 
 
 class PicomPerformanceContracts(unittest.TestCase):
@@ -169,8 +173,9 @@ class FirefoxPerformanceContracts(unittest.TestCase):
 
     def test_grub_gate_checks_default_entry_without_rejecting_safe_fallback(self):
         self.assertIn("default_entry", BUILD)
-        self.assertIn("Safe Graphics", BUILD)
-        self.assertIn("must keep a safe-graphics entry", BUILD)
+        self.assertIn("if keystatus --shift; then", LIVE_GRUB)
+        self.assertIn("安全显卡模式", LIVE_GRUB)
+        self.assertIn("must expose exactly one visible default installer entry", BUILD)
 
     def test_official_debian_grub_generator_is_disabled_to_prevent_top_level_fanout(self):
         self.assertIn('"10_linux"', BASE)

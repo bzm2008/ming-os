@@ -690,11 +690,10 @@ api_url() {
     version=$(current_version)
     server=${server:-${UPDATE_SERVER}}
     endpoint=${endpoint:-${API_ENDPOINT}}
-    if [[ "${server}" == "https://scallion.uno" || "${endpoint}" == "/api/ming-update" ]]; then
-        server="${LEGACY_UPDATE_SERVER}"
+    if [[ -z "${server}" || "${server}" == "${LEGACY_UPDATE_SERVER}" || \
+          "${server}" == "https://scallion.uno" || "${endpoint}" == "/api/ming-update" ]]; then
+        server="${UPDATE_SERVER}"
         endpoint="${API_ENDPOINT}"
-        set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
-        set_config '.api_endpoint' "${API_ENDPOINT}" >/dev/null 2>&1 || true
     fi
     channel=${channel:-stable}
     printf '%s%s/check?version=%s&channel=%s\n' "${server}" "${endpoint}" "${version}" "${channel}"
@@ -728,14 +727,7 @@ is_json_response() {
 validate_ota_manifest_schema() {
     local manifest="$1"
     jq -e '
-        (
-          ((.schema == "ming.update.discovery.v1") and
-           (.available | type == "boolean") and
-           (.delivery | type == "string") and
-           (.capability | type == "string"))
-          or
-          ((.has_update // .update_available) | type == "boolean")
-        ) and
+        ((.has_update // .update_available // .available) | type == "boolean") and
         ((.ready // true) | type == "boolean") and
         ((.update_type // "major") | IN("patch", "minor", "major")) and
         (if (.has_update // .update_available // .available // false) then
@@ -751,6 +743,16 @@ validate_ota_manifest_schema() {
     ' "${manifest}" >/dev/null 2>&1
 }
 
+validate_ota_discovery_schema() {
+    local manifest="$1"
+    validate_ota_manifest_schema "${manifest}" && jq -e '
+        (.schema == "ming.update.discovery.v1") and
+        (.available | type == "boolean") and
+        (.delivery | type == "string") and
+        (.capability | type == "string")
+    ' "${manifest}" >/dev/null 2>&1
+}
+
 verify_signed_ota_manifest() {
     local manifest="$1" signature expected_trusted_comment
     signature="$(jq -r '.signature // .minisign_signature // empty' "${manifest}" 2>/dev/null || true)"
@@ -761,6 +763,10 @@ verify_signed_ota_manifest() {
     fi
     if [[ -z "${signature}" ]]; then
         log_error "更新清单缺少 Minisign signature，拒绝在线更新。"
+        return 1
+    fi
+    if [[ -z "${expected_trusted_comment}" ]]; then
+        log_error "更新清单缺少 Minisign trusted_comment，拒绝在线更新。"
         return 1
     fi
     if ! command -v minisign >/dev/null 2>&1; then
@@ -779,7 +785,7 @@ verify_signed_ota_manifest() {
         return 1
     fi
     rm -f "${tmp_manifest}" "${tmp_sig}"
-    if [[ -n "${expected_trusted_comment}" && "${expected_trusted_comment}" != *"Ming OS OTA"* ]]; then
+    if [[ "${expected_trusted_comment}" != *"Ming OS OTA"* ]]; then
         log_error "系统 OTA 签名说明不匹配，拒绝复用非系统发布签名。"
         return 1
     fi
@@ -796,21 +802,15 @@ maybe_migrate_update_server() {
     candidate=$(candidate_api_url)
     response=$(curl -fsSL --proto '=https' --tlsv1.2 \
         --retry 1 --connect-timeout 8 --max-time 20 "${candidate}") || {
-        if [[ -z "${current}" || "${current}" == "${UPDATE_SERVER}" ]]; then
-            set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
-        fi
         log_warn "新 OTA 服务尚未通过 TLS 连通验证，继续使用现有服务。"
         return 1
     }
     temporary=$(mktemp)
     printf '%s\n' "${response}" > "${temporary}"
-    if ! validate_ota_manifest_schema "${temporary}" || \
+    if ! validate_ota_discovery_schema "${temporary}" || \
        ! verify_signed_ota_manifest "${temporary}"; then
         rm -f "${temporary}"
-        if [[ -z "${current}" || "${current}" == "${UPDATE_SERVER}" ]]; then
-            set_config '.update_server' "${LEGACY_UPDATE_SERVER}" >/dev/null 2>&1 || true
-        fi
-        log_warn "新 OTA 服务的清单结构或签名未通过验证，保留现有服务。"
+        log_warn "新 OTA 服务的系统 OTA 清单尚未准备好；不会自动改用旧域名。"
         return 1
     fi
     rm -f "${temporary}"
@@ -819,10 +819,30 @@ maybe_migrate_update_server() {
     log_info "新 OTA 服务已通过 TLS、清单和 Minisign 验证，已安全迁移。"
 }
 
+classify_ota_response() {
+    local response="$1" temporary
+    if ! is_json_response "${response}"; then
+        printf '%s\n' invalid_json
+        return 0
+    fi
+    temporary="$(mktemp)"
+    printf '%s\n' "${response}" > "${temporary}"
+    if ! validate_ota_discovery_schema "${temporary}"; then
+        rm -f "${temporary}"
+        printf '%s\n' untrusted_manifest
+        return 0
+    fi
+    rm -f "${temporary}"
+    printf '%s\n' system_manifest
+}
+
 check_network() {
     local server
     server=$(get_config '.update_server')
     server=${server:-${UPDATE_SERVER}}
+    case "${server}" in
+        "${LEGACY_UPDATE_SERVER}"|https://scallion.uno) server="${UPDATE_SERVER}" ;;
+    esac
     curl -fsSL --connect-timeout 8 --max-time 15 "${server}" >/dev/null
 }
 
@@ -897,7 +917,7 @@ check_update() {
     # endpoint, response schema and system OTA Minisign signature all pass.
     maybe_migrate_update_server || true
 
-    local version response url cdir manifest
+    local version response response_class url cdir manifest
     cdir=$(cache_dir)
     manifest="${cdir}/update_info.json"
     version=$(current_version)
@@ -911,32 +931,39 @@ check_update() {
     url=$(api_url)
     log_info "接口：${url}"
     response=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 45 "${url}") || {
-        local fallback_url
-        fallback_url=$(legacy_api_url)
-        log_warn "获取更新信息失败，尝试旧版兼容入口：${fallback_url}"
-        response=$(curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 "${fallback_url}") || {
-            log_error "获取更新信息失败。"
-            return 1
-        }
+        log_error "无法连接到更新服务器。"
+        return 1
     }
 
-    if ! is_json_response "${response}"; then
-        local fallback_url fallback_response
-        fallback_url=$(legacy_api_url)
-        if [[ "${fallback_url}" != "${url}" ]]; then
-            log_warn "更新服务器返回了非 JSON 内容，尝试旧版兼容入口：${fallback_url}"
-            fallback_response=$(curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 "${fallback_url}" 2>/dev/null || true)
-            if is_json_response "${fallback_response}"; then
-                response="${fallback_response}"
-            else
-                log_error "更新服务器返回了非 JSON 内容，OTA 接口可能暂时不可用。"
-                return 1
-            fi
-        else
+    response_class="$(classify_ota_response "${response}")"
+    case "${response_class}" in
+        system_manifest) ;;
+        untrusted_manifest)
+            rm -f "${manifest}"
+            set_config '.last_check' "$(date -Iseconds)"
+            record_check_result false false "" "服务器清单未通过系统 OTA 签名验证" ""
+            record_background_availability
+            log_error "服务器尚未发布可信的系统 OTA 清单，或清单暂未准备好。"
+            return 1
+            ;;
+        *)
             log_error "更新服务器返回了非 JSON 内容，OTA 接口可能暂时不可用。"
             return 1
-        fi
+            ;;
+    esac
+
+    local response_manifest
+    response_manifest="$(mktemp)"
+    printf '%s\n' "${response}" > "${response_manifest}"
+    if ! verify_signed_ota_manifest "${response_manifest}"; then
+        rm -f "${response_manifest}" "${manifest}"
+        set_config '.last_check' "$(date -Iseconds)"
+        record_check_result false false "" "服务器清单未通过系统 OTA 签名验证" ""
+        record_background_availability
+        log_error "服务器尚未发布可信的系统 OTA 清单，或清单暂未准备好。"
+        return 1
     fi
+    rm -f "${response_manifest}"
 
     local server_error ready has_update new_version notes update_type
     server_error=$(printf '%s' "${response}" | jq -r '.error // ""')
@@ -979,13 +1006,6 @@ check_update() {
     fi
 
     printf '%s\n' "${response}" > "${manifest}"
-    if ! verify_signed_ota_manifest "${manifest}"; then
-        rm -f "${manifest}"
-        set_config '.last_check' "$(date -Iseconds)"
-        record_check_result false false "" "" ""
-        record_background_availability
-        return 1
-    fi
     if [[ "${update_type}" == "major" ]] && dual_boot_major_ota_blocked; then
         record_check_result true true "${new_version}" "${notes}" "${update_type}"
         log_error "此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"

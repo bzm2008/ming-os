@@ -106,26 +106,26 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("ming-refresh-dock-launchers", settings)
 
     def test_light_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
-        self.assertIn("IconSize=32", self.plank_settings)
+        self.assertIn("IconSize=30", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
-        self.assertIn("ZoomPercent=110", self.plank_settings)
-        self.assertIn("MingDockProfile=2641-macos-frosted-centered-1", self.plank_settings)
+        self.assertIn("ZoomPercent=106", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-macos-frosted-centered-2", self.plank_settings)
         self.assertIn("Alignment=3", self.plank_settings)
         self.assertIn("Offset=0", self.plank_settings)
-        self.assertIn("ZoomPercent=110", self.watchdog)
+        self.assertIn("ZoomPercent=106", self.watchdog)
         self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
         self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
         self.assertIn("dock_zoom=false", self.source)
-        self.assertIn('"ZoomPercent=110"', self.build)
+        self.assertIn('"ZoomPercent=106"', self.build)
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
 
     def test_compact_macos_dock_profile_is_applied_at_runtime(self):
         for marker in (
-            "IconSize=32",
+            "IconSize=30",
             "TopPadding=4",
-            "BottomPadding=10",
-            "VisualBottomGap=10",
+            "BottomPadding=14",
+            "VisualBottomGap=18",
         ):
             self.assertIn(marker, self.source)
         self.assertIn("command -v gsettings", self.watchdog)
@@ -196,10 +196,10 @@ class DockLifecycleContracts(unittest.TestCase):
         for marker in (
             "TopRoundness=24",
             "BottomRoundness=24",
-            "HorizPadding=14",
+            "HorizPadding=10",
             "TopPadding=4",
-            "BottomPadding=10",
-            "ItemPadding=3",
+            "BottomPadding=14",
+            "ItemPadding=2",
             "IndicatorSize=4",
             "OuterStrokeColor=255;;255;;255;;255",
             "FillStartColor=255;;255;;255;;230",
@@ -226,10 +226,10 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, plank_theme)
         for marker in (
-            "HorizPadding=14",
+            "HorizPadding=10",
             "TopPadding=4",
-            "BottomPadding=10",
-            "ItemPadding=3",
+            "BottomPadding=14",
+            "ItemPadding=2",
             "LaunchBounceTime=150",
             "ItemMoveTime=130",
         ):
@@ -237,16 +237,18 @@ class DockLifecycleContracts(unittest.TestCase):
 
     def test_glass_rail_profile_migrates_existing_2640_users_once(self):
         for marker in (
-            "MingDockProfile=2641-macos-frosted-centered-1",
+            "MingDockProfile=2641-macos-frosted-centered-2",
             "migrate_glass_rail_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
-            "s/^IconSize=.*/IconSize=32/",
-            "s/^ZoomPercent=.*/ZoomPercent=110/",
+            "s/^IconSize=.*/IconSize=30/",
+            "s/^ZoomPercent=.*/ZoomPercent=106/",
+            "s/^Offset=.*/Offset=0/",
         ):
             self.assertIn(marker, self.watchdog)
         self.assertIn("2641-glass-rail-2", self.watchdog)
         self.assertIn("2641-glass-rail-1", self.watchdog)
         self.assertIn("2641-macos-compact-glass-1", self.watchdog)
+        self.assertIn("2641-macos-frosted-centered-1", self.watchdog)
         self.assertIn("migrate_glass_rail_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
     def test_plank_restarts_once_after_glass_theme_migration(self):
@@ -261,6 +263,12 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("stop_plank", start)
         self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("plank_health_reason"))
         self.assertLess(start.index("MING_PLANK_RELOAD_REQUIRED"), start.index("plank_health_reason"))
+
+    def test_dock_does_not_promote_itself_above_normal_windows(self):
+        self.assertNotIn("dock+above", self.watchdog)
+        self.assertNotIn("plank above", self.watchdog.lower())
+        self.assertIn("avoid_covering_windows", self.watchdog)
+        self.assertIn("reserve_bottom_workarea", self.watchdog)
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(
@@ -361,7 +369,8 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("geometry_is_in_bounds", self.healthcheck)
         self.assertIn("geometry_is_bottom", self.healthcheck)
         self.assertIn("dock_healthy=false", self.healthcheck)
-        self.assertIn('[[ "${dock_stacking}" == "dock" || "${dock_stacking}" == "dock+above" ]]', self.healthcheck)
+        self.assertIn('[[ "${dock_stacking}" == "dock" ]]', self.healthcheck)
+        self.assertNotIn("dock+above", self.healthcheck)
         final_condition = self.healthcheck.rsplit("\n", 3)[-3:]
         self.assertIn("dock_healthy", "\n".join(final_condition))
 

@@ -349,6 +349,10 @@ prepare_chroot_scripts() {
         log_error "missing required build asset: assets/ming-detect-other-os"
         return 1
     fi
+    if [[ ! -s "${SCRIPT_DIR}/assets/ming-os-logo.png" ]]; then
+        log_error "missing required build asset: assets/ming-os-logo.png"
+        return 1
+    fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
@@ -1031,8 +1035,12 @@ validate_iso_grub_config() {
         log_error "ISO GRUB must boot the installer session"
         exit 1
     fi
-    if ! grep -Fq 'nomodeset' "${grub_cfg}"; then
-        log_error "ISO GRUB must keep a safe-graphics entry"
+    if ! grep -Fq 'set timeout=1' "${grub_cfg}"; then
+        log_error "ISO GRUB must auto-start after one second"
+        exit 1
+    fi
+    if [[ "$(grep -c '^menuentry "启动/安装 Ming OS' "${grub_cfg}" || true)" -ne 1 ]]; then
+        log_error "ISO GRUB must expose exactly one visible default installer entry"
         exit 1
     fi
     if ! grep -Fq 'terminal_input console' "${grub_cfg}"; then
@@ -1046,10 +1054,10 @@ validate_iso_grub_config() {
         fi
     done
     # The first installer entry is the default and must leave i915/KMS and
-    # PCI power management untouched.  Only the explicitly labelled Safe
-    # Graphics entry may carry nomodeset for emergency software rendering.
+    # PCI power management untouched. Hidden Shift-only compatibility entries
+    # may carry recovery parameters without cluttering the default menu.
     local default_entry
-    default_entry=$(awk '/^menuentry /{entry=$0; body=""; in_entry=1; next} in_entry{body=body $0 "\n"} in_entry && /^}/{if (entry !~ /Safe Graphics/ && entry !~ /安全显卡模式/ && body ~ /linux \/live\/vmlinuz/) {print body; exit}}' "${grub_cfg}")
+    default_entry=$(awk '/^menuentry "启动\/安装 Ming OS/{body=""; in_entry=1; next} in_entry{body=body $0 "\n"} in_entry && /^}/{print body; exit}' "${grub_cfg}")
     for forbidden in nomodeset i915.modeset=0 pcie_aspm=off pci=nomsi acpi_osi=Linux; do
         if grep -Eq "(^|[[:space:]])${forbidden}([[:space:]]|$)" <<< "${default_entry}"; then
             log_error "default installer GRUB entry must not force ${forbidden}"
@@ -1079,7 +1087,19 @@ validate_isolinux_fallback() {
         log_error "isolinux fallback must boot Linux directly, not chain-load GRUB"
         return 1
     fi
-    for marker in 'DEFAULT install' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1' 'nomodeset'; do
+    if ! grep -Fq 'DEFAULT ming' "${cfg}" || ! grep -Fq 'ONTIMEOUT ming' "${cfg}" || ! grep -Fq 'TIMEOUT 10' "${cfg}"; then
+        log_error "isolinux fallback must use one default entry and a one-second timeout"
+        return 1
+    fi
+    if [[ "$(grep -c '^LABEL ' "${cfg}" || true)" -ne 1 ]]; then
+        log_error "isolinux fallback must expose exactly one boot label"
+        return 1
+    fi
+    if grep -Eq '^LABEL (safe|oldpc)' "${cfg}" || grep -Fq 'nomodeset' "${cfg}"; then
+        log_error "isolinux fallback must not expose separate safe/oldpc labels"
+        return 1
+    fi
+    for marker in 'LABEL ming' 'MENU LABEL Boot / Install Ming OS' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1'; do
         if ! grep -Fq "${marker}" "${cfg}"; then
             log_error "isolinux fallback missing marker: ${marker}"
             return 1
@@ -1452,6 +1472,7 @@ if len(tmpfs_tmp_entries) != 1:
     errors.append("Live fstab must contain exactly one /tmp tmpfs entry")
 
 settings = require_file("usr/local/bin/ming-settings", "硬件与诊断")
+require_file("usr/share/pixmaps/ming-os-logo.png")
 for marker in [
     "ming-network-repair",
     "ming-driver-diagnose",
@@ -1578,7 +1599,7 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["MingDockProfile=2641-macos-frosted-centered-1", "Alignment=3", "Offset=0", "IconSize=32", "ZoomEnabled=true", "ZoomPercent=110", "HideMode=0", "Theme=Ming"]:
+for marker in ["MingDockProfile=2641-macos-frosted-centered-2", "Alignment=3", "Offset=0", "IconSize=30", "ZoomEnabled=true", "ZoomPercent=106", "HideMode=0", "Theme=Ming"]:
     if marker not in plank_settings:
         errors.append(f"Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
@@ -1605,9 +1626,9 @@ for marker in [
         "[PlankDockTheme]",
         "TopRoundness=24",
         "BottomRoundness=24",
-        "BottomPadding=10",
-        "HorizPadding=14",
-        "ItemPadding=3",
+        "BottomPadding=14",
+        "HorizPadding=10",
+        "ItemPadding=2",
         "UrgentBounceTime=420",
         "LaunchBounceTime=150",
         "ItemMoveTime=130"]:
@@ -1635,6 +1656,22 @@ for path, marker in [
 
 package_installer = require_file(
     "usr/local/sbin/ming-package-installer", "sync_opt_app_proxies")
+spark_package_control = require_file(
+    "usr/local/sbin/ming-spark-package-control", "MING_SPARK_PACKAGE_PATTERN")
+for marker in ["administrator_ready", "validate_packages", "validate_deb_paths",
+               "aptss", "ssinstall", "apm_backend_ready"]:
+    if marker not in spark_package_control:
+        errors.append(f"ming-spark-package-control missing boundary marker {marker}")
+spark_backend_status = require_file(
+    "usr/local/bin/ming-spark-backend-status", "APM_MIN_VERSION=1.2.2")
+for marker in ["dpkg --compare-versions", "ming.spark.backends.v1", "APM 后端版本过低"]:
+    if marker not in spark_backend_status:
+        errors.append(f"ming-spark-backend-status missing marker {marker}")
+require_file(
+    "usr/share/polkit-1/actions/org.ming.spark.package-control.policy",
+    "/usr/local/sbin/ming-spark-package-control")
+validate_generated_executable("usr/local/sbin/ming-spark-package-control", "bash")
+validate_generated_executable("usr/local/bin/ming-spark-backend-status", "bash")
 launch_broker = require_file("usr/local/bin/ming-launch", "verify_desktop_proxy")
 for marker in ["manifest-v1.json", "manifest_sha256", "source_sha256", "proxy_sha256"]:
     if marker not in package_installer or marker not in launch_broker:
@@ -2134,13 +2171,19 @@ for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in f"\n{network_modules}\n":
         errors.append(f"modules-load.d must not force Broadcom module {conflicting_module}")
 installed_identity = require_file("usr/local/sbin/ming-fix-installed-identity")
-for marker in ["scanner bluetooth sudo nopasswdlogin autologin",
-               "installed primary user is not in the sudo group",
+for marker in ["scanner bluetooth nopasswdlogin autologin",
+               "passwd -l \"${user_name}\"",
+               "gpasswd -d \"${user_name}\" sudo",
+               "installed primary user unexpectedly has sudo before OOBE",
                "ensure_ming_user || exit 30"]:
     if marker not in installed_identity:
-        errors.append("installed identity repair must keep the primary user in sudo")
-if 'gpasswd -d "${user_name}" sudo' in installed_identity:
-    errors.append("installed identity repair must not remove the primary user from sudo")
+        errors.append("installed identity repair must defer sudo until password-backed OOBE")
+if "scanner bluetooth sudo nopasswdlogin autologin" in installed_identity:
+    errors.append("installed identity repair must not add pre-OOBE user to sudo")
+if 'chroot "${target}" passwd -d "${user_name}"' in installed_identity:
+    errors.append("installed identity repair must not clear the pre-OOBE user password")
+if '["usermod", "-aG", "sudo", user]' not in admin_bootstrap:
+    errors.append("ming-admin-bootstrap must add sudo only after password setup succeeds")
 for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in installed_identity:
         errors.append(f"installed identity repair must not force Broadcom module {conflicting_module}")
@@ -2484,7 +2527,7 @@ PY
 write_grub_config() {
     cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBCFG
 set default=0
-set timeout=8
+set timeout=1
 set pager=1
 
 insmod part_gpt
@@ -2503,6 +2546,7 @@ insmod search_fs_file
 insmod linux
 insmod loopback
 insmod probe
+insmod keystatus
 
 search --no-floppy --label ${ISO_VOLUME_ID} --set=root
 search --no-floppy --file --set=root /live/vmlinuz
@@ -2519,46 +2563,48 @@ set menu_color_normal=white/black
 set menu_color_highlight=black/light-gray
 set gfxmode=auto
 set default=0
-set timeout=8
+set timeout=1
 
-menuentry "安装 Ming OS ${MING_OS_VERSION} (Install Ming OS)" {
+menuentry "启动/安装 Ming OS ${MING_OS_VERSION}" {
  linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
     initrd /live/initrd
 }
 
-menuentry "安装 Ming OS ${MING_OS_VERSION}  (安全显卡模式 / Safe Graphics)" {
- linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
-    initrd /live/initrd
-}
+if keystatus --shift; then
+  submenu "高级兼容启动" {
+    menuentry "Ming OS ${MING_OS_VERSION} 安全显卡模式" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
+        initrd /live/initrd
+    }
 
-submenu "高级兼容启动" {
-  menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
-   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
-      initrd /live/initrd
-  }
+    menuentry "Ming OS ${MING_OS_VERSION} 老电脑兼容模式 (1-3代酷睿 / E3 V1-V2)" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+        initrd /live/initrd
+    }
 
-  menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
-   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
-      initrd /live/initrd
-  }
+    menuentry "Ming OS ${MING_OS_VERSION} Radeon Legacy 恢复模式" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
+        initrd /live/initrd
+    }
 
-  menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
-   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
-      initrd /live/initrd
-  }
+    menuentry "Ming OS ${MING_OS_VERSION} Radeon GCN 尝试模式 (SI/CIK)" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+        initrd /live/initrd
+    }
 
-  # Surface Pro 1/2/3: preserve the touch and ACPI compatibility arguments.
-  menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
-   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
-      initrd /live/initrd
-  }
+    # Surface Pro 1/2/3: preserve the touch and ACPI compatibility arguments.
+    menuentry "Ming OS ${MING_OS_VERSION} Surface Pro 1/2/3 专用模式" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
+        initrd /live/initrd
+    }
 
-  # Mac EFI / MacBook compatibility.
-  menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
-   linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
-      initrd /live/initrd
+    # Mac EFI / MacBook compatibility.
+    menuentry "Ming OS ${MING_OS_VERSION} Mac EFI / MacBook 兼容模式" {
+     linux /live/vmlinuz boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=${MING_USER} user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
+        initrd /live/initrd
+    }
   }
-}
+fi
 
 GRUBCFG
 }
@@ -2726,25 +2772,14 @@ build_iso_manual() {
         cat > "${iso_workdir}/isolinux/isolinux.cfg" << 'ISOLINUXCFG'
 # Ming OS BIOS/Rufus fallback. Boot Linux directly instead of chain-loading GRUB.
 UI menu.c32
-DEFAULT install
+DEFAULT ming
 PROMPT 0
-TIMEOUT 80
+TIMEOUT 10
+ONTIMEOUT ming
 MENU TITLE Ming OS Installer
 
-LABEL install
-  MENU LABEL Install Ming OS
-  KERNEL /live/vmlinuz
-  INITRD /live/initrd
-  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
-
-LABEL safe
-  MENU LABEL Install Ming OS (Safe Graphics)
-  KERNEL /live/vmlinuz
-  INITRD /live/initrd
-  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog ming.installer=1 nomodeset vga=791
-
-LABEL oldpc
-  MENU LABEL Ming OS Old PC Compatibility
+LABEL ming
+  MENU LABEL Boot / Install Ming OS
   KERNEL /live/vmlinuz
   INITRD /live/initrd
   APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
