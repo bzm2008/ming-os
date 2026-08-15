@@ -2196,15 +2196,14 @@ for conflicting_module in ["brcmfmac", "brcmsmac", "b43", "wl"]:
     if f"\n{conflicting_module}\n" in f"\n{network_modules}\n":
         errors.append(f"modules-load.d must not force Broadcom module {conflicting_module}")
 installed_identity = require_file("usr/local/sbin/ming-fix-installed-identity")
-for marker in ["scanner bluetooth nopasswdlogin autologin",
+for marker in ["scanner bluetooth sudo nopasswdlogin autologin",
                "passwd -l \"${user_name}\"",
-               "gpasswd -d \"${user_name}\" sudo",
-               "installed primary user unexpectedly has sudo before OOBE",
+               "installed primary user must belong to sudo group",
                "ensure_ming_user || exit 30"]:
     if marker not in installed_identity:
-        errors.append("installed identity repair must defer sudo until password-backed OOBE")
-if "scanner bluetooth sudo nopasswdlogin autologin" in installed_identity:
-    errors.append("installed identity repair must not add pre-OOBE user to sudo")
+        errors.append("installed identity repair must preserve password-backed sudo administration")
+if 'gpasswd -d "${user_name}" sudo' in installed_identity:
+    errors.append("installed identity repair must keep the primary user in sudo")
 if 'chroot "${target}" passwd -d "${user_name}"' in installed_identity:
     errors.append("installed identity repair must not clear the pre-OOBE user password")
 if '["usermod", "-aG", "sudo", user]' not in admin_bootstrap:

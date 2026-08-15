@@ -2488,7 +2488,7 @@ ensure_ming_user() {
     user_home="$(resolve_user_home "${user_name}")"
     local groups=(
         users adm cdrom dip plugdev lp lpadmin netdev audio video render input
-        scanner bluetooth nopasswdlogin autologin
+        scanner bluetooth sudo nopasswdlogin autologin
     )
     local grp
 
@@ -2507,9 +2507,9 @@ ensure_ming_user() {
     else
         chroot "${target}" useradd -m -d "${user_home}" -s /bin/bash -c "Ming OS User" "${user_name}" >/dev/null 2>&1 || true
     fi
-    # The active-session bootstrap policy can set the first password without
-    # an existing administrator. Until that succeeds, keep this account locked
-    # and out of sudo so auto-login cannot become passwordless root access.
+    # The active-session bootstrap policy sets the first password after first
+    # boot. Keep the account locked until then, but preserve sudo membership so
+    # installed systems are maintainable as soon as the user finishes OOBE.
     chroot "${target}" passwd -l "${user_name}" >/dev/null 2>&1 || return 1
     chroot "${target}" passwd -l root >/dev/null 2>&1 || return 1
 
@@ -2518,9 +2518,8 @@ ensure_ming_user() {
             && chroot "${target}" usermod -aG "${grp}" "${user_name}" >/dev/null 2>&1 \
             || true
     done
-    chroot "${target}" gpasswd -d "${user_name}" sudo >/dev/null 2>&1 || true
-    if chroot "${target}" id -nG "${user_name}" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then
-        echo "ERROR: installed primary user unexpectedly has sudo before OOBE" >&2
+    if ! chroot "${target}" id -nG "${user_name}" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then
+        echo "ERROR: installed primary user must belong to sudo group" >&2
         return 1
     fi
 

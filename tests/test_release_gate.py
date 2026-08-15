@@ -328,16 +328,16 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/bin/sudo")',
             'require_file("usr/bin/pkexec")',
             'require_file("etc/sudoers", "%sudo")',
-            "installed primary user unexpectedly has sudo before OOBE",
-            "installed identity repair must defer sudo until password-backed OOBE",
+            "installed primary user must belong to sudo group",
+            "installed identity repair must preserve password-backed sudo administration",
             "ensure_ming_user || exit 30",
         ):
             self.assertIn(marker, self.build)
-        self.assertIn('gpasswd -d \\"${user_name}\\" sudo', self.build)
+        self.assertIn('scanner bluetooth sudo nopasswdlogin autologin', self.build)
         self.assertIn('passwd -l \\"${user_name}\\"', self.build)
-        self.assertIn("installed identity repair must not add pre-OOBE user to sudo", self.build)
+        self.assertIn("installed identity repair must keep the primary user in sudo", self.build)
         self.assertIn("ming-admin-bootstrap must add sudo only after password setup succeeds", self.build)
-        self.assertNotIn("installed identity repair must keep the primary user in sudo", self.build)
+        self.assertNotIn("installed identity repair must not add pre-OOBE user to sudo", self.build)
 
     def test_rootfs_gate_requires_keyboard_accessible_install_mode_chooser(self):
         self.assertIn('chooser_path = root / "usr/local/bin/ming-install-mode-chooser"', self.build)

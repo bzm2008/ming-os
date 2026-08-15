@@ -397,16 +397,15 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn('echo "user:user"', self.base)
         self.assertNotIn('> /etc/ming-os/identity', self.base.split('user:user')[0] if 'user:user' in self.base else '')
 
-    def test_installed_identity_defers_sudo_until_password_backed_oobe(self):
+    def test_installed_identity_preserves_sudo_but_defers_password_until_oobe(self):
         identity = self.base.split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1
         )[1].split("\nMINGIDENTITY", 1)[0]
-        self.assertIn("scanner bluetooth nopasswdlogin autologin", identity)
-        self.assertNotIn("scanner bluetooth sudo nopasswdlogin autologin", identity)
-        self.assertIn('gpasswd -d "${user_name}" sudo', identity)
+        self.assertIn("scanner bluetooth sudo nopasswdlogin autologin", identity)
+        self.assertNotIn('gpasswd -d "${user_name}" sudo', identity)
         self.assertIn('passwd -l "${user_name}"', identity)
         self.assertNotIn('chroot "${target}" passwd -d "${user_name}"', identity)
-        self.assertIn("installed primary user unexpectedly has sudo before OOBE", identity)
+        self.assertIn("installed primary user must belong to sudo group", identity)
         self.assertIn("ensure_ming_user || exit 30", identity)
         self.assertIn('["usermod", "-aG", "sudo", user]', self.bootstrap)
 
