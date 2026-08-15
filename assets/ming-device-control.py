@@ -520,7 +520,7 @@ class DeviceController:
             if info_rc != 0:
                 if wpctl_status is not None:
                     return wpctl_status
-                pactl_error = info_error or info or "PulseAudio 服务没有运行。"
+                pactl_error = info_error or info or "PipeWire 的 PulseAudio 兼容服务没有运行。"
                 if self._can_run("amixer"):
                     alsa_ok, alsa_value, alsa_error = self._read_volume("amixer")
                     if alsa_ok:
@@ -540,8 +540,8 @@ class DeviceController:
             defaults = self._pactl_info_defaults(info)
             default_sink = defaults["sink"]
             if not default_sink or default_sink.lower() == "auto_null":
-                # Keep the real sink/card inventory even when PulseAudio has
-                # not selected a default yet.  The repair action uses this
+                # Keep the real sink/card inventory even when the compatibility
+                # server has not selected a default yet.  The repair action uses this
                 # inventory to recover an internal analog output.
                 sinks_rc, sinks_output, _sinks_error = self._run(
                     ["pactl", "list", "short", "sinks"])
@@ -558,7 +558,7 @@ class DeviceController:
                     default_source=defaults["source"],
                     playback_devices=playback_devices,
                     cards=cards,
-                    error="PulseAudio 没有可用的默认输出设备。")
+                    error="PipeWire 音频服务没有可用的默认输出设备。")
 
             volume_rc, volume_output, volume_error = self._run(
                 ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
@@ -584,7 +584,7 @@ class DeviceController:
                         available=True, state="no_default_sink", backend="pactl",
                         server_available=True, default_sink=default_sink,
                         default_source=defaults["source"], playback_devices=playback_devices,
-                        error="默认输出设备未出现在 PulseAudio 可用设备列表中。")
+                        error="默认输出设备未出现在 PipeWire 可用设备列表中。")
                 default_device = {
                     "id": default_sink,
                     "display_name": self._audio_device_display_name(default_sink),
@@ -718,13 +718,13 @@ class DeviceController:
         return selected.strip() if isinstance(selected, str) else ""
 
     def audio_select_output(self, output_id):
-        """Honor an explicit user choice from the current PulseAudio sink list."""
+        """Honor an explicit user choice from the current PipeWire sink list."""
         status = self.audio_status()
         if status.get("backend") != "pactl" or not status.get("server_available"):
             return {
                 "ok": False, "selected": "", "changed": False,
                 "action": "unavailable",
-                "error": "PulseAudio 会话不可用，无法切换音频输出。",
+                "error": "PipeWire 音频会话不可用，无法切换音频输出。",
                 "status": status,
             }
         device = next(
@@ -804,7 +804,7 @@ class DeviceController:
         if status.get("backend") != "pactl" or not status.get("server_available"):
             return {
                 "ok": False, "changed": False, "action": "unavailable",
-                "error": "PulseAudio 会话不可用，无法修复声音播放。",
+                "error": "PipeWire 音频会话不可用，无法修复声音播放。",
                 "status": status,
             }
         active = self._active_playback_device(status)
@@ -918,7 +918,7 @@ class DeviceController:
         return ""
 
     def audio_repair_call(self):
-        """Restore an internal duplex source only when PulseAudio has none.
+        """Restore an internal duplex source only when PipeWire has none.
 
         External USB, HDMI and Bluetooth paths are deliberately left unchanged:
         a call repair button must never steal a working headset or display audio.
@@ -929,7 +929,7 @@ class DeviceController:
                 "ok": False,
                 "changed": False,
                 "action": "unavailable",
-                "error": "PulseAudio 会话不可用，无法修复通话音频。",
+                "error": "PipeWire 音频会话不可用，无法修复通话音频。",
                 "status": status,
             }
         if status["physical_input_present"]:
@@ -1010,7 +1010,7 @@ class DeviceController:
         }
 
     def audio_test_input(self):
-        """Record three seconds through PulseAudio and report whether bytes arrive."""
+        """Record three seconds through the PipeWire compatibility layer and report bytes."""
         status = self.audio_status()
         if status["backend"] != "pactl" or not status["physical_input_present"]:
             return {
@@ -1030,7 +1030,7 @@ class DeviceController:
             return {
                 "ok": False,
                 "seconds": 3,
-                "error": "缺少 PulseAudio 录音工具 parecord。",
+                "error": "缺少 PipeWire 兼容录音工具 parecord。",
                 "status": status,
             }
         capture_path = ""
@@ -1349,7 +1349,7 @@ class DeviceController:
     @staticmethod
     def _wireless_firmware(output):
         pattern = re.compile(
-            r"iwlwifi|iwlmvm|rtw[0-9_]*|rtl8|brcm|brcmfmac|b43|bcma|"
+            r"iwlwifi|iwlmvm|mwifiex|mrvl|rtw[0-9_]*|rtl8|brcm|brcmfmac|b43|bcma|"
             r"ath[0-9a-z_]*|mt76|cfg80211|mac80211|wlan|wireless",
             re.I,
         )

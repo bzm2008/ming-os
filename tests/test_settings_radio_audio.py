@@ -233,6 +233,18 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("process.communicate(input_text", stdin_runner)
         self.assertNotIn("password", command.replace("--password-stdin", ""))
 
+    def test_wifi_password_dialog_has_a_keyboard_default_and_enter_action(self):
+        source = function_source("on_wifi_connect", "MingSettings")
+
+        self.assertIn('dlg.set_default_response("ok")', source)
+        self.assertIn('entry.connect("activate", lambda _entry: dlg.response("ok"))', source)
+
+    def test_normal_wifi_page_exposes_one_click_repair_without_sending_users_to_nmtui(self):
+        source = function_source("build_network", "MingSettings")
+
+        self.assertIn('self.wifi_repair_btn = Gtk.Button(label="修复无线网络")', source)
+        self.assertIn("self.on_wifi_repair", source)
+
     def test_wifi_status_surfaces_b43_compatibility_help_not_fake_repair(self):
         refresh = function_source("on_wifi_status_refresh", "MingSettings")
         page = function_source("build_network", "MingSettings")
@@ -343,6 +355,7 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
                     raise RuntimeError(dialog_error)
                 self.response_handler = None
                 self.presented = False
+                self.default_response = None
                 dialogs.append(self)
 
             def set_extra_child(self, _child):
@@ -353,6 +366,9 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
 
             def set_response_appearance(self, *_args):
                 pass
+
+            def set_default_response(self, response):
+                self.default_response = response
 
             def connect(self, _signal, handler):
                 self.response_handler = handler
@@ -367,6 +383,7 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
                 if password_error:
                     raise RuntimeError(password_error)
                 self.text = "super-secret"
+                self.activate_handler = None
                 entries.append(self)
 
             def set_placeholder_text(self, _text):
@@ -377,6 +394,10 @@ class SettingsAsyncBehaviorTests(unittest.TestCase):
 
             def set_text(self, text):
                 self.text = text
+
+            def connect(self, signal, handler):
+                if signal == "activate":
+                    self.activate_handler = handler
 
         class FakeAdw:
             MessageDialog = Dialog

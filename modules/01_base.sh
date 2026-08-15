@@ -827,7 +827,7 @@ configure_users() {
     passwd -d "${MING_USER}"
 
     # 创建必要的组（如果不存在）
-    for grp in lpadmin plugdev nopasswdlogin autologin render; do
+    for grp in lpadmin plugdev netdev nopasswdlogin autologin render; do
         getent group "${grp}" >/dev/null 2>&1 || groupadd -r "${grp}" 2>/dev/null || true
     done
 
@@ -983,6 +983,25 @@ managed=true
 [device]
 wifi.scan-rand-mac-address=no
 NMCFG
+
+    # Joining a Wi-Fi network is an ordinary desktop action.  Permit only the
+    # active local netdev user to control NetworkManager's radio and connection
+    # state; driver repair and system-wide configuration still require admin.
+    mkdir -p /etc/polkit-1/rules.d
+    cat > /etc/polkit-1/rules.d/50-ming-network.rules << 'MINGNETWORKPOLICY'
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.enable-disable-wifi",
+        "org.freedesktop.NetworkManager.enable-disable-network"
+    ];
+    if (subject.active && subject.local && subject.isInGroup("netdev")
+            && allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});
+MINGNETWORKPOLICY
+    chmod 0644 /etc/polkit-1/rules.d/50-ming-network.rules
 
     systemctl enable NetworkManager 2>/dev/null || true
     # ModemManager is installed for WWAN/USB modem compatibility but is
@@ -4231,9 +4250,11 @@ JOURNALCFG
         systemctl disable --now serial-getty@ttyS0.service 2>/dev/null || true
     fi
 
-    # Select exactly one OOM backend at runtime.  The selector prefers
-    # systemd-oomd only when unified cgroup memory control is actually
-    # available; otherwise earlyoom remains the bounded fallback.
+    # Keep exactly one real system-wide OOM guard active.  cgroup v2 by itself
+    # does not configure a ManagedOOM target, so selecting systemd-oomd merely
+    # because its service exists can leave an old machine unprotected until it
+    # is already swapping heavily.  earlyoom observes global memory/swap
+    # pressure and is therefore the dependable default for this desktop.
     cat > /usr/local/sbin/ming-oom-policy << 'MINGOOMPOLICY'
 #!/usr/bin/env bash
 set -u
@@ -4244,25 +4265,12 @@ mkdir -p "${STATE_DIR}"
 backend=none
 foreground_protected=false
 
-has_unified_memory() {
-    [[ -r /sys/fs/cgroup/cgroup.controllers ]] \
-        && grep -qw memory /sys/fs/cgroup/cgroup.controllers 2>/dev/null
-}
-
 unit_available() {
     systemctl cat "$1" >/dev/null 2>&1
 }
 
-if has_unified_memory && unit_available systemd-oomd.service; then
-    systemctl enable --now systemd-oomd.service >/dev/null 2>&1 || true
-    if systemctl is-active --quiet systemd-oomd.service 2>/dev/null; then
-        backend=systemd-oomd
-        systemctl disable --now earlyoom.service >/dev/null 2>&1 || true
-    fi
-fi
-
-if [[ "${backend}" != systemd-oomd ]] && unit_available earlyoom.service; then
-    systemctl disable --now systemd-oomd.service >/dev/null 2>&1 || true
+systemctl disable --now systemd-oomd.service >/dev/null 2>&1 || true
+if unit_available earlyoom.service; then
     systemctl enable --now earlyoom.service >/dev/null 2>&1 || true
     if systemctl is-active --quiet earlyoom.service 2>/dev/null; then
         backend=earlyoom
@@ -4304,7 +4312,7 @@ MINGOOMPOLICYSVC
 
     mkdir -p /etc/default
     cat > /etc/default/earlyoom << EARLYOOMCFG
-EARLYOOM_ARGS="-m 4 -s 8 -r 60 --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager|pipewire|pulseaudio|wireplumber|fcitx5|ming-phone-desktop|ming-update)$'"
+EARLYOOM_ARGS="-m 8 -s 12 -r 60 --avoid '^(Xorg|xfce4-session|lightdm|NetworkManager|pipewire|pulseaudio|wireplumber|fcitx5|ming-phone-desktop|ming-update)$'"
 EARLYOOMCFG
 
     # Apply timer migration only when this kernel exposes the key.  The helper

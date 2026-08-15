@@ -167,6 +167,11 @@ class WifiClassificationTests(unittest.TestCase):
         self.assertNotIn("amdgpu", filtered)
         self.assertIn("iwlwifi", filtered)
 
+    def test_surface_marvell_mwifiex_firmware_error_is_not_hidden_by_wifi_diagnostics(self):
+        filtered = self.device.DeviceController._wireless_firmware(
+            "mwifiex_pcie 0000:01:00.0: failed to get firmware helper")
+        self.assertIn("mwifiex_pcie", filtered)
+
     def test_probe_uses_absolute_rfkill_path(self):
         runner = FakeRunner({})
         controller = self.device.DeviceController(runner=runner, executable=lambda _name: True)

@@ -417,7 +417,7 @@ window.ming-desktop {
   font-weight: 700;
 }
 .folder-panel {
-  background: rgba(251, 253, 251, 0.98);
+  background: #FBFDFB;
   border: 1px solid rgba(31, 98, 84, 0.10);
   border-radius: 12px;
   padding: 16px;
@@ -456,7 +456,7 @@ window.ming-desktop {
 .status-widget {
   border-radius: 14px;
   padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.72);
+  background: #F9FCFA;
   border: 1px solid rgba(255, 255, 255, 0.78);
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
 }
@@ -470,12 +470,12 @@ window.ming-desktop {
   min-height: 38px;
   border-radius: 27px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.82);
+  background: #FFFFFF;
   border: 1px solid rgba(255, 255, 255, 0.92);
   box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
   color: #17231F;
 }
-.status-compact-pill:hover { background: rgba(255, 255, 255, 0.96); }
+.status-compact-pill:hover { background: #F4F8F5; }
 .status-compact-time { font-size: 19px; font-weight: 700; color: #17231F; }
 .status-compact-date { font-size: 10.5px; font-weight: 500; color: #2D695C; }
 .status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
@@ -483,20 +483,19 @@ window.ming-desktop {
 .status-button {
   border-radius: 9px;
   padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.54);
+  background: #FFFFFF;
   border: 1px solid rgba(47, 138, 125, 0.10);
   color: #21302A;
 }
-.status-button:hover { background: rgba(255, 255, 255, 0.88); }
+.status-button:hover { background: #F4F8F5; }
 .ming-desktop-dark .clock-widget,
 .ming-desktop-dark .status-widget {
-  background: rgba(32, 40, 36, 0.88);
+  background: #202824;
   border-color: rgba(159, 231, 215, 0.18);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255,255,255,0.08);
 }
 .ming-desktop-dark .clock-time,
-.ming-desktop-dark .status-compact-time,
-.ming-desktop-dark .notification-title {
+.ming-desktop-dark .status-compact-time {
   color: #E7EEE9;
 }
 .ming-desktop-dark .clock-date,
@@ -509,7 +508,7 @@ window.ming-desktop {
 }
 .ming-desktop-dark .status-compact-pill,
 .ming-desktop-dark .status-button {
-  background: rgba(32, 40, 36, 0.88);
+  background: #202824;
   border-color: rgba(159, 231, 215, 0.18);
   color: #E7EEE9;
 }
@@ -557,10 +556,16 @@ window.ming-desktop {
 .notification-panel { border-radius: 12px; border: 1px solid rgba(47, 138, 125, 0.14); }
 .notification-title { font-weight: 700; color: #17231F; }
 .notification-body { color: #596760; font-size: 10px; font-weight: 400; }
+.ming-desktop-dark .notification-panel {
+  background: #202824;
+  border-color: rgba(159, 231, 215, 0.18);
+}
+.ming-desktop-dark .notification-title { color: #E7EEE9; }
+.ming-desktop-dark .notification-body { color: #A9BDB5; }
 .launch-feedback {
   border-radius: 14px;
   padding: 12px 16px;
-  background: rgba(252, 254, 252, 0.98);
+  background: #FCFEFC;
   border: 1px solid rgba(47, 138, 125, 0.16);
   box-shadow: 0 14px 36px rgba(21, 68, 56, 0.16);
 }
@@ -3046,19 +3051,9 @@ class StatusWidget(Gtk.Box):
         if include_update:
             add_item("更新并重启", self.open_update_and_restart_dialog)
         menu.append(Gtk.SeparatorMenuItem())
-        add_item("注销", [
-            ["xfce4-session-logout", "--logout"],
-            ["gnome-session-quit", "--logout"],
-            ["mate-session-save", "--logout-dialog"],
-        ])
-        add_item("重新启动", [
-            ["xfce4-session-logout", "--reboot"],
-            ["gnome-session-quit", "--reboot"],
-        ])
-        add_item("关机", [
-            ["xfce4-session-logout", "--halt"],
-            ["gnome-session-quit", "--power-off"],
-        ])
+        add_item("注销", ["ming-power-action", "logout"])
+        add_item("重新启动", ["ming-power-action", "reboot"])
+        add_item("关机", ["ming-power-action", "poweroff"])
         menu.show_all()
         menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
 

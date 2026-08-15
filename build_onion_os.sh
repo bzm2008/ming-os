@@ -1169,8 +1169,8 @@ validate_required_desktop_runtime() {
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
-        pulseaudio pulseaudio-utils alsa-utils libasound2-plugins \
-        pulseaudio-module-bluetooth pavucontrol bluez upower pkexec polkitd \
+        pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
+        libspa-0.2-bluetooth pavucontrol bluez upower pkexec polkitd \
         lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
         i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
         mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \
@@ -1828,6 +1828,7 @@ for helper in [
     "usr/local/bin/ming-surface-support",
     "usr/local/bin/ming-classic-mode",
     "usr/local/bin/ming-lock",
+    "usr/local/bin/ming-power-action",
     "usr/local/bin/ming-picom",
     "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-desktop-healthcheck",
@@ -1943,6 +1944,7 @@ bash_generated_helpers = [
     "usr/local/sbin/ming-oom-policy",
     "usr/local/sbin/ming-timer-policy",
     "usr/local/bin/ming-ota-run",
+    "usr/local/bin/ming-power-action",
 ]
 for relative_path in bash_generated_helpers:
     validate_generated_executable(relative_path, "bash")

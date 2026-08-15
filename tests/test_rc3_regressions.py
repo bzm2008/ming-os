@@ -12,6 +12,11 @@ DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 APPEARANCE = (ROOT / "assets" / "ming-appearance-control.py").read_text(encoding="utf-8")
 PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
+BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+
+
+def heredoc(source, opener, marker):
+    return source.split(opener, 1)[1].split(marker, 1)[0]
 
 
 class Rc3DockContracts(unittest.TestCase):
@@ -24,6 +29,12 @@ class Rc3DockContracts(unittest.TestCase):
         self.assertIn("MingDockProfile=2640-legacy-centered", settings)
         self.assertNotIn("VisualBottomGap=18", settings)
         self.assertNotIn("reserve_bottom_workarea", DESKTOP)
+
+
+class Rc3PowerContracts(unittest.TestCase):
+    def test_rootfs_gate_requires_the_power_action_helper(self):
+        self.assertIn('"usr/local/bin/ming-power-action"', BUILD)
+        self.assertIn("ming-power-action", DESKTOP)
 
 
 class Rc3AppearanceContracts(unittest.TestCase):
@@ -94,11 +105,194 @@ class Rc3AppearanceContracts(unittest.TestCase):
         self.assertNotIn("gtk-3.0 +        /usr/share/themes/Ming-Dark", DESKTOP)
 
     def test_terminal_background_is_opaque(self):
-        terminal = DESKTOP.split(
-            "cat > \"/home/${MING_USER}/.config/xfce4/terminal/terminalrc\" << 'TERMINALRC'", 1
-        )[1].split("TERMINALRC", 1)[0]
+        terminal = heredoc(
+            DESKTOP,
+            "cat > \"/home/${MING_USER}/.config/xfce4/terminal/terminalrc\" << 'TERMINALRC'",
+            "TERMINALRC",
+        )
         self.assertIn("ColorBackground=", terminal)
-        self.assertNotIn("background-opacity=88", terminal)
+        self.assertIn("BackgroundMode=TERMINAL_BACKGROUND_SOLID", terminal)
+        self.assertIn("BackgroundOpacity=1.00", terminal)
+        self.assertIn('"ColorBackground": "#1D2421" if dark else "#F7FAF7"', APPEARANCE)
+        self.assertIn('"BackgroundOpacity": "1.00"', APPEARANCE)
+
+    def test_system_text_surfaces_and_menus_are_opaque(self):
+        light = heredoc(
+            DESKTOP,
+            "cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'",
+            "MINGGLASSCSS",
+        )
+        for declaration in (
+            "background-color: #FFFFFF;",
+            "background-color: #FFF9F9;",
+            "background-color: #F5F8F4;",
+            "background-color: #EEF3F0;",
+            "background-color: #1C2723;",
+        ):
+            self.assertIn(declaration, light)
+        for translucent_surface in (
+            "background-color: rgba(255, 255, 255, 0.90);",
+            "background-color: rgba(255, 255, 255, 0.95);",
+            "background-color: rgba(255, 255, 255, 0.96);",
+            "background-color: rgba(255, 255, 255, 0.86);",
+            "background-color: rgba(238, 243, 240, 0.92);",
+        ):
+            self.assertNotIn(translucent_surface, light)
+
+        whisker = heredoc(
+            DESKTOP,
+            "cat > \"/home/${MING_USER}/.config/xfce4/panel/whiskermenu-1.rc\" << 'WHISKERRC'",
+            "WHISKERRC",
+        )
+        self.assertIn("menu-opacity=100", whisker)
+        self.assertIn("background-opacity=100", whisker)
+
+    def test_notification_themes_use_solid_light_and_dark_surfaces(self):
+        for theme, marker, color in (
+            ("Ming-Glass", "MINGGLASSNOTIFY", "#FFFFFF"),
+            ("Ming-Dark", "MINGDARKNOTIFY", "#202824"),
+        ):
+            opener = (
+                "cat > /usr/share/themes/%s/xfce-notify-4.0/gtk.css << '%s'"
+                % (theme, marker)
+            )
+            self.assertIn(opener, DESKTOP)
+            notification = heredoc(DESKTOP, opener, marker)
+            self.assertIn("background-color: %s;" % color, notification)
+            self.assertNotRegex(notification, r"background-color:\s*rgba\(")
+
+    def test_ming_settings_and_wifi_password_dialog_use_solid_surfaces(self):
+        css = SETTINGS[
+            SETTINGS.index("    def install_css(self):"):
+            SETTINGS.index("    def apply_settings_theme", SETTINGS.index("    def install_css(self):"))
+        ]
+        for declaration in (
+            "background: #EEF3EF;",
+            "background: #FFFFFF;",
+            "background: #202824;",
+        ):
+            self.assertIn(declaration, css)
+        self.assertNotIn("background: alpha(#FFFFFF, 0.94);", css)
+        self.assertNotIn("background: alpha(#EEF3EF, 0.98);", css)
+        self.assertIn(".ming-wifi-password-dialog", css)
+        self.assertIn(".ming-wifi-password-dialog-dark", css)
+
+        wifi = SETTINGS[
+            SETTINGS.index("    def on_wifi_connect(self, _btn, network):"):
+            SETTINGS.index("    def apply_wifi_connect_result", SETTINGS.index("    def on_wifi_connect(self, _btn, network):"))
+        ]
+        self.assertIn('dlg.add_css_class("ming-wifi-password-dialog")', wifi)
+        self.assertIn('dlg.add_css_class("ming-wifi-password-dialog-dark")', wifi)
+
+    def test_status_and_notification_panels_keep_text_on_solid_surfaces(self):
+        for declaration in (
+            "background: #F9FCFA;",
+            "background: #FFFFFF;",
+            "background: #202824;",
+            "background: #FCFEFC;",
+        ):
+            self.assertIn(declaration, PHONE)
+        for translucent_surface in (
+            "background: rgba(255, 255, 255, 0.72);",
+            "background: rgba(255, 255, 255, 0.82);",
+            "background: rgba(32, 40, 36, 0.88);",
+            "background: rgba(252, 254, 252, 0.98);",
+        ):
+            self.assertNotIn(translucent_surface, PHONE)
+
+    def test_dark_notification_history_keeps_dark_text_surface_pairs(self):
+        for selector, declaration in (
+            (".ming-desktop-dark .notification-panel", "background: #202824;"),
+            (".ming-desktop-dark .notification-title", "color: #E7EEE9;"),
+            (".ming-desktop-dark .notification-body", "color: #A9BDB5;"),
+        ):
+            block = PHONE.split(selector + " {", 1)[1].split("}", 1)[0]
+            self.assertIn(declaration, block)
+
+    def test_generated_utility_windows_and_installer_cards_are_opaque(self):
+        for old_surface in (
+            "background: rgba(255,255,255,0.78);",
+            "background: rgba(255,255,255,0.82);",
+            "background: rgba(255,255,255,0.92);",
+            "background: rgba(251, 253, 251, 0.98);",
+        ):
+            self.assertNotIn(old_surface, DESKTOP + PHONE)
+        for solid_surface in (
+            "background: #FFFFFF;",
+            "background: #FBFDFB;",
+            "background: #FFF7F7;",
+            "background: #EAF3EF;",
+        ):
+            self.assertIn(solid_surface, DESKTOP + PHONE)
+
+    def test_notifyd_initial_opacity_is_solid(self):
+        notify = heredoc(
+            DESKTOP,
+            "cat > \"/home/${MING_USER}/.config/xfce4/xfce4-notifyd.xml\" << 'NOTIFYCFG'",
+            "NOTIFYCFG",
+        )
+        self.assertIn('name="initial-opacity" type="double" value="1.0"', notify)
+        self.assertNotIn('name="initial-opacity" type="double" value="0.85"', notify)
+
+    def test_compatibility_xfce_panel_keeps_its_text_surface_opaque(self):
+        light = heredoc(
+            DESKTOP,
+            "cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'",
+            "MINGGLASSCSS",
+        )
+        panel = heredoc(
+            DESKTOP,
+            "cat > \"${xfconf_dir}/xfce4-panel.xml\" << 'PANELXML'",
+            "PANELXML",
+        )
+        self.assertIn(".xfce4-panel {\n  background-color: #FFFFFF;", light)
+        self.assertIn('<value type="double" value="1.000000"/>', panel)
+        self.assertIn('<property name="leave-opacity" type="uint" value="100"/>', panel)
+        self.assertNotIn("background-color: rgba(255, 255, 255, 0.74);", light)
+        self.assertNotIn('<value type="double" value="0.680000"/>', panel)
+        self.assertNotIn('<property name="leave-opacity" type="uint" value="88"/>', panel)
+
+
+class Rc3PicomReadabilityContracts(unittest.TestCase):
+    def test_picom_transparency_is_limited_to_the_dock(self):
+        main = heredoc(
+            DESKTOP,
+            "cat > /home/${MING_USER}/.config/picom/picom.conf << 'PICOMCFG'",
+            "PICOMCFG",
+        )
+        for wintype in ("notification", "popup_menu", "dropdown_menu", "utility"):
+            self.assertRegex(main, rf"{wintype}\s*=\s*\{{[^}}]*opacity\s*=\s*1\.0;")
+        self.assertRegex(main, r"dock\s*=\s*\{[^}]*opacity\s*=\s*0\.92;")
+
+    def test_low_resource_and_software_profiles_disable_effects_and_keep_text_surfaces_opaque(self):
+        profiles = (
+            heredoc(
+                DESKTOP,
+                "cat > /etc/xdg/picom/picom-fallback.conf << 'PICOMFALLBACK'",
+                "PICOMFALLBACK",
+            ),
+            heredoc(
+                DESKTOP,
+                "cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'",
+                "PICOMLOWMEM",
+            ),
+            heredoc(
+                APPS,
+                "cat > /etc/xdg/picom/picom-fallback.conf << PICOMFALLBACK",
+                "PICOMFALLBACK",
+            ),
+        )
+        for profile in profiles:
+            self.assertIn("shadow = false;", profile)
+            self.assertIn("fading = false;", profile)
+            self.assertNotIn("fade-in-step", profile)
+            self.assertNotIn("fade-out-step", profile)
+            for wintype in ("notification", "popup_menu", "dropdown_menu"):
+                self.assertRegex(
+                    profile,
+                    rf"{wintype}\s*=\s*\{{[^}}]*opacity\s*=\s*1\.0;",
+                )
+            self.assertRegex(profile, r"dock\s*=\s*\{[^}]*opacity\s*=\s*0\.92;")
 
 
 class Rc3SparkContracts(unittest.TestCase):

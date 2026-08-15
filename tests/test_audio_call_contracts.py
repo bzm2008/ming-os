@@ -13,12 +13,32 @@ class AudioCallBuildContracts(unittest.TestCase):
         cls.apps = APPS.read_text(encoding="utf-8")
         cls.base = BASE.read_text(encoding="utf-8")
 
-    def test_required_runtime_includes_pulseaudio_call_dependencies(self):
+    def test_required_runtime_uses_pipewire_and_has_no_pulseaudio_daemon(self):
         required_block = self.apps[
             self.apps.index("readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=("):
             self.apps.index(")", self.apps.index("readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(")) + 1]
-        for package in ["libasound2-plugins", "pulseaudio-module-bluetooth", "pavucontrol"]:
+        for package in [
+            "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber",
+            "libspa-0.2-bluetooth", "pulseaudio-utils", "libasound2-plugins",
+            "pavucontrol",
+        ]:
             self.assertIn(package, required_block)
+        self.assertNotRegex(required_block, r"(?m)^\s*pulseaudio\s*$")
+        self.assertNotIn("pulseaudio-module-bluetooth", required_block)
+
+    def test_build_and_resume_gates_require_the_pipewire_runtime_stack(self):
+        for source in (self.apps, (ROOT / "build_onion_os.sh").read_text(encoding="utf-8"),
+                       (ROOT / "resume_build.sh").read_text(encoding="utf-8")):
+            for package in (
+                "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber",
+                "libspa-0.2-bluetooth",
+            ):
+                self.assertIn(package, source)
+        self.assertIn("configure_pipewire_audio", self.apps)
+        self.assertIn(
+            "systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service",
+            self.apps,
+        )
 
     def test_wechat_wrapper_repairs_audio_before_launch_without_memory_ceiling(self):
         start = self.apps.index("cat > /usr/local/bin/ming-wechat << 'WECHATWRAP'")

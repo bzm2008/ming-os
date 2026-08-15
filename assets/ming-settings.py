@@ -855,7 +855,7 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-sidebar {
-            background: alpha(#EEF3EF, 0.98);
+            background: #EEF3EF;
             border-right: 1px solid alpha(#2F8A7D, 0.08);
         }
 
@@ -864,7 +864,7 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window headerbar {
-            background: alpha(#FFFFFF, 0.94);
+            background: #FFFFFF;
             border-bottom: 1px solid alpha(#2F8A7D, 0.06);
             min-height: 44px;
         }
@@ -919,7 +919,7 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: alpha(#FFFFFF, 0.94);
+            background: #FFFFFF;
             border-radius: 14px;
             border: 1px solid alpha(#2F8A7D, 0.06);
             padding: 8px;
@@ -942,6 +942,8 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
+            background: #FFFFFF;
+            color: #1B2320;
             border-radius: 10px;
             min-height: 40px;
             padding: 6px 12px;
@@ -988,6 +990,12 @@ class MingSettings(Adw.ApplicationWindow):
             border-color: alpha(#9FE7D7, 0.10);
         }
 
+        .ming-settings-window.ming-settings-dark entry,
+        .ming-settings-window.ming-settings-dark passwordentry {
+            background: #202824;
+            color: #E7EEE9;
+        }
+
         .ming-settings-window.ming-settings-dark row.ming-nav-row:selected {
             background: alpha(#62C9B5, 0.16);
             color: #E7EEE9;
@@ -1023,6 +1031,24 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-feedback-dialog.feedback-error {
             background: #651E1E;
             border-color: #FFB4AB;
+        }
+
+        .ming-wifi-password-dialog {
+            background: #FFFFFF;
+            color: #1B2320;
+        }
+
+        .ming-wifi-password-dialog passwordentry,
+        .ming-wifi-password-dialog entry {
+            background: #FFFFFF;
+            color: #1B2320;
+        }
+
+        .ming-wifi-password-dialog-dark,
+        .ming-wifi-password-dialog-dark passwordentry,
+        .ming-wifi-password-dialog-dark entry {
+            background: #202824;
+            color: #E7EEE9;
         }
         """
         provider = Gtk.CssProvider()
@@ -1602,6 +1628,10 @@ class MingSettings(Adw.ApplicationWindow):
         self.wifi_scan_btn.set_sensitive(self.wifi_diagnostic["available"])
         self.wifi_scan_btn.connect("clicked", self.on_wifi_scan)
         wifi_grp.add(self.wifi_scan_btn)
+        self.wifi_repair_btn = Gtk.Button(label="修复无线网络")
+        self.wifi_repair_btn.set_margin_top(6)
+        self.wifi_repair_btn.connect("clicked", self.on_wifi_repair)
+        wifi_grp.add(self.wifi_repair_btn)
         box.append(wifi_grp)
 
         self.wifi_list_grp = Adw.PreferencesGroup(title="可用网络")
@@ -1876,6 +1906,28 @@ class MingSettings(Adw.ApplicationWindow):
 
         run_task_async(wifi_diagnostic_snapshot, done)
 
+    def on_wifi_repair(self, _button):
+        self.wifi_repair_btn.set_sensitive(False)
+        self.wifi_repair_btn.set_label("正在修复...")
+
+        def done(rc, _output, error):
+            if self.network_page.get_root() is not self:
+                return False
+            self.wifi_repair_btn.set_sensitive(True)
+            self.wifi_repair_btn.set_label("修复无线网络")
+            if rc != 0:
+                self.toast("无线修复未成功：%s" % (error or "授权或网络服务未返回结果。"), "error")
+                self.on_wifi_status_refresh(None)
+                return False
+            self.toast("无线网络已修复，正在重新扫描。", "info")
+            self.on_wifi_status_refresh(None)
+            GLib.timeout_add_seconds(2, self.on_wifi_scan, self.wifi_scan_btn)
+            return False
+
+        run_capture_async(
+            self.pkexec_cmd("ming-network-repair", "--use-wpa"),
+            timeout=55, on_done=done)
+
     def on_bt_toggle(self, sw, _p):
         if self.loading_bt_state:
             return
@@ -2098,12 +2150,20 @@ class MingSettings(Adw.ApplicationWindow):
             dlg = Adw.MessageDialog(
                 transient_for=self, heading="连接到 %s" % ssid,
                 body="请输入无线网络密码。密码只会安全传给 NetworkManager，不会写入命令参数、日志或诊断数据。" )
+            if hasattr(dlg, "add_css_class"):
+                dlg.add_css_class("ming-wifi-password-dialog")
+            if (hasattr(dlg, "add_css_class")
+                    and hasattr(self, "has_css_class")
+                    and self.has_css_class("ming-settings-dark")):
+                dlg.add_css_class("ming-wifi-password-dialog-dark")
             entry = Gtk.PasswordEntry(show_peek_icon=True)
             entry.set_placeholder_text("请输入无线网络密码")
             dlg.set_extra_child(entry)
             dlg.add_response("cancel", "取消")
             dlg.add_response("ok", "连接")
             dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+            dlg.set_default_response("ok")
+            entry.connect("activate", lambda _entry: dlg.response("ok"))
         except Exception as exc:
             fail(
                 "E_WIFI_DIALOG_CREATE",

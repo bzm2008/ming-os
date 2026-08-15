@@ -155,15 +155,6 @@ class AudioSession:
         self._log("状态：%s" % result["state"])
         return result
 
-    def _start_pulseaudio(self):
-        rc, output, error = self.runner(["pulseaudio", "--start"], timeout=COMMAND_TIMEOUT)
-        if rc == 0:
-            self._log("已请求启动 PulseAudio 用户会话。")
-            return True, ""
-        message = error or output or "无法启动 PulseAudio 用户会话。"
-        self._log("启动 PulseAudio 失败：%s" % message)
-        return False, message
-
     def _start_pipewire(self):
         command = [
             "systemctl", "--user", "start", "pipewire.service",
@@ -184,18 +175,12 @@ class AudioSession:
         actions = []
 
         if not current.get("server_available"):
-            use_pipewire = current.get("backend") == "wpctl"
-            started, start_error = (
-                self._start_pipewire() if use_pipewire else self._start_pulseaudio())
+            started, start_error = self._start_pipewire()
             changed = started
-            actions.append(
-                ("started_pipewire" if use_pipewire else "started_pulseaudio")
-                if started else "start_failed")
+            actions.append("started_pipewire" if started else "start_failed")
             current = self._read_status()
             if not current.get("server_available"):
-                fallback_error = (
-                    "PipeWire 用户会话仍不可用。" if use_pipewire
-                    else "PulseAudio 用户会话仍不可用。")
+                fallback_error = "PipeWire 用户会话仍不可用。"
                 error = current.get("error") or start_error or fallback_error
                 result = {
                     "ok": False, "changed": changed, "action": actions[-1],

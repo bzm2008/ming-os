@@ -206,6 +206,18 @@ class PerformanceStatusDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(marker, BASE)
 
+    def test_oom_policy_keeps_a_real_global_guard_when_no_managed_oom_scope_exists(self):
+        """cgroup v2 alone is not an oomd policy and must not disable earlyoom."""
+        policy = BASE.split(
+            "cat > /usr/local/sbin/ming-oom-policy << 'MINGOOMPOLICY'", 1
+        )[1].split("MINGOOMPOLICY", 1)[0]
+
+        self.assertIn('backend=earlyoom', policy)
+        self.assertIn('systemctl enable --now earlyoom.service', policy)
+        self.assertIn('systemctl disable --now systemd-oomd.service', policy)
+        self.assertNotIn('if has_unified_memory && unit_available systemd-oomd.service', policy)
+        self.assertIn('EARLYOOM_ARGS="-m 8 -s 12', BASE)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1447,7 +1447,8 @@ GTK2SETTINGS
 
     # Ming-Glass GTK3 轻量纸感主题：参考 Lingmo/deepin/macOS 的统一浅色层级，
     # 但避免高成本模糊和重发光，优先照顾老电脑。
-    mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0
+    mkdir -p /usr/share/themes/Ming-Glass/gtk-3.0 \
+        /usr/share/themes/Ming-Glass/xfce-notify-4.0
     cat > /usr/share/themes/Ming-Glass/gtk-3.0/gtk.css << 'MINGGLASSCSS'
 @define-color theme_bg_color #F7F9F6;
 @define-color theme_fg_color #1D2421;
@@ -1481,7 +1482,7 @@ headerbar label {
   font-weight: 600;
 }
 
-window {
+window, dialog {
   background-color: @theme_bg_color;
   color: @theme_fg_color;
   border-radius: 10px;
@@ -1497,7 +1498,7 @@ button {
   padding: 6px 12px;
   border: 1px solid @borders;
   background-image: none;
-  background-color: rgba(255, 255, 255, 0.90);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   min-height: 32px;
 }
@@ -1531,14 +1532,14 @@ button.suggested-action:hover {
 button.destructive-action {
   color: #A64653;
   border-color: rgba(166, 70, 83, 0.20);
-  background-color: rgba(255, 249, 249, 0.94);
+  background-color: #FFF9F9;
 }
 
 entry {
   border-radius: 10px;
   padding: 6px 12px;
   border: 1px solid @borders;
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   min-height: 32px;
 }
@@ -1549,14 +1550,14 @@ entry:focus {
 }
 
 notebook header {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   border: none;
 }
 
 notebook tab {
   border-radius: 10px 10px 0 0;
   padding: 6px 12px;
-  background-color: rgba(238, 243, 240, 0.92);
+  background-color: #EEF3F0;
   color: @unfocused_fg_color;
   border: 1px solid transparent;
   border-bottom: none;
@@ -1582,14 +1583,14 @@ scrollbar slider:hover {
 
 tooltip {
   border-radius: 10px;
-  background-color: rgba(28, 39, 35, 0.94);
+  background-color: #1C2723;
   color: #FFFFFF;
   border: 1px solid rgba(255, 255, 255, 0.12);
   padding: 8px 12px;
 }
 
 menu, .menu {
-  background-color: rgba(255, 255, 255, 0.96);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
   border-radius: 12px;
   padding: 4px;
@@ -1607,7 +1608,7 @@ menuitem:hover {
 }
 
 headerbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
   border-bottom: 1px solid rgba(47, 138, 125, 0.08);
   border-radius: 12px 12px 0 0;
@@ -1616,7 +1617,7 @@ headerbar {
 }
 
 toolbar {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: #FFFFFF;
   border: none;
 }
 
@@ -1662,7 +1663,7 @@ progressbar progress {
 
 checkbutton check, radiobutton radio {
   border-radius: 5px;
-  background-color: rgba(255, 255, 255, 0.94);
+  background-color: #FFFFFF;
   border: 1px solid @borders;
   min-width: 18px;
   min-height: 18px;
@@ -1674,7 +1675,7 @@ checkbutton check:checked, radiobutton radio:checked {
 }
 
 .view, iconview {
-  background-color: rgba(255, 255, 255, 0.80);
+  background-color: #FFFFFF;
   color: @theme_fg_color;
   border-radius: 10px;
 }
@@ -1685,7 +1686,7 @@ checkbutton check:checked, radiobutton radio:checked {
 }
 
 treeview header button {
-  background-color: rgba(245, 248, 244, 0.96);
+  background-color: #F5F8F4;
   color: @theme_fg_color;
   border: none;
   border-bottom: 1px solid @borders;
@@ -1697,7 +1698,7 @@ placessidebar,
 .sidebar,
 paned > box,
 stacksidebar {
-  background-color: rgba(238, 243, 240, 0.92);
+  background-color: #EEF3F0;
   border-right: 1px solid rgba(47, 138, 125, 0.10);
 }
 
@@ -1723,7 +1724,7 @@ decoration {
 
 .whiskermenu-window,
 #whiskermenu-window {
-  background-color: rgba(255, 255, 255, 0.96);
+  background-color: #FFFFFF;
   border: 1px solid rgba(31, 98, 84, 0.14);
   border-radius: 14px;
 }
@@ -1738,7 +1739,7 @@ spinbutton button {
 }
 
 .xfce4-panel {
-  background-color: rgba(255, 255, 255, 0.74);
+  background-color: #FFFFFF;
   border: 1px solid rgba(31, 98, 84, 0.10);
   border-radius: 14px;
   margin: 6px 8px 4px 8px;
@@ -1765,6 +1766,19 @@ spinbutton button {
   border-color: rgba(47, 138, 125, 0.32);
 }
 MINGGLASSCSS
+
+    cat > /usr/share/themes/Ming-Glass/xfce-notify-4.0/gtk.css << 'MINGGLASSNOTIFY'
+window#XfceNotifyWindow {
+  background-color: #FFFFFF;
+  color: #1D2421;
+  border: 1px solid rgba(31, 98, 84, 0.20);
+  border-radius: 10px;
+}
+
+window#XfceNotifyWindow label {
+  color: #1D2421;
+}
+MINGGLASSNOTIFY
 
     if [[ -d /usr/share/themes/Arc-Darker/xfwm4 ]]; then
         rm -rf /usr/share/themes/Ming-Glass/xfwm4
@@ -2085,10 +2099,10 @@ configure_xfce_panel() {
         <value type="double" value="0.101961"/>
         <value type="double" value="0.039216"/>
         <value type="double" value="0.180392"/>
-        <value type="double" value="0.680000"/>
+        <value type="double" value="1.000000"/>
       </property>
       <property name="enter-opacity" type="uint" value="100"/>
-      <property name="leave-opacity" type="uint" value="88"/>
+      <property name="leave-opacity" type="uint" value="100"/>
       <property name="disable-struts" type="bool" value="false"/>
       <property name="plugin-ids" type="array">
         <value type="int" value="1"/>
@@ -2107,7 +2121,7 @@ configure_xfce_panel() {
       <property name="show-button-title" type="bool" value="true"/>
       <property name="menu-width" type="uint" value="440"/>
       <property name="menu-height" type="uint" value="520"/>
-      <property name="menu-opacity" type="uint" value="92"/>
+      <property name="menu-opacity" type="uint" value="100"/>
       <property name="position-categories-alternate" type="bool" value="false"/>
       <property name="view-mode" type="uint" value="1"/>
       <property name="show-generic-names" type="bool" value="true"/>
@@ -4429,6 +4443,87 @@ exec xfce4-terminal --hide-menubar --title="Ming Terminal" "$@"
 MINGTERM
     chmod +x /usr/local/bin/ming-terminal
 
+    cat > /usr/local/bin/ming-power-action << 'MINGPOWERACTION'
+#!/usr/bin/env bash
+# Route all desktop power requests through one bounded, diagnosable fallback chain.
+set -u
+
+LOG=/tmp/ming-power-action.log
+ACTION="${1:-menu}"
+
+log() {
+    mkdir -p /tmp 2>/dev/null || true
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "${LOG}" 2>/dev/null || true
+}
+
+record_inhibitors() {
+    log "action=${ACTION} user=$(id -un 2>/dev/null || printf unknown) session=${XDG_SESSION_ID:-unknown}"
+    if command -v systemd-inhibit >/dev/null 2>&1; then
+        timeout --foreground 3s systemd-inhibit --list >> "${LOG}" 2>&1 || \
+            log "systemd-inhibit list was unavailable"
+    fi
+}
+
+run_attempt() {
+    local label="$1"
+    shift
+    command -v "$1" >/dev/null 2>&1 || {
+        log "${label}: missing command $1"
+        return 1
+    }
+    log "${label}: $*"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground 8s "$@" >> "${LOG}" 2>&1 && return 0
+    else
+        "$@" >> "${LOG}" 2>&1 && return 0
+    fi
+    log "${label}: failed"
+    return 1
+}
+
+notify_failure() {
+    local message="$1"
+    log "failure: ${message}"
+    notify-send -i dialog-error "Ming OS 电源操作未完成" "${message}。详情：${LOG}" 2>/dev/null || true
+}
+
+record_inhibitors
+case "${ACTION}" in
+    menu)
+        if run_attempt "xfce power menu" xfce4-session-logout; then
+            exit 0
+        fi
+        notify_failure "无法打开电源菜单"
+        exit 1
+        ;;
+    logout)
+        run_attempt "xfce logout" xfce4-session-logout --logout && exit 0
+        if [[ -n "${XDG_SESSION_ID:-}" ]]; then
+            run_attempt "logind terminate session" loginctl terminate-session "${XDG_SESSION_ID}" && exit 0
+        fi
+        run_attempt "logind terminate user" loginctl terminate-user "$(id -un)" && exit 0
+        notify_failure "无法注销当前会话"
+        exit 1
+        ;;
+    reboot|poweroff)
+        if [[ "${ACTION}" == reboot ]]; then
+            run_attempt "xfce reboot" xfce4-session-logout --reboot && exit 0
+        else
+            run_attempt "xfce poweroff" xfce4-session-logout --halt && exit 0
+        fi
+        run_attempt "logind ${ACTION}" loginctl "${ACTION}" && exit 0
+        run_attempt "systemctl ${ACTION}" systemctl "${ACTION}" --no-wall && exit 0
+        notify_failure "系统拒绝${ACTION}请求"
+        exit 1
+        ;;
+    *)
+        notify_failure "不支持的电源操作"
+        exit 2
+        ;;
+esac
+MINGPOWERACTION
+    chmod 0755 /usr/local/bin/ming-power-action
+
     cat > /usr/local/bin/ming-lock << 'MINGLOCK'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -4490,20 +4585,20 @@ window { background: #F7F9F6; }
 .time { font-size: 34px; font-weight: 800; color: #1C2320; }
 .date { font-size: 12px; color: #5C6963; }
 .tile {
-  background: rgba(255,255,255,0.78);
+  background: #FFFFFF;
   border: 1px solid rgba(31,98,84,0.09);
   border-radius: 12px;
   padding: 12px;
   color: #1C2320;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
+  background: #F4F8F5;
   border-color: rgba(47,138,125,0.22);
   box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
 .tile label { color: #1C2320; font-weight: 700; }
 .danger {
-  background: rgba(255,247,247,0.90);
+  background: #FFF7F7;
   border-color: rgba(178,59,72,0.28);
 }
 '''
@@ -4581,7 +4676,7 @@ class StatusCenter(Gtk.ApplicationWindow):
             ('设置', 'ming-control-center', 'ming-control-center'),
             ('应用库', 'ming-app-library', 'ming-app-library'),
             ('锁屏', 'system-lock-screen', 'ming-lock'),
-            ('退出/关机', 'system-shutdown', 'xfce4-session-logout'),
+            ('退出/关机', 'system-shutdown', 'ming-power-action menu'),
         ]
         for index, (label, icon, command) in enumerate(actions):
             button = self.tile(label, icon, command, danger=(label == '退出/关机'))
@@ -4652,20 +4747,20 @@ window { background: #F7F9F6; }
 .search {
   min-height: 42px;
   border-radius: 12px;
-  background: rgba(255,255,255,0.82);
+  background: #FFFFFF;
   color: #1C2320;
   border: 1px solid rgba(31,98,84,0.09);
   padding: 0 12px;
 }
 .app-tile {
-  background: rgba(255,255,255,0.78);
+  background: #FFFFFF;
   border: 1px solid rgba(31,98,84,0.09);
   border-radius: 12px;
   padding: 10px;
   color: #1C2320;
 }
 .app-tile:hover {
-  background: rgba(255,255,255,0.94);
+  background: #F4F8F5;
   border-color: rgba(47,138,125,0.22);
   box-shadow: 0 8px 20px rgba(30,70,58,0.07);
 }
@@ -4673,10 +4768,10 @@ window { background: #F7F9F6; }
 .quick-button {
   border-radius: 12px;
   padding: 9px 12px;
-  background: rgba(255,255,255,0.78);
+  background: #FFFFFF;
   color: #1C2320;
 }
-.quick-button:hover { background: rgba(47,138,125,0.10); }
+.quick-button:hover { background: #EAF3EF; }
 '''
 
 def read_desktop_file(path):
@@ -5185,18 +5280,18 @@ window {
   color: #4F625A;
 }
 .tile {
-  background: rgba(255,255,255,0.76);
+  background: #FFFFFF;
   border: 1px solid rgba(31,98,84,0.13);
   border-radius: 10px;
   padding: 12px;
   color: #1D2421;
 }
 .tile:hover {
-  background: rgba(255,255,255,0.94);
+  background: #F4F8F5;
   border-color: rgba(47,174,143,0.36);
 }
 .tile:active {
-  background: rgba(47,174,143,0.14);
+  background: #EAF3EF;
 }
 .tile label {
   color: #1D2421;
@@ -5453,13 +5548,13 @@ fade-delta = 5;
 # ---- wintypes ----
 wintypes:
 {
-  tooltip = { fade = true; shadow = true; opacity = 0.90; focus = true; };
+  tooltip = { fade = true; shadow = true; opacity = 1.0; focus = true; };
   dock = { shadow = false; opacity = 0.92; };
   dnd = { shadow = false; };
   dropdown_menu = { shadow = true; opacity = 1.0; };
   popup_menu = { shadow = true; opacity = 1.0; };
   utility = { shadow = true; opacity = 1.0; };
-  notification = { shadow = true; opacity = 0.94; };
+  notification = { shadow = true; opacity = 1.0; };
 };
 
 detect-rounded-corners = true;
@@ -5499,12 +5594,14 @@ detect-client-opacity = true;
 detect-transient = true;
 wintypes:
 {
-  dock = { shadow = false; opacity = 1.0; };
+  dock = { shadow = false; opacity = 0.92; };
+  popup_menu = { shadow = false; opacity = 1.0; };
+  dropdown_menu = { shadow = false; opacity = 1.0; };
   notification = { shadow = false; opacity = 1.0; };
 };
 PICOMFALLBACK
 
-    # 低内存轻动画配置 (2601-4200MB: GLX + 无 blur + 轻阴影 + 圆角)
+# 低内存配置 (2601-4200MB: GLX + 无 blur/动画/阴影)
     cat > /etc/xdg/picom/picom-lowmem.conf << 'PICOMLOWMEM'
 backend = "glx";
 vsync = true;
@@ -5516,16 +5613,7 @@ use-damage = true;
 # 不启用 blur（blur 是 GPU/内存消耗大户）
 blur-background = false;
 
-# 轻阴影
-shadow = true;
-shadow-radius = 8;
-shadow-opacity = 0.20;
-shadow-offset-x = -6;
-shadow-offset-y = -6;
-shadow-exclude = [
-  "window_type = 'dock'",
-  "window_type = 'desktop'",
-];
+shadow = false;
 
 # 圆角保留（纯 CPU 开销极低）
 corner-radius = 10;
@@ -5533,15 +5621,19 @@ rounded-corners-exclude = [
   "window_type = 'desktop'",
 ];
 
-# 渐入渐出（transform/opacity 动画，不触发 layout）
-fading = true;
-fade-in-step = 0.05;
-fade-out-step = 0.05;
-fade-delta = 5;
+fading = false;
 
 inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
+
+wintypes:
+{
+  dock = { shadow = false; opacity = 0.92; };
+  popup_menu = { shadow = false; opacity = 1.0; };
+  dropdown_menu = { shadow = false; opacity = 1.0; };
+  notification = { shadow = false; opacity = 1.0; };
+};
 
 detect-rounded-corners = true;
 detect-client-opacity = true;
@@ -5637,7 +5729,7 @@ configure_notification_filter() {
 <channel name="xfce4-notifyd" version="1.0">
   <property name="notify-location" type="uint" value="3"/>
   <property name="theme" type="string" value="Smoke"/>
-  <property name="initial-opacity" type="double" value="0.85"/>
+  <property name="initial-opacity" type="double" value="1.0"/>
   <property name="expire-timeout" type="int" value="3"/>
   <property name="do-fadeout" type="bool" value="true"/>
   <property name="do-slideout" type="bool" value="true"/>
@@ -6163,7 +6255,7 @@ class WelcomeWindow(Gtk.ApplicationWindow):
                       background-color: #2F8A7D; color: white; border: none; min-height: 52px; }
         .big-button:hover { background-color: #28786E; }
         .big-button-alt { font-size: 18px; padding: 16px 40px; border-radius: 12px;
-                          background-color: rgba(255,255,255,0.78); color: #1D2421; border: 1px solid rgba(31,98,84,0.14); min-height: 52px; }
+                          background-color: #FFFFFF; color: #1D2421; border: 1px solid rgba(31,98,84,0.14); min-height: 52px; }
         .step-label { font-size: 14px; color: #5C6963; margin-top: 16px; }
         .done-icon { font-size: 64px; color: #2F8A7D; }
         '''
@@ -7208,12 +7300,12 @@ dialog {
   border-radius: 14px;
   padding: 14px;
   border: 1px solid rgba(47, 138, 125, 0.22);
-  background: rgba(255, 255, 255, 0.92);
+  background: #FFFFFF;
 }
 .mode-card:focus,
 .mode-card:hover {
   border-color: rgba(47, 138, 125, 0.66);
-  background: rgba(255, 255, 255, 0.98);
+  background: #F4F8F5;
 }
 .mode-card-primary {
   border-color: rgba(47, 138, 125, 0.72);
@@ -8092,9 +8184,9 @@ favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,sp
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter
-command-logoutuser=xfce4-session-logout --logout
-command-restart=xfce4-session-logout --reboot
-command-shutdown=xfce4-session-logout --halt
+command-logoutuser=ming-power-action logout
+command-restart=ming-power-action reboot
+command-shutdown=ming-power-action poweroff
 search-actions=1
 position-categories-alternate=false
 position-commands-alternate=true
@@ -8103,8 +8195,8 @@ category-icon-size=1
 item-icon-size=2
 menu-width=440
 menu-height=540
-menu-opacity=95
-background-opacity=88
+menu-opacity=100
+background-opacity=100
 view-mode=1
 sort-categories=true
 WHISKERRC

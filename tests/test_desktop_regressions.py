@@ -210,7 +210,8 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn(".notification-panel { padding: 12px; background: #F9FCFA;", css)
         self.assertIn("border-radius: 12px;", css)
         self.assertIn(".launch-feedback", css)
-        self.assertIn("background: rgba(252, 254, 252, 0.98);", css)
+        self.assertIn("background: #FCFEFC;", css)
+        self.assertNotIn("background: rgba(252, 254, 252, 0.98);", css)
         self.assertNotIn("background: rgba(252, 254, 252, 0.94);", css)
 
     def test_app_drawer_activates_on_explicit_primary_release(self):
@@ -1283,8 +1284,30 @@ class DesktopPolishContractTests(unittest.TestCase):
 
     def test_status_widget_exposes_safe_power_menu(self):
         self.assertIn("self.power_button", self.phone)
-        self.assertIn("xfce4-session-logout", self.phone)
-        self.assertIn("gnome-session-quit", self.phone)
+        self.assertIn('"ming-power-action", "logout"', self.phone)
+        self.assertIn('"ming-power-action", "reboot"', self.phone)
+        self.assertIn('"ming-power-action", "poweroff"', self.phone)
+        self.assertNotIn('["xfce4-session-logout", "--reboot"]', self.phone)
+        self.assertNotIn('["gnome-session-quit", "--reboot"]', self.phone)
+
+    def test_power_helper_logs_inhibitors_and_falls_back_to_logind(self):
+        opener = "cat > /usr/local/bin/ming-power-action << 'MINGPOWERACTION'"
+        self.assertIn(opener, self.desktop)
+        helper = self.desktop.split(opener, 1)[1].split("MINGPOWERACTION", 1)[0]
+        for marker in (
+            "systemd-inhibit --list",
+            "xfce4-session-logout",
+            "loginctl",
+            "systemctl",
+            "notify-send",
+            "timeout --foreground",
+            "/tmp/ming-power-action.log",
+        ):
+            self.assertIn(marker, helper)
+        self.assertIn("reboot", helper)
+        self.assertIn("poweroff", helper)
+        self.assertIn("logout", helper)
+        self.assertNotIn("sudo ", helper)
 
     def test_spark_requires_visible_process_or_window_before_success(self):
         self.assertIn("wait_for_spark_ready", self.apps)

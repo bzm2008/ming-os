@@ -54,11 +54,11 @@ class AudioSessionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.audio = load_module(AUDIO_SESSION_PATH, "ming_audio_session")
 
-    def test_ensure_starts_pulseaudio_then_repairs_a_missing_output(self):
+    def test_ensure_starts_pipewire_then_repairs_a_missing_pactl_output(self):
         statuses = iter((
             status(server_available=False, playback_ready=False, default_sink="",
                    default_sink_present=False, playback_profile_valid=None,
-                   playback_devices=[], error="PulseAudio 服务没有运行。"),
+                   playback_devices=[], error="PipeWire Pulse 兼容服务没有运行。"),
             status(playback_ready=False, default_sink="", default_sink_present=False,
                    playback_profile_valid=None, playback_devices=[],
                    error="没有默认输出。"),
@@ -79,7 +79,11 @@ class AudioSessionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["changed"])
         self.assertEqual([True], repairs)
-        self.assertIn(("pulseaudio", "--start"), [call[0] for call in runner.calls])
+        calls = [call[0] for call in runner.calls]
+        self.assertIn(
+            ("systemctl", "--user", "start", "pipewire.service",
+             "pipewire-pulse.service", "wireplumber.service"), calls)
+        self.assertNotIn(("pulseaudio", "--start"), calls)
         self.assertTrue(all(timeout <= self.audio.COMMAND_TIMEOUT for _, timeout in runner.calls))
 
     def test_ensure_starts_pipewire_stack_instead_of_pulseaudio_for_wpctl(self):

@@ -37,11 +37,14 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     xdotool
     wmctrl
     rfkill
-    pulseaudio
+    pipewire
+    pipewire-pulse
+    pipewire-alsa
+    wireplumber
     pulseaudio-utils
     alsa-utils
     libasound2-plugins
-    pulseaudio-module-bluetooth
+    libspa-0.2-bluetooth
     pavucontrol
     bluez
     upower
@@ -158,12 +161,12 @@ blur-background-exclude = [
 ];
 wintypes:
 {
-    tooltip = { fade = true; shadow = true; opacity = 0.9; focus = true; };
+    tooltip = { fade = true; shadow = true; opacity = 1.0; focus = true; };
     dock = { shadow = false; opacity = 0.92; };
     dnd = { shadow = false; };
     popup_menu = { opacity = 1.0; };
     dropdown_menu = { opacity = 1.0; };
-    notification = { shadow = true; opacity = 0.94; };
+    notification = { shadow = true; opacity = 1.0; };
 };
 
 detect-client-leader = true;
@@ -181,10 +184,7 @@ vsync = false;
 unredir-if-possible = false;
 shadow = false;
 blur-background = false;
-fading = true;
-fade-in-step = 5.0e-2;
-fade-out-step = 5.0e-2;
-fade-delta = 4;
+fading = false;
 active-opacity = 1.0;
 inactive-opacity = 1.0;
 frame-opacity = 1.0;
@@ -196,7 +196,9 @@ detect-transient = true;
 wintypes:
 {
     dock = { shadow = false; opacity = 0.92; };
-    notification = { shadow = false; opacity = 0.94; };
+    popup_menu = { shadow = false; opacity = 1.0; };
+    dropdown_menu = { shadow = false; opacity = 1.0; };
+    notification = { shadow = false; opacity = 1.0; };
 };
 PICOMFALLBACK
 
@@ -2693,6 +2695,20 @@ install_required_desktop_runtime() {
     done
 }
 
+configure_pipewire_audio() {
+    # Start PipeWire on every graphical login.  The pulse server remains as a
+    # compatibility protocol for older applications; it is not the old
+    # PulseAudio daemon and therefore does not compete for the sound card.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "[ERROR] [02_apps] systemctl is required to enable PipeWire audio" >&2
+        return 1
+    fi
+    if ! systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service; then
+        echo "[ERROR] [02_apps] failed to enable the PipeWire user audio services" >&2
+        return 1
+    fi
+}
+
 enable_bluetooth_after_runtime() {
     # Do not ask systemd to enable bluetooth until the mandatory runtime
     # validation has confirmed that BlueZ is actually installed.  `systemctl
@@ -2708,7 +2724,7 @@ enable_bluetooth_after_runtime() {
 install_utilities() {
     apt install -y -o Dpkg::Options::=--force-confold --no-install-recommends \
         pavucontrol \
-        pulseaudio-module-bluetooth \
+        libspa-0.2-bluetooth \
         bluez-tools \
         blueman \
         bluetooth \
@@ -2788,6 +2804,7 @@ main() {
     run_required_step install_xfce_desktop || return 1
     run_required_step install_fonts || return 1
     run_required_step install_required_desktop_runtime || return 1
+    run_required_step configure_pipewire_audio || return 1
     run_required_step enable_bluetooth_after_runtime || return 1
     run_required_step install_fcitx5 || return 1
     run_required_step deploy_eyecare || return 1

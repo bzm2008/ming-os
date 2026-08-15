@@ -50,6 +50,19 @@ class RadioBuildContracts(unittest.TestCase):
         self.assertIn("Before=NetworkManager.service", network)
         self.assertIn("systemctl enable ming-regdom.service", network)
 
+    def test_active_netdev_user_can_connect_wifi_without_sudo_or_an_admin_prompt(self):
+        network = shell_function(BASE, "configure_network")
+        opener = "cat > /etc/polkit-1/rules.d/50-ming-network.rules"
+        self.assertIn(opener, network)
+        policy = network.split(opener, 1)[1].split(
+            "\nMINGNETWORKPOLICY", 1)[0]
+        self.assertIn("subject.active", policy)
+        self.assertIn("subject.local", policy)
+        self.assertIn('subject.isInGroup("netdev")', policy)
+        self.assertIn('"org.freedesktop.NetworkManager.network-control"', policy)
+        self.assertIn('"org.freedesktop.NetworkManager.enable-disable-wifi"', policy)
+        self.assertNotIn("settings.modify.system", policy)
+
     def test_installed_system_uses_only_networkmanager_without_legacy_service_competition(self):
         identity = BASE.split("cat > /usr/local/sbin/ming-fix-installed-identity << 'MINGIDENTITY'", 1)[1].split(
             "MINGIDENTITY", 1

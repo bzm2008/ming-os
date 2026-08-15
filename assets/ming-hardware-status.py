@@ -233,7 +233,7 @@ class HardwareStatus:
         model = output.splitlines()[0] if rc == 0 and output else "未检测到 ALSA 声卡"
         return {
             "model": model,
-            "driver": "ALSA/PulseAudio",
+            "driver": "ALSA/PipeWire",
             "state": "normal" if rc == 0 and output else "attention",
             "recommendation": "可在‘声音与通话’中测试内置麦克风和扬声器。"
             if rc == 0 and output else "未检测到声卡，请检查固件或导出诊断。",
