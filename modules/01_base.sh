@@ -1687,7 +1687,29 @@ fi
 # The repair command changes rfkill state, kernel modules and system services.
 # Always cross the policy boundary through polkit when launched by a desktop user.
 if [[ "${EUID}" -ne 0 ]]; then
-    exec pkexec /usr/local/sbin/ming-radio-repair bluetooth
+    if ! command -v pkexec >/dev/null 2>&1; then
+        echo "无法请求管理员授权：系统缺少 Polkit（pkexec）组件。" >&2
+        exit 77
+    fi
+    if auth_output="$(pkexec /usr/local/sbin/ming-radio-repair bluetooth 2>&1)"; then
+        auth_rc=0
+    else
+        auth_rc=$?
+    fi
+    if [[ "${auth_rc}" -ne 0 ]]; then
+        if [[ "${auth_output}" == *"Error creating textual authentication agent"* \
+                || "${auth_output}" == *"/dev/tty"* \
+                || "${auth_output}" == *"No such device or address"* ]]; then
+            echo "请在桌面授权弹窗中确认，当前无可用图形授权代理。请先完成账户设置或重启授权代理。" >&2
+        elif [[ "${auth_output}" == *"not authorized"* || "${auth_output}" == *"Not authorized"* ]]; then
+            echo "蓝牙修复需要管理员授权，请在桌面授权弹窗中确认。" >&2
+        else
+            printf '%s\n' "${auth_output:-蓝牙修复授权失败。}" >&2
+        fi
+        exit "${auth_rc}"
+    fi
+    [[ -n "${auth_output}" ]] && printf '%s\n' "${auth_output}"
+    exit 0
 fi
 
 LOG=/var/log/ming-radio-repair.log
@@ -1805,6 +1827,10 @@ echo "Bluetooth remains in state ${after_state}; inspect ${LOG}" >&2
 exit 1
 RADIOREPAIR
     chmod 0755 /usr/local/sbin/ming-radio-repair
+    # pkexec sanitizes PATH on some desktop sessions and may omit
+    # /usr/local/sbin. Keep a compatibility entry in the normal executable
+    # path while retaining the privileged helper's canonical location.
+    ln -sf /usr/local/sbin/ming-radio-repair /usr/local/bin/ming-radio-repair
 
     cat > /usr/local/bin/ming-driver-diagnose << 'DRIVERDIAG'
 #!/usr/bin/env bash
@@ -3449,6 +3475,12 @@ log() {
     printf '%s\n' "$*" >>"${LOG}"
 }
 
+fail_partition_types() {
+    log "ERROR: $*"
+    printf 'Ming OS 安装分区检查失败：%s。详细日志：%s\n' "$*" "${LOG}" >&2
+    exit 31
+}
+
 install_mode="blank_ab"
 if [[ -s /run/ming-installer/install-mode.json ]] && command -v python3 >/dev/null 2>&1; then
     install_mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode",""))' /run/ming-installer/install-mode.json 2>>"${LOG}" || printf '')"
@@ -3477,10 +3509,32 @@ lsblk_snapshot() {
         >>"${LOG}" 2>&1 || true
 }
 
+lsblk_parts_by_label() {
+    local wanted="$1"
+    lsblk -nrpo NAME,TYPE,PARTLABEL 2>>"${LOG}" \
+        | awk -v wanted="${wanted}" '$2 == "part" && $3 == wanted { print $1 }'
+}
+
 wait_for_part_label() {
     local label="$1" link part
+    local -a part_matches=()
     for _attempt in 1 2 3 4 5 6; do
         settle_partitions
+        # Prefer the kernel's current partition table and fail closed when
+        # another disk already contains the same Ming label. A global udev
+        # by-partlabel link cannot safely disambiguate that situation.
+        mapfile -t part_matches < <(lsblk_parts_by_label "${label}")
+        if ((${#part_matches[@]} > 1)); then
+            log "duplicate partition label ${label}: ${part_matches[*]}"
+            return 3
+        fi
+        if ((${#part_matches[@]} == 1)); then
+            part="${part_matches[0]}"
+            if [[ -b "${part}" ]]; then
+                printf '%s\n' "${part}"
+                return 0
+            fi
+        fi
         link="/dev/disk/by-partlabel/${label}"
         if [[ -e "${link}" || -L "${link}" ]]; then
             part="$(readlink -f -- "${link}" 2>>"${LOG}" || true)"
@@ -3555,18 +3609,24 @@ settle_partitions
 changed_disks=()
 for contract in "${partition_type_contracts[@]}"; do
     IFS=: read -r label short_code guid <<<"${contract}"
-    part="$(part_by_label "${label}" || true)"
-    [[ -n "${part}" ]] || { log "ERROR: missing partition label ${label}"; exit 31; }
+    if part="$(part_by_label "${label}")"; then
+        :
+    else
+        lookup_rc=$?
+        if [[ "${lookup_rc}" -eq 3 ]]; then
+            fail_partition_types "duplicate partition label ${label}; disconnect other Ming OS disks and retry"
+        fi
+        fail_partition_types "missing partition label ${label}"
+    fi
     disk="$(part_disk "${part}")"
     number="$(part_number "${part}")"
-    [[ -b "${disk}" && -n "${number}" ]] || {
-        log "ERROR: cannot resolve disk/number for ${label} (${part})"
-        exit 31
-    }
+    [[ -b "${disk}" && -n "${number}" ]] \
+        || fail_partition_types "cannot resolve disk/number for ${label} (${part})"
     actual="$(part_type "${part}")"
     if [[ "${actual}" != "${guid}" ]]; then
         log "fix ${label}: ${actual:-missing} -> ${guid} on ${disk}#${number}"
-        set_part_type "${disk}" "${number}" "${short_code}" "${guid}" || exit 31
+        set_part_type "${disk}" "${number}" "${short_code}" "${guid}" \
+            || fail_partition_types "cannot set GPT partition type for ${label}"
         changed_disks+=("${disk}")
     else
         log "ok ${label}: ${guid}"
@@ -3582,11 +3642,18 @@ fi
 
 for contract in "${partition_type_contracts[@]}"; do
     IFS=: read -r label _short_code guid <<<"${contract}"
-    part="$(part_by_label "${label}" || true)"
+    if part="$(part_by_label "${label}")"; then
+        :
+    else
+        lookup_rc=$?
+        if [[ "${lookup_rc}" -eq 3 ]]; then
+            fail_partition_types "duplicate partition label ${label}; disconnect other Ming OS disks and retry"
+        fi
+        fail_partition_types "missing partition label ${label} during final verification"
+    fi
     [[ -n "${part}" ]] && wait_for_part_type "${part}" "${guid}" || {
         actual="$(part_type "${part:-/dev/null}")"
-        log "ERROR: ${label} PARTTYPE is ${actual:-missing}, expected ${guid}"
-        exit 31
+        fail_partition_types "${label} PARTTYPE is ${actual:-missing}, expected ${guid}"
     }
 done
 

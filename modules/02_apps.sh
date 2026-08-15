@@ -2371,7 +2371,7 @@ if [[ "${1:-}" == "apm" ]]; then
             ;;
     esac
 fi
-exec pkexec /usr/local/sbin/ming-spark-package-control "$@"
+exec /usr/local/bin/ming-authorized-action spark "$@"
 MINGSPARKCALLER
             chmod 0755 "$spark_shell_caller"
         fi

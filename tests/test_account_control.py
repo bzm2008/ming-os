@@ -444,14 +444,19 @@ class BuildContractTests(unittest.TestCase):
         self.assertIn('$1 !~ /^systemd-/', identity)
         self.assertIn('validate_posix_user_name "${user_name}"', identity)
 
-    def test_package_gui_blocks_before_pkexec_when_administrator_is_not_ready(self):
+    def test_package_gui_blocks_before_authorized_action_when_administrator_is_not_ready(self):
         gui = self.desktop.split(
             "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
         )[1].split("\nMINGPACKAGEGUI", 1)[0]
         self.assertIn("ming-admin-bootstrap status", gui)
         self.assertIn("ming-oobe-account", gui)
         self.assertIn("请先完成首次开机账户设置", gui)
-        self.assertLess(gui.index("ming-admin-bootstrap status"), gui.index("pkexec /usr/local/sbin/ming-package-installer"))
+        self.assertIn("ming-authorized-action package install", gui)
+        self.assertNotIn("pkexec /usr/local/sbin/ming-package-installer", gui)
+        self.assertLess(
+            gui.index("ming-admin-bootstrap status"),
+            gui.index("ming-authorized-action package install"),
+        )
 
     def test_package_gui_requires_an_active_polkit_agent(self):
         gui = self.desktop.split(

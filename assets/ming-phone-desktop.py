@@ -794,6 +794,7 @@ def read_app(path):
         "id": app_id(effective_path),
         "type": "app",
         "path": str(effective_path),
+        "source_path": str(source_path) if source_path else "",
         "basename": effective_path.name,
         "name": entry.name or effective_path.stem,
         "icon": entry.icon or "application-x-executable",
@@ -905,13 +906,165 @@ def canonical_identity(app):
     return layout_item_identity(app)
 
 
+def normalized_desktop_exec_program(exec_line):
+    """Return a stable main program and fixed arguments for identity checks."""
+    if not isinstance(exec_line, str) or not exec_line.strip() or "\x00" in exec_line:
+        return "", ()
+    if any(marker in exec_line for marker in (";", "`", "$(", "\n", "\r")):
+        return "", ()
+    try:
+        raw = shlex.split(exec_line, posix=True)
+    except ValueError:
+        return "", ()
+    if not raw or any(token in {"|", "||", "&&", ">", ">>", "<"} for token in raw):
+        return "", ()
+    argv = []
+    for token in raw:
+        token = token.replace("%%", "\x00")
+        token = re.sub(r"%[fFuUdDnNickvm]", "", token).replace("\x00", "%")
+        if token:
+            argv.append(token)
+    if not argv:
+        return "", ()
+    offset = 0
+    if Path(argv[0]).name.casefold() == "env":
+        offset = 1
+        while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
+            offset += 1
+    if offset >= len(argv):
+        return "", ()
+    program = argv[offset]
+    if Path(program).name.casefold() in {"sh", "bash", "dash", "zsh", "ksh"}:
+        if "-c" in argv[offset + 1:]:
+            return "", ()
+    normalized = str(Path(program))
+    if program.startswith("/"):
+        normalized = str(Path(program).resolve(strict=False))
+    return normalized.casefold(), tuple(argv[offset + 1:])
+
+
+def desktop_entry_dedup_fields(path):
+    """Read non-display launcher fields; names are intentionally excluded."""
+    target = Path(path)
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        if target.stat().st_size > 256 * 1024:
+            return None
+        parser.read(target, encoding="utf-8")
+    except (OSError, UnicodeError, configparser.Error):
+        return None
+    if not parser.has_section("Desktop Entry"):
+        return None
+    section = parser["Desktop Entry"]
+    if section.get("Type", "Application").strip().casefold() != "application":
+        return None
+    program, arguments = normalized_desktop_exec_program(section.get("Exec", ""))
+    if not program:
+        return None
+    return {
+        "exec_program": program,
+        "exec_arguments": arguments,
+        "startup_wm_class": section.get("StartupWMClass", "").strip().casefold(),
+    }
+
+
+def desktop_entry_package_owners(paths, command_runner=None):
+    """Resolve package ownership in one bounded query for preference/grouping."""
+    candidates = tuple(dict.fromkeys(str(Path(path)) for path in paths if path))
+    if not candidates:
+        return {}
+    runner = command_runner or subprocess.run
+    try:
+        completed = runner(
+            ["dpkg-query", "-S", "--", *candidates[:512]],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+            shell=False,
+        )
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        return {}
+    owners = {}
+    candidate_set = set(candidates)
+    for line in (completed.stdout or "").splitlines():
+        owner, separator, owned_path = line.partition(": ")
+        if separator and owner.strip() and owned_path in candidate_set:
+            owners.setdefault(owned_path, set()).add(owner.strip())
+    return {
+        path: next(iter(found))
+        for path, found in owners.items()
+        if len(found) == 1
+    }
+
+
+def third_party_app_identity(app, package_owners=None):
+    """Group third-party entries only when launch-critical identity agrees."""
+    path = str(app.get("path") or "")
+    source_path = str(app.get("source_path") or "")
+    identity_path = source_path or path
+    fields = desktop_entry_dedup_fields(identity_path)
+    if not fields:
+        return ("path", os.path.normpath(identity_path))
+    program = fields["exec_program"]
+    arguments = fields["exec_arguments"]
+    wm_class = fields["startup_wm_class"]
+    if wm_class:
+        return ("launcher", program, arguments, wm_class)
+    owner = str(app.get("package_owner") or (
+        (package_owners or {}).get(identity_path, "")
+        or (package_owners or {}).get(path, "")
+    )).strip().casefold()
+    if owner:
+        return ("package-launcher", owner, program, arguments)
+    return ("path", os.path.normpath(identity_path))
+
+
+def app_dedup_preference(app, package_owners=None):
+    path = str(app.get("path") or "")
+    launchable = not bool(app.get("diagnostic"))
+    system_entry = is_system_application_path(path)
+    package_owned = bool(str(app.get("package_owner") or (
+        (package_owners or {}).get(path, "")
+    )).strip())
+    return (
+        int(system_entry and package_owned and launchable),
+        int(system_entry and launchable),
+        int(launchable),
+        int(system_entry and package_owned),
+    )
+
+
 def deduplicate_apps(apps):
+    apps = list(apps)
+    owner_paths = [
+        app.get("path")
+        for app in apps
+        if (
+            canonical_identity(app) not in CANONICAL_PREFERENCE
+            and is_system_application_path(app.get("path"))
+            and not app.get("package_owner")
+        )
+    ]
+    package_owners = desktop_entry_package_owners(owner_paths)
     selected = {}
     for app in apps:
-        identity = canonical_identity(app)
-        preferred = CANONICAL_PREFERENCE.get(identity)
+        core_identity = canonical_identity(app)
+        preferred = CANONICAL_PREFERENCE.get(core_identity)
+        identity = core_identity if preferred else third_party_app_identity(
+            app, package_owners
+        )
         current = selected.get(identity)
-        if current is None or app["basename"].casefold() == preferred:
+        if (
+            current is None
+            or (preferred and app["basename"].casefold() == preferred)
+            or (
+                not preferred
+                and app_dedup_preference(app, package_owners)
+                > app_dedup_preference(current, package_owners)
+            )
+        ):
             selected[identity] = app
     return list(selected.values())
 
@@ -1017,7 +1170,29 @@ def retired_layout_item(item):
 def deduplicate_layout_items(items):
     """Prefer managed proxy placement, while storing the current system path."""
     preferred_core = {}
+    preferred_noncore = {}
     source_resolver = globals().get("managed_desktop_source_path")
+    layout_paths = []
+
+    for item in items:
+        if item.get("type") == "folder":
+            layout_paths.extend(str(child) for child in item.get("children", []) if child)
+        elif item.get("path"):
+            layout_paths.append(str(item.get("path")))
+    owner_resolver = globals().get("desktop_entry_package_owners")
+    identity_resolver = globals().get("third_party_app_identity")
+    preference_resolver = globals().get("app_dedup_preference")
+    package_owners = owner_resolver(layout_paths) if callable(owner_resolver) else {}
+
+    def noncore_identity(item):
+        if callable(identity_resolver):
+            return identity_resolver(item, package_owners)
+        return ("path", os.path.normpath(str(item.get("path") or "")))
+
+    def noncore_preference(item):
+        if callable(preference_resolver):
+            return preference_resolver(item, package_owners)
+        return (0, 0, int(not bool(item.get("diagnostic"))), 0)
 
     def consider(item, token):
         if retired_layout_item(item):
@@ -1032,12 +1207,28 @@ def deduplicate_layout_items(items):
         if current is None or priority > current[0]:
             preferred_core[identity] = (priority, token)
 
+    def consider_noncore(item, token):
+        if retired_layout_item(item):
+            return
+        if layout_item_identity(item) in CANONICAL_PREFERENCE:
+            return
+        identity = noncore_identity(item)
+        priority = noncore_preference(item)
+        current = preferred_noncore.get(identity)
+        if current is None or priority > current[0]:
+            preferred_noncore[identity] = (priority, token)
+
     for item_index, item in enumerate(items):
         if item.get("type") == "folder":
             for child_index, child in enumerate(item.get("children", [])):
-                consider({"type": "app", "path": str(child)}, ("child", item_index, child_index))
+                child_item = {"type": "app", "path": str(child)}
+                token = ("child", item_index, child_index)
+                consider(child_item, token)
+                consider_noncore(child_item, token)
         else:
-            consider(item, ("item", item_index))
+            token = ("item", item_index)
+            consider(item, token)
+            consider_noncore(item, token)
 
     deduplicated = []
     known_noncore = set()
@@ -1056,6 +1247,9 @@ def deduplicate_layout_items(items):
                     managed_source = source_resolver(child) if callable(source_resolver) else None
                     children.append(str(managed_source or child))
                 else:
+                    identity = noncore_identity(child_item)
+                    if preferred_noncore.get(identity, (None, None))[1] != ("child", item_index, child_index):
+                        continue
                     if identity in known_noncore:
                         continue
                     known_noncore.add(identity)
@@ -1076,6 +1270,9 @@ def deduplicate_layout_items(items):
                 normalized["path"] = str(managed_source)
             deduplicated.append(normalized)
         else:
+            identity = noncore_identity(item)
+            if preferred_noncore.get(identity, (None, None))[1] != ("item", item_index):
+                continue
             if identity in known_noncore:
                 continue
             known_noncore.add(identity)

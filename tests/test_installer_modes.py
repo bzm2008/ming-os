@@ -191,6 +191,23 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("lsblk_snapshot", normalizer)
         self.assertNotIn('$2 == \"part\" && $3 == label', normalizer)
 
+    def test_partition_type_normalizer_falls_back_to_lsblk_when_udev_link_is_late(self):
+        normalizer = BASE.split(
+            "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
+        )[1].split("\nMINGFIXPARTTYPES", 1)[0]
+        self.assertIn("lsblk_parts_by_label()", normalizer)
+        self.assertIn("lsblk -nrpo NAME,TYPE,PARTLABEL", normalizer)
+        self.assertIn('mapfile -t part_matches < <(lsblk_parts_by_label "${label}")', normalizer)
+        self.assertIn('[[ -b "${part}" ]]', normalizer)
+        self.assertLess(
+            normalizer.index('mapfile -t part_matches < <(lsblk_parts_by_label "${label}")'),
+            normalizer.index('link="/dev/disk/by-partlabel/${label}"'),
+        )
+        self.assertIn('((${#part_matches[@]} > 1))', normalizer)
+        self.assertIn("duplicate partition label", normalizer)
+        self.assertIn("Ming OS 安装分区检查失败", normalizer)
+        self.assertIn("详细日志：%s", normalizer)
+
     def test_partition_type_normalizer_retries_final_parttype_after_kernel_reread(self):
         normalizer = BASE.split(
             "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1

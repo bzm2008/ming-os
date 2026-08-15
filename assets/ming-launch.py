@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 
 
 ANIMATION_DURATION_MS = 160
@@ -28,6 +29,38 @@ DESKTOP_PROXY_DIR = pathlib.Path("/usr/local/share/applications")
 DESKTOP_PROXY_MANIFEST = pathlib.Path("/var/lib/ming-os/desktop-proxies/manifest-v1.json")
 DESKTOP_PROXY_GENERATION = "ming-opt-desktop-proxies-v1"
 
+SANDBOX_RETRY_SIGNATURES = (
+    "no usable sandbox",
+    "suid sandbox",
+    "setuid sandbox",
+    "zygote_host_impl_linux",
+    "sandbox_linux",
+    "failed to move to new namespace",
+    "without --no-sandbox",
+)
+SANDBOX_RETRY_ALLOWLIST = {
+    "wechat": {
+        "desktop_ids": {"wechat", "weixin", "ming-wechat"},
+        "wm_classes": {"wechat", "weixin"},
+        "programs": {"wechat", "weixin", "ming-wechat"},
+    },
+    "dingtalk": {
+        "desktop_ids": {
+            "dingtalk", "com.alibabainc.dingtalk", "dingding",
+        },
+        "wm_classes": {"dingtalk", "dingding"},
+        "programs": {"dingtalk", "dingding", "elevator.sh"},
+    },
+    "wps": {
+        "desktop_ids": {
+            "wps", "wps-office", "wps-office-wps", "wps-office-et",
+            "wps-office-wpp", "wps-office-pdf",
+        },
+        "wm_classes": {"wps", "et", "wpp", "wpspdf"},
+        "programs": {"wps", "et", "wpp", "wpspdf"},
+    },
+}
+
 
 def _load_common():
     path = pathlib.Path(__file__).with_name("ming-shell-common.py")
@@ -39,6 +72,111 @@ def _load_common():
 
 COMMON = _load_common()
 _EVENT_LOCK = threading.Lock()
+
+
+def sandbox_failure_signature(error):
+    text = str(error or "").casefold()
+    return bool(text) and any(marker in text for marker in SANDBOX_RETRY_SIGNATURES)
+
+
+def _sandbox_desktop_metadata(desktop_file, argv):
+    try:
+        path = pathlib.Path(desktop_file)
+        if not path.is_absolute() or path.suffix.casefold() != ".desktop":
+            return None
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            parser.read_file(stream)
+        if not parser.has_section("Desktop Entry"):
+            return None
+        section = parser["Desktop Entry"]
+        if section.get("Type", "Application").strip().casefold() != "application":
+            return None
+        if section.getboolean("Hidden", fallback=False) or section.getboolean(
+                "NoDisplay", fallback=False):
+            return None
+        entry = COMMON.parse_desktop_file(path)
+        if entry is None or tuple(argv) != tuple(entry.argv):
+            return None
+        try:
+            program = COMMON.desktop_exec_program(entry.argv)
+        except (AttributeError, ValueError):
+            if not entry.argv:
+                return None
+            program = entry.argv[0]
+        return {
+            "desktop_id": path.stem.casefold(),
+            "wm_class": section.get("StartupWMClass", "").strip().casefold(),
+            "program": pathlib.PurePath(program).name.casefold(),
+        }
+    except (OSError, UnicodeError, configparser.Error, TypeError, ValueError):
+        return None
+
+
+def _sandbox_retry_allowed(desktop_file, argv):
+    metadata = _sandbox_desktop_metadata(desktop_file, argv)
+    if not metadata:
+        return False
+    for allowed in SANDBOX_RETRY_ALLOWLIST.values():
+        if metadata["program"] not in allowed["programs"]:
+            continue
+        if (
+            metadata["desktop_id"] in allowed["desktop_ids"]
+            or metadata["wm_class"] in allowed["wm_classes"]
+        ):
+            return True
+    return False
+
+
+def sandbox_retry_argv(desktop_file, argv, error):
+    """Return a compatibility retry only for allowlisted sandbox failures."""
+    if not sandbox_failure_signature(error) or not isinstance(argv, (tuple, list)):
+        return None
+    if not argv or "--no-sandbox" in argv or not _sandbox_retry_allowed(desktop_file, argv):
+        return None
+    return tuple(argv) + ("--no-sandbox",)
+
+
+def _spawn_with_stderr(argv):
+    capture = tempfile.TemporaryFile(mode="w+b")
+    try:
+        process = subprocess.Popen(list(argv), shell=False, stderr=capture)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        capture.close()
+        raise
+    process._ming_stderr_capture = capture
+    return process
+
+
+def _close_stderr_capture(process):
+    capture = getattr(process, "_ming_stderr_capture", None)
+    if capture is None:
+        return
+    try:
+        capture.close()
+    except OSError:
+        pass
+    try:
+        delattr(process, "_ming_stderr_capture")
+    except AttributeError:
+        pass
+
+
+def _process_exit_error(process, returncode):
+    detail = ""
+    capture = getattr(process, "_ming_stderr_capture", None)
+    if capture is not None:
+        try:
+            capture.flush()
+            capture.seek(0)
+            detail = capture.read(8192).decode("utf-8", errors="replace").strip()
+        except (OSError, UnicodeError):
+            detail = ""
+        finally:
+            _close_stderr_capture(process)
+    suffix = ": " + detail[-2048:] if detail else ""
+    return RuntimeError("application exited with status {}{}".format(returncode, suffix))
 
 
 def record_launch_event(request, status, detail="", path=None):
@@ -410,6 +548,7 @@ def probe_window_async(
                     check=False, shell=False,
                 )
                 if window_matches(result.stdout, pid=pid, desktop_file=desktop_file):
+                    _close_stderr_capture(process)
                     if on_ready:
                         on_ready()
                     return
@@ -417,15 +556,20 @@ def probe_window_async(
                 break
             if returncode not in (None, 0):
                 if on_failure:
-                    on_failure(RuntimeError("application exited with status {}".format(returncode)))
+                    on_failure(_process_exit_error(process, returncode))
+                else:
+                    _close_stderr_capture(process)
                 return
             if interval:
                 time.sleep(interval)
         returncode = process.poll() if hasattr(process, "poll") else None
         if returncode not in (None, 0) and on_failure:
-            on_failure(RuntimeError("application exited with status {}".format(returncode)))
+            on_failure(_process_exit_error(process, returncode))
         elif on_timeout:
+            _close_stderr_capture(process)
             on_timeout()
+        else:
+            _close_stderr_capture(process)
     threading.Thread(target=probe, name="ming-launch-wmctrl", daemon=True).start()
 
 
@@ -450,7 +594,7 @@ class LaunchBroker:
             workarea=None, probe=None, report_error=None, record_event=None,
             trusted_verifier=None, desktop_activator=None, proxy_verifier=None,
             static_feedback=None):
-        self.spawn = spawn or (lambda argv: subprocess.Popen(list(argv), shell=False))
+        self.spawn = spawn or _spawn_with_stderr
         self.trusted_verifier = trusted_verifier or verify_package_owned_system_desktop
         self.desktop_activator = desktop_activator or activate_desktop_app_info
         self.proxy_verifier = proxy_verifier or verify_desktop_proxy
@@ -471,7 +615,7 @@ class LaunchBroker:
         if previous is not None and moment - previous < DEDUP_SECONDS:
             return False
 
-        def watch_for_window(process, failure_status):
+        def watch_for_window(process, failure_status, launch_argv=None):
             feedback = self.static_feedback if self.reduced_motion() else self.animate
             finish = feedback(request, self.workarea())
 
@@ -481,6 +625,23 @@ class LaunchBroker:
                     finish()
 
             def failed(error):
+                retry_argv = sandbox_retry_argv(
+                    request.desktop_file, launch_argv, error
+                ) if launch_argv else None
+                if retry_argv is not None:
+                    if callable(finish):
+                        finish()
+                    self.record_event(request, "sandbox_retry", error)
+                    try:
+                        retry_process = self.spawn(retry_argv)
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        self._recent.pop(key, None)
+                        self.record_event(request, "sandbox_retry_failed", exc)
+                        self.report_error(request, exc)
+                        return
+                    self.record_event(request, "sandbox_retry_spawned")
+                    watch_for_window(retry_process, "sandbox_retry_exit")
+                    return
                 self._recent.pop(key, None)
                 if callable(finish):
                     finish()
@@ -518,6 +679,24 @@ class LaunchBroker:
                 self.report_error(request, error)
                 return False
             try:
+                entry = COMMON.parse_desktop_file(request.desktop_file)
+            except (OSError, ValueError):
+                entry = None
+            ordinary_argv = tuple(entry.argv) if entry is not None else ()
+            if ordinary_argv and _sandbox_retry_allowed(
+                    request.desktop_file, ordinary_argv):
+                try:
+                    process = self.spawn(ordinary_argv)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    status = "command_missing" if isinstance(exc, FileNotFoundError) else "spawn_failed"
+                    self.record_event(request, status, exc)
+                    self.report_error(request, exc)
+                    return False
+                self._recent[key] = moment
+                self.record_event(request, "spawned")
+                watch_for_window(process, "process_exit", launch_argv=ordinary_argv)
+                return True
+            try:
                 activated = self.desktop_activator(request.desktop_file)
             except (OSError, ValueError, RuntimeError) as exc:
                 self.record_event(request, "activation_failed", exc)
@@ -546,7 +725,8 @@ class LaunchBroker:
             return False
         self._recent[key] = moment
         self.record_event(request, "spawned")
-        watch_for_window(process, "process_exit")
+        retry_argv = request.argv if request.mode == "desktop_proxy" else None
+        watch_for_window(process, "process_exit", launch_argv=retry_argv)
         return True
 
 

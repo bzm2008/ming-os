@@ -2022,7 +2022,7 @@ class MingSettings(Adw.ApplicationWindow):
                 return False
 
             run_capture_async(
-                ["pkexec", "ming-radio-repair", "bluetooth"], timeout=35, on_done=done)
+                ["/usr/local/bin/ming-radio-repair", "bluetooth"], timeout=35, on_done=done)
 
         run_task_async(bluetooth_status_snapshot, checked)
 
@@ -3669,9 +3669,9 @@ class MingSettings(Adw.ApplicationWindow):
                 return
             operation_generation = self.hardware_probe_state.begin()
             self.broadcom_button.set_sensitive(False)
-            cmd = self.pkexec_cmd("/usr/local/sbin/ming-broadcom-driver", action)
+            cmd = ["/usr/local/bin/ming-authorized-action", "broadcom", action]
 
-            def done(rc):
+            def done(rc, output, operation_error):
                 if not self.hardware_probe_state.accept(operation_generation):
                     return False
                 if self.hardware_page.get_root() is not self:
@@ -3680,10 +3680,13 @@ class MingSettings(Adw.ApplicationWindow):
                 if rc == 0:
                     self.toast("驱动操作完成，请重启电脑。日志：/var/log/ming-broadcom-driver.log")
                 else:
-                    self.toast("驱动操作未成功，系统已保留或恢复原配置。日志：/var/log/ming-broadcom-driver.log")
+                    detail = operation_error or output or "系统授权或驱动操作失败。"
+                    if "/dev/tty" in detail or "textual authentication agent" in detail:
+                        detail = "请在桌面授权弹窗中确认，当前无可用图形授权代理。"
+                    self.toast("驱动操作未成功：%s 日志：/var/log/ming-broadcom-driver.log" % detail[:180])
                 return False
 
-            run_async(cmd, on_done=done)
+            run_capture_async(cmd, timeout=120, on_done=done)
 
         dlg.connect("response", on_response)
         dlg.present()

@@ -135,6 +135,73 @@ class PackageRuntimeContracts(unittest.TestCase):
         self.assertIn("桌面刷新失败", DESKTOP)
         self.assertIn("刷新/重试", DESKTOP)
 
+    def test_privileged_gui_actions_use_one_whitelisted_polkit_bridge(self):
+        opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"
+        self.assertIn(opener, DESKTOP)
+        bridge = DESKTOP.split(opener, 1)[1].split("\nMINGAUTHORIZE", 1)[0]
+        for route in ("package", "spark", "broadcom", "radio"):
+            self.assertIn(route + ")", bridge)
+        self.assertIn("Error creating textual authentication agent", bridge)
+        self.assertIn("/dev/tty", bridge)
+        self.assertIn("当前无可用图形授权代理", bridge)
+        self.assertNotIn("eval ", bridge)
+        self.assertNotIn("sudo ", bridge)
+        self.assertNotIn("su ", bridge)
+
+    def test_build_gate_requires_the_authorization_bridge(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn('"usr/local/bin/ming-authorized-action"', build)
+
+    def test_package_and_spark_callers_use_the_ming_authorization_bridge(self):
+        package_gui = DESKTOP.split(
+            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
+        )[1].split("\nMINGPACKAGEGUI", 1)[0]
+        self.assertIn("ming-authorized-action package install", package_gui)
+        self.assertNotIn("pkexec /usr/local/sbin/ming-package-installer", package_gui)
+
+        spark_caller = APPS.split(
+            "cat > \"$spark_shell_caller\" << 'MINGSPARKCALLER'", 1
+        )[1].split("\nMINGSPARKCALLER", 1)[0]
+        self.assertIn("ming-authorized-action spark", spark_caller)
+        self.assertNotIn("exec pkexec /usr/local/sbin/ming-spark-package-control", spark_caller)
+
+    def test_authorization_bridge_translates_headless_pkexec_failure(self):
+        self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for authorization regression")
+        opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"
+        bridge = DESKTOP.split(opener, 1)[1].split("\nMINGAUTHORIZE", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="ming-authorize-") as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            driver = root / "ming-broadcom-driver"
+            driver.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            driver.chmod(0o755)
+            pkexec = bin_dir / "pkexec"
+            pkexec.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'Error creating textual authentication agent: /dev/tty: No such device or address' >&2\n"
+                "exit 127\n",
+                encoding="utf-8",
+            )
+            pkexec.chmod(0o755)
+            bridge = bridge.replace(
+                "/usr/local/sbin/ming-broadcom-driver", str(driver).replace("\\", "/")
+            )
+            script = root / "ming-authorized-action"
+            script.write_text(bridge, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [str(GIT_BASH), str(script).replace("\\", "/"), "broadcom", "install"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")},
+            )
+        self.assertEqual(127, result.returncode)
+        self.assertIn("当前无可用图形授权代理", result.stderr)
+        self.assertNotIn("Error creating textual authentication agent", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

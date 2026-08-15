@@ -227,6 +227,169 @@ class LaunchBrokerCoreTests(unittest.TestCase):
         self.assertTrue(broker.launch(request))
         self.assertEqual(["spawn", "animate"], [event[0] for event in events])
 
+    def test_sandbox_retry_is_limited_to_explicit_desktop_entry_classes(self):
+        retry = getattr(self.launch, "sandbox_retry_argv", lambda *_args: None)
+        sandbox_error = RuntimeError(
+            "[FATAL:zygote_host_impl_linux.cc] No usable sandbox!"
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            cases = (
+                ("wechat.desktop", "/usr/bin/wechat %U", "WeChat", ("/usr/bin/wechat",)),
+                (
+                    "com.alibabainc.DingTalk.desktop",
+                    "/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh %U",
+                    "DingTalk",
+                    ("/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh",),
+                ),
+                ("wps-office-wps.desktop", "/usr/bin/wps %F", "wps", ("/usr/bin/wps",)),
+            )
+            for basename, command, wm_class, argv in cases:
+                with self.subTest(basename=basename):
+                    desktop_file = root / basename
+                    desktop_file.write_text(
+                        "[Desktop Entry]\nType=Application\nName=Allowed\n"
+                        f"Exec={command}\nStartupWMClass={wm_class}\n",
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(
+                        argv + ("--no-sandbox",),
+                        retry(desktop_file, argv, sandbox_error),
+                    )
+
+    def test_sandbox_retry_rejects_browsers_and_unknown_desktop_entries(self):
+        retry = getattr(self.launch, "sandbox_retry_argv", lambda *_args: None)
+        sandbox_error = RuntimeError(
+            "The SUID sandbox helper binary was found but is not configured correctly"
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            cases = (
+                ("firefox.desktop", "/usr/bin/firefox %U", "Firefox", ("/usr/bin/firefox",)),
+                ("chromium.desktop", "/usr/bin/chromium %U", "Chromium", ("/usr/bin/chromium",)),
+                ("unknown.desktop", "/opt/vendor/client %U", "VendorClient", ("/opt/vendor/client",)),
+            )
+            for basename, command, wm_class, argv in cases:
+                with self.subTest(basename=basename):
+                    desktop_file = root / basename
+                    desktop_file.write_text(
+                        "[Desktop Entry]\nType=Application\nName=Browser\n"
+                        f"Exec={command}\nStartupWMClass={wm_class}\n",
+                        encoding="utf-8",
+                    )
+                    self.assertIsNone(retry(desktop_file, argv, sandbox_error))
+
+    def test_sandbox_retry_requires_a_sandbox_signature_after_ordinary_failure(self):
+        retry = getattr(self.launch, "sandbox_retry_argv", lambda *_args: None)
+        with tempfile.TemporaryDirectory() as tempdir:
+            desktop_file = pathlib.Path(tempdir) / "wechat.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nType=Application\nName=WeChat\n"
+                "Exec=/usr/bin/wechat %U\nStartupWMClass=WeChat\n",
+                encoding="utf-8",
+            )
+            argv = ("/usr/bin/wechat",)
+            self.assertIsNone(
+                retry(desktop_file, argv, RuntimeError("application exited with status 7"))
+            )
+            self.assertIsNone(
+                retry(
+                    desktop_file,
+                    argv + ("--no-sandbox",),
+                    RuntimeError("No usable sandbox!"),
+                )
+            )
+
+    def test_allowlisted_system_entry_retries_only_after_ordinary_process_failure(self):
+        calls = []
+        failures = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            desktop_file = pathlib.Path(tempdir) / "wechat.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nType=Application\nName=WeChat\n"
+                "Exec=/usr/bin/wechat %U\nStartupWMClass=WeChat\n",
+                encoding="utf-8",
+            )
+
+            def spawn(argv):
+                calls.append(tuple(argv))
+                return object()
+
+            def probe(_process, _desktop, on_ready=None, on_failure=None, on_timeout=None):
+                failures.append(on_failure)
+
+            broker = self.launch.LaunchBroker(
+                spawn=spawn,
+                animate=lambda *_args: None,
+                static_feedback=lambda *_args: None,
+                probe=probe,
+                trusted_verifier=lambda _path: True,
+                desktop_activator=lambda _path: self.fail("allowlisted entry must use observable argv"),
+                reduced_motion=lambda: True,
+                report_error=lambda *_args: None,
+                record_event=lambda *_args: None,
+                now=lambda: 1.0,
+            )
+            request = self.launch.LaunchRequest(
+                (), desktop_file=str(desktop_file.resolve()), mode="desktop_app_info"
+            )
+
+            self.assertTrue(broker.launch(request))
+            self.assertEqual([("/usr/bin/wechat",)], calls)
+            failures[0](RuntimeError("zygote_host_impl_linux.cc: No usable sandbox!"))
+
+        self.assertEqual(
+            [
+                ("/usr/bin/wechat",),
+                ("/usr/bin/wechat", "--no-sandbox"),
+            ],
+            calls,
+        )
+
+    def test_verified_allowlisted_desktop_proxy_can_retry_after_sandbox_failure(self):
+        calls = []
+        failures = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            desktop_file = pathlib.Path(tempdir) / (
+                "ming-opt-" + "a" * 64 + ".desktop"
+            )
+            desktop_file.write_text(
+                "[Desktop Entry]\nType=Application\nName=DingTalk\n"
+                "Exec=/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh %U\n"
+                "StartupWMClass=DingTalk\n",
+                encoding="utf-8",
+            )
+
+            def spawn(argv):
+                calls.append(tuple(argv))
+                return object()
+
+            def probe(_process, _desktop, on_ready=None, on_failure=None, on_timeout=None):
+                failures.append(on_failure)
+
+            broker = self.launch.LaunchBroker(
+                spawn=spawn,
+                animate=lambda *_args: None,
+                static_feedback=lambda *_args: None,
+                probe=probe,
+                proxy_verifier=lambda _path: True,
+                reduced_motion=lambda: True,
+                report_error=lambda *_args: None,
+                record_event=lambda *_args: None,
+                now=lambda: 1.0,
+            )
+            argv = ("/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh",)
+            request = self.launch.LaunchRequest(
+                argv,
+                desktop_file=str(desktop_file.resolve()),
+                mode="desktop_proxy",
+            )
+
+            self.assertTrue(broker.launch(request))
+            failures[0](RuntimeError("No usable sandbox!"))
+
+        self.assertEqual([argv, argv + ("--no-sandbox",)], calls)
+
     def test_workarea_falls_back_when_gdk_typelib_is_missing(self):
         fake_gi = types.SimpleNamespace(
             require_version=mock.Mock(side_effect=ValueError("Namespace Gdk not available")),

@@ -33,6 +33,54 @@ def load_interaction_state():
     return namespace["InteractionState"]
 
 
+def load_phone_dedup_functions():
+    source = PHONE_DESKTOP.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    wanted = {
+        "layout_effective_path",
+        "is_system_application_path",
+        "layout_item_identity",
+        "canonical_identity",
+        "desktop_entry_dedup_fields",
+        "normalized_desktop_exec_program",
+        "desktop_entry_package_owners",
+        "third_party_app_identity",
+        "app_dedup_preference",
+        "retired_layout_item",
+        "deduplicate_layout_items",
+        "deduplicate_apps",
+    }
+    body = [node for node in tree.body if isinstance(node, ast.Assign)]
+    body.extend(
+        node for node in tree.body
+        if isinstance(node, ast.Import)
+        and all(alias.name != "gi" for alias in node.names)
+    )
+    body.extend(
+        node for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module != "gi.repository"
+    )
+    body.extend(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    )
+    namespace = {
+        "Path": pathlib.Path,
+        "os": os,
+        "load_shell_common": lambda: None,
+        "__file__": str(PHONE_DESKTOP),
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
+            str(PHONE_DESKTOP),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace
+
+
 class InteractionStateTests(unittest.TestCase):
     def test_small_pointer_movement_activates_once(self):
         state = load_interaction_state()(drag_threshold=12)
@@ -253,6 +301,9 @@ class DesktopSourceTests(unittest.TestCase):
         wanted = {
             "layout_effective_path", "is_system_application_path",
             "layout_item_identity", "canonical_identity", "deduplicate_apps",
+            "desktop_entry_dedup_fields", "normalized_desktop_exec_program",
+            "desktop_entry_package_owners", "third_party_app_identity",
+            "app_dedup_preference",
         }
         body = [node for node in tree.body if isinstance(node, ast.Assign)]
         body.extend(
@@ -291,6 +342,9 @@ class DesktopSourceTests(unittest.TestCase):
         wanted = {
             "layout_effective_path", "is_system_application_path",
             "layout_item_identity", "canonical_identity", "deduplicate_apps",
+            "desktop_entry_dedup_fields", "normalized_desktop_exec_program",
+            "desktop_entry_package_owners", "third_party_app_identity",
+            "app_dedup_preference",
         }
         body = [node for node in tree.body if isinstance(node, ast.Assign)]
         body.extend(
@@ -326,6 +380,165 @@ class DesktopSourceTests(unittest.TestCase):
             ["ming-settings.desktop"],
             [item["basename"] for item in namespace["deduplicate_apps"](apps)],
         )
+
+    def test_phone_desktop_deduplicates_wps_and_dingtalk_by_launcher_identity(self):
+        namespace = load_phone_dedup_functions()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_dir = pathlib.Path(temp_dir) / "applications"
+            system_dir.mkdir()
+            namespace["SYSTEM_APPLICATION_DIR"] = system_dir
+
+            launchers = {
+                "wps-office-wps.desktop": ("WPS Office", "/usr/bin/wps %F", "wps"),
+                "wps.desktop": ("WPS Office", "/usr/bin/wps %F", "WPS"),
+                "dingtalk.desktop": (
+                    "DingTalk",
+                    "/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh %U",
+                    "DingTalk",
+                ),
+                "com.alibabainc.DingTalk.desktop": (
+                    "钉钉",
+                    "/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh %U",
+                    "dingtalk",
+                ),
+                "team-notes.desktop": ("DingTalk", "/usr/bin/team-notes %U", "TeamNotes"),
+            }
+            apps = []
+            for basename, (name, command, wm_class) in launchers.items():
+                path = system_dir / basename
+                path.write_text(
+                    "[Desktop Entry]\nType=Application\n"
+                    f"Name={name}\nExec={command}\nStartupWMClass={wm_class}\n",
+                    encoding="utf-8",
+                )
+                apps.append({
+                    "path": str(path),
+                    "basename": basename,
+                    "name": name,
+                    "diagnostic": "",
+                    "package_owner": "wps-office" if "wps" in basename else "dingtalk",
+                })
+
+            selected = namespace["deduplicate_apps"](apps)
+
+        self.assertEqual(3, len(selected))
+        self.assertEqual(1, sum(item["basename"].startswith("wps") for item in selected))
+        self.assertEqual(
+            1,
+            sum("dingtalk" in item["basename"].casefold() for item in selected),
+        )
+        self.assertIn("team-notes.desktop", {item["basename"] for item in selected})
+
+    def test_phone_desktop_keeps_same_program_launchers_with_distinct_fixed_arguments(self):
+        namespace = load_phone_dedup_functions()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_dir = pathlib.Path(temp_dir) / "applications"
+            system_dir.mkdir()
+            namespace["SYSTEM_APPLICATION_DIR"] = system_dir
+            apps = []
+            for basename, argument in (
+                ("office-writer.desktop", "--writer"),
+                ("office-calc.desktop", "--calc"),
+            ):
+                path = system_dir / basename
+                path.write_text(
+                    "[Desktop Entry]\nType=Application\nName=Office\n"
+                    f"Exec=/usr/bin/office {argument} %U\n",
+                    encoding="utf-8",
+                )
+                apps.append({
+                    "path": str(path),
+                    "basename": basename,
+                    "name": "Office",
+                    "diagnostic": "",
+                    "package_owner": "office-suite",
+                })
+
+            selected = namespace["deduplicate_apps"](apps)
+
+        self.assertEqual(
+            ["office-writer.desktop", "office-calc.desktop"],
+            [item["basename"] for item in selected],
+        )
+
+    def test_phone_desktop_prefers_launchable_package_owned_system_entry(self):
+        namespace = load_phone_dedup_functions()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            system_dir = root / "usr" / "share" / "applications"
+            user_dir = root / "home" / "user" / ".local" / "share" / "applications"
+            system_dir.mkdir(parents=True)
+            user_dir.mkdir(parents=True)
+            namespace["SYSTEM_APPLICATION_DIR"] = system_dir
+            entries = []
+            for path in (user_dir / "wps.desktop", system_dir / "wps-office-wps.desktop"):
+                path.write_text(
+                    "[Desktop Entry]\nType=Application\nName=WPS Office\n"
+                    "Exec=/usr/bin/wps %F\nStartupWMClass=wps\n",
+                    encoding="utf-8",
+                )
+                entries.append({
+                    "path": str(path),
+                    "basename": path.name,
+                    "name": "WPS Office",
+                    "diagnostic": "",
+                    "package_owner": "wps-office" if path.parent == system_dir else "",
+                })
+
+            selected = namespace["deduplicate_apps"](entries)
+
+        self.assertEqual([str(system_dir / "wps-office-wps.desktop")], [
+            item["path"] for item in selected
+        ])
+
+    def test_phone_desktop_merges_managed_copy_with_its_source_launcher(self):
+        namespace = load_phone_dedup_functions()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_dir = pathlib.Path(temp_dir) / "applications"
+            system_dir.mkdir()
+            namespace["SYSTEM_APPLICATION_DIR"] = system_dir
+            source = system_dir / "wps-office-wps.desktop"
+            source.write_text(
+                "[Desktop Entry]\nType=Application\nName=WPS Office\n"
+                "Exec=/usr/bin/wps %F\nStartupWMClass=wps\n",
+                encoding="utf-8",
+            )
+            base = {
+                "path": str(source),
+                "basename": source.name,
+                "name": "WPS Office",
+                "diagnostic": "",
+                "package_owner": "wps-office",
+            }
+            managed = {**base, "basename": "WPS Office.desktop", "source_path": str(source)}
+            direct = {**base, "source_path": ""}
+
+            selected = namespace["deduplicate_apps"]([managed, direct])
+
+        self.assertEqual(1, len(selected))
+
+    def test_phone_desktop_migrates_existing_third_party_duplicate_layout_items(self):
+        namespace = load_phone_dedup_functions()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_dir = pathlib.Path(temp_dir) / "applications"
+            system_dir.mkdir()
+            namespace["SYSTEM_APPLICATION_DIR"] = system_dir
+            paths = []
+            for basename in ("wps.desktop", "wps-office-wps.desktop"):
+                path = system_dir / basename
+                path.write_text(
+                    "[Desktop Entry]\nType=Application\nName=WPS Office\n"
+                    "Exec=/usr/bin/wps %F\nStartupWMClass=wps\n",
+                    encoding="utf-8",
+                )
+                paths.append(str(path))
+            layout = [
+                {"id": "first", "type": "app", "path": paths[0]},
+                {"id": "second", "type": "app", "path": paths[1]},
+            ]
+            result = namespace["deduplicate_layout_items"](layout)
+
+        self.assertEqual(1, len(result))
 
     def test_finalizer_clears_all_managed_desktop_state_for_live_and_skel_users(self):
         finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")
@@ -664,6 +877,9 @@ class DesktopSourceTests(unittest.TestCase):
             "_desktop_has_marker", "is_system_application_path", "managed_desktop_source_path",
             "layout_effective_path", "canonicalize_core_layout_item",
             "desktop_entry_identity_fields", "legacy_managed_source_path",
+            "desktop_entry_dedup_fields", "normalized_desktop_exec_program",
+            "desktop_entry_package_owners", "third_party_app_identity",
+            "app_dedup_preference",
         }
         body = [node for node in tree.body if isinstance(node, ast.Assign)]
         body.extend(node for node in tree.body if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names))

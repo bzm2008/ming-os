@@ -213,13 +213,42 @@ class RadioBuildContracts(unittest.TestCase):
         for module in ["btusb", "btintel", "btrtl", "btbcm", "ath3k"]:
             self.assertIn(module, preload)
             self.assertIn(module, repair)
-        self.assertIn("exec pkexec /usr/local/sbin/ming-radio-repair bluetooth", repair)
+        self.assertIn("pkexec /usr/local/sbin/ming-radio-repair bluetooth", repair)
+        self.assertIn('auth_rc=$?', repair)
         self.assertIn("rfkill unblock bluetooth", repair)
         self.assertIn("systemctl enable bluetooth.service", repair)
         self.assertIn("systemctl start bluetooth.service", repair)
         self.assertIn("ming-device-control bluetooth-status --json", repair)
         self.assertIn("no_hardware", repair)
         self.assertIn("/var/log/ming-radio-repair.log", repair)
+
+    def test_bluetooth_repair_reports_missing_graphical_polkit_agent(self):
+        opener = "cat > /usr/local/sbin/ming-radio-repair << 'RADIOREPAIR'"
+        repair = BASE.split(opener, 1)[1].split("RADIOREPAIR", 1)[0]
+        self.assertIn("Error creating textual authentication agent", repair)
+        self.assertIn("/dev/tty", repair)
+        self.assertIn("当前无可用图形授权代理", repair)
+
+    def test_bluetooth_repair_captures_pkexec_failure_despite_errexit(self):
+        opener = "cat > /usr/local/sbin/ming-radio-repair << 'RADIOREPAIR'"
+        repair = BASE.split(opener, 1)[1].split("RADIOREPAIR", 1)[0]
+        self.assertIn('if auth_output="$(pkexec /usr/local/sbin/ming-radio-repair bluetooth 2>&1)"; then', repair)
+        self.assertIn('auth_rc=0', repair)
+        self.assertIn('auth_rc=$?', repair)
+
+    def test_bluetooth_repair_has_a_standard_path_compatibility_entry(self):
+        self.assertIn(
+            "ln -sf /usr/local/sbin/ming-radio-repair /usr/local/bin/ming-radio-repair",
+            BASE,
+        )
+
+    def test_build_gate_accepts_normalized_authorization_and_requires_standard_path(self):
+        self.assertNotIn(
+            '"exec pkexec /usr/local/sbin/ming-radio-repair bluetooth"',
+            BUILD,
+        )
+        self.assertIn('"pkexec /usr/local/sbin/ming-radio-repair bluetooth"', BUILD)
+        self.assertIn('require_path("usr/local/bin/ming-radio-repair")', BUILD)
 
     def test_bluetooth_repair_refuses_hard_block_and_untrusted_diagnostics_before_module_reload(self):
         opener = "cat > /usr/local/sbin/ming-radio-repair << 'RADIOREPAIR'"

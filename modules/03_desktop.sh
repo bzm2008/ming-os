@@ -264,6 +264,83 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
+    # All GUI-triggered privileged operations cross one narrow, auditable
+    # Polkit boundary.  The route and its arguments are validated before
+    # pkexec is invoked, so a missing graphical agent produces a useful
+    # message instead of a silent /dev/tty failure.
+    cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'
+#!/usr/bin/env bash
+set -uo pipefail
+
+route="${1:-}"
+shift || true
+command=()
+case "${route}" in
+    package)
+        [[ "${1:-}" == "install" && "$#" -eq 2 ]] || {
+            echo "软件安装请求无效，只允许安装一个本地 DEB 文件。" >&2
+            exit 2
+        }
+        package_file="$2"
+        [[ "${package_file}" == /*.deb && -f "${package_file}" ]] || {
+            echo "软件包路径无效，只允许读取本地 DEB 文件。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-package-installer install "${package_file}")
+        ;;
+    spark)
+        [[ "$#" -ge 1 ]] || { echo "星火应用请求缺少操作。" >&2; exit 2; }
+        command=(/usr/local/sbin/ming-spark-package-control "$@")
+        ;;
+    broadcom)
+        [[ "$#" -eq 1 && ( "$1" == install || "$1" == restore ) ]] || {
+            echo "Broadcom 驱动请求无效。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-broadcom-driver "$1")
+        ;;
+    radio)
+        [[ "$#" -eq 1 && "$1" == bluetooth ]] || {
+            echo "无线设备修复请求无效。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-radio-repair bluetooth)
+        ;;
+    *)
+        echo "拒绝未受信任的系统授权操作。" >&2
+        exit 2
+        ;;
+esac
+
+if [[ ! -x "${command[0]}" ]]; then
+    echo "系统组件缺失：${command[0]}。" >&2
+    exit 127
+fi
+
+if output="$(pkexec "${command[@]}" 2>&1)"; then
+    rc=0
+else
+    rc=$?
+fi
+if [[ "${rc}" -ne 0 ]]; then
+    if [[ "${output}" == *"Error creating textual authentication agent"* \
+            || "${output}" == *"/dev/tty"* \
+            || "${output}" == *"No such device or address"* ]]; then
+        echo "请在桌面授权弹窗中确认，当前无可用图形授权代理。请先完成账户设置或重启授权代理。" >&2
+    elif [[ "${output}" == *"not authorized"* || "${output}" == *"Not authorized"* ]]; then
+        echo "此操作需要管理员授权，请先完成账户设置并在桌面授权弹窗中确认。" >&2
+    elif [[ -n "${output}" ]]; then
+        printf '%s\n' "${output}" >&2
+    else
+        echo "系统授权失败，请检查账户设置和 Polkit 服务。" >&2
+    fi
+else
+    [[ -n "${output}" ]] && printf '%s\n' "${output}"
+fi
+exit "${rc}"
+MINGAUTHORIZE
+    chmod 0755 /usr/local/bin/ming-authorized-action
+
     # AppImage files normally mount through FUSE.  Older kernels, containers
     # and some virtual machines do not expose /dev/fuse, so all generated
     # launchers go through this small user-level dispatcher and use the
@@ -399,7 +476,7 @@ if [[ -z "${result_file}" ]]; then
 fi
 trap 'rm -f "${result_file}"' EXIT
 
-if pkexec /usr/local/sbin/ming-package-installer install "${package_file}" >"${result_file}" 2>&1; then
+if /usr/local/bin/ming-authorized-action package install "${package_file}" >"${result_file}" 2>&1; then
     installer_rc=0
 else
     installer_rc=$?

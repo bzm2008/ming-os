@@ -283,7 +283,8 @@ class SettingsRadioAudioContracts(unittest.TestCase):
 
         self.assertIn("bluetooth_status_snapshot", refresh)
         self.assertIn("bluetooth_repair_allowed(status)", refresh)
-        self.assertIn('["pkexec", "ming-radio-repair", "bluetooth"]', repair)
+        self.assertIn('["/usr/local/bin/ming-radio-repair", "bluetooth"]', repair)
+        self.assertNotIn('["pkexec", "ming-radio-repair", "bluetooth"]', repair)
         self.assertIn("refresh_bluetooth_status()", repair)
 
     def test_audio_actions_use_the_device_controller_and_present_readable_result(self):
@@ -319,6 +320,13 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("修复输入法", page)
         self.assertIn("ming-input-repair", page)
         self.assertIn("--user", page)
+
+    def test_broadcom_driver_action_uses_the_ming_authorization_bridge(self):
+        action = function_source("on_broadcom_action", "MingSettings")
+        self.assertIn('"/usr/local/bin/ming-authorized-action", "broadcom", action', action)
+        self.assertNotIn('self.pkexec_cmd("/usr/local/sbin/ming-broadcom-driver"', action)
+        self.assertIn("run_capture_async(cmd", action)
+        self.assertIn("operation_error", action)
 
     def test_feedback_uses_high_contrast_specific_headings_instead_of_generic_hint(self):
         toast = function_source("toast", "MingSettings")

@@ -1839,6 +1839,7 @@ for helper in [
     "usr/local/bin/ming-phone-desktop-watchdog",
     "usr/local/bin/ming-firefox",
     "usr/local/bin/ming-spark-store",
+    "usr/local/bin/ming-authorized-action",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",
 ]:
@@ -1945,6 +1946,7 @@ bash_generated_helpers = [
     "usr/local/sbin/ming-timer-policy",
     "usr/local/bin/ming-ota-run",
     "usr/local/bin/ming-power-action",
+    "usr/local/bin/ming-authorized-action",
 ]
 for relative_path in bash_generated_helpers:
     validate_generated_executable(relative_path, "bash")
@@ -2286,7 +2288,7 @@ if not (root / "etc/systemd/system/multi-user.target.wants/ming-regdom.service")
 
 radio_repair = require_file("usr/local/sbin/ming-radio-repair", "bluetooth-status --json")
 for marker in [
-    "exec pkexec /usr/local/sbin/ming-radio-repair bluetooth",
+    "pkexec /usr/local/sbin/ming-radio-repair bluetooth",
     "rfkill unblock bluetooth", "systemctl enable bluetooth.service",
     "systemctl start bluetooth.service", "no_hardware", "/var/log/ming-radio-repair.log",
 ]:
@@ -2294,6 +2296,7 @@ for marker in [
         errors.append(f"ming-radio-repair missing Bluetooth recovery marker {marker}")
 if not os.access(root / "usr/local/sbin/ming-radio-repair", os.X_OK):
     errors.append("ming-radio-repair must be executable")
+require_path("usr/local/bin/ming-radio-repair")
 
 hardware_modules = require_file("usr/local/sbin/ming-hardware-preload", "btusb")
 for marker in [
