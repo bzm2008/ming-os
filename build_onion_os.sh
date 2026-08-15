@@ -1401,8 +1401,25 @@ def require_file(relative_path, marker=None):
         errors.append(f"{relative_path} missing marker {marker!r}")
     return text
 
-def require_path(relative_path):
+def rootfs_resolved_path(relative_path, depth=0):
     path = root / relative_path
+    if path.exists() or depth >= 8:
+        return path
+    try:
+        target = os.readlink(path)
+    except OSError:
+        return path
+    target_path = Path(target)
+    if target_path.is_absolute():
+        return rootfs_resolved_path(str(target_path).lstrip("/"), depth + 1)
+    try:
+        next_relative = str((path.parent / target_path).relative_to(root))
+    except ValueError:
+        return path.parent / target_path
+    return rootfs_resolved_path(next_relative, depth + 1)
+
+def require_path(relative_path):
+    path = rootfs_resolved_path(relative_path)
     if not path.exists() or (path.is_file() and path.stat().st_size == 0):
         errors.append(f"missing or empty {relative_path}")
 

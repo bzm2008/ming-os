@@ -250,6 +250,15 @@ class RadioBuildContracts(unittest.TestCase):
         self.assertIn('"pkexec /usr/local/sbin/ming-radio-repair bluetooth"', BUILD)
         self.assertIn('require_path("usr/local/bin/ming-radio-repair")', BUILD)
 
+    def test_build_gate_resolves_absolute_symlinks_inside_target_rootfs(self):
+        r4_validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split(
+            "\n# ========================", 1
+        )[0]
+        self.assertIn("def rootfs_resolved_path(", r4_validator)
+        self.assertIn("os.readlink(path)", r4_validator)
+        self.assertIn('str(target_path).lstrip("/")', r4_validator)
+        self.assertIn("path = rootfs_resolved_path(relative_path)", r4_validator)
+
     def test_bluetooth_repair_refuses_hard_block_and_untrusted_diagnostics_before_module_reload(self):
         opener = "cat > /usr/local/sbin/ming-radio-repair << 'RADIOREPAIR'"
         repair = BASE.split(opener, 1)[1].split("RADIOREPAIR", 1)[0]
