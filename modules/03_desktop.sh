@@ -6603,7 +6603,7 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
 
     # 首次授权由一次性 bootstrap 完成。密码只在特权 helper 的可见窗口输入。
     bootstrap_output=""
-    if ! bootstrap_output="$(pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" 2>&1)"; then
+    if ! bootstrap_output="$(DISPLAY="${DISPLAY:-:0}" XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" pkexec /usr/local/sbin/ming-admin-bootstrap --user "${CUR_USER}" 2>&1)"; then
         log_oobe_event "bootstrap_failed" "${bootstrap_output:-admin bootstrap returned non-zero} (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
         dialog --title="无法完成" --text="管理员初始化未成功，请重新设置。" \
             --width=400 --button="重新设置:0" 2>/dev/null || true

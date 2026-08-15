@@ -93,14 +93,52 @@ def administrator_status(user, runner=run_command):
             "error": "" if status_rc == 0 and groups_rc == 0 else (status_error or groups_error)}
 
 
-def collect_interactive_password(runner=run_command, environ=None, executable=os.path.isfile):
+def recover_graphical_environment_from_pkexec(
+        environ=None, uid_lookup=None, path_exists=os.path.exists):
+    """Restore the caller's X11 session for the first-boot pkexec helper.
+
+    Polkit may start the privileged helper with a very small environment on
+    some LightDM/Xfce sessions.  The helper still needs to show the password
+    dialog locally, so recover only the active caller's standard display and
+    Xauthority file from PKEXEC_UID.  This does not accept arbitrary shell
+    input and it does not grant sudo; it only makes the visible dialog possible.
+    """
+    environ = os.environ if environ is None else environ
+    uid_lookup = uid_lookup or (pwd.getpwuid if pwd is not None else None)
+    if uid_lookup is None:
+        return environ
+    value = environ.get("PKEXEC_UID")
+    try:
+        uid = int(value)
+        account = uid_lookup(uid)
+    except (KeyError, TypeError, ValueError):
+        return environ
+    if uid < 1000 or getattr(account, "pw_uid", None) != uid:
+        return environ
+    if not environ.get("DISPLAY"):
+        environ["DISPLAY"] = ":0"
+    if not environ.get("XAUTHORITY"):
+        home = str(account.pw_dir).rstrip("/")
+        candidate = "%s/.Xauthority" % home
+        if path_exists(candidate):
+            environ["XAUTHORITY"] = candidate
+    return environ
+
+
+def collect_interactive_password(
+        runner=run_command, environ=None, executable=os.path.isfile,
+        uid_lookup=None, path_exists=os.path.exists):
     """Collect the password inside the privileged process, never over caller stdin.
 
     This blocks silent background submission. X11 cannot protect keystrokes once
     the entire desktop session is compromised; first boot must still run only
     trusted image code until administrator setup completes.
     """
-    environ = os.environ if environ is None else environ
+    environ = recover_graphical_environment_from_pkexec(
+        os.environ if environ is None else environ,
+        uid_lookup=uid_lookup,
+        path_exists=path_exists,
+    )
     if not environ.get("DISPLAY") or not executable(ZENITY):
         raise ValueError("a visible local password dialog is required")
     prompts = (

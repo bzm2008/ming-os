@@ -290,6 +290,35 @@ class AdministratorBootstrapTests(unittest.TestCase):
         self.assertTrue(all("--password" in call[0] for call in calls))
         self.assertTrue(all(call[1] is None for call in calls))
 
+    def test_privileged_helper_recovers_display_from_pkexec_uid(self):
+        class Record:
+            pw_name = "alice"
+            pw_uid = 1000
+            pw_dir = "/home/alice"
+
+        calls = []
+        answers = iter(((0, "secret", ""), (0, "secret", "")))
+
+        def runner(command, input_text=None):
+            calls.append((tuple(command), input_text))
+            return next(answers)
+
+        environ = {
+            "PKEXEC_UID": "1000",
+        }
+        password = self.api.collect_interactive_password(
+            runner=runner,
+            environ=environ,
+            executable=lambda path: path in (self.api.ZENITY, "/home/alice/.Xauthority"),
+            uid_lookup=lambda _uid: Record(),
+            path_exists=lambda path: path == "/home/alice/.Xauthority",
+        )
+
+        self.assertEqual("secret", password)
+        self.assertEqual(":0", environ["DISPLAY"])
+        self.assertEqual("/home/alice/.Xauthority", environ["XAUTHORITY"])
+        self.assertEqual(2, len(calls))
+
     def test_password_prompts_identify_initial_and_confirmation_steps(self):
         source = pathlib.Path(self.api.__file__).read_text(encoding="utf-8")
         self.assertIn("管理员初始化（1/2）", source)
@@ -492,7 +521,7 @@ class BuildContractTests(unittest.TestCase):
         script = self.desktop.split(
             "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
                 "OOBEACCOUNT", 1)[0]
-        self.assertIn('bootstrap_output="$(pkexec', script)
+        self.assertIn('bootstrap_output="$(DISPLAY="${DISPLAY:-:0}" XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" pkexec', script)
         self.assertIn('bootstrap_output:-admin bootstrap returned non-zero', script)
         self.assertIn('status_output="$(/usr/local/sbin/ming-admin-bootstrap status', script)
         self.assertIn('status_output:-admin status was not ready', script)
@@ -512,10 +541,10 @@ class BuildContractTests(unittest.TestCase):
         script = self.desktop.split(
             "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
                 "OOBEACCOUNT", 1)[0]
-        self.assertIn("pkexec /usr/local/sbin/ming-admin-bootstrap", script)
+        self.assertIn('DISPLAY="${DISPLAY:-:0}" XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" pkexec /usr/local/sbin/ming-admin-bootstrap', script)
         self.assertIn("pkexec chfn", script)
         self.assertLess(
-            script.index("pkexec /usr/local/sbin/ming-admin-bootstrap"),
+            script.index("/usr/local/sbin/ming-admin-bootstrap"),
             script.index("pkexec chfn"),
         )
         self.assertLess(
