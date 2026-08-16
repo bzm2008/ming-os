@@ -258,11 +258,11 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
 
     def test_spark_store_preflights_and_installs_aria2_dependency(self):
         app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("apt-cache policy aria2", app_store)
+        self.assertIn("LC_ALL=C apt-cache policy aria2", app_store)
         self.assertIn("Spark Store 依赖 aria2", app_store)
         self.assertIn("apt-get update", app_store)
         self.assertIn("aria2", app_store.split("apt install -y --no-install-recommends", 1)[1])
-        self.assertLess(app_store.index("apt-cache policy aria2"), app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install "${asset}"'))
+        self.assertLess(app_store.index("LC_ALL=C apt-cache policy aria2"), app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install "${asset}"'))
 
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]
