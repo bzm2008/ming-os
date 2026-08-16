@@ -258,11 +258,23 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
 
     def test_spark_store_preflights_and_installs_aria2_dependency(self):
         app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("LC_ALL=C apt-cache policy aria2", app_store)
-        self.assertIn("Spark Store 依赖 aria2", app_store)
-        self.assertIn("apt-get update", app_store)
-        self.assertIn("aria2", app_store.split("apt install -y --no-install-recommends", 1)[1])
-        self.assertLess(app_store.index("LC_ALL=C apt-cache policy aria2"), app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install "${asset}"'))
+        helper = APPS.split("install_spark_store_dependencies() {", 1)[1].split("\n}\n\ninstall_app_store()", 1)[0]
+        spark_install = helper + app_store
+        self.assertNotIn("Spark Store 依赖 aria2 不可安装", app_store)
+        self.assertIn("install_spark_store_dependencies || return 1", app_store)
+        self.assertIn("apt-get -y -o Dpkg::Use-Pty=0 install", spark_install)
+        self.assertIn("apt-get update", spark_install)
+        self.assertIn("Spark Store 依赖安装失败", spark_install)
+        self.assertIn("apt-cache policy aria2", spark_install)
+        self.assertIn("aria2", spark_install)
+        self.assertLess(
+            helper.index("apt-get -y -o Dpkg::Use-Pty=0 install"),
+            helper.index("apt-cache policy aria2"),
+        )
+        self.assertLess(
+            app_store.index("install_spark_store_dependencies"),
+            app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install'),
+        )
 
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]

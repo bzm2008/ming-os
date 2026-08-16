@@ -1972,6 +1972,38 @@ install_papyrus() {
 
 # ======================== 应用商店 (星火应用商店) ========================
 
+install_spark_store_dependencies() {
+    local dependency_log="/tmp/ming-spark-store-dependencies.log"
+    local packages=(
+        aria2
+        xdg-utils
+        xdg-desktop-portal
+        xdg-desktop-portal-gtk
+        libnotify-bin
+    )
+
+    if apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends "${packages[@]}" >"${dependency_log}" 2>&1; then
+        return 0
+    fi
+
+    echo "[WARN] Spark Store 依赖安装首次失败，刷新 APT 索引后重试" >&2
+    apt-get update >>"${dependency_log}" 2>&1 || true
+    if apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends "${packages[@]}" >>"${dependency_log}" 2>&1; then
+        return 0
+    fi
+
+    echo "[ERROR] Spark Store 依赖安装失败；请检查 Debian main 软件源、网络和 APT 索引" >&2
+    echo "[DIAG] apt-cache policy aria2:" >&2
+    LC_ALL=C apt-cache policy aria2 >&2 || true
+    echo "[DIAG] active apt sources:" >&2
+    grep -Rhs '^deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list >&2 || true
+    if [[ -s "${dependency_log}" ]]; then
+        echo "[DIAG] recent dependency install log:" >&2
+        tail -80 "${dependency_log}" >&2 || true
+    fi
+    return 1
+}
+
 install_app_store() {
     local asset="/tmp/ming-build/assets/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
     local target="/usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
@@ -1992,21 +2024,7 @@ install_app_store() {
         return 1
     fi
 
-    if ! LC_ALL=C apt-cache policy aria2 2>/dev/null | grep -Eq 'Candidate: [^ (]'; then
-        echo "[WARN] Spark Store 依赖 aria2 不在当前 APT 索引中，刷新软件源索引后重试" >&2
-        apt-get update || true
-    fi
-    if ! LC_ALL=C apt-cache policy aria2 2>/dev/null | grep -Eq 'Candidate: [^ (]'; then
-        echo "[ERROR] Spark Store 依赖 aria2 不可安装；请检查 Debian main 软件源和 apt update 结果" >&2
-        return 1
-    fi
-
-    apt install -y --no-install-recommends \
-        aria2 \
-        xdg-utils \
-        xdg-desktop-portal \
-        xdg-desktop-portal-gtk \
-        libnotify-bin || return 1
+    install_spark_store_dependencies || return 1
 
     install -d -m 0755 /usr/share/ming-os/vendor/spark-store
     install -m 0644 "${asset}" "${target}"
