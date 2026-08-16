@@ -1992,7 +1992,17 @@ install_app_store() {
         return 1
     fi
 
+    if ! apt-cache policy aria2 2>/dev/null | grep -Eq 'Candidate: [^ (]'; then
+        echo "[WARN] Spark Store 依赖 aria2 不在当前 APT 索引中，刷新软件源索引后重试" >&2
+        apt-get update || true
+    fi
+    if ! apt-cache policy aria2 2>/dev/null | grep -Eq 'Candidate: [^ (]'; then
+        echo "[ERROR] Spark Store 依赖 aria2 不可安装；请检查 Debian main 软件源和 apt update 结果" >&2
+        return 1
+    fi
+
     apt install -y --no-install-recommends \
+        aria2 \
         xdg-utils \
         xdg-desktop-portal \
         xdg-desktop-portal-gtk \

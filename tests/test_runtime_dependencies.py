@@ -222,16 +222,32 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             'readonly DEBIAN_MIRROR="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"',
             BUILD,
         )
-        self.assertIn("deb https://deb.debian.org/debian/ trixie main", BASE)
-        self.assertIn("deb https://security.debian.org/debian-security trixie-security main", BASE)
+        self.assertIn(
+            'readonly DEBIAN_SECURITY_MIRROR="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"',
+            BUILD,
+        )
+        self.assertIn('local debian_mirror="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"', BASE)
+        self.assertIn(
+            'local security_mirror="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"',
+            BASE,
+        )
+        self.assertIn("deb ${debian_mirror} trixie main", BASE)
+        self.assertIn("deb ${security_mirror} trixie-security main", BASE)
         self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BUILD)
         self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BASE)
+
+    def test_build_uses_reusable_debootstrap_cache_for_fast_rebuilds(self):
+        self.assertIn('readonly APT_ARCHIVES_CACHE="${MING_APT_ARCHIVES_CACHE:-${LINUX_WORKDIR}/apt-archives}"', BUILD)
+        self.assertIn('mkdir -p "${APT_ARCHIVES_CACHE}"', BUILD)
+        self.assertIn('--cache-dir="${APT_ARCHIVES_CACHE}"', BUILD)
 
     def test_resume_rewrites_chroot_sources_to_official_debian_and_retries_update(self):
         self.assertIn("configure_resume_apt_sources()", RESUME)
         helper = RESUME.split("configure_resume_apt_sources() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("deb.debian.org/debian", helper)
-        self.assertIn("security.debian.org/debian-security", helper)
+        self.assertIn("MING_DEBIAN_MIRROR", helper)
+        self.assertIn("MING_DEBIAN_SECURITY_MIRROR", helper)
+        self.assertIn("deb ${debian_mirror}", helper)
+        self.assertIn("deb ${security_mirror}", helper)
         function = RESUME.split("ensure_resume_runtime_packages() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(
             function.index('if ! chroot_exec apt-get update'),
@@ -239,6 +255,14 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         )
         self.assertIn('if ! chroot_exec apt-get update; then', function)
         self.assertIn("resume 构建无法更新 APT 索引", function)
+
+    def test_spark_store_preflights_and_installs_aria2_dependency(self):
+        app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("apt-cache policy aria2", app_store)
+        self.assertIn("Spark Store 依赖 aria2", app_store)
+        self.assertIn("apt-get update", app_store)
+        self.assertIn("aria2", app_store.split("apt install -y --no-install-recommends", 1)[1])
+        self.assertLess(app_store.index("apt-cache policy aria2"), app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install "${asset}"'))
 
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]

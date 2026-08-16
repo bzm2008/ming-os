@@ -33,11 +33,13 @@ readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2641"
 readonly DEBIAN_MIRROR="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"
+readonly DEBIAN_SECURITY_MIRROR="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"
 readonly DEBIAN_SUITE="trixie"
 readonly DEBIAN_ARCHIVE_KEYRING="${MING_DEBIAN_ARCHIVE_KEYRING:-/usr/share/keyrings/debian-archive-keyring.gpg}"
 readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
+readonly APT_ARCHIVES_CACHE="${MING_APT_ARCHIVES_CACHE:-${LINUX_WORKDIR}/apt-archives}"
 readonly CHROOT_DIR="${LINUX_WORKDIR}/chroot"
 readonly OUTPUT_DIR="${LINUX_WORKDIR}/output"
 readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
@@ -260,7 +262,9 @@ run_debootstrap() {
         rm -rf "${CHROOT_DIR}"
     fi
     mkdir -p "${CHROOT_DIR}"
+    mkdir -p "${APT_ARCHIVES_CACHE}"
     debootstrap \
+        --cache-dir="${APT_ARCHIVES_CACHE}" \
         --arch="${ARCH}" \
         --variant=minbase \
         --keyring="${DEBIAN_ARCHIVE_KEYRING}" \
@@ -305,6 +309,8 @@ chroot_exec() {
         MING_USER="${MING_USER}" \
         MING_USER_PASS="${MING_USER_PASS}" \
         ROOT_PASS="${ROOT_PASS}" \
+        MING_DEBIAN_MIRROR="${DEBIAN_MIRROR}" \
+        MING_DEBIAN_SECURITY_MIRROR="${DEBIAN_SECURITY_MIRROR}" \
         "$@" </dev/null
 }
 

@@ -29,10 +29,12 @@ set -uo pipefail
 configure_apt_sources() {
     # Use Debian's official CDN by default. A single regional mirror returning
     # 403 must not make the installed system unable to receive patch updates.
+    local debian_mirror="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"
+    local security_mirror="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"
     cat > /etc/apt/sources.list << APTSRC
-deb https://deb.debian.org/debian/ trixie main contrib non-free non-free-firmware
-deb https://deb.debian.org/debian/ trixie-updates main contrib non-free non-free-firmware
-deb https://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+deb ${debian_mirror} trixie main contrib non-free non-free-firmware
+deb ${debian_mirror} trixie-updates main contrib non-free non-free-firmware
+deb ${security_mirror} trixie-security main contrib non-free non-free-firmware
 APTSRC
 
     cat > /etc/apt/apt.conf.d/99ming-network << 'APTNETWORK'

@@ -23,11 +23,13 @@ echo "[INFO] CHROOT_DIR=${CHROOT_DIR}"
 
 # ---- 主流程：跳过 debootstrap，从模块执行继续 ----
 configure_resume_apt_sources() {
-    log_warn "chroot APT 源不可用，切换到 Debian 官方源后重试"
+    log_warn "chroot APT 源不可用，按当前 Debian 镜像配置重写 sources.list 后重试"
+    local debian_mirror="${MING_DEBIAN_MIRROR:-${DEBIAN_MIRROR:-https://deb.debian.org/debian/}}"
+    local security_mirror="${MING_DEBIAN_SECURITY_MIRROR:-${DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}}"
     cat > "${CHROOT_DIR}/etc/apt/sources.list" <<APTSRC
-deb https://deb.debian.org/debian/ ${DEBIAN_SUITE} main contrib non-free non-free-firmware
-deb https://deb.debian.org/debian/ ${DEBIAN_SUITE}-updates main contrib non-free non-free-firmware
-deb https://security.debian.org/debian-security ${DEBIAN_SUITE}-security main contrib non-free non-free-firmware
+deb ${debian_mirror} ${DEBIAN_SUITE} main contrib non-free non-free-firmware
+deb ${debian_mirror} ${DEBIAN_SUITE}-updates main contrib non-free non-free-firmware
+deb ${security_mirror} ${DEBIAN_SUITE}-security main contrib non-free non-free-firmware
 APTSRC
     rm -rf "${CHROOT_DIR}/var/lib/apt/lists/"*
 }
