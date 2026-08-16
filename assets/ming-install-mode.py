@@ -59,19 +59,12 @@ BLANK_AB_BIOS_ESP = """partitionLayout:
 """
 
 
-BLANK_AB_UEFI_ESP = """efi:
-  mountPoint: "/boot/efi"
-  recommendedSize: 512M
-  minimumSize: 300M
-  label: "MING-ESP"
-partitionLayout:
-  - name: "MING-BIOSBOOT"
-    filesystem: "unformatted"
-    noEncrypt: true
-    type: "21686148-6449-6E6F-744E-656564454649"
-    size: 8M
-    minSize: 8M
-"""
+# Keep UEFI and BIOS on the same explicit partition layout.  Calamares 3.3
+# can stall in the partition view while resolving the automatic `efi:` helper
+# on a fresh VirtualBox disk, before Ming's exec-stage guards have a chance to
+# run.  A concrete MING-ESP entry is also easier for the installer verifier and
+# post-install gates to audit.
+BLANK_AB_UEFI_ESP = BLANK_AB_BIOS_ESP
 
 
 BLANK_AB_LAYOUT_TAIL = """
