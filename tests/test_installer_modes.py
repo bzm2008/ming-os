@@ -87,6 +87,23 @@ def write_installed_desktop(root, uuid):
 
 
 class InstallerModeTests(unittest.TestCase):
+    def test_calamares_show_sequence_starts_at_partition_not_welcome(self):
+        """The native welcome module can stall at "Remaining modules: welcome" in Live VMs."""
+        base_settings = BASE.split("cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'", 1)[1].split(
+            "CALAMARESSETTINGS", 1
+        )[0]
+        desktop_settings = DESKTOP.split("cat > /etc/calamares/settings.conf <<'SETTINGS'", 1)[1].split(
+            "\nSETTINGS", 1
+        )[0]
+        static_settings = DESKTOP.split("cat > /etc/calamares/settings.conf << 'STATICCALASETTINGS'", 1)[1].split(
+            "\nSTATICCALASETTINGS", 1
+        )[0]
+        for settings in (base_settings, desktop_settings, static_settings):
+            show_block = settings.split("- show:", 1)[1].split("- exec:", 1)[0]
+            self.assertIn("  - partition", show_block)
+            self.assertIn("  - summary", show_block)
+            self.assertNotIn("  - welcome", show_block)
+
     def test_blank_ab_payload_declares_ota_ready_layout(self):
         mode = load_mode()
         payload = mode.build_mode_payload("blank_ab")

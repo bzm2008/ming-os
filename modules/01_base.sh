@@ -4016,7 +4016,6 @@ sequence:
 # 用户账户由 ming-fix-installed-identity 幂等修复，避免 users 模块重复 useradd。
 # 分区保留确认页，避免误清空硬盘。
 - show:
-  - welcome
   - partition
   - summary
 - exec:

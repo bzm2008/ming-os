@@ -6877,7 +6877,6 @@ dont-chroot: false
 sequence:
 # 一键安装：用户只需点"开始安装"，无需配置语言/键盘/用户/时区
 - show:
-  - welcome
   - partition
   - summary
 - exec:
@@ -7159,7 +7158,6 @@ quit-at-end: false
 dont-chroot: false
 sequence:
 - show:
-  - welcome
   - partition
   - summary
 - exec:
