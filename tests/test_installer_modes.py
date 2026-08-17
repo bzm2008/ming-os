@@ -350,6 +350,22 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("return 1", cancelled)
         self.assertIn("未选择安装方式", cancelled)
 
+    def test_install_mode_chooser_realizes_buttons_before_focus_and_handles_both_modes(self):
+        chooser = DESKTOP.split(
+            "cat > /usr/local/bin/ming-install-mode-chooser << 'INSTALLMODECHOOSER'", 1
+        )[1].split("\nINSTALLMODECHOOSER", 1)[0]
+        self.assertLess(
+            chooser.index("self.show_all()"),
+            chooser.index("self.blank_button.grab_focus()"),
+        )
+        self.assertIn("self.blank_button = self.mode_button(", chooser)
+        self.assertIn("self.dual_button = self.mode_button(", chooser)
+        mode_button = chooser.split("    def mode_button", 1)[1]
+        self.assertIn("button.set_can_default(True)", mode_button)
+        self.assertIn("button.set_receives_default(True)", mode_button)
+        self.assertIn("button.connect(\n            'key-press-event'", mode_button)
+        self.assertIn("self.choose(mode)", chooser)
+
     def test_identity_branches_and_marks_dual_boot_install(self):
         identity = BASE.split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1

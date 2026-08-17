@@ -7446,12 +7446,14 @@ class InstallModeChooser(Gtk.Dialog):
         )
         cards.pack_start(self.blank_button, False, False, 0)
         cards.pack_start(self.dual_button, False, False, 0)
-        self.blank_button.grab_focus()
         self.show_all()
+        self.blank_button.grab_focus()
 
     def mode_button(self, mode, title, body):
         button = Gtk.Button()
         button.set_relief(Gtk.ReliefStyle.NONE)
+        button.set_can_default(True)
+        button.set_receives_default(True)
         button.get_style_context().add_class('mode-card')
         if mode == 'blank_ab':
             button.get_style_context().add_class('mode-card-primary')
@@ -7467,11 +7469,22 @@ class InstallModeChooser(Gtk.Dialog):
         box.pack_start(detail, False, False, 0)
         button.add(box)
         button.connect('clicked', lambda *_args: self.choose(mode))
+        button.connect(
+            'key-press-event',
+            lambda _button, event, selected_mode=mode:
+                self.on_mode_button_key(selected_mode, event),
+        )
         return button
 
     def choose(self, mode):
         self.selected_mode = mode
         self.response(Gtk.ResponseType.OK)
+
+    def on_mode_button_key(self, mode, event):
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            self.choose(mode)
+            return True
+        return False
 
     def on_key_press(self, _widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
