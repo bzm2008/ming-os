@@ -7321,12 +7321,17 @@ install -d -m 0755 /run/ming-installer
     --state /run/ming-installer/install-mode.json \
     --partition /etc/calamares/modules/partition.conf
 /usr/local/sbin/ming-calamares-preflight
+{
+    echo "ming-live-installer-root mode=${mode}"
+    echo "ming-live-installer-root settings=/etc/calamares/settings.conf"
+    sed -n '/^sequence:/,/^- show:/p' /etc/calamares/settings.conf 2>/dev/null || true
+} >> /run/ming-installer/preflight.log 2>&1
 export DISPLAY="${display}"
 if [[ -n "${xauthority}" ]]; then
     export XAUTHORITY="${xauthority}"
 fi
 export TZ=Asia/Shanghai LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:zh LC_ALL=zh_CN.UTF-8
-exec calamares -d
+exec calamares -d -c /etc/calamares
 LIVEINSTALLERROOT
     chmod 0755 /usr/local/sbin/ming-live-installer-root
 

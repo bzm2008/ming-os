@@ -321,6 +321,8 @@ class InstallerModeTests(unittest.TestCase):
         )[1].split("\nLIVEINSTALLERROOT", 1)[0]
         self.assertIn("install-mode.json", helper)
         self.assertLess(helper.index("ming-install-mode write"), helper.index("calamares -d"))
+        self.assertIn("calamares -d -c /etc/calamares", helper)
+        self.assertIn("settings.conf", helper)
 
     def test_launcher_uses_keyboard_accessible_mode_chooser(self):
         launcher = DESKTOP.split(
