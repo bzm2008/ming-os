@@ -7321,9 +7321,21 @@ install -d -m 0755 /run/ming-installer
     --state /run/ming-installer/install-mode.json \
     --partition /etc/calamares/modules/partition.conf
 /usr/local/sbin/ming-calamares-preflight
+if [[ ! -d /etc/calamares/qml ]]; then
+    if [[ -e /etc/calamares/qml && ! -L /etc/calamares/qml ]]; then
+        echo "Ming installer QML path is occupied by a non-directory" >&2
+        exit 13
+    fi
+    ln -sfn /usr/share/calamares/qml /etc/calamares/qml
+fi
+if [[ ! -d /etc/calamares/qml ]]; then
+    echo "Ming installer QML modules are unavailable" >&2
+    exit 13
+fi
 {
     echo "ming-live-installer-root mode=${mode}"
     echo "ming-live-installer-root settings=/etc/calamares/settings.conf"
+    echo "ming-live-installer-root qml=/etc/calamares/qml"
     sed -n '/^sequence:/,/^- show:/p' /etc/calamares/settings.conf 2>/dev/null || true
 } >> /run/ming-installer/preflight.log 2>&1
 export DISPLAY="${display}"
