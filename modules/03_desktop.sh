@@ -7615,19 +7615,39 @@ auto_select_blank_ab() {
     [[ "${selected_mode}" == "blank_ab" ]] || return 0
     command -v wmctrl >/dev/null 2>&1 || return 0
     command -v xdotool >/dev/null 2>&1 || return 0
-    local calamares_window geometry width height click_x click_y
+    local calamares_window geometry width height click_x click_y page_ready
     for _ in $(seq 1 240); do
         calamares_window="$({
             timeout --foreground 2s wmctrl -lx 2>/dev/null || true
         } | awk 'tolower($0) ~ /calamares/ { print $1; exit }')"
         if [[ -n "${calamares_window}" ]]; then
-            sleep 1
+            page_ready=false
+            # The top-level window exists during the slow requirements scan.
+            # Wait for the partition page's own debug marker so the click is
+            # never delivered to the transient spinner page.
+            for _page_try in $(seq 1 240); do
+                if grep -Eq 'No partitioning choice has been made yet|Updating partitioning preview widgets' \
+                    /tmp/ming-installer/calamares.log 2>/dev/null; then
+                    page_ready=true
+                    break
+                fi
+                sleep 0.25
+            done
+            if [[ "${page_ready}" == "true" ]]; then
+                sleep 2
+            else
+                # Direct launches may not have a debug log; give the page a
+                # conservative fallback delay before using geometry.
+                sleep 8
+            fi
             geometry="$(xdotool getwindowgeometry --shell "${calamares_window}" 2>/dev/null || true)"
             width="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "WIDTH" {print $2}')"
             height="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "HEIGHT" {print $2}')"
             if [[ "${width}" =~ ^[0-9]+$ && "${height}" =~ ^[0-9]+$ && "${width}" -ge 800 ]]; then
                 click_x=$((width * 205 / 1000))
-                click_y=$((height * 100 / 1000))
+                click_y=$((height * 110 / 1000))
+                (( click_y < 70 )) && click_y=70
+                (( click_y > 90 )) && click_y=90
                 xdotool windowactivate --sync "${calamares_window}" >/dev/null 2>&1 || true
                 xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
                     >/tmp/ming-installer/auto-select.log 2>&1 || true

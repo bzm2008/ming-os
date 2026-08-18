@@ -275,6 +275,8 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("selected-mode", DESKTOP)
         self.assertIn("xdotool", DESKTOP)
         self.assertIn("mousemove", DESKTOP.lower())
+        self.assertIn("No partitioning choice has been made yet", DESKTOP)
+        self.assertIn("Updating partitioning preview widgets", DESKTOP)
 
     def test_chroot_apt_network_has_bounded_retries(self):
         self.assertIn('Acquire::Retries "5";', BASE)
