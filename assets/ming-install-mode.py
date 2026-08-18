@@ -35,8 +35,12 @@ defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
   - "fat32"
-initialPartitioningChoice: erase
+initialPartitioningChoice: none
 initialSwapChoice: none
+# Blank-disk A/B installation does not use Calamares' optional LUKS widget.
+# Keeping it disabled avoids an initial state-notification race that leaves
+# the Next button disabled until the checkbox is toggled.
+enableLuksAutomatedPartitioning: false
 """
 
 

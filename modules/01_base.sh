@@ -3834,8 +3834,12 @@ defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
   - "fat32"
-initialPartitioningChoice: erase
+initialPartitioningChoice: none
 initialSwapChoice: none
+# Ming A/B installation has its own explicit, non-encrypted slot layout.
+# Disable the unused Calamares LUKS widget so initial auto-partitioning can
+# enable Next immediately without requiring a checkbox round-trip.
+enableLuksAutomatedPartitioning: false
 partitionLayout:
   - name: "MING-BIOSBOOT"
     filesystem: "unformatted"

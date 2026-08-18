@@ -7197,8 +7197,12 @@ defaultFileSystemType: "ext4"
 availableFileSystemTypes:
   - "ext4"
   - "fat32"
-initialPartitioningChoice: erase
+initialPartitioningChoice: none
 initialSwapChoice: none
+# Ming A/B installation has its own explicit, non-encrypted slot layout.
+# Disable the unused Calamares LUKS widget so initial auto-partitioning can
+# enable Next immediately without requiring a checkbox round-trip.
+enableLuksAutomatedPartitioning: false
 partitionLayout:
   - name: "MING-BIOSBOOT"
     filesystem: "unformatted"
@@ -7582,6 +7586,8 @@ choose_install_mode() {
             ;;
     esac
     selected_mode="${choice}"
+    printf '%s\n' "${selected_mode}" > /tmp/ming-installer/selected-mode
+    chmod 0644 /tmp/ming-installer/selected-mode 2>/dev/null || true
 }
 
 if ! is_live_or_installer; then
@@ -7597,23 +7603,67 @@ helper=(/usr/local/sbin/ming-live-installer-root
     --mode "${selected_mode}"
     --display "${DISPLAY:-:0}"
     --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}")
+
+# Calamares 3.3 emits its initial partition next-state signal before the
+# PartitionViewStep connects to it.  Blank A/B therefore starts with no action
+# selected, and the button would remain disabled without a real user click.
+# Select the erase card only after the actual Calamares window exists.  This is
+# a bounded, best-effort UI assist: if xdotool/window discovery is unavailable,
+# the user can still click the card normally and the installer never proceeds
+# without Calamares' own enabled-state checks.
+auto_select_blank_ab() {
+    [[ "${selected_mode}" == "blank_ab" ]] || return 0
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    command -v xdotool >/dev/null 2>&1 || return 0
+    local calamares_window geometry width height click_x click_y
+    for _ in $(seq 1 240); do
+        calamares_window="$({
+            timeout --foreground 2s wmctrl -lx 2>/dev/null || true
+        } | awk 'tolower($0) ~ /calamares/ { print $1; exit }')"
+        if [[ -n "${calamares_window}" ]]; then
+            sleep 1
+            geometry="$(xdotool getwindowgeometry --shell "${calamares_window}" 2>/dev/null || true)"
+            width="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "WIDTH" {print $2}')"
+            height="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "HEIGHT" {print $2}')"
+            if [[ "${width}" =~ ^[0-9]+$ && "${height}" =~ ^[0-9]+$ && "${width}" -ge 800 ]]; then
+                click_x=$((width * 205 / 1000))
+                click_y=$((height * 100 / 1000))
+                xdotool windowactivate --sync "${calamares_window}" >/dev/null 2>&1 || true
+                xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
+                    >/tmp/ming-installer/auto-select.log 2>&1 || true
+                printf '[%s] selected blank_ab erase card at %sx%s\n' \
+                    "$(date '+%F %T')" "${click_x}" "${click_y}" >>/tmp/ming-installer/auto-select.log
+                return 0
+            fi
+        fi
+        sleep 0.25
+    done
+    return 0
+}
+
+auto_select_pid=""
+if [[ "${selected_mode}" == "blank_ab" ]]; then
+    auto_select_blank_ab &
+    auto_select_pid="$!"
+fi
 if command -v xhost >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
     xhost +SI:localuser:root >/tmp/ming-installer/xhost.log 2>&1 || true
 fi
+launch_status=0
 if [ "$(id -u)" -eq 0 ]; then
-    "${helper[@]}" || {
-        show_preflight_error
-        exit 1
-    }
-    exit 0
+    "${helper[@]}" || launch_status=$?
+elif ! command -v pkexec >/dev/null 2>&1; then
+    launch_status=127
+else
+    pkexec "${helper[@]}" || launch_status=$?
 fi
-if ! command -v pkexec >/dev/null 2>&1; then
-    show_preflight_error
-    exit 1
+if [[ -n "${auto_select_pid}" ]]; then
+    kill "${auto_select_pid}" 2>/dev/null || true
+    wait "${auto_select_pid}" 2>/dev/null || true
 fi
-if ! pkexec "${helper[@]}"; then
+if [[ "${launch_status}" -ne 0 ]]; then
     show_preflight_error
-    exit 1
+    exit "${launch_status}"
 fi
 exit 0
 CALAMARESLAUNCHER

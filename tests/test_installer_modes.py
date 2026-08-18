@@ -124,6 +124,7 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn('name: "MING-ROOT-B"', partition)
         self.assertIn("requiredStorage: 48", partition)
         self.assertIn("allowManualPartitioning: false", partition)
+        self.assertIn("enableLuksAutomatedPartitioning: false", partition)
         self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
         self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
 
@@ -190,6 +191,7 @@ class InstallerModeTests(unittest.TestCase):
                 self.assertIn("MING-ROOT-A:8300", source)
                 self.assertIn("MING-ROOT-B:8300", source)
                 self.assertIn("MING-HOME:8300", source)
+                self.assertIn("enableLuksAutomatedPartitioning: false", source)
                 settings = source.split("cat > /etc/calamares/settings.conf", 1)[1]
                 self.assertIn("shellprocess@ming-fix-partition-types", settings)
                 self.assertLess(settings.index("  - partition"), settings.index("  - shellprocess@ming-fix-partition-types"))
@@ -261,8 +263,18 @@ class InstallerModeTests(unittest.TestCase):
     def test_blank_ab_payload_defaults_to_erase_disk_flow(self):
         mode = load_mode()
         partition = mode.partition_config("blank_ab")
-        self.assertIn("initialPartitioningChoice: erase", partition)
-        self.assertNotIn("initialPartitioningChoice: none", partition)
+        # Calamares emits its initial next-state signal before the partition
+        # page connects to it.  Live session automation selects Erase after the
+        # real page appears, so the config must start unselected.
+        self.assertIn("initialPartitioningChoice: none", partition)
+        self.assertNotIn("initialPartitioningChoice: erase", partition)
+
+    def test_live_session_auto_selects_blank_ab_erase_after_calamares_window(self):
+        marker = "auto_select_blank_ab"
+        self.assertIn(marker, DESKTOP)
+        self.assertIn("selected-mode", DESKTOP)
+        self.assertIn("xdotool", DESKTOP)
+        self.assertIn("mousemove", DESKTOP.lower())
 
     def test_chroot_apt_network_has_bounded_retries(self):
         self.assertIn('Acquire::Retries "5";', BASE)

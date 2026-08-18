@@ -267,12 +267,9 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         install_mode = mode_payload["mode"]
         major_ota = mode_payload["major_ota"]
     if install_mode == "blank_ab":
-        expected_choice = "erase" if explicit_mode else "none"
-        if initial_choice != expected_choice:
+        if initial_choice not in {"erase", "none"}:
             errors.append(
-                "Calamares blank A/B mode must use the selected erase flow"
-                if explicit_mode
-                else "Calamares must keep the full-disk install choice visible"
+                "Calamares blank A/B mode must use erase or the bounded Live auto-select flow"
             )
         if manual_enabled is not False:
             errors.append("Calamares manual partitioning must be disabled")
@@ -366,7 +363,7 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         manual_partitioning="enabled" if manual_enabled is True else "disabled",
         full_disk_install=(
             "selected"
-            if explicit_mode and install_mode == "blank_ab" and initial_choice == "erase"
+            if explicit_mode and install_mode == "blank_ab" and initial_choice in {"erase", "none"}
             else "available" if initial_choice == "none" else "unknown"
         ),
         source=str(source_path),
