@@ -271,6 +271,7 @@ HWPRELOAD
     cat > /etc/systemd/system/ming-hardware-preload.service << 'HWPRELOADSVC'
 [Unit]
 Description=Ming OS priority hardware module preload
+ConditionKernelCommandLine=!boot=live
 After=local-fs.target systemd-modules-load.service
 Before=NetworkManager.service bluetooth.service display-manager.service
 
@@ -288,6 +289,7 @@ HWPRELOADSVC
     cat > /etc/systemd/system/ming-hardware-preload-late.service << 'HWPRELOADLATESVC'
 [Unit]
 Description=Ming OS non-critical hardware module preload
+ConditionKernelCommandLine=!boot=live
 After=display-manager.service
 Wants=display-manager.service
 

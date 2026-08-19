@@ -100,6 +100,16 @@ class LegacyPerformanceContracts(unittest.TestCase):
         self.assertIn("if (( SECONDS < preload_deadline )); then", preload)
         self.assertIn("TimeoutStartSec=", service)
 
+    def test_hardware_preload_is_skipped_in_live_installer_sessions(self):
+        service = BASE.split(
+            "cat > /etc/systemd/system/ming-hardware-preload.service << 'HWPRELOADSVC'", 1
+        )[1].split("\nHWPRELOADSVC", 1)[0]
+        late_service = BASE.split(
+            "cat > /etc/systemd/system/ming-hardware-preload-late.service << 'HWPRELOADLATESVC'", 1
+        )[1].split("\nHWPRELOADLATESVC", 1)[0]
+        self.assertIn("ConditionKernelCommandLine=!boot=live", service)
+        self.assertIn("ConditionKernelCommandLine=!boot=live", late_service)
+
     def test_touch_services_are_conditional_on_touch_hardware(self):
         for marker in ("ming-touch-session", "touchscreen", "tablet", "onboard", "touchegg"):
             self.assertIn(marker, DESKTOP)
