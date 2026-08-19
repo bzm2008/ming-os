@@ -147,27 +147,24 @@ class InstallerModeTests(unittest.TestCase):
                 self.assertIn('mountPoint: "/boot/efi"', template)
                 self.assertIn('name: "MING-ESP"', template)
 
-    def test_blank_ab_uefi_uses_explicit_ming_esp_layout(self):
+    def test_blank_ab_uefi_uses_calamares_esp_as_ming_esp(self):
         mode = load_mode()
         partition = mode.partition_config("blank_ab", firmware="uefi")
-        self.assertNotIn("efi:", partition)
-        self.assertNotIn("efiSystemPartition", partition)
-        self.assertIn('name: "MING-ESP"', partition)
+        self.assertIn("efi:\n", partition)
+        self.assertIn('label: "MING-ESP"', partition)
         self.assertIn('mountPoint: "/boot/efi"', partition)
-        self.assertIn('filesystem: "fat32"', partition)
-        self.assertIn('type: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"', partition)
-        self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
-        self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
+        self.assertIn('recommendedSize: 512M', partition)
+        self.assertIn('minimumSize: 300M', partition)
+        self.assertNotIn('name: "MING-ESP"', partition)
 
-    def test_partition_type_normalizer_requires_explicit_ming_esp(self):
+    def test_partition_type_normalizer_accepts_calamares_uefi_ming_esp(self):
+        mode = load_mode()
         normalizer = BASE.split(
             "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
         )[1].split("\nMINGFIXPARTTYPES", 1)[0]
         self.assertIn("MING-ESP:ef00", normalizer)
         self.assertIn("missing partition label ${label}", normalizer)
-        self.assertNotIn("claim_auto_esp_as_ming_esp", normalizer)
-        self.assertNotIn("find_auto_esp_partition", normalizer)
-        self.assertNotIn("sgdisk --change-name=", normalizer)
+        self.assertIn('label: "MING-ESP"', mode.BLANK_AB_UEFI_ESP)
 
     def test_partition_type_normalizer_is_lf_only(self):
         normalizer = extract_heredoc_bytes(
@@ -423,7 +420,7 @@ class InstallerModeTests(unittest.TestCase):
         self.assertEqual("dual_boot_preserve", result["install_mode"])
         self.assertEqual("enabled", result["manual_partitioning"])
 
-    def test_live_verifier_accepts_blank_ab_uefi_explicit_esp_layout(self):
+    def test_live_verifier_accepts_blank_ab_uefi_auto_esp_layout(self):
         mode = load_mode()
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
@@ -449,7 +446,7 @@ class InstallerModeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
 
-    def test_live_verifier_rejects_blank_ab_uefi_auto_esp_helper(self):
+    def test_live_verifier_rejects_blank_ab_uefi_auto_esp_without_ming_label(self):
         mode = load_mode()
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
@@ -468,7 +465,7 @@ class InstallerModeTests(unittest.TestCase):
   mountPoint: "/boot/efi"
   recommendedSize: 512M
   minimumSize: 300M
-  label: "MING-ESP"
+  label: "EFI System"
 partitionLayout:
   - name: "MING-BIOSBOOT"
     filesystem: "unformatted"
@@ -489,7 +486,7 @@ partitionLayout:
             result = verifier.verify_live(root=root, source=source)
 
         self.assertFalse(result["ok"], result)
-        self.assertTrue(any("explicit MING-ESP" in error for error in result["errors"]), result)
+        self.assertTrue(any("MING-ESP label" in error for error in result["errors"]), result)
 
     def test_live_verifier_rejects_blank_ab_partition_attribute_drift(self):
         mode = load_mode()

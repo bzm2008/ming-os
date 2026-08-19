@@ -123,6 +123,32 @@ def _partition_layout_block(text: str, label: str) -> str:
     return match.group(0) if match else ""
 
 
+def _yaml_map_block(text: str, key: str) -> str:
+    """Return a simple top-level YAML map and its indented children."""
+    lines = text.splitlines()
+    header = re.compile(r"^(?P<indent>[ \t]*)" + re.escape(key) + r"\s*:\s*$")
+    start = None
+    base_indent = 0
+    for index, line in enumerate(lines):
+        match = header.match(line)
+        if match:
+            start = index
+            base_indent = len(match.group("indent").expandtabs(2))
+            break
+    if start is None:
+        return ""
+    selected = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            selected.append(line)
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        if indent <= base_indent:
+            break
+        selected.append(line)
+    return "\n".join(selected)
+
+
 def _firmware_efi_detected() -> bool:
     return Path("/sys/firmware/efi").is_dir()
 
@@ -293,13 +319,22 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                     and partition.index('name: "MING-BIOSBOOT"') > partition.index('name: "MING-BOOT"')
                 ):
                     errors.append("Calamares A/B MING-BIOSBOOT must be before MING-BOOT")
-            if "efiSystemPartition" in partition:
-                errors.append("Calamares A/B partition layout must use explicit MING-ESP instead of efiSystemPartition")
-            efi_marker = "\nefi:\n"
-            uses_auto_efi = efi_marker in f"\n{partition}"
+            efi_block = _yaml_map_block(partition, "efi")
+            uses_auto_efi = bool(efi_block)
+            if "efiSystemPartition" in partition and not uses_auto_efi:
+                errors.append("Calamares A/B EFI configuration must use the efi map")
             if uses_auto_efi:
-                errors.append("Calamares A/B partition layout must use explicit MING-ESP instead of efi:")
-            if partition.count('name: "MING-ESP"') != 1:
+                if _yaml_scalar(efi_block, "mountPoint") != "/boot/efi":
+                    errors.append("Calamares automatic EFI partition must mount at /boot/efi")
+                if _yaml_scalar(efi_block, "label") != "MING-ESP":
+                    errors.append("Calamares automatic EFI partition must use the MING-ESP label")
+                if _yaml_scalar(efi_block, "recommendedSize") != "512M":
+                    errors.append("Calamares automatic EFI partition must recommend 512M")
+                if _yaml_scalar(efi_block, "minimumSize") != "300M":
+                    errors.append("Calamares automatic EFI partition must require at least 300M")
+                if partition.count('name: "MING-ESP"'):
+                    errors.append("Calamares UEFI A/B layout must not add a second explicit MING-ESP")
+            elif partition.count('name: "MING-ESP"') != 1:
                 errors.append("Calamares BIOS A/B partition layout must contain exactly one MING-ESP")
             else:
                 esp_block = _partition_layout_block(partition, "MING-ESP")
@@ -321,12 +356,13 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                     errors.append("Calamares A/B MING-ESP must be before MING-BOOT")
             required = _yaml_scalar(partition, "requiredStorage")
             expected_layout = {
-                "MING-ESP": ({"fat32", "vfat"}, "/boot/efi"),
                 "MING-BOOT": ({"ext4"}, "/boot"),
                 "MING-ROOT-A": ({"ext4"}, "/"),
                 "MING-ROOT-B": ({"ext4"}, None),
                 "MING-HOME": ({"ext4"}, "/home"),
             }
+            if not uses_auto_efi:
+                expected_layout["MING-ESP"] = ({"fat32", "vfat"}, "/boot/efi")
             for label, (filesystems, mountpoint) in expected_layout.items():
                 if partition.count(f'name: "{label}"') != 1:
                     errors.append(f"Calamares A/B partition layout must contain exactly one {label}")
