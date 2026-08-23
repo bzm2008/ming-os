@@ -38,6 +38,7 @@ CANONICAL_LAUNCHERS = {
     "ming-firefox.desktop": "browser",
     "firefox-esr.desktop": "browser",
     "firefox.desktop": "browser",
+    "xiahai-xiaoming.desktop": "agent",
     "papyrus.desktop": "agent",
 }
 CANONICAL_PREFERENCE = {
@@ -45,7 +46,7 @@ CANONICAL_PREFERENCE = {
     "files": "ming-files.desktop",
     "terminal": "ming-terminal.desktop",
     "browser": "ming-firefox.desktop",
-    "agent": "papyrus.desktop",
+    "agent": "xiahai-xiaoming.desktop",
 }
 
 

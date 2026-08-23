@@ -131,7 +131,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         self.assertIn("/var/lib/ming-os/trusted-desktops", module)
         self.assertIn("trusted-desktops", build)
-        self.assertIn('"papyrus.desktop"', module)
+        self.assertIn('"xiahai-xiaoming.desktop"', module)
 
 
 if __name__ == "__main__":

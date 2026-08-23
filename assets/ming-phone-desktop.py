@@ -278,7 +278,7 @@ CORE_NAMES = {
     "ming-terminal.desktop",
     "ming-firefox.desktop",
     "spark-store.desktop",
-    "papyrus.desktop",
+    "xiahai-xiaoming.desktop",
     "Install Ming OS.desktop",
 }
 DESKTOP_ORDER = {name: idx for idx, name in enumerate([
@@ -286,7 +286,7 @@ DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-files.desktop",
     "ming-firefox.desktop",
     "spark-store.desktop",
-    "papyrus.desktop",
+    "xiahai-xiaoming.desktop",
     "Install Ming OS.desktop",
     "ming-terminal.desktop",
 ])}
@@ -310,6 +310,8 @@ CANONICAL_LAUNCHERS = {
     "firefox.desktop": "browser",
     "firefox esr.desktop": "browser",
     "firefox esr 浏览器.desktop": "browser",
+    "xiahai-xiaoming.desktop": "agent",
+    "xiahai.desktop": "agent",
     "papyrus.desktop": "agent",
     "ming 设置.desktop": "settings",
 }
@@ -318,8 +320,9 @@ CANONICAL_PREFERENCE = {
     "files": "ming-files.desktop",
     "terminal": "ming-terminal.desktop",
     "browser": "ming-firefox.desktop",
-    "agent": "papyrus.desktop",
+    "agent": "xiahai-xiaoming.desktop",
 }
+
 CORE_GENERATED = {
     "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-control-center", "Settings;System;"),
     "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
@@ -1052,6 +1055,11 @@ def deduplicate_apps(apps):
     for app in apps:
         core_identity = canonical_identity(app)
         preferred = CANONICAL_PREFERENCE.get(core_identity)
+        if core_identity == "agent" and preferred:
+            preferred_path = Path(SYSTEM_APPLICATION_DIR) / preferred
+            legacy_path = Path(SYSTEM_APPLICATION_DIR) / "papyrus.desktop"
+            if not preferred_path.is_file() and legacy_path.is_file():
+                preferred = legacy_path.name
         identity = core_identity if preferred else third_party_app_identity(
             app, package_owners
         )
@@ -1626,6 +1634,11 @@ def legacy_managed_source_path(path):
     target = Path(path)
     family = CANONICAL_LAUNCHERS.get(target.name.casefold())
     canonical_basename = CANONICAL_PREFERENCE.get(family)
+    if family == "agent" and canonical_basename:
+        preferred_path = Path(SYSTEM_APPLICATION_DIR) / canonical_basename
+        legacy_path = Path(SYSTEM_APPLICATION_DIR) / "papyrus.desktop"
+        if not preferred_path.is_file() and legacy_path.is_file():
+            canonical_basename = legacy_path.name
     if not canonical_basename:
         return None
     source = Path(SYSTEM_APPLICATION_DIR) / canonical_basename

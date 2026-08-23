@@ -29,7 +29,7 @@ readonly DESKTOP_LAUNCHERS=(
     "ming-files.desktop"
     "ming-firefox.desktop"
     "spark-store.desktop"
-    "papyrus.desktop"
+    "xiahai-xiaoming.desktop"
     "ming-terminal.desktop"
     "Install Ming OS.desktop"
 )
@@ -61,7 +61,7 @@ seed_trusted_desktop_receipts() {
     install -d -m 0755 "${receipt_dir}"
     for launcher in \
         "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
-        "ming-firefox.desktop" "ming-terminal.desktop" "spark-store.desktop" "papyrus.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "spark-store.desktop" "xiahai-xiaoming.desktop" \
         "Install Ming OS.desktop"; do
         source="/usr/share/applications/${launcher}"
         [[ -f "${source}" ]] || continue

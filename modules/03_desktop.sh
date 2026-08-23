@@ -2316,7 +2316,7 @@ configure_plank_dock() {
 [PlankDockPreferences]
 # MingDockProfile=2640-legacy-centered
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -2418,7 +2418,7 @@ for launcher in \
     "ming-firefox:ming-firefox.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
-    "papyrus:papyrus.desktop" \
+    "xiahai-xiaoming:xiahai-xiaoming.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
@@ -2490,7 +2490,7 @@ APPS = [
     ('ming-files.desktop', 'files-icon', '文件'),
     ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
     ('spark-store.desktop', 'spark-store', 'Spark'),
-    ('papyrus.desktop', 'papyrus', 'Papyrus'),
+    ('xiahai-xiaoming.desktop', 'xiahai-xiaoming', '小明 AI 助手'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
 
@@ -3438,7 +3438,7 @@ write_default_plank_settings() {
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
 # MingDockProfile=2640-legacy-centered
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
 Offset=0
@@ -3534,7 +3534,7 @@ migrate_legacy_dock_profile() {
     local settings="$1"
     grep -q '^# MingDockProfile=2640-legacy-centered$' "${settings}" 2>/dev/null && return 0
 
-    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;papyrus.dockitem;;ming-terminal.dockitem'
+    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
         sed -i "s|^DockItems=.*|DockItems=${dock_items}|" "${settings}" 2>/dev/null || true
     else
@@ -5342,7 +5342,7 @@ TASKS = [
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
     ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('AI 助手', 'papyrus', '打开 Papyrus', '/usr/bin/papyrus'),
+    ('小明 AI 助手', 'xiahai-xiaoming', '打开小明 AI 助手', '/opt/xiahai-xiaoming/xiahai-xiaoming'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -5831,7 +5831,7 @@ configure_notification_filter() {
     <value type="string" value="network-manager-applet"/>
     <value type="string" value="xfce4-power-manager"/>
     <value type="string" value="pulseaudio"/>
-    <value type="string" value="papyrus"/>
+    <value type="string" value="xiahai-xiaoming"/>
     <value type="string" value="xfce4-power-manager-settings"/>
   </property>
 </channel>
@@ -5922,8 +5922,8 @@ Categories=Utility;System;
 StartupNotify=true
 APPLIBDESKTOP
 
-    if [[ -s /usr/share/applications/papyrus.desktop ]]; then
-        cp -f /usr/share/applications/papyrus.desktop "${desktop_dir}/papyrus.desktop"
+    if [[ -s /usr/share/applications/xiahai-xiaoming.desktop ]]; then
+        cp -f /usr/share/applications/xiahai-xiaoming.desktop "${desktop_dir}/xiahai-xiaoming.desktop"
     fi
 
     chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
@@ -6573,6 +6573,23 @@ with Path(path).open("a", encoding="utf-8") as stream:
 PY
 }
 
+# Zenity/yad can leave a decorated placeholder behind on old XRender
+# sessions after the password dialog closes.  Close only windows whose title
+# belongs to this OOBE flow; never terminate unrelated user processes.
+close_stale_oobe_windows() {
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    while IFS= read -r window_id; do
+        [[ -n "${window_id}" ]] || continue
+        title="$(wmctrl -l 2>/dev/null | awk -v id="${window_id}" '$1 == id {for (i=4; i<=NF; i++) printf "%s%s", $i, (i==NF ? "" : " ")}' || true)"
+        case "${title}" in
+            *设置账户*|*管理员初始化*|*无法完成*|*"Ming OS 管理员"*|*账户设置*)
+                wmctrl -i -c "${window_id}" >/dev/null 2>&1 || true
+                ;;
+        esac
+    done < <(wmctrl -lx 2>/dev/null | awk '{print $1}')
+}
+trap close_stale_oobe_windows EXIT
+
 # 等桌面与授权代理就绪
 sleep 4
 
@@ -6644,6 +6661,7 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
         --text="本机管理员已建立。\n开机仍会自动进入桌面，管理操作会要求输入刚才的密码。" \
         --width=380 --button="开始使用:0" 2>/dev/null || true
     repair_desktop_session
+    close_stale_oobe_windows
     exit 0
 done
 
@@ -8370,7 +8388,7 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,xiahai-xiaoming.desktop,ming-terminal.desktop
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter

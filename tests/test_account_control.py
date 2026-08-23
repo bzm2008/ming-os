@@ -537,6 +537,16 @@ class BuildContractTests(unittest.TestCase):
                 "ACCOUNT_CONTROL_POLICY", 2)[1]
         self.assertIn("<allow_active>auth_admin_keep</allow_active>", account_policy)
 
+    def test_oobe_closes_only_its_stale_dialog_windows_after_completion(self):
+        script = self.desktop.split(
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(
+                "OOBEACCOUNT", 1)[0]
+        self.assertIn("close_stale_oobe_windows()", script)
+        self.assertIn("wmctrl -i -c", script)
+        self.assertIn("*设置账户*|*管理员初始化*", script)
+        self.assertIn("trap close_stale_oobe_windows EXIT", script)
+        self.assertNotIn("pkill", script)
+
     def test_oobe_bootstraps_administrator_before_any_account_pkexec_mutation(self):
         script = self.desktop.split(
             "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'", 1)[1].split(

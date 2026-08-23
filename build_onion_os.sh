@@ -359,6 +359,28 @@ prepare_chroot_scripts() {
         log_error "missing required build asset: assets/ming-os-logo.png"
         return 1
     fi
+    # Xiahai is a user-supplied binary input.  Copy it into the build asset
+    # tree only when explicitly provided, then let dpkg-deb validate it inside
+    # the rootfs.  A corrupt attachment must stop before any ISO is produced.
+    local xiahai_asset="${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb"
+    if [[ -n "${MING_XIAHAI_DEB_SOURCE:-}" && -s "${MING_XIAHAI_DEB_SOURCE}" ]]; then
+        mkdir -p "$(dirname "${xiahai_asset}")"
+        cp -f "${MING_XIAHAI_DEB_SOURCE}" "${xiahai_asset}"
+    fi
+    if [[ ! -s "${xiahai_asset}" ]]; then
+        log_error "missing required build asset: ${xiahai_asset}"
+        log_error "set MING_XIAHAI_DEB_SOURCE to a complete, dpkg-deb-readable package"
+        return 1
+    fi
+    if ! command -v dpkg-deb >/dev/null 2>&1; then
+        log_error "dpkg-deb is required to validate the Xiahai build asset"
+        return 1
+    fi
+    if ! dpkg-deb --info "${xiahai_asset}" >/dev/null 2>&1 \
+        || ! dpkg-deb --contents "${xiahai_asset}" >/dev/null 2>&1; then
+        log_error "Xiahai Xiaoming package is corrupt or incomplete; refusing to start the build"
+        return 1
+    fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
     cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
@@ -1293,7 +1315,7 @@ desktop_names = [
     "ming-terminal.desktop",
     "ming-firefox.desktop",
     "spark-store.desktop",
-    "papyrus.desktop",
+    "xiahai-xiaoming.desktop",
 ]
 search_path = ":".join(str(root / item) for item in (
     "usr/local/bin", "usr/bin", "bin", "usr/local/sbin", "usr/sbin", "sbin"
@@ -1631,8 +1653,8 @@ if "ming-disk-hub.dockitem" in plank_settings:
     errors.append("Plank settings must not include the retired All Disks item")
 if "ming-firefox.dockitem" not in plank_settings:
     errors.append("Plank settings must include ming-firefox.dockitem as the default browser")
-if "papyrus.dockitem" not in plank_settings:
-    errors.append("Plank settings must include papyrus.dockitem as the default agent")
+if "xiahai-xiaoming.dockitem" not in plank_settings:
+    errors.append("Plank settings must include xiahai-xiaoming.dockitem as the default agent")
 for forbidden_dock in ["wechat.dockitem", "wps-office.dockitem"]:
     if forbidden_dock in plank_settings:
         errors.append(f"Plank settings must not include retired dock item {forbidden_dock}")
@@ -1717,35 +1739,23 @@ else:
     if spark_actual_sha256 != spark_expected_sha256:
         errors.append("verified Spark Store asset SHA256 mismatch")
 
-papyrus_launcher = require_file("opt/papyrus/launch-papyrus", "APP_ROOT=/opt/papyrus")
-papyrus_command = root / "usr/bin/papyrus"
-if not papyrus_command.is_symlink():
-    errors.append("Papyrus command must be a symlink to the normalized launcher")
-else:
-    link_target = os.readlink(papyrus_command)
-    target = (
-        root / link_target.lstrip("/")
-        if os.path.isabs(link_target)
-        else papyrus_command.parent / link_target
-    )
-    expected_target = root / "opt/papyrus/launch-papyrus"
-    if os.path.normpath(str(target)) != os.path.normpath(str(expected_target)):
-        errors.append(f"Papyrus command symlink points to unexpected target: {link_target}")
-papyrus_root = root / "opt/papyrus"
-if not papyrus_root.is_dir():
-    errors.append("missing Papyrus install directory: opt/papyrus")
-elif stat.S_IMODE(papyrus_root.stat().st_mode) & 0o055 != 0o055:
-    errors.append("Papyrus install directory is not readable by desktop users")
-papyrus_launcher_path = root / "opt/papyrus/launch-papyrus"
-if papyrus_launcher_path.is_file() and stat.S_IMODE(papyrus_launcher_path.stat().st_mode) & 0o055 != 0o055:
-    errors.append("Papyrus launcher is not executable by desktop users")
-papyrus_desktop = require_file("usr/share/applications/papyrus.desktop", "StartupWMClass=uno.scallion.papyrus")
-for marker in ["Exec=/usr/bin/papyrus", "Icon=papyrus", "StartupWMClass=uno.scallion.papyrus"]:
-    if marker not in papyrus_desktop:
-        errors.append(f"Papyrus desktop entry missing {marker}")
-papyrus_icon = root / "usr/share/icons/hicolor/128x128/apps/papyrus.png"
-if not papyrus_icon.is_file() or papyrus_icon.stat().st_size == 0:
-    errors.append("missing Papyrus app icon: usr/share/icons/hicolor/128x128/apps/papyrus.png")
+xiahai_binary = require_file(
+    "opt/xiahai-xiaoming/xiahai-xiaoming", "Xiahai Xiaoming")
+if stat.S_IMODE((root / "opt/xiahai-xiaoming/xiahai-xiaoming").stat().st_mode) & 0o055 != 0o055:
+    errors.append("Xiahai Xiaoming executable is not readable/executable by desktop users")
+xiahai_desktop = require_file(
+    "usr/share/applications/xiahai-xiaoming.desktop",
+    "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming")
+for marker in [
+    "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming",
+    "Icon=xiahai-xiaoming",
+    "Type=Application",
+]:
+    if marker not in xiahai_desktop:
+        errors.append(f"Xiahai Xiaoming desktop entry missing {marker}")
+xiahai_icon = root / "usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png"
+if not xiahai_icon.is_file() or xiahai_icon.stat().st_size == 0:
+    errors.append("missing Xiahai Xiaoming app icon: usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png")
 
 ota_backup = require_file("usr/local/sbin/ming-ota-backup", "--system-target")
 for marker in ["sha256", "readlink", "headroom", "verify_command"]:
@@ -2728,6 +2738,8 @@ build_iso() {
         local iso_sha256 build_sidecar
         iso_sha256="$(sha256sum "${OUTPUT_DIR}/${iso_name}" | awk '{print $1}')"
         printf '%s  %s\n' "${iso_sha256}" "${iso_name}" > "${OUTPUT_DIR}/SHA256SUMS"
+        # Keep the per-ISO checksum sidecar in sync with the canonical sums file.
+        printf '%s  %s\n' "${iso_sha256}" "${iso_name}" > "${OUTPUT_DIR}/${iso_name}.sha256"
         build_sidecar="${OUTPUT_DIR}/${iso_name%.iso}.build.json"
         python3 - "${build_sidecar}" "${MING_OS_VERSION}" "${BUILD_ID}" \
             "${BUILD_SOURCE_COMMIT}" "${BUILD_TIME_UTC}" "${iso_sha256}" <<'PY'
@@ -2753,6 +2765,7 @@ PY
         mkdir -p "${win_output_dir}"
         cp "${OUTPUT_DIR}/${iso_name}" "${win_output_dir}/${iso_name}"
         cp "${OUTPUT_DIR}/SHA256SUMS" "${win_output_dir}/SHA256SUMS"
+        cp "${OUTPUT_DIR}/${iso_name}.sha256" "${win_output_dir}/${iso_name}.sha256"
         cp "${build_sidecar}" "${win_output_dir}/$(basename "${build_sidecar}")"
         verify_build_identity
         log_info "ISO 已复制到 Windows 目录: ${win_output_dir}/${iso_name}"

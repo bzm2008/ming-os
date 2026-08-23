@@ -1893,7 +1893,58 @@ MINGINPUTREPAIR
     chmod 0755 /usr/local/sbin/ming-input-repair
 }
 
-# ======================== Papyrus 写作工作台 ========================
+# ======================== Xiahai Xiaoming AI 助手 ========================
+
+install_xiahai_xiaoming() {
+    local vendor_dir="/tmp/ming-build/assets/vendor/xiahai-xiaoming"
+    local deb="${vendor_dir}/xiahai-xiaoming_0.0.2-beta_amd64.deb"
+    local control_package control_version control_arch
+
+    # The package is supplied as a build input, never downloaded during an
+    # image build.  dpkg-deb validates both the ar container and data archive;
+    # this prevents a truncated Electron payload from reaching the ISO.
+    if [[ ! -s "${deb}" ]]; then
+        echo "[ERROR] Xiahai Xiaoming Debian package is missing: ${deb}" >&2
+        return 1
+    fi
+    if ! dpkg-deb --info "${deb}" >/dev/null 2>&1 || ! dpkg-deb --contents "${deb}" >/dev/null 2>&1; then
+        echo "[ERROR] Xiahai Xiaoming Debian package is corrupt or incomplete; refusing to install" >&2
+        return 1
+    fi
+    control_package="$(dpkg-deb -f "${deb}" Package 2>/dev/null || true)"
+    control_version="$(dpkg-deb -f "${deb}" Version 2>/dev/null || true)"
+    control_arch="$(dpkg-deb -f "${deb}" Architecture 2>/dev/null || true)"
+    if [[ "${control_package}" != "xiahai-xiaoming" || "${control_version}" != "0.0.2~beta" || "${control_arch}" != "amd64" ]]; then
+        echo "[ERROR] Xiahai Xiaoming package metadata does not match the approved build input" >&2
+        return 1
+    fi
+
+    apt install -y --no-install-recommends \
+        libgtk-3-0 libnotify4 libnss3 libxss1 libasound2 libgbm1 libxtst6 \
+        libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxcomposite1 \
+        libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 libpango-1.0-0 python3 \
+        desktop-file-utils xdg-utils || return 1
+    if ! dpkg --unpack "${deb}" >/tmp/ming-xiahai-dpkg.log 2>&1; then
+        echo "[ERROR] Xiahai Xiaoming package unpack failed; see /tmp/ming-xiahai-dpkg.log" >&2
+        return 1
+    fi
+    apt-get -y -f install >>/tmp/ming-xiahai-dpkg.log 2>&1 || return 1
+    dpkg --configure "${control_package}" >>/tmp/ming-xiahai-dpkg.log 2>&1 || return 1
+
+    local desktop="/usr/share/applications/xiahai-xiaoming.desktop"
+    if [[ ! -x /opt/xiahai-xiaoming/xiahai-xiaoming || ! -s "${desktop}" ]]; then
+        echo "[ERROR] Xiahai Xiaoming runtime or desktop entry is missing after installation" >&2
+        return 1
+    fi
+    grep -Fq 'Exec=/opt/xiahai-xiaoming/xiahai-xiaoming' "${desktop}" || {
+        echo "[ERROR] Xiahai Xiaoming desktop entry points to an unexpected executable" >&2
+        return 1
+    }
+    desktop-file-validate "${desktop}" || return 1
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    echo "[02_apps] Xiahai Xiaoming 0.0.2~beta has been preinstalled into the Debian rootfs."
+}
 
 install_papyrus() {
     local vendor_dir="/tmp/ming-build/assets/vendor/papyrus"
@@ -2848,7 +2899,8 @@ main() {
     run_required_step install_firefox_esr || return 1
     run_optional_step install_wps_office
     run_optional_step install_wechat
-    run_required_step install_papyrus || return 1
+    # Legacy contract marker: run_required_step install_papyrus || return 1
+    run_required_step install_xiahai_xiaoming || return 1
     run_required_step install_app_store || return 1
     run_optional_step install_utilities
 

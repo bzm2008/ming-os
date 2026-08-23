@@ -1,0 +1,10 @@
+{
+  "package": "xiahai-xiaoming",
+  "version": "0.0.2~beta",
+  "architecture": "amd64",
+  "desktop_file": "xiahai-xiaoming.desktop",
+  "binary_path": "/opt/xiahai-xiaoming/xiahai-xiaoming",
+  "icon": "xiahai-xiaoming",
+  "source": "user supplied attachment",
+  "validation": "dpkg-deb --info and dpkg-deb --contents are required before build"
+}

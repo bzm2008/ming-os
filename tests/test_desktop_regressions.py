@@ -184,7 +184,7 @@ class DesktopSourceTests(unittest.TestCase):
         core_start = self.phone.index("CORE_NAMES = {")
         core = self.phone[core_start:self.phone.index("}\nDESKTOP_ORDER", core_start)]
         self.assertIn('"Install Ming OS.desktop"', core)
-        self.assertIn('"papyrus.desktop"', core)
+        self.assertIn('"xiahai-xiaoming.desktop"', core)
 
     def test_desktop_module_generates_the_live_installer_entry(self):
         installer = self.desktop[

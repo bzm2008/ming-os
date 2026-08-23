@@ -83,7 +83,7 @@ def write_core_desktops(root):
         "ming-terminal.desktop": "/usr/local/bin/ming-terminal",
         "ming-firefox.desktop": "/usr/local/bin/ming-firefox",
         "spark-store.desktop": "/usr/local/bin/ming-spark-store",
-        "papyrus.desktop": "/usr/bin/papyrus",
+        "xiahai-xiaoming.desktop": "/opt/xiahai-xiaoming/xiahai-xiaoming",
     }
     applications = root / "usr/share/applications"
     applications.mkdir(parents=True, exist_ok=True)
@@ -320,7 +320,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "ming-terminal.desktop",
             "ming-firefox.desktop",
             "spark-store.desktop",
-            "papyrus.desktop",
+            "xiahai-xiaoming.desktop",
         ]:
             self.assertIn(desktop, function)
         self.assertIn("shlex.split(exec_line)", function)

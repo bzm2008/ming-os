@@ -84,12 +84,12 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertNotIn("ming-edge.desktop", launcher_block)
         self.assertNotIn("garlic-claw.desktop", launcher_block)
         self.assertNotIn("ming-update.desktop", launcher_block)
-        self.assertIn("papyrus.desktop", launcher_block)
+        self.assertIn("xiahai-xiaoming.desktop", launcher_block)
 
     def test_update_is_only_exposed_inside_settings(self):
         self.assertNotIn("ming-update.dockitem", self.desktop)
         self.assertNotIn("('ming-update.desktop'", self.desktop)
-        self.assertNotIn("favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,papyrus.desktop,ming-update.desktop", self.desktop)
+        self.assertNotIn("favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,xiahai-xiaoming.desktop,ming-update.desktop", self.desktop)
         self.assertIn("def build_update(self):", (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8"))
         self.assertIn(
             'require_file("usr/local/bin/ming-update-gui", "exec /usr/local/bin/ming-control-center --page update")',

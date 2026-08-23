@@ -758,7 +758,7 @@ def _launch_feedback_window(request, workarea=None, animated=True):
     )
     # Keep the top-level feedback surface opaque. Transparent top-level
     # windows become unreadable on XRender and older GPUs.
-    window.set_opacity(0.0 if animated else 1.0)
+    window.set_opacity(1.0)
 
     provider = Gtk.CssProvider()
     provider.load_from_data(
@@ -812,7 +812,10 @@ def _launch_feedback_window(request, workarea=None, animated=True):
         def step():
             elapsed = (GLib.get_monotonic_time() - started) / 1000.0
             progress = min(1.0, elapsed / ANIMATION_DURATION_MS)
-            window.set_opacity(COMMON.ease_out_cubic(progress))
+            # Keep the surface opaque on XRender/old GPUs; only the spinner
+            # communicates progress so a transparent black rectangle cannot
+            # remain after a window manager repaint.
+            window.set_opacity(1.0)
             return progress < 1.0 and not state["destroyed"]
         GLib.timeout_add(33, step)
     GLib.timeout_add(FEEDBACK_TIMEOUT_MS, destroy)

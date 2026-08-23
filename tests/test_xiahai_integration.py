@@ -1,0 +1,53 @@
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
+FINALIZE = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+LAUNCH = (ROOT / "assets" / "ming-launch.py").read_text(encoding="utf-8")
+
+
+class XiahaiIntegrationContracts(unittest.TestCase):
+    def test_xiahai_vendor_asset_is_present_and_named(self):
+        receipt = ROOT / "assets" / "vendor" / "xiahai-xiaoming" / "receipt.json"
+        self.assertTrue(receipt.is_file())
+        self.assertIn("xiahai-xiaoming_0.0.2-beta_amd64.deb", APPS)
+
+    def test_apps_module_installs_xiahai_and_validates_the_debian_archive(self):
+        self.assertIn("install_xiahai_xiaoming()", APPS)
+        installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
+        for marker in (
+            "xiahai-xiaoming_0.0.2-beta_amd64.deb",
+            "dpkg-deb --info",
+            "dpkg-deb --contents",
+            "Package",
+            "Version",
+            "Architecture",
+            "xiahai-xiaoming.desktop",
+            "/opt/xiahai-xiaoming/xiahai-xiaoming",
+        ):
+            self.assertIn(marker, installer)
+        self.assertNotIn("Papyrus", installer)
+
+    def test_build_preflights_xiahai_archive_before_chroot_work(self):
+        prepare = BUILD.split("prepare_chroot_scripts() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('dpkg-deb --info "${xiahai_asset}"', prepare)
+        self.assertIn('dpkg-deb --contents "${xiahai_asset}"', prepare)
+        self.assertIn("corrupt or incomplete", prepare)
+
+    def test_default_desktop_and_dock_use_xiahai_instead_of_papyrus(self):
+        for source in (DESKTOP, FINALIZE, BUILD):
+            self.assertIn("xiahai-xiaoming.desktop", source)
+            self.assertNotIn("papyrus.desktop", source)
+        self.assertIn("xiahai-xiaoming", DESKTOP)
+
+    def test_launch_feedback_starts_opaque_for_xrender_compatibility(self):
+        self.assertIn("window.set_opacity(1.0)", LAUNCH)
+        self.assertNotIn("window.set_opacity(0.0 if animated else 1.0)", LAUNCH)
+
+
+if __name__ == "__main__":
+    unittest.main()
