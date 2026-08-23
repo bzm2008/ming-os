@@ -305,7 +305,7 @@ class DrawerController:
         .drawer-tile {
           border-radius: 10px;
           padding: 8px;
-          background: transparent;
+           background: #F8FBF9;
           border: 1px solid transparent;
         }
         .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
@@ -526,7 +526,7 @@ class DrawerController:
             eased = COMMON.ease_out_cubic(current)
             y = active_geometry.y + DRAWER_REVEAL_OFFSET * (1.0 - eased)
             self.window.move(int(active_geometry.x), int(y))
-            self.window.set_opacity(0.98 * eased)
+            self.window.set_opacity(eased)
             if self._animation.active:
                 return True
             self._animation_source = 0

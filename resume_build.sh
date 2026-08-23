@@ -89,6 +89,9 @@ ensure_resume_runtime_packages() {
         libasound2-plugins \
         libspa-0.2-bluetooth \
         pavucontrol \
+        dbus-user-session \
+        dbus-x11 \
+        libpam-systemd \
         bluez \
         upower \
         pkexec \
@@ -115,7 +118,7 @@ ensure_resume_runtime_packages() {
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
-        libspa-0.2-bluetooth pavucontrol bluez upower pkexec polkitd \
+        libspa-0.2-bluetooth pavucontrol dbus-user-session dbus-x11 libpam-systemd bluez upower pkexec polkitd \
         lxpolkit libnotify-bin zenity x11-utils x11-xserver-utils desktop-file-utils im-config blueman; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "resume required runtime package is not installed: ${package}"

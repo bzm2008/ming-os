@@ -261,6 +261,13 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
+    # Keep the privileged implementation in sbin, but expose a normal-user
+    # PATH entry so terminal diagnostics and documented commands are usable.
+    cat > /usr/local/bin/ming-package-installer << 'MINGPACKAGEINSTALLER'
+#!/usr/bin/env bash
+exec /usr/local/sbin/ming-package-installer "$@"
+MINGPACKAGEINSTALLER
+    chmod 0755 /usr/local/bin/ming-package-installer
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
@@ -5667,11 +5674,15 @@ inactive-opacity = 1.0;
 active-opacity = 1.0;
 frame-opacity = 1.0;
 detect-rounded-corners = true;
-detect-client-opacity = true;
+detect-client-opacity = false;
 detect-transient = true;
 wintypes:
 {
   dock = { shadow = false; opacity = 0.92; };
+  normal = { shadow = false; opacity = 1.0; };
+  dialog = { shadow = false; opacity = 1.0; };
+  menu = { shadow = false; opacity = 1.0; };
+  tooltip = { shadow = false; opacity = 1.0; };
   popup_menu = { shadow = false; opacity = 1.0; };
   dropdown_menu = { shadow = false; opacity = 1.0; };
   notification = { shadow = false; opacity = 1.0; };
@@ -5707,13 +5718,17 @@ frame-opacity = 1.0;
 wintypes:
 {
   dock = { shadow = false; opacity = 0.92; };
+  normal = { shadow = false; opacity = 1.0; };
+  dialog = { shadow = false; opacity = 1.0; };
+  menu = { shadow = false; opacity = 1.0; };
+  tooltip = { shadow = false; opacity = 1.0; };
   popup_menu = { shadow = false; opacity = 1.0; };
   dropdown_menu = { shadow = false; opacity = 1.0; };
   notification = { shadow = false; opacity = 1.0; };
 };
 
 detect-rounded-corners = true;
-detect-client-opacity = true;
+detect-client-opacity = false;
 detect-transient = true;
 PICOMLOWMEM
 

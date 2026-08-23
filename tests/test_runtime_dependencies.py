@@ -48,6 +48,9 @@ REQUIRED_PACKAGES = [
     "x11-utils",
     "x11-xserver-utils",
     "desktop-file-utils",
+    "dbus-user-session",
+    "dbus-x11",
+    "libpam-systemd",
 ]
 
 
@@ -103,6 +106,16 @@ def run_backend_validator(root):
 
 
 class RequiredRuntimeDependencyContracts(unittest.TestCase):
+    def test_package_installer_is_discoverable_from_a_normal_user_path(self):
+        self.assertIn(
+            'cat > /usr/local/bin/ming-package-installer <<',
+            DESKTOP,
+        )
+        self.assertIn(
+            'exec /usr/local/sbin/ming-package-installer "$@"',
+            DESKTOP,
+        )
+
     def test_package_installer_is_deployed_and_final_thunar_menu_offers_deb_install(self):
         self.assertIn("ming-package-installer.py", DESKTOP)
         self.assertIn("/usr/local/sbin/ming-package-installer", DESKTOP)

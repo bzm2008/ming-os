@@ -756,7 +756,9 @@ def _launch_feedback_window(request, workarea=None, animated=True):
         int(workarea.x + (workarea.width - width) / 2.0),
         int(workarea.y + max(24, min(72, workarea.height * 0.10))),
     )
-    window.set_opacity(0.0 if animated else 0.94)
+    # Keep the top-level feedback surface opaque. Transparent top-level
+    # windows become unreadable on XRender and older GPUs.
+    window.set_opacity(0.0 if animated else 1.0)
 
     provider = Gtk.CssProvider()
     provider.load_from_data(
@@ -810,7 +812,7 @@ def _launch_feedback_window(request, workarea=None, animated=True):
         def step():
             elapsed = (GLib.get_monotonic_time() - started) / 1000.0
             progress = min(1.0, elapsed / ANIMATION_DURATION_MS)
-            window.set_opacity(0.94 * COMMON.ease_out_cubic(progress))
+            window.set_opacity(COMMON.ease_out_cubic(progress))
             return progress < 1.0 and not state["destroyed"]
         GLib.timeout_add(33, step)
     GLib.timeout_add(FEEDBACK_TIMEOUT_MS, destroy)

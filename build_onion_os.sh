@@ -1176,7 +1176,7 @@ validate_required_desktop_runtime() {
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
-        libspa-0.2-bluetooth pavucontrol bluez upower pkexec polkitd \
+        libspa-0.2-bluetooth pavucontrol dbus-user-session dbus-x11 libpam-systemd bluez upower pkexec polkitd \
         lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
         i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
         mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \

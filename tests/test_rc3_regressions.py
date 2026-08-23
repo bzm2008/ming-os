@@ -254,6 +254,16 @@ class Rc3AppearanceContracts(unittest.TestCase):
 
 
 class Rc3PicomReadabilityContracts(unittest.TestCase):
+    def test_feedback_and_drawer_surfaces_do_not_leave_final_window_alpha(self):
+        launch = (ROOT / "assets" / "ming-launch.py").read_text(encoding="utf-8")
+        drawer = (ROOT / "assets" / "ming-app-drawer.py").read_text(encoding="utf-8")
+        self.assertIn("window.set_opacity(0.0 if animated else 1.0)", launch)
+        self.assertIn("window.set_opacity(COMMON.ease_out_cubic(progress))", launch)
+        self.assertNotIn("0.94 * COMMON.ease_out_cubic", launch)
+        self.assertIn("background: #F8FBF9;", drawer)
+        self.assertIn("self.window.set_opacity(eased)", drawer)
+        self.assertNotIn("0.98 * eased", drawer)
+
     def test_picom_transparency_is_limited_to_the_dock(self):
         main = heredoc(
             DESKTOP,
@@ -287,7 +297,8 @@ class Rc3PicomReadabilityContracts(unittest.TestCase):
             self.assertIn("fading = false;", profile)
             self.assertNotIn("fade-in-step", profile)
             self.assertNotIn("fade-out-step", profile)
-            for wintype in ("notification", "popup_menu", "dropdown_menu"):
+            self.assertIn("detect-client-opacity = false;", profile)
+            for wintype in ("normal", "dialog", "menu", "tooltip", "notification", "popup_menu", "dropdown_menu"):
                 self.assertRegex(
                     profile,
                     rf"{wintype}\s*=\s*\{{[^}}]*opacity\s*=\s*1\.0;",

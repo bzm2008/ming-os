@@ -46,6 +46,9 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     libasound2-plugins
     libspa-0.2-bluetooth
     pavucontrol
+    dbus-user-session
+    dbus-x11
+    libpam-systemd
     bluez
     upower
     pkexec
@@ -192,10 +195,15 @@ inactive-opacity-override = false;
 use-damage = true;
 log-level = "warn";
 detect-client-leader = true;
+detect-client-opacity = false;
 detect-transient = true;
 wintypes:
 {
     dock = { shadow = false; opacity = 0.92; };
+    normal = { shadow = false; opacity = 1.0; };
+    dialog = { shadow = false; opacity = 1.0; };
+    menu = { shadow = false; opacity = 1.0; };
+    tooltip = { shadow = false; opacity = 1.0; };
     popup_menu = { shadow = false; opacity = 1.0; };
     dropdown_menu = { shadow = false; opacity = 1.0; };
     notification = { shadow = false; opacity = 1.0; };

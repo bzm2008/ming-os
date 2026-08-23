@@ -20,7 +20,7 @@ class AudioCallBuildContracts(unittest.TestCase):
         for package in [
             "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber",
             "libspa-0.2-bluetooth", "pulseaudio-utils", "libasound2-plugins",
-            "pavucontrol",
+            "pavucontrol", "dbus-user-session", "dbus-x11", "libpam-systemd",
         ]:
             self.assertIn(package, required_block)
         self.assertNotRegex(required_block, r"(?m)^\s*pulseaudio\s*$")
@@ -32,6 +32,7 @@ class AudioCallBuildContracts(unittest.TestCase):
             for package in (
                 "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber",
                 "libspa-0.2-bluetooth",
+                "dbus-user-session", "dbus-x11", "libpam-systemd",
             ):
                 self.assertIn(package, source)
         self.assertIn("configure_pipewire_audio", self.apps)
@@ -39,6 +40,13 @@ class AudioCallBuildContracts(unittest.TestCase):
             "systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service",
             self.apps,
         )
+
+    def test_audio_runtime_requires_a_systemd_user_bus_for_lightdm_sessions(self):
+        block = self.apps[
+            self.apps.index("readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=("):
+            self.apps.index(")", self.apps.index("readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(")) + 1]
+        for package in ("dbus-user-session", "dbus-x11", "libpam-systemd"):
+            self.assertIn(package, block)
 
     def test_wechat_wrapper_repairs_audio_before_launch_without_memory_ceiling(self):
         start = self.apps.index("cat > /usr/local/bin/ming-wechat << 'WECHATWRAP'")

@@ -68,7 +68,9 @@ install_base_packages() {
         systemd \
         systemd-sysv \
         dbus \
+        dbus-user-session \
         dbus-x11 \
+        libpam-systemd \
         at-spi2-core \
         sudo \
         apt-utils \
