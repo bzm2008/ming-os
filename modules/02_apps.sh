@@ -1961,6 +1961,13 @@ install_xiahai_xiaoming() {
         echo "[ERROR] Xiahai Xiaoming desktop entry points to an unexpected executable" >&2
         return 1
     }
+    # Some approved Xiahai builds contain CRLF desktop metadata and multiple
+    # main categories.  Normalize only this trusted entry before validation;
+    # arbitrary package metadata is never rewritten or accepted implicitly.
+    sed -i 's/\r$//' "${desktop}"
+    if grep -q '^Categories=' "${desktop}"; then
+        sed -i 's/^Categories=.*/Categories=Office;/' "${desktop}"
+    fi
     desktop-file-validate "${desktop}" || return 1
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
