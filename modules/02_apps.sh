@@ -1944,6 +1944,14 @@ install_xiahai_xiaoming() {
         return 1
     fi
 
+    # The supplied Electron archive has historically carried mode 0666 for
+    # its payload.  Restore executable bits only on the approved Xiahai
+    # launcher and its bundled Chromium sandbox; never chmod arbitrary files.
+    chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming 2>/dev/null || return 1
+    if [[ -f /opt/xiahai-xiaoming/chrome-sandbox ]]; then
+        chmod 0755 /opt/xiahai-xiaoming/chrome-sandbox 2>/dev/null || return 1
+    fi
+
     local desktop="/usr/share/applications/xiahai-xiaoming.desktop"
     if [[ ! -x /opt/xiahai-xiaoming/xiahai-xiaoming || ! -s "${desktop}" ]]; then
         echo "[ERROR] Xiahai Xiaoming runtime or desktop entry is missing after installation" >&2

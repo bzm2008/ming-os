@@ -49,6 +49,11 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn("install ok installed", installer)
         self.assertIn("did not reach install ok installed", installer)
 
+    def test_xiahai_payload_permissions_are_repaired_for_execution(self):
+        installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming", installer)
+        self.assertIn("chmod 0755 /opt/xiahai-xiaoming/chrome-sandbox", installer)
+
     def test_build_preflights_xiahai_archive_before_chroot_work(self):
         prepare = BUILD.split("prepare_chroot_scripts() {", 1)[1].split("\n}", 1)[0]
         self.assertIn('dpkg-deb --info "${xiahai_asset}"', prepare)
