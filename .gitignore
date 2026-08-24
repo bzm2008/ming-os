@@ -3,6 +3,10 @@
 output/*.iso
 output/
 
+# External Xiahai package injected by MING_XIAHAI_DEB_SOURCE at build time.
+# The build validates its package metadata and SHA256; it is never committed.
+/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb
+
 # Trae IDE
 .trae/
 
