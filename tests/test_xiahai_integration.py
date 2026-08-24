@@ -11,6 +11,11 @@ LAUNCH = (ROOT / "assets" / "ming-launch.py").read_text(encoding="utf-8")
 
 
 class XiahaiIntegrationContracts(unittest.TestCase):
+    def test_internal_build_can_explicitly_skip_missing_xiahai_without_weakening_default_gate(self):
+        self.assertIn("MING_SKIP_XIAHAI", BUILD)
+        self.assertIn("skip_xiahai", APPS)
+        self.assertIn('if [[ "${MING_SKIP_XIAHAI}" != "1" ]]', BUILD)
+
     def test_xiahai_vendor_asset_is_present_and_named(self):
         receipt = ROOT / "assets" / "vendor" / "xiahai-xiaoming" / "receipt.json"
         self.assertTrue(receipt.is_file())

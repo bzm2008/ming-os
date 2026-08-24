@@ -48,6 +48,8 @@ readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly MING_USER="user"
 readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
+readonly MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI:-0}"
+export MING_SKIP_XIAHAI
 BUILD_SOURCE_COMMIT=""
 BUILD_TIME_UTC=""
 BUILD_ID=""
@@ -309,6 +311,7 @@ chroot_exec() {
         MING_USER="${MING_USER}" \
         MING_USER_PASS="${MING_USER_PASS}" \
         ROOT_PASS="${ROOT_PASS}" \
+        MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI}" \
         MING_DEBIAN_MIRROR="${DEBIAN_MIRROR}" \
         MING_DEBIAN_SECURITY_MIRROR="${DEBIAN_SECURITY_MIRROR}" \
         "$@" </dev/null
@@ -367,19 +370,28 @@ prepare_chroot_scripts() {
         mkdir -p "$(dirname "${xiahai_asset}")"
         cp -f "${MING_XIAHAI_DEB_SOURCE}" "${xiahai_asset}"
     fi
-    if [[ ! -s "${xiahai_asset}" ]]; then
+    if [[ "${MING_SKIP_XIAHAI}" == "1" ]]; then
+        log_warn "MING_SKIP_XIAHAI=1: omitting Xiahai Xiaoming from this internal RC build"
+        rm -f "${xiahai_asset}"
+        install -d -m 0755 "${CHROOT_DIR}/etc/ming-os"
+        : > "${CHROOT_DIR}/etc/ming-os/skip-xiahai"
+    elif [[ ! -s "${xiahai_asset}" ]]; then
         log_error "missing required build asset: ${xiahai_asset}"
         log_error "set MING_XIAHAI_DEB_SOURCE to a complete, dpkg-deb-readable package"
         return 1
+    else
+        rm -f "${CHROOT_DIR}/etc/ming-os/skip-xiahai"
     fi
-    if ! command -v dpkg-deb >/dev/null 2>&1; then
-        log_error "dpkg-deb is required to validate the Xiahai build asset"
-        return 1
-    fi
-    if ! dpkg-deb --info "${xiahai_asset}" >/dev/null 2>&1 \
-        || ! dpkg-deb --contents "${xiahai_asset}" >/dev/null 2>&1; then
-        log_error "Xiahai Xiaoming package is corrupt or incomplete; refusing to start the build"
-        return 1
+    if [[ "${MING_SKIP_XIAHAI}" != "1" ]]; then
+        if ! command -v dpkg-deb >/dev/null 2>&1; then
+            log_error "dpkg-deb is required to validate the Xiahai build asset"
+            return 1
+        fi
+        if ! dpkg-deb --info "${xiahai_asset}" >/dev/null 2>&1 \
+            || ! dpkg-deb --contents "${xiahai_asset}" >/dev/null 2>&1; then
+            log_error "Xiahai Xiaoming package is corrupt or incomplete; refusing to start the build"
+            return 1
+        fi
     fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
@@ -1315,8 +1327,9 @@ desktop_names = [
     "ming-terminal.desktop",
     "ming-firefox.desktop",
     "spark-store.desktop",
-    "xiahai-xiaoming.desktop",
 ]
+if os.environ.get("MING_SKIP_XIAHAI") != "1":
+    desktop_names.append("xiahai-xiaoming.desktop")
 search_path = ":".join(str(root / item) for item in (
     "usr/local/bin", "usr/bin", "bin", "usr/local/sbin", "usr/sbin", "sbin"
 ))
@@ -1739,23 +1752,24 @@ else:
     if spark_actual_sha256 != spark_expected_sha256:
         errors.append("verified Spark Store asset SHA256 mismatch")
 
-xiahai_binary = require_file(
-    "opt/xiahai-xiaoming/xiahai-xiaoming", "Xiahai Xiaoming")
-if stat.S_IMODE((root / "opt/xiahai-xiaoming/xiahai-xiaoming").stat().st_mode) & 0o055 != 0o055:
-    errors.append("Xiahai Xiaoming executable is not readable/executable by desktop users")
-xiahai_desktop = require_file(
-    "usr/share/applications/xiahai-xiaoming.desktop",
-    "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming")
-for marker in [
-    "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming",
-    "Icon=xiahai-xiaoming",
-    "Type=Application",
-]:
-    if marker not in xiahai_desktop:
-        errors.append(f"Xiahai Xiaoming desktop entry missing {marker}")
-xiahai_icon = root / "usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png"
-if not xiahai_icon.is_file() or xiahai_icon.stat().st_size == 0:
-    errors.append("missing Xiahai Xiaoming app icon: usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png")
+if os.environ.get("MING_SKIP_XIAHAI") != "1":
+    xiahai_binary = require_file(
+        "opt/xiahai-xiaoming/xiahai-xiaoming", "Xiahai Xiaoming")
+    if stat.S_IMODE((root / "opt/xiahai-xiaoming/xiahai-xiaoming").stat().st_mode) & 0o055 != 0o055:
+        errors.append("Xiahai Xiaoming executable is not readable/executable by desktop users")
+    xiahai_desktop = require_file(
+        "usr/share/applications/xiahai-xiaoming.desktop",
+        "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming")
+    for marker in [
+        "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming",
+        "Icon=xiahai-xiaoming",
+        "Type=Application",
+    ]:
+        if marker not in xiahai_desktop:
+            errors.append(f"Xiahai Xiaoming desktop entry missing {marker}")
+    xiahai_icon = root / "usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png"
+    if not xiahai_icon.is_file() or xiahai_icon.stat().st_size == 0:
+        errors.append("missing Xiahai Xiaoming app icon: usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png")
 
 ota_backup = require_file("usr/local/sbin/ming-ota-backup", "--system-target")
 for marker in ["sha256", "readlink", "headroom", "verify_command"]:

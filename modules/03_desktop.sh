@@ -2349,6 +2349,10 @@ ItemsAlignment=3
 FadeOpacity=1.0
 PLANKSETTINGS
 
+    if [[ "${MING_SKIP_XIAHAI:-0}" == "1" ]]; then
+        sed -i 's/;;xiahai-xiaoming\.dockitem//g' "${plank_dir}/settings"
+    fi
+
     # Late modules install some launchers after this module. Keep generation in
     # one idempotent helper and let 07_finalize run it again before seeding skel.
     cat > /usr/local/sbin/ming-refresh-dock-launchers << 'MINGREFRESHDOCK'
@@ -2365,6 +2369,8 @@ fi
 plank_dir="${user_home}/.config/plank/dock1"
 mkdir -p "${plank_dir}/launchers"
 missing=0
+skip_xiahai=false
+[[ -f /etc/ming-os/skip-xiahai ]] && skip_xiahai=true
 
 _plank_launcher() {
         local name="$1" target="$2"
@@ -2418,11 +2424,16 @@ for launcher in \
     "ming-firefox:ming-firefox.desktop" \
     "ming-files:ming-files.desktop" \
     "spark-store:spark-store.desktop" \
-    "xiahai-xiaoming:xiahai-xiaoming.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
+if ! ${skip_xiahai}; then
+    _plank_launcher "xiahai-xiaoming" "xiahai-xiaoming.desktop" || missing=1
+else
+    rm -f "${plank_dir}/launchers/xiahai-xiaoming.dockitem" \
+          /usr/share/applications/ming-dock-xiahai-xiaoming.desktop
+fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true

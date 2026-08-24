@@ -1946,6 +1946,11 @@ install_xiahai_xiaoming() {
     echo "[02_apps] Xiahai Xiaoming 0.0.2~beta has been preinstalled into the Debian rootfs."
 }
 
+skip_xiahai() {
+    echo "[02_apps] Xiahai Xiaoming package unavailable; skipping for this explicitly requested internal build."
+    return 0
+}
+
 install_papyrus() {
     local vendor_dir="/tmp/ming-build/assets/vendor/papyrus"
     local integration="${vendor_dir}/Papyrus-Debian13-Integration_1.1.0.tar.gz"
@@ -2900,7 +2905,11 @@ main() {
     run_optional_step install_wps_office
     run_optional_step install_wechat
     # Legacy contract marker: run_required_step install_papyrus || return 1
-    run_required_step install_xiahai_xiaoming || return 1
+    if [[ "${MING_SKIP_XIAHAI:-0}" == "1" ]]; then
+        run_optional_step skip_xiahai
+    else
+        run_required_step install_xiahai_xiaoming || return 1
+    fi
     run_required_step install_app_store || return 1
     run_optional_step install_utilities
 
