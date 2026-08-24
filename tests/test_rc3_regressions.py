@@ -30,6 +30,29 @@ class Rc3DockContracts(unittest.TestCase):
         self.assertNotIn("VisualBottomGap=18", settings)
         self.assertNotIn("reserve_bottom_workarea", DESKTOP)
 
+    def test_bios_cold_boot_cannot_restore_retired_custom_dock(self):
+        health = heredoc(
+            DESKTOP,
+            "cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'",
+            "MINGSESSIONHEALTH",
+        )
+        self.assertIn("stop_legacy_ming_dock()", health)
+        self.assertIn("ming-dock-watchdog", health)
+        self.assertIn("/usr/local/bin/ming-dock", health)
+        self.assertLess(health.index("stop_legacy_ming_dock()"), health.index("start_plank_dock"))
+
+    def test_oobe_dialog_is_repositioned_inside_current_work_area(self):
+        oobe = heredoc(
+            DESKTOP,
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'",
+            "OOBEACCOUNT",
+        )
+        self.assertIn("center_oobe_dialogs", oobe)
+        self.assertIn("wmctrl -i -r", oobe)
+        self.assertIn("screen_width", oobe)
+        self.assertIn("screen_height", oobe)
+        self.assertIn("OOBE_CENTER_PID", oobe)
+
 
 class Rc3PowerContracts(unittest.TestCase):
     def test_rootfs_gate_requires_the_power_action_helper(self):

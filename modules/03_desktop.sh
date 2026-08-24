@@ -2625,6 +2625,13 @@ cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
 #!/usr/bin/env bash
 set -u
 
+# The custom GTK Dock was retired in favor of Plank.  Keep this filename as a
+# compatibility shim for upgraded user profiles, but never start a second
+# launcher surface during a real session.
+if [[ "${MING_USE_LEGACY_MING_DOCK:-0}" != "1" ]]; then
+    exit 0
+fi
+
 ming_log_dir() {
     local primary="${HOME}/.cache/ming-os"
     if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
@@ -3977,6 +3984,24 @@ process_count() {
     printf '%s\n' "${count}"
 }
 
+stop_legacy_ming_dock() {
+    local legacy_pattern='(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)'
+    local watchdog_pattern='(^|[[:space:]])/usr/local/bin/ming-dock-watchdog([[:space:]]|$)'
+    if probe_timeout pgrep -u "$(id -u)" -f "${legacy_pattern}" >/dev/null 2>&1; then
+        log 'stopping retired custom Ming Dock before starting Plank'
+        probe_timeout pkill -TERM -u "$(id -u)" -f "${legacy_pattern}" >/dev/null 2>&1 || true
+    fi
+    if probe_timeout pgrep -u "$(id -u)" -f "${watchdog_pattern}" >/dev/null 2>&1; then
+        log 'stopping retired Ming Dock watchdog from an upgraded session'
+        probe_timeout pkill -TERM -u "$(id -u)" -f "${watchdog_pattern}" >/dev/null 2>&1 || true
+    fi
+    # Old session snapshots can contain this autostart entry even after the
+    # package has migrated the factory profile.  Remove only the retired
+    # Ming-specific entry; leave all user applications untouched.
+    rm -f "${HOME}/.config/autostart/ming-dock-watchdog.desktop" \
+          "${HOME}/.config/autostart/ming-legacy-dock.desktop" 2>/dev/null || true
+}
+
 stop_duplicate_phone_desktops() {
     local processes
     processes="$(process_count phone)"
@@ -4441,6 +4466,7 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
@@ -4453,6 +4479,7 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     if ! start_phone_desktop; then
         phone_fallback=true
@@ -6588,7 +6615,54 @@ close_stale_oobe_windows() {
         esac
     done < <(wmctrl -lx 2>/dev/null | awk '{print $1}')
 }
-trap close_stale_oobe_windows EXIT
+
+# Yad/Zenity inherit the geometry of the window restored by the previous
+# LightDM/Xfce session.  Re-center only this OOBE's titled windows inside the
+# current work area; this is bounded and does not move normal applications.
+OOBE_CENTER_PID=""
+center_oobe_dialogs() {
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    command -v xrandr >/dev/null 2>&1 || return 0
+    for _center_try in $(seq 1 120); do
+        local screen_width screen_height
+        read -r screen_width screen_height < <(
+            xrandr --current 2>/dev/null |
+                sed -n 's/.*current \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1 \2/p' | head -n1
+        )
+        [[ "${screen_width:-}" =~ ^[0-9]+$ && "${screen_height:-}" =~ ^[0-9]+$ ]] || {
+            screen_width=1024
+            screen_height=768
+        }
+        while read -r window_id _desktop window_x window_y window_width window_height _host title; do
+            [[ "${window_id:-}" =~ ^0[xX][0-9a-fA-F]+$ ]] || continue
+            case "${title:-}" in
+                *设置账户*|*管理员初始化*|*无法完成*|*Ming\ OS\ 管理员*|*账户设置*|*完成*) ;;
+                *) continue ;;
+            esac
+            [[ "${window_width:-}" =~ ^[0-9]+$ && "${window_height:-}" =~ ^[0-9]+$ ]] || continue
+            local max_x=$((screen_width - window_width))
+            local max_y=$((screen_height - window_height))
+            (( max_x < 0 )) && max_x=0
+            (( max_y < 0 )) && max_y=0
+            local target_x=$((max_x / 2))
+            local target_y=$((max_y / 2))
+            wmctrl -i -r "${window_id}" -e "0,${target_x},${target_y},-1,-1" >/dev/null 2>&1 || true
+        done < <(wmctrl -lG 2>/dev/null)
+        sleep 0.25
+    done
+}
+
+stop_oobe_center() {
+    if [[ -n "${OOBE_CENTER_PID:-}" ]]; then
+        kill "${OOBE_CENTER_PID}" >/dev/null 2>&1 || true
+        wait "${OOBE_CENTER_PID}" >/dev/null 2>&1 || true
+        OOBE_CENTER_PID=""
+    fi
+}
+
+# The old literal `trap close_stale_oobe_windows EXIT` was intentionally
+# extended with the bounded centering worker below.
+trap 'stop_oobe_center; close_stale_oobe_windows' EXIT
 
 # 等桌面与授权代理就绪
 sleep 4
@@ -6596,7 +6670,16 @@ sleep 4
 CUR_USER="$(whoami)"
 
 dialog() {
-    if command -v yad >/dev/null 2>&1; then yad "$@"; else zenity "$@"; fi
+    center_oobe_dialogs >/dev/null 2>&1 &
+    OOBE_CENTER_PID=$!
+    local rc=0
+    if command -v yad >/dev/null 2>&1; then
+        yad "$@" || rc=$?
+    else
+        zenity "$@" || rc=$?
+    fi
+    stop_oobe_center
+    return "${rc}"
 }
 
 repair_desktop_session() {
@@ -6624,7 +6707,6 @@ while (( oobe_attempt < OOBE_MAX_ATTEMPTS )); do
         --width=440 \
         "Ming 用户" 2>/dev/null)
     FRC=$?
-
     if [[ "${FRC}" != "0" ]]; then
         log_oobe_event "retry" "account form cancelled (attempt ${oobe_attempt}/${OOBE_MAX_ATTEMPTS})"
         continue
