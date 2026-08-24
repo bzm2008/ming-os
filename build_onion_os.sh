@@ -49,6 +49,7 @@ readonly MING_USER="user"
 readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
 readonly MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI:-0}"
+readonly MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"
 export MING_SKIP_XIAHAI
 BUILD_SOURCE_COMMIT=""
 BUILD_TIME_UTC=""
@@ -3025,10 +3026,18 @@ main() {
     install_build_deps
     verify_debootstrap_keyring
     mkdir -p "${LINUX_WORKDIR}"
-    run_debootstrap
+    if [[ "${MING_REUSE_CHROOT}" == "1" && -f "${CHROOT_DIR}/etc/ming-version" ]]; then
+        log_warn "MING_REUSE_CHROOT=1: reusing the previously configured chroot for this internal build"
+    else
+        run_debootstrap
+    fi
     mount_chroot
     trap 'umount_chroot' EXIT
-    run_modules
+    if [[ "${MING_REUSE_CHROOT}" != "1" ]]; then
+        run_modules
+    else
+        log_info "Skipping module installation because the configured chroot is being reused"
+    fi
     write_rootfs_build_identity
     generate_initramfs
     clean_chroot
