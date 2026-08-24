@@ -1670,9 +1670,15 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-for marker in ["MingDockProfile=2640-legacy-centered", "Alignment=3", "Offset=0", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"]:
-    if marker not in plank_settings:
-        errors.append(f"Plank settings missing {marker}")
+# RC4 ships the approved Ming Mint compact profile.  Keep the 26.4 legacy
+# profile as a read-only compatibility shape so older upgrades remain valid,
+# but require one complete profile rather than mixing values from both.
+dock_profiles = [
+    ["Alignment=3", "Offset=0", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"],
+    ["Alignment=3", "Offset=12", "IconSize=32", "ZoomEnabled=true", "ZoomPercent=125", "HideMode=0", "Theme=Ming-Mint"],
+]
+if not any(all(marker in plank_settings for marker in profile) for profile in dock_profiles):
+    errors.append("Plank settings do not match an approved Ming Dock profile")
 if plank_settings.count("ming-app-library.dockitem") != 1:
     errors.append("Plank settings must contain exactly one application drawer item")
 if "ming-disk-hub.dockitem" in plank_settings:
@@ -1767,15 +1773,16 @@ else:
 
 if os.environ.get("MING_SKIP_XIAHAI") != "1":
     xiahai_binary = require_file(
-        "opt/xiahai-xiaoming/xiahai-xiaoming", "Xiahai Xiaoming")
+        "opt/xiahai-xiaoming/xiahai-xiaoming", "ELF")
     if stat.S_IMODE((root / "opt/xiahai-xiaoming/xiahai-xiaoming").stat().st_mode) & 0o055 != 0o055:
         errors.append("Xiahai Xiaoming executable is not readable/executable by desktop users")
     xiahai_desktop = require_file(
         "usr/share/applications/xiahai-xiaoming.desktop",
         "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming")
     for marker in [
+        "Name=Xiahai Xiaoming",
         "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming",
-        "Icon=xiahai-xiaoming",
+        "Icon=ming-xiahai",
         "Type=Application",
     ]:
         if marker not in xiahai_desktop:
