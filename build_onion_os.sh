@@ -1782,11 +1782,14 @@ if os.environ.get("MING_SKIP_XIAHAI") != "1":
     for marker in [
         "Name=Xiahai Xiaoming",
         "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming",
-        "Icon=ming-xiahai",
         "Type=Application",
     ]:
         if marker not in xiahai_desktop:
             errors.append(f"Xiahai Xiaoming desktop entry missing {marker}")
+    # Accept the legacy icon name for upgrades while requiring the RC4 name
+    # shipped by the repaired package.
+    if "Icon=ming-xiahai" not in xiahai_desktop and "Icon=xiahai-xiaoming" not in xiahai_desktop:
+        errors.append("Xiahai Xiaoming desktop entry has no approved icon")
     xiahai_icon = root / "usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png"
     if not xiahai_icon.is_file() or xiahai_icon.stat().st_size == 0:
         errors.append("missing Xiahai Xiaoming app icon: usr/share/icons/hicolor/128x128/apps/xiahai-xiaoming.png")
