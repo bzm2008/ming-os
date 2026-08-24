@@ -303,6 +303,19 @@ verify_appearance_assets() {
     fi
 }
 
+converge_package_state() {
+    if [[ -x /usr/local/sbin/ming-apt-source-select ]]; then
+        /usr/local/sbin/ming-apt-source-select >/dev/null 2>&1 || \
+            echo "[07_finalize][WARN] APT 镜像测速失败，保留 Debian 官方源" >&2
+    fi
+    if [[ -x /usr/local/sbin/ming-apt-upgrade-converge ]]; then
+        /usr/local/sbin/ming-apt-upgrade-converge || {
+            echo "[07_finalize][ERROR] APT 软件包收敛失败" >&2
+            return 1
+        }
+    fi
+}
+
 # ======================== 主流程 ========================
 
 main() {
@@ -317,6 +330,7 @@ main() {
     constrain_default_desktop
     repair_default_user_ownership
     verify_appearance_assets
+    converge_package_state || return 1
 
     echo "=====> [07_finalize] 收尾完成 <====="
 }

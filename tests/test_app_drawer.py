@@ -54,10 +54,12 @@ class AppDrawerCoreTests(unittest.TestCase):
                 store.touch(item)
             self.assertEqual(["d.desktop", "c.desktop", "a.desktop"], store.load())
 
-    def test_drawer_uses_bottom_seventy_two_percent_of_workarea(self):
+    def test_drawer_uses_bottom_seventy_two_percent_above_compact_dock(self):
         geometry = self.drawer.drawer_geometry({"x": 10, "y": 20, "width": 1000, "height": 800})
         self.assertEqual(576.0, geometry.height)
-        self.assertEqual(244.0, geometry.y)
+        self.assertEqual(190.0, geometry.y)
+        self.assertEqual(32, self.drawer.DOCK_RESERVED_HEIGHT)
+        self.assertEqual(10, self.drawer.DRAWER_DOCK_GAP)
         self.assertEqual(160, self.drawer.ANIMATION_DURATION_MS)
         self.assertGreaterEqual(self.drawer.ANIMATION_DURATION_MS, 140)
         self.assertLessEqual(self.drawer.ANIMATION_DURATION_MS, 180)

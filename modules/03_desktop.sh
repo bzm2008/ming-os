@@ -1451,6 +1451,228 @@ TILESVG
 }
 
 
+# ======================== Ming Mint 统一视觉资源 ========================
+
+install_ming_mint_icon_set() {
+    local asset_dir="/tmp/ming-build/assets/icons/ming-mint"
+    local icon_base="/usr/share/icons/Ming-Mint"
+    [[ -d "${asset_dir}" ]] || {
+        echo "ERROR: missing Ming Mint icon source: ${asset_dir}" >&2
+        return 1
+    }
+
+    install -d -m 0755 \
+        "${icon_base}/24x24/apps" "${icon_base}/32x32/apps" \
+        "${icon_base}/48x48/apps" "${icon_base}/scalable/apps"
+    install -m 0644 "${asset_dir}/index.theme" "${icon_base}/index.theme"
+    local name
+    for name in settings files terminal app-library update control store papyrus xiahai; do
+        [[ -s "${asset_dir}/${name}.svg" ]] || {
+            echo "ERROR: missing Ming Mint icon: ${name}" >&2
+            return 1
+        }
+        # The source SVG is intentionally transparent and scales cleanly.  A
+        # single source is copied into fixed-size theme slots so GTK3, GTK4,
+        # Plank and desktop entries resolve the same visual asset.
+        install -m 0644 "${asset_dir}/${name}.svg" \
+            "${icon_base}/scalable/apps/ming-${name}.svg"
+        for size in 24 32 48; do
+            install -m 0644 "${asset_dir}/${name}.svg" \
+                "${icon_base}/${size}x${size}/apps/ming-${name}.svg"
+        done
+    done
+    gtk-update-icon-cache -f -t "${icon_base}" 2>/dev/null || true
+}
+
+configure_ming_mint_theme() {
+    local theme_root="/usr/share/themes/Ming-Mint"
+    local user_home="/home/${MING_USER}"
+    install -d -m 0755 "${theme_root}/gtk-3.0" "${theme_root}/gtk-4.0" \
+        "${theme_root}/xfwm4" "${theme_root}/xfce-notify-4.0" \
+        "${user_home}/.config/gtk-3.0" "${user_home}/.config/gtk-4.0"
+
+    cat > "${theme_root}/gtk-3.0/gtk.css" << 'MINGMINTGTK3'
+/* Ming Mint: opaque, flat surfaces that remain readable without a compositor. */
+@define-color ming_surface #F7FBF9;
+@define-color ming_surface_strong #FFFFFF;
+@define-color ming_text #21423D;
+@define-color ming_muted #58756D;
+@define-color ming_accent #2F7775;
+@define-color ming_line #C8DED6;
+
+* {
+  font-family: "Noto Sans CJK SC", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+window, dialog, popover, menu, tooltip {
+  background-color: #F7FBF9;
+  color: #21423D;
+  border-radius: 10px;
+}
+headerbar, .titlebar {
+  min-height: 32px;
+  padding: 0 10px;
+  background-color: #EDF5F1;
+  color: #21423D;
+  border-bottom: 1px solid #C8DED6;
+  border-radius: 10px 10px 0 0;
+}
+button, entry, combobox, spinbutton, scale trough {
+  background-color: #FFFFFF;
+  color: #21423D;
+  border: 1px solid #C8DED6;
+  border-radius: 8px;
+}
+button:hover, button:checked {
+  background-color: #DCEFE8;
+  border-color: #2F7775;
+}
+tooltip, .tooltip {
+  background-color: #21423D;
+  color: #FFFFFF;
+}
+MINGMINTGTK3
+
+    cat > "${theme_root}/gtk-4.0/gtk.css" << 'MINGMINTGTK4'
+/* Ming Mint GTK4 compatibility layer. */
+@define-color ming_surface #F7FBF9;
+@define-color ming_text #21423D;
+* { font-family: "Noto Sans CJK SC", sans-serif; font-size: 14px; line-height: 1.45; }
+window, dialog, popover, menu, tooltip { background-color: #F7FBF9; color: #21423D; border-radius: 10px; }
+headerbar { min-height: 32px; background-color: #EDF5F1; color: #21423D; border-bottom: 1px solid #C8DED6; }
+button, entry { background-color: #FFFFFF; color: #21423D; border: 1px solid #C8DED6; border-radius: 8px; }
+button:hover, button:checked { background-color: #DCEFE8; border-color: #2F7775; }
+MINGMINTGTK4
+
+    cat > "${theme_root}/xfce-notify-4.0/gtk.css" << 'MINGMINTNOTIFY'
+#XfceNotifyWindow, #XfceNotifyWindow * {
+  background-color: #21423D;
+  color: #FFFFFF;
+  border-radius: 10px;
+}
+MINGMINTNOTIFY
+
+    cat > "${theme_root}/xfwm4/themerc" << 'MINGMINTXFW'
+active_text_color=#21423D
+inactive_text_color=#58756D
+title_font=Noto Sans CJK SC Medium 14
+button_spacing=4
+title_alignment=left
+MINGMINTXFW
+
+    cat > "${theme_root}/index.theme" << 'MINGMINTINDEX'
+[X-GNOME-Metatheme]
+Name=Ming Mint
+GtkTheme=Ming-Mint
+MetacityTheme=Ming-Mint
+IconTheme=Ming-Mint
+CursorTheme=Adwaita
+MINGMINTINDEX
+
+    cat > "${user_home}/.config/gtk-3.0/settings.ini" << 'MINGMINTGTKSETTINGS'
+[Settings]
+gtk-theme-name=Ming-Mint
+gtk-icon-theme-name=Ming-Mint
+gtk-font-name=Noto Sans CJK SC 14
+gtk-enable-animations=true
+MINGMINTGTKSETTINGS
+    cat > "${user_home}/.config/gtk-4.0/settings.ini" << 'MINGMINTGTK4SETTINGS'
+[Settings]
+gtk-theme-name=Ming-Mint
+gtk-icon-theme-name=Ming-Mint
+gtk-font-name=Noto Sans CJK SC 14
+MINGMINTGTK4SETTINGS
+    cat > "${user_home}/.config/ming-os/ming-mint-theme" << 'MINGMINTMARKER'
+theme=Ming-Mint
+titlebar_height=32
+window_radius=10
+font=Noto Sans CJK SC 14
+line_height=1.45
+control_spacing=8
+MINGMINTMARKER
+
+    # Keep old theme names as compatibility aliases, but make Ming Mint the
+    # active Xfce and GTK selection for new and upgraded users.
+    xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true
+    xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint" 2>/dev/null || true
+    xfconf-query -c xfwm4 -p /general/theme -s "Ming-Mint" 2>/dev/null || true
+    chown -R "${MING_USER}:${MING_USER}" "${user_home}/.config/gtk-3.0" \
+        "${user_home}/.config/gtk-4.0" "${user_home}/.config/ming-os" 2>/dev/null || true
+}
+
+configure_ming_mint_dock_profile() {
+    local settings="/home/${MING_USER}/.config/plank/dock1/settings"
+    local theme_dir="/usr/share/plank/themes/Ming-Mint"
+    install -d -m 0755 "${theme_dir}"
+    if [[ -f "${settings}" ]]; then
+        sed -i 's/^IconSize=.*/IconSize=32/' "${settings}"
+        sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
+        sed -i 's/^ZoomPercent=.*/ZoomPercent=125/' "${settings}"
+        sed -i 's/^Offset=.*/Offset=12/' "${settings}"
+        sed -i 's/^Theme=.*/Theme=Ming-Mint/' "${settings}"
+    fi
+    cat > "${theme_dir}/dock.theme" << 'MINGMINTPLANK'
+[PlankTheme]
+TopRoundness=10
+BottomRoundness=10
+HorizPadding=8
+TopPadding=5
+BottomPadding=5
+ItemPadding=3
+IndicatorSize=3
+OuterStrokeColor=47;;119;;117;;72
+FillStartColor=255;;255;;255;;244
+FillEndColor=247;;251;;249;;244
+InnerStrokeColor=255;;255;;255;;180
+
+[PlankDockTheme]
+LaunchBounceTime=100
+LaunchBounceHeight=0.10
+UrgentBounceTime=120
+ItemMoveTime=90
+HoverTime=80
+MINGMINTPLANK
+    cat > "/usr/local/sbin/ming-mint-dock-profile" << 'MINGMINTDOCK'
+#!/usr/bin/env bash
+set -u
+settings="${HOME}/.config/plank/dock1/settings"
+[[ -f "${settings}" ]] || exit 0
+sed -i -e 's/^IconSize=.*/IconSize=32/' \
+       -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
+       -e 's/^ZoomPercent=.*/ZoomPercent=125/' \
+       -e 's/^Offset=.*/Offset=12/' \
+       -e 's/^Theme=.*/Theme=Ming-Mint/' "${settings}"
+MINGMINTDOCK
+    chmod 0755 /usr/local/sbin/ming-mint-dock-profile
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" 2>/dev/null || true
+}
+
+configure_ming_mint_desktop_icons() {
+    local app_dir="/usr/share/applications"
+    declare -A icons=(
+        [ming-control-center.desktop]=ming-settings
+        [ming-settings.desktop]=ming-settings
+        [ming-files.desktop]=ming-files
+        [ming-terminal.desktop]=ming-terminal
+        [ming-app-library.desktop]=ming-app-library
+        [ming-update.desktop]=ming-update
+        [spark-store.desktop]=ming-store
+        [xiahai-xiaoming.desktop]=ming-xiahai
+    )
+    local desktop_file icon
+    for desktop_file in "${!icons[@]}"; do
+        [[ -f "${app_dir}/${desktop_file}" ]] || continue
+        icon="${icons[$desktop_file]}"
+        if grep -q '^Icon=' "${app_dir}/${desktop_file}"; then
+            sed -i "s/^Icon=.*/Icon=${icon}/" "${app_dir}/${desktop_file}"
+        else
+            sed -i "/^\[Desktop Entry\]/a Icon=${icon}" "${app_dir}/${desktop_file}"
+        fi
+    done
+    update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
+}
+
 # ======================== 主题与图标 ========================
 
 install_themes() {
@@ -3502,6 +3724,11 @@ apply_plank_runtime_preferences() {
     theme="${theme//\'/}"
     theme_dconf="'Ming'"
     theme_dconf="'${theme:-Ming}'"
+    # MingMintCompact is the active profile.  Keep the legacy defaults above
+    # for migration detection, then enforce the compact values before Plank
+    # is started so upgraded users converge on the same geometry.
+    theme="Ming-Mint"
+    theme_dconf="'Ming-Mint'"
     if command -v gsettings >/dev/null 2>&1; then
         current_theme="$(gsettings get "${plank_schema}" theme 2>/dev/null || true)"
     elif command -v dconf >/dev/null 2>&1; then
@@ -3520,6 +3747,17 @@ apply_plank_runtime_preferences() {
     zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
+    icon_size=32
+    zoom_enabled=true
+    zoom_percent=125
+    offset=12
+    if [[ -f "${settings}" ]]; then
+        sed -i -e 's/^IconSize=.*/IconSize=32/' \
+               -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
+               -e 's/^ZoomPercent=.*/ZoomPercent=125/' \
+               -e 's/^Offset=.*/Offset=12/' \
+               -e 's/^Theme=.*/Theme=Ming-Mint/' "${settings}" 2>/dev/null || true
+    fi
     case "${hide_mode}" in
         0) hide_mode_runtime=none ;;
         1) hide_mode_runtime=intelligent ;;
@@ -8594,6 +8832,11 @@ fi
 xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
+# Ming Mint is the final active selection; the legacy values above remain only
+# as compatibility markers for older user profiles and release tooling.
+xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true
+xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint" 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/theme -s "Ming-Mint" 2>/dev/null || true
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
@@ -8868,6 +9111,7 @@ main() {
     echo "=====> [03_desktop] 开始 Ming OS 26.4.1 Dock 桌面定制 <====="
 
     generate_ming_icons
+    install_ming_mint_icon_set || return 1
     configure_hidpi_autoscale
     install_themes
     setup_wallpaper || return 1
@@ -8881,6 +9125,9 @@ main() {
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
     configure_plank_dock         # 底部可放大 Dock
+    configure_ming_mint_dock_profile
+    configure_ming_mint_desktop_icons
+    configure_ming_mint_theme
     configure_picom
     configure_session_healthcheck # 统一启动/健康协调器（唯一常驻入口）
     configure_touch_input        # 触屏手势 + Onboard 虚拟键盘

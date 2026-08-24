@@ -1,0 +1,27 @@
+[Icon Theme]
+Name=Ming Mint
+Comment=Flat transparent Ming OS application icons
+Directories=24x24/apps,32x32/apps,48x48/apps,scalable/apps
+Inherits=hicolor
+
+[24x24/apps]
+Size=24
+Context=Applications
+Type=Fixed
+
+[32x32/apps]
+Size=32
+Context=Applications
+Type=Fixed
+
+[48x48/apps]
+Size=48
+Context=Applications
+Type=Fixed
+
+[scalable/apps]
+Size=48
+MinSize=16
+MaxSize=256
+Context=Applications
+Type=Scalable

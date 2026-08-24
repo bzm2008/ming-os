@@ -57,6 +57,95 @@ APTNETWORK
     fi
 }
 
+deploy_apt_source_selector() {
+    cat > /usr/local/sbin/ming-apt-source-select << 'MINGAPTSOURCE'
+#!/usr/bin/env bash
+set -uo pipefail
+
+suite="${MING_APT_SUITE:-trixie}"
+state_dir=/var/lib/ming-os
+state_file="${state_dir}/apt-source-state.json"
+source_file=/etc/apt/sources.list.d/90-ming-mirror.list
+official=https://deb.debian.org/debian
+security=https://security.debian.org/debian-security
+timeout_seconds="${MING_APT_MIRROR_TIMEOUT:-4}"
+candidates=(
+    "${official}|${security}"
+    "https://mirrors.aliyun.com/debian|https://mirrors.aliyun.com/debian-security"
+    "https://mirrors.ustc.edu.cn/debian|https://mirrors.ustc.edu.cn/debian-security"
+)
+
+mkdir -p "${state_dir}" /etc/apt/sources.list.d
+best=""
+best_ms=999999
+for candidate in "${candidates[@]}"; do
+    debian="${candidate%%|*}"
+    security_url="${candidate##*|}"
+    started=$(date +%s%3N 2>/dev/null || date +%s000)
+    if curl -4 -fsSL --max-time "${timeout_seconds}" -o /dev/null \
+        "${debian}/dists/${suite}/InRelease" \
+        && curl -4 -fsSL --max-time "${timeout_seconds}" -o /dev/null \
+        "${security_url}/dists/${suite}-security/InRelease"; then
+        ended=$(date +%s%3N 2>/dev/null || date +%s000)
+        elapsed=$((ended - started))
+        if (( elapsed < best_ms )); then
+            best="${candidate}"
+            best_ms="${elapsed}"
+        fi
+    fi
+done
+
+if [[ -z "${best}" ]]; then
+    best="${official}|${security}"
+    best_ms=-1
+fi
+debian="${best%%|*}"
+security_url="${best##*|}"
+tmp="${source_file}.tmp.$$"
+cat > "${tmp}" << EOF
+deb ${debian} ${suite} main contrib non-free non-free-firmware
+deb ${debian} ${suite}-updates main contrib non-free non-free-firmware
+deb ${security_url} ${suite}-security main contrib non-free non-free-firmware
+EOF
+if ! mv -f "${tmp}" "${source_file}"; then
+    rm -f "${tmp}"
+    exit 1
+fi
+python3 - "${state_file}" "${debian}" "${security_url}" "${best_ms}" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+path, debian, security, elapsed = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({"schema": "ming.apt-source.v1", "debian": debian,
+               "security": security, "latency_ms": int(elapsed),
+               "selected_at": datetime.now(timezone.utc).isoformat()}, stream)
+    stream.write("\n")
+PY
+printf '%s\n' "${debian}"
+MINGAPTSOURCE
+    chmod 0755 /usr/local/sbin/ming-apt-source-select
+}
+
+deploy_apt_upgrade_convergence() {
+    cat > /usr/local/sbin/ming-apt-upgrade-converge << 'MINGAPTCONVERGE'
+#!/usr/bin/env bash
+set -uo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+log=/var/log/ming-apt-upgrade-converge.log
+exec >>"${log}" 2>&1
+dpkg --configure -a || exit 1
+apt-get -f install -y -o Dpkg::Use-Pty=0 || exit 1
+if [[ "${MING_SKIP_FULL_UPGRADE:-0}" != "1" ]]; then
+    apt-get full-upgrade -y -o Dpkg::Use-Pty=0 -o APT::Install-Recommends=false || exit 1
+fi
+dpkg --audit | tee /var/log/ming-apt-audit.log
+[[ ! -s /var/log/ming-apt-audit.log ]]
+MINGAPTCONVERGE
+    chmod 0755 /usr/local/sbin/ming-apt-upgrade-converge
+}
+
 # ======================== 内核与基础包 ========================
 
 install_base_packages() {
@@ -1963,6 +2052,55 @@ else
 fi
 DIAGBUNDLE
     chmod 0755 /usr/local/bin/ming-diagnostic-bundle
+
+    cat > /usr/local/bin/ming-diagnostic-upload << 'DIAGUPLOAD'
+#!/usr/bin/env bash
+set -uo pipefail
+
+endpoint="${MING_DIAGNOSTIC_ENDPOINT:-https://ming.sca-hub.cn/api/ming-diagnostics/reports}"
+schema=ming.diagnostic.v1
+queue="${XDG_CACHE_HOME:-${HOME}/.cache}/ming-os/diagnostic-queue"
+mkdir -p "${queue}"
+archive="${1:-}"
+if [[ -z "${archive}" || ! -s "${archive}" ]]; then
+    ming-diagnostic-bundle >/dev/null 2>&1 || true
+    archive="$(find "${HOME}/Desktop" /tmp -maxdepth 2 -type f -name 'Ming-OS-诊断包-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print}')"
+fi
+[[ -s "${archive}" ]] || { echo "无法生成诊断包。" >&2; exit 2; }
+
+work="$(mktemp -d)"
+cleanup() { rm -rf "${work}"; }
+trap cleanup EXIT
+if ! tar -xzf "${archive}" -C "${work}" >/dev/null 2>&1; then
+    echo "诊断包格式无效。" >&2
+    exit 2
+fi
+find "${work}" -type f -size -4M -exec sed -E -i \
+    -e '/(SSID|BSSID|password|passphrase|passwd|authorization|cookie|token|api[_-]?key|username|user=)/Id' \
+    -e 's#/(home|root)/[^[:space:]/]+#/<redacted>#g' \
+    -e 's#([Pp]assword|[Pp]assphrase|token|secret|api[_-]?key)[=:][^[:space:]]+#\1=<redacted>#g' \
+    -e 's#(SSID|ssid|BSSID|bssid)[=:][^[:space:]]+#\1=<redacted>#g' {} + 2>/dev/null || true
+safe_archive="$(mktemp "${TMPDIR:-/tmp}/ming-diagnostic-sanitized.XXXXXX.tar.gz")"
+trap 'rm -rf "${work}" "${safe_archive}"' EXIT
+tar -czf "${safe_archive}" -C "${work}" .
+if [[ "$(wc -c < "${safe_archive}")" -gt 8388608 ]]; then
+    echo "诊断包超过 8MB 限制。" >&2
+    exit 3
+fi
+response="$(curl -4 -fsS --max-time 30 \
+    -H 'Accept: application/json' \
+    -F 'report={"schema":"ming.diagnostic.v1","summary":"Ming OS 用户确认的脱敏诊断报告"};type=application/json' \
+    -F "bundle=@${safe_archive};filename=ming-diagnostic.tar.gz;type=application/gzip" \
+    "${endpoint}" 2>&1)"
+rc=$?
+if [[ "${rc}" -ne 0 ]]; then
+    cp -f "${safe_archive}" "${queue}/$(date +%s).tar.gz" 2>/dev/null || true
+    echo "诊断上传失败，已保存到本地待重试队列。" >&2
+    exit "${rc}"
+fi
+printf '%s\n' "${response}"
+DIAGUPLOAD
+    chmod 0755 /usr/local/bin/ming-diagnostic-upload
 
     cat > /usr/local/bin/ming-surface-support << 'SURFACE'
 #!/usr/bin/env bash
@@ -5269,6 +5407,8 @@ main() {
     echo "=====> [01_base] 开始基础系统配置 <====="
 
     configure_apt_sources
+    deploy_apt_source_selector
+    deploy_apt_upgrade_convergence
     install_base_packages || return 1
     install_hardware_support_packages
     configure_installer_password_policy

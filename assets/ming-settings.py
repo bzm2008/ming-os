@@ -2147,16 +2147,27 @@ class MingSettings(Adw.ApplicationWindow):
             return start_connect()
 
         try:
-            dlg = Adw.MessageDialog(
-                transient_for=self, heading="连接到 %s" % ssid,
-                body="请输入无线网络密码。密码只会安全传给 NetworkManager，不会写入命令参数、日志或诊断数据。" )
+            if callable(getattr(Adw.MessageDialog, "new", None)):
+                dlg = Adw.MessageDialog.new(
+                    self,
+                    "连接到 %s" % ssid,
+                    "请输入无线网络密码。密码只会安全传给 NetworkManager，不会写入命令参数、日志或诊断数据。",
+                )
+            else:
+                dlg = Adw.MessageDialog(
+                    transient_for=self, heading="连接到 %s" % ssid,
+                    body="请输入无线网络密码。密码只会安全传给 NetworkManager，不会写入命令参数、日志或诊断数据。")
             if hasattr(dlg, "add_css_class"):
                 dlg.add_css_class("ming-wifi-password-dialog")
             if (hasattr(dlg, "add_css_class")
                     and hasattr(self, "has_css_class")
                     and self.has_css_class("ming-settings-dark")):
                 dlg.add_css_class("ming-wifi-password-dialog-dark")
-            entry = Gtk.PasswordEntry(show_peek_icon=True)
+            entry = Gtk.PasswordEntry()
+            if hasattr(entry, "set_show_peek_icon"):
+                entry.set_show_peek_icon(True)
+            elif hasattr(entry, "set_visibility"):
+                entry.set_visibility(False)
             entry.set_placeholder_text("请输入无线网络密码")
             dlg.set_extra_child(entry)
             dlg.add_response("cancel", "取消")
@@ -2165,9 +2176,12 @@ class MingSettings(Adw.ApplicationWindow):
             dlg.set_default_response("ok")
             entry.connect("activate", lambda _entry: dlg.response("ok"))
         except Exception as exc:
+            recovery = getattr(self, "show_wifi_recovery_actions", None)
+            if callable(recovery):
+                recovery(network)
             fail(
                 "E_WIFI_DIALOG_CREATE",
-                "无法显示无线密码输入框，请关闭设置后重新打开。",
+                "无法显示无线密码输入框，可点击“打开网络设置”或“重新扫描”后重试。",
                 "%s: %s" % (type(exc).__name__, exc))
             return False
 
@@ -2203,12 +2217,52 @@ class MingSettings(Adw.ApplicationWindow):
             write_wifi_connect_event("password_prompt_presented", network)
         except Exception as exc:
             self.wifi_connect_dialog = None
+            recovery = getattr(self, "show_wifi_recovery_actions", None)
+            if callable(recovery):
+                recovery(network)
             fail(
                 "E_WIFI_DIALOG_PRESENT",
-                "无法显示无线密码输入框，请关闭设置后重新打开。",
+                "无法显示无线密码输入框，可点击“打开网络设置”或“重新扫描”后重试。",
                 "%s: %s" % (type(exc).__name__, exc))
             return False
         return True
+
+    def show_wifi_recovery_actions(self, network):
+        """Offer a GTK-only recovery window when libadwaita cannot present a dialog."""
+        try:
+            window = Gtk.Window(transient_for=self, modal=True, title="无线连接")
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_top(18)
+            box.set_margin_bottom(18)
+            box.set_margin_start(18)
+            box.set_margin_end(18)
+            box.append(Gtk.Label(label="密码输入框无法显示，请选择恢复方式。"))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            retry = Gtk.Button(label="重新扫描")
+            retry.connect("clicked", lambda _button: (window.close(), self.on_wifi_scan(self.wifi_scan_btn)))
+            network_btn = Gtk.Button(label="打开网络设置")
+            network_btn.connect("clicked", lambda _button: (window.close(), self.open_network_manager()))
+            actions.append(retry)
+            actions.append(network_btn)
+            box.append(actions)
+            window.set_child(box)
+            window.present()
+            self.wifi_recovery_dialog = window
+        except Exception as exc:
+            write_wifi_connect_event("recovery_dialog_failure", network, "E_WIFI_RECOVERY_DIALOG", str(exc))
+
+    def open_network_manager(self):
+        for command in (("nm-connection-editor",),
+                        ("xfce4-terminal", "--command", "nmtui"),
+                        ("x-terminal-emulator", "-e", "nmtui")):
+            if shutil.which(command[0]):
+                try:
+                    subprocess.Popen(command, start_new_session=True)
+                    return True
+                except OSError:
+                    continue
+        self.toast("系统网络设置组件不可用，请先重新扫描无线网络。", "error")
+        return False
 
     def apply_wifi_connect_result(self, generation, ssid, bssid, result, error, button=None,
                                   network=None):
@@ -3486,6 +3540,9 @@ class MingSettings(Adw.ApplicationWindow):
         box.append(diag_grp)
         bundle = Gtk.Button(label="生成诊断包")
         bundle.connect("clicked", lambda _b: self.run_helper(["ming-diagnostic-bundle"], "问题诊断"))
+        upload = Gtk.Button(label="上报问题")
+        upload.add_css_class("suggested-action")
+        upload.connect("clicked", self.confirm_diagnostic_upload)
         classic = Gtk.Button(label="切换经典轻量模式")
         classic.connect("clicked", lambda _b: self.run_helper(["ming-classic-mode"], "经典轻量模式"))
         disk_health = Gtk.Button(label="检查磁盘健康")
@@ -3502,6 +3559,7 @@ class MingSettings(Adw.ApplicationWindow):
                 self.pkexec_cmd("ming-input-repair", "--user", USER, "--json"),
                 "输入法修复"))
         diag_grp.add(self.button_row("问题诊断包", "把安装器、网络、驱动和启动日志打包到桌面。", bundle))
+        diag_grp.add(self.button_row("上报问题", "仅在你确认后上传脱敏设备和错误日志，服务器会返回报告编号。", upload))
         diag_grp.add(self.button_row("经典轻量模式", "关闭模糊和重动画，更适合机械硬盘与老 CPU。", classic))
         diag_grp.add(self.button_row("磁盘健康", "按需读取 SATA、SAS 和 NVMe 磁盘的 SMART 状态，不开启常驻监控。", disk_health))
         diag_grp.add(self.button_row("修复输入法", "备份旧 .xinputrc，恢复 Fcitx5 拼音/Rime 配置并避免 im-config 冲突。", input_repair))
@@ -3520,6 +3578,21 @@ class MingSettings(Adw.ApplicationWindow):
         self.hardware_page = sc
         self.refresh_hardware_status()
         return sc
+
+    def confirm_diagnostic_upload(self, _button):
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="确认上报问题？",
+            body="只会上传脱敏后的系统版本、硬件状态和错误日志，不会上传用户名、无线密码、SSID 或个人文件。")
+        dialog.add_response("cancel", "取消")
+        dialog.add_response("upload", "手动确认并上报")
+        dialog.set_response_appearance("upload", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", lambda _dialog, response: self.start_diagnostic_upload()
+                       if response == "upload" else None)
+        dialog.present()
+
+    def start_diagnostic_upload(self):
+        self.run_helper(["ming-diagnostic-upload"], "诊断上报")
 
     def refresh_hardware_status(self):
         generation = self.hardware_probe_state.begin()

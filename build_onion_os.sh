@@ -28,7 +28,7 @@ set -euo pipefail
 # ======================== 项目常量 ========================
 readonly MING_OS_NAME="Ming OS"
 readonly MING_OS_VERSION="26.4.1"
-readonly MING_OS_BUILD_SUFFIX="rc3"
+readonly MING_OS_BUILD_SUFFIX="rc4"
 readonly MING_OS_EDITION="Home"
 readonly MING_OS_CODENAME="ming"
 readonly ISO_VOLUME_ID="MING_OS_2641"
@@ -140,7 +140,7 @@ capture_build_identity() {
     assert_clean_source_tree
     BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
     BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    BUILD_ID="2641-rc3-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+    BUILD_ID="2641-rc4-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
     export BUILD_SOURCE_COMMIT BUILD_TIME_UTC BUILD_ID
 }
 
@@ -391,6 +391,18 @@ prepare_chroot_scripts() {
         if ! dpkg-deb --info "${xiahai_asset}" >/dev/null 2>&1 \
             || ! dpkg-deb --contents "${xiahai_asset}" >/dev/null 2>&1; then
             log_error "Xiahai Xiaoming package is corrupt or incomplete; refusing to start the build"
+            return 1
+        fi
+        if [[ "$(dpkg-deb -f "${xiahai_asset}" Package 2>/dev/null || true)" != "xiahai-xiaoming" \
+            || "$(dpkg-deb -f "${xiahai_asset}" Version 2>/dev/null || true)" != "0.0.2~beta" \
+            || "$(dpkg-deb -f "${xiahai_asset}" Architecture 2>/dev/null || true)" != "amd64" ]]; then
+            log_error "Xiahai Xiaoming package metadata does not match RC4 requirements"
+            return 1
+        fi
+        local xiahai_sha
+        xiahai_sha="$(sha256sum "${xiahai_asset}" | awk '{print toupper($1)}')"
+        if [[ "${xiahai_sha}" != "F3D9612F19D53DB6F4E96E62982060C283D8A2707FEC05429F3074C15E825244" ]]; then
+            log_error "Xiahai Xiaoming package SHA256 is not the approved repaired asset"
             return 1
         fi
     fi

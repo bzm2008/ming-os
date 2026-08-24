@@ -2272,18 +2272,22 @@ validate_deb_paths() {
 }
 
 refresh_desktop() {
-    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
-    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    local status=0
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || status=1
+    if [ -d /usr/share/icons/hicolor ]; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || status=1
+    fi
     target_user="$(caller_user || true)"
     if [ -n "$target_user" ]; then
-        runuser -u "$target_user" -- ming-phone-desktop --sync >/dev/null 2>&1 || true
+        runuser -u "$target_user" -- ming-phone-desktop --sync >/dev/null 2>&1 || status=1
         if [ -x /usr/local/bin/ming-refresh-desktop-state ]; then
-            runuser -u "$target_user" -- ming-refresh-desktop-state >/dev/null 2>&1 || true
+            runuser -u "$target_user" -- ming-refresh-desktop-state >/dev/null 2>&1 || status=1
         fi
         if [ -x /usr/local/sbin/ming-refresh-dock-launchers ]; then
-            /usr/local/sbin/ming-refresh-dock-launchers "$target_user" >/dev/null 2>&1 || true
+            /usr/local/sbin/ming-refresh-dock-launchers "$target_user" >/dev/null 2>&1 || status=1
         fi
     fi
+    return "$status"
 }
 
 verify_packages_installed() {
@@ -2344,8 +2348,12 @@ case "$action" in
         else
             /usr/bin/aptss remove "$@" -y
         fi
-        refresh_desktop
-        json_log "$action" "$*"
+        if refresh_desktop; then
+            json_log "$action" "$*"
+        else
+            echo "已安装，但桌面刷新失败；请在应用库中点击“刷新桌面”后重试。" >&2
+            json_log installed_with_refresh_warning "$*"
+        fi
         ;;
     aptss)
         require_root_for_mutation
@@ -2371,16 +2379,24 @@ case "$action" in
                 exit 2
                 ;;
         esac
-        refresh_desktop
-        json_log "aptss:$subaction" "$*"
+        if refresh_desktop; then
+            json_log "aptss:$subaction" "$*"
+        else
+            echo "操作已完成，但桌面刷新失败；请稍后重试刷新。" >&2
+            json_log installed_with_refresh_warning "aptss:$subaction $*"
+        fi
         ;;
     ssinstall)
         require_root_for_mutation
         validate_deb_paths "$@"
         command -v ssinstall >/dev/null 2>&1 || { echo "ssinstall 后端不可用。" >&2; exit 5; }
         /usr/bin/ssinstall "$@" --native
-        refresh_desktop
-        json_log ssinstall "$*"
+        if refresh_desktop; then
+            json_log ssinstall "$*"
+        else
+            echo "软件已安装，但桌面刷新失败；请稍后重试刷新。" >&2
+            json_log installed_with_refresh_warning "ssinstall $*"
+        fi
         ;;
     apm)
         require_root_for_mutation
@@ -2411,8 +2427,12 @@ case "$action" in
                 verify_apm_installed "$@"
                 ;;
         esac
-        refresh_desktop
-        json_log "apm:$subaction" "$*"
+        if refresh_desktop; then
+            json_log "apm:$subaction" "$*"
+        else
+            echo "APM 软件已安装，但桌面刷新失败；请稍后重试刷新。" >&2
+            json_log installed_with_refresh_warning "apm:$subaction $*"
+        fi
         ;;
     *)
         echo "usage: ming-spark-package-control {aptss|ssinstall|apm|install|remove|refresh|status} ..." >&2
@@ -2477,11 +2497,11 @@ set -euo pipefail
 case "${1:-}" in
     /opt/spark-store/bin/extras/shell-caller.sh)
         shift
-        exec /opt/spark-store/bin/extras/shell-caller.sh "$@"
+        exec /usr/local/sbin/ming-spark-package-control "$@"
         ;;
     /opt/spark-store/extras/shell-caller.sh)
         shift
-        exec /opt/spark-store/extras/shell-caller.sh "$@"
+        exec /usr/local/sbin/ming-spark-package-control "$@"
         ;;
     *)
         echo "拒绝执行未经 Ming OS 验证的星火提权命令。" >&2
@@ -2501,11 +2521,11 @@ MINGSPARKPASSAUTH
     <description>Run Spark Store package actions through Ming OS</description>
     <message>星火应用管理需要本机管理员授权。</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
+      <allow_any>no</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/opt/spark-store/extras/shell-caller.sh</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-spark-package-control</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 </policyconfig>
@@ -2520,7 +2540,7 @@ SPARKSTOREPOLICY
     <description>Install Spark Store packages through Ming OS</description>
     <message>安装星火应用需要本机管理员授权。</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
+      <allow_any>no</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>

@@ -16,6 +16,12 @@ import threading
 ANIMATION_DURATION_MS = 160
 DRAWER_REVEAL_OFFSET = 32
 DRAWER_HEIGHT_RATIO = 0.72
+# Keep the application sheet independent from the bottom Dock.  The window
+# manager workarea still includes the Dock on some Xfce versions, so reserve a
+# small fixed strip explicitly instead of anchoring the sheet to a Dock window.
+DOCK_RESERVED_HEIGHT = 32
+DRAWER_DOCK_GAP = 10
+DRAWER_BOTTOM_MARGIN = 12
 IPC_VERSION = 1
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
@@ -112,7 +118,9 @@ def deduplicate_apps(apps):
 def drawer_geometry(workarea):
     workarea = COMMON.Rect.from_mapping(workarea)
     height = round(workarea.height * DRAWER_HEIGHT_RATIO)
-    return COMMON.Rect(workarea.x, workarea.y + workarea.height - height, workarea.width, height)
+    bottom = workarea.y + workarea.height
+    y = bottom - height - DOCK_RESERVED_HEIGHT - DRAWER_DOCK_GAP - DRAWER_BOTTOM_MARGIN
+    return COMMON.Rect(workarea.x, max(workarea.y, y), workarea.width, height)
 
 
 def reduced_motion_enabled(path=None):
