@@ -1929,7 +1929,20 @@ install_xiahai_xiaoming() {
         return 1
     fi
     apt-get -y -f install >>/tmp/ming-xiahai-dpkg.log 2>&1 || return 1
-    dpkg --configure "${control_package}" >>/tmp/ming-xiahai-dpkg.log 2>&1 || return 1
+    # apt-get -f install may configure the package as part of dependency
+    # resolution.  Calling dpkg --configure again then returns the misleading
+    # "already installed and configured" error, so only configure when the
+    # status still is not complete and always verify the final state.
+    local package_status
+    package_status="$(dpkg-query -W -f='${Status}' "${control_package}" 2>/dev/null || true)"
+    if [[ "${package_status}" != "install ok installed" ]]; then
+        dpkg --configure "${control_package}" >>/tmp/ming-xiahai-dpkg.log 2>&1 || return 1
+    fi
+    package_status="$(dpkg-query -W -f='${Status}' "${control_package}" 2>/dev/null || true)"
+    if [[ "${package_status}" != "install ok installed" ]]; then
+        echo "[ERROR] Xiahai Xiaoming package did not reach install ok installed; see /tmp/ming-xiahai-dpkg.log" >&2
+        return 1
+    fi
 
     local desktop="/usr/share/applications/xiahai-xiaoming.desktop"
     if [[ ! -x /opt/xiahai-xiaoming/xiahai-xiaoming || ! -s "${desktop}" ]]; then
