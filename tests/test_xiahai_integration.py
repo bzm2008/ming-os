@@ -15,6 +15,7 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn("MING_SKIP_XIAHAI", BUILD)
         self.assertIn("skip_xiahai", APPS)
         self.assertIn('if [[ "${MING_SKIP_XIAHAI}" != "1" ]]', BUILD)
+        self.assertIn('os.environ.get("MING_SKIP_XIAHAI") != "1" and "xiahai-xiaoming.dockitem"', BUILD)
 
     def test_xiahai_vendor_asset_is_present_and_named(self):
         receipt = ROOT / "assets" / "vendor" / "xiahai-xiaoming" / "receipt.json"

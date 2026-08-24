@@ -1666,7 +1666,7 @@ if "ming-disk-hub.dockitem" in plank_settings:
     errors.append("Plank settings must not include the retired All Disks item")
 if "ming-firefox.dockitem" not in plank_settings:
     errors.append("Plank settings must include ming-firefox.dockitem as the default browser")
-if "xiahai-xiaoming.dockitem" not in plank_settings:
+if os.environ.get("MING_SKIP_XIAHAI") != "1" and "xiahai-xiaoming.dockitem" not in plank_settings:
     errors.append("Plank settings must include xiahai-xiaoming.dockitem as the default agent")
 for forbidden_dock in ["wechat.dockitem", "wps-office.dockitem"]:
     if forbidden_dock in plank_settings:
