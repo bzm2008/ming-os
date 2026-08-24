@@ -6631,6 +6631,7 @@ close_stale_oobe_windows() {
 # LightDM/Xfce session.  Re-center only this OOBE's titled windows inside the
 # current work area; this is bounded and does not move normal applications.
 OOBE_CENTER_PID=""
+OOBE_DIALOG_PID=""
 center_oobe_dialogs() {
     command -v wmctrl >/dev/null 2>&1 || return 0
     command -v xrandr >/dev/null 2>&1 || return 0
@@ -6685,10 +6686,18 @@ dialog() {
     OOBE_CENTER_PID=$!
     local rc=0
     if command -v yad >/dev/null 2>&1; then
-        yad "$@" || rc=$?
+        # Use Yad's native centering before the bounded wmctrl correction.  A
+        # background child lets the centering worker observe the real window,
+        # while wait preserves the dialog output and exit status.
+        yad --center "$@" &
+        OOBE_DIALOG_PID=$!
+        wait "${OOBE_DIALOG_PID}" || rc=$?
     else
-        zenity "$@" || rc=$?
+        zenity --center "$@" &
+        OOBE_DIALOG_PID=$!
+        wait "${OOBE_DIALOG_PID}" || rc=$?
     fi
+    OOBE_DIALOG_PID=""
     stop_oobe_center
     return "${rc}"
 }

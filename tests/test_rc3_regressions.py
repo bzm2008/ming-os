@@ -53,6 +53,16 @@ class Rc3DockContracts(unittest.TestCase):
         self.assertIn("screen_height", oobe)
         self.assertIn("OOBE_CENTER_PID", oobe)
 
+    def test_oobe_yad_uses_native_centering_and_keeps_reposition_worker_bound_to_dialog(self):
+        oobe = heredoc(
+            DESKTOP,
+            "cat > /usr/local/bin/ming-oobe-account << 'OOBEACCOUNT'",
+            "OOBEACCOUNT",
+        )
+        self.assertIn("yad --center", oobe)
+        self.assertIn("OOBE_DIALOG_PID", oobe)
+        self.assertIn("wait \"${OOBE_DIALOG_PID}\"", oobe)
+
 
 class Rc3PowerContracts(unittest.TestCase):
     def test_rootfs_gate_requires_the_power_action_helper(self):
