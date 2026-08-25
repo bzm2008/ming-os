@@ -1729,6 +1729,17 @@ set_engine() {
     esac
 }
 
+toggle_engine() {
+    case "$(current_engine)" in
+        rime)
+            set_engine pinyin
+            ;;
+        *)
+            set_engine rime
+            ;;
+    esac
+}
+
 case "${1:-}" in
     status)
         if [[ "${2:-}" != --json || "$#" -ne 2 ]]; then
@@ -1744,8 +1755,15 @@ case "${1:-}" in
         fi
         set_engine "$2"
         ;;
+    toggle)
+        [[ "$#" -eq 1 ]] || {
+            printf 'usage: ming-input-control toggle\n' >&2
+            exit 2
+        }
+        toggle_engine
+        ;;
     *)
-        printf 'usage: ming-input-control {status --json|set-engine <pinyin|rime>}\n' >&2
+        printf 'usage: ming-input-control {status --json|set-engine <pinyin|rime>|toggle}\n' >&2
         exit 2
         ;;
 esac
@@ -1948,6 +1966,10 @@ install_xiahai_xiaoming() {
     # its payload.  Restore executable bits only on the approved Xiahai
     # launcher and its bundled Chromium sandbox; never chmod arbitrary files.
     chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming 2>/dev/null || return 1
+    # The Debian payload may create a root-only /opt directory when unpacked.
+    # Xiahai is a user-launched desktop app, so its directory and launcher
+    # must be traversable/readable by the logged-in user.
+    chmod 0755 /opt/xiahai-xiaoming 2>/dev/null || return 1
     if [[ -f /opt/xiahai-xiaoming/chrome-sandbox ]]; then
         chmod 0755 /opt/xiahai-xiaoming/chrome-sandbox 2>/dev/null || return 1
     fi
@@ -2207,6 +2229,12 @@ MINGSPARKSTATUS
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Spark's vendor aptss/apt-fast invokes `aria2c` by name.  Put the scoped
+# wrapper first in PATH so failed Metalink downloads are classified and
+# retried without replacing the system aria2c binary.
+export MING_SPARK_ARIA2C=/usr/local/libexec/ming-spark-aria2c
+export PATH="/usr/local/libexec:${PATH}"
+
 MING_SPARK_PACKAGE_PATTERN='^[A-Za-z0-9][A-Za-z0-9.+-]{0,127}$'
 MING_SPARK_PATH_PATTERN='^/[A-Za-z0-9._/+:-]+[.]deb$'
 LOG=/var/log/ming-spark-package-control.jsonl
@@ -2245,6 +2273,11 @@ caller_user() {
 }
 
 administrator_ready() {
+    # A root-only maintainer hook has already crossed the privilege boundary;
+    # there is no desktop caller to validate in that case.
+    if [ "$(id -u)" -eq 0 ] && [ -z "${PKEXEC_UID:-}" ] && [ -z "${SUDO_USER:-}" ]; then
+        return 0
+    fi
     user_name="$(caller_user || true)"
     [ -n "$user_name" ] || return 1
     status="$(passwd -S "$user_name" 2>/dev/null || true)"
@@ -2307,9 +2340,18 @@ refresh_desktop() {
     fi
     target_user="$(caller_user || true)"
     if [ -n "$target_user" ]; then
-        runuser -u "$target_user" -- ming-phone-desktop --sync >/dev/null 2>&1 || status=1
+        target_uid="$(id -u "$target_user" 2>/dev/null || true)"
+        session_runtime="/run/user/${target_uid}"
+        session_bus="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${session_runtime}/bus}"
+        runuser -u "$target_user" -- env \
+            HOME="/home/${target_user}" DISPLAY="${DISPLAY:-:0}" \
+            XDG_RUNTIME_DIR="${session_runtime}" DBUS_SESSION_BUS_ADDRESS="${session_bus}" \
+            ming-phone-desktop --sync >/dev/null 2>&1 || status=1
         if [ -x /usr/local/bin/ming-refresh-desktop-state ]; then
-            runuser -u "$target_user" -- ming-refresh-desktop-state >/dev/null 2>&1 || status=1
+            runuser -u "$target_user" -- env \
+                HOME="/home/${target_user}" DISPLAY="${DISPLAY:-:0}" \
+                XDG_RUNTIME_DIR="${session_runtime}" DBUS_SESSION_BUS_ADDRESS="${session_bus}" \
+                ming-refresh-desktop-state >/dev/null 2>&1 || status=1
         fi
         if [ -x /usr/local/sbin/ming-refresh-dock-launchers ]; then
             /usr/local/sbin/ming-refresh-dock-launchers "$target_user" >/dev/null 2>&1 || status=1
@@ -2471,6 +2513,80 @@ esac
 MINGSPARKCONTROL
     chmod 0755 /usr/local/sbin/ming-spark-package-control
 
+    install -d -m 0755 /usr/local/libexec /var/log
+    cat > /usr/local/libexec/ming-spark-aria2c << 'MINGSPARKARIA2C'
+#!/usr/bin/env bash
+set -u
+
+real=/usr/bin/aria2c
+log=/var/log/ming-spark-download.jsonl
+attempt=0
+max_attempts=2
+tmp="$(mktemp -t ming-spark-aria2c.XXXXXX 2>/dev/null || printf '/tmp/ming-spark-aria2c.%s' "$$")"
+cleanup() { rm -f -- "${tmp}"; }
+trap cleanup EXIT
+
+classify_failure() {
+    local text="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "${text}" in
+        *certificate*|*tls*|*ssl*) printf 'tls' ;;
+        *resolve*|*dns*|*network*|*connection*) printf 'network' ;;
+        *checksum*|*hash*|*piece*) printf 'integrity' ;;
+        *permission*|*denied*) printf 'permission' ;;
+        *) printf 'aria2c' ;;
+    esac
+}
+
+write_event() {
+    local rc="$1" failure="$2" mirror_count="$3" detail="$4"
+    python3 - "${log}" "${attempt}" "${rc}" "${failure}" "${mirror_count}" "${detail}" <<'PY' 2>/dev/null || true
+import json, sys
+from datetime import datetime, timezone
+path, attempt, rc, failure, mirrors, detail = sys.argv[1:]
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "spark_download",
+        "attempts": int(attempt),
+        "rc": int(rc),
+        "failure_class": failure,
+        "mirror_count": int(mirrors),
+        "detail": detail[-500:],
+    }, ensure_ascii=False, sort_keys=True) + "\n")
+PY
+}
+
+if [[ ! -x "${real}" ]]; then
+    printf 'aria2c 后端缺失：%s\n' "${real}" >&2
+    write_event 127 "missing" 0 "aria2c missing"
+    exit 127
+fi
+
+mirror_count=0
+for arg in "$@"; do
+    [[ "${arg}" == https://* ]] && mirror_count=$((mirror_count + 1))
+done
+
+while (( attempt < max_attempts )); do
+    attempt=$((attempt + 1))
+    : >"${tmp}"
+    set +e
+    "${real}" "$@" --retry-wait=2 --max-tries=2 2>&1 | tee -a "${tmp}" >&2
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [[ "${rc}" -eq 0 ]]; then
+        write_event 0 "none" "${mirror_count}" "success"
+        exit 0
+    fi
+    failure="$(classify_failure "$(cat "${tmp}" 2>/dev/null || true)")"
+    write_event "${rc}" "${failure}" "${mirror_count}" "$(cat "${tmp}" 2>/dev/null || true)"
+    (( attempt < max_attempts )) || break
+done
+exit "${rc:-1}"
+MINGSPARKARIA2C
+    chmod 0755 /usr/local/libexec/ming-spark-aria2c
+    ln -sfn ming-spark-aria2c /usr/local/libexec/aria2c
+
     cat > /usr/share/polkit-1/actions/org.ming.spark.package-control.policy << 'MINGSPARKPOLICY'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC
@@ -2522,14 +2638,14 @@ MINGSPARKCALLER
 #!/usr/bin/env bash
 set -euo pipefail
 
-case "${1:-}" in
+    case "${1:-}" in
     /opt/spark-store/bin/extras/shell-caller.sh)
         shift
-        exec /usr/local/sbin/ming-spark-package-control "$@"
+        exec /usr/local/bin/ming-authorized-action spark "$@"
         ;;
     /opt/spark-store/extras/shell-caller.sh)
         shift
-        exec /usr/local/sbin/ming-spark-package-control "$@"
+        exec /usr/local/bin/ming-authorized-action spark "$@"
         ;;
     *)
         echo "拒绝执行未经 Ming OS 验证的星火提权命令。" >&2
@@ -2625,9 +2741,12 @@ fi
 SPARKINSTALL
     chmod +x /usr/local/bin/ming-install-spark-store
 
-    cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'
+cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'
 #!/usr/bin/env bash
 set -u
+
+export MING_SPARK_ARIA2C=/usr/local/libexec/ming-spark-aria2c
+export PATH="/usr/local/libexec:${PATH}"
 
 MING_SPARK_LOG="${HOME}/.cache/ming-os/spark-store.log"
 mkdir -p "$(dirname "${MING_SPARK_LOG}")" 2>/dev/null || MING_SPARK_LOG="/tmp/ming-spark-store.log"

@@ -33,7 +33,8 @@ class SparkAuthorizationContracts(unittest.TestCase):
             1,
         )[1].split("MINGSPARKPASSAUTH", 1)[0]
         self.assertNotIn('exec pkexec "$@"', pass_auth)
-        self.assertIn("ming-spark-package-control", pass_auth)
+        self.assertIn("ming-authorized-action spark", pass_auth)
+        self.assertNotIn("exec /usr/local/sbin/ming-spark-package-control", pass_auth)
 
 
 class WifiDialogContracts(unittest.TestCase):

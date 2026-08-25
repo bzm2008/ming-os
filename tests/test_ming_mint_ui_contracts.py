@@ -38,12 +38,12 @@ class MingMintThemeContracts(unittest.TestCase):
         self.assertIn("initial-opacity\" type=\"double\" value=\"1.0\"", self.desktop)
         self.assertIn("background-opacity=100", self.desktop)
 
-    def test_compact_dock_profile_is_applied_at_runtime(self):
-        self.assertIn("MingMintCompact", self.desktop)
-        self.assertIn("IconSize=32", self.desktop)
-        self.assertIn("ZoomPercent=125", self.desktop)
+    def test_legacy_dock_profile_is_applied_at_runtime(self):
+        self.assertIn("MingDockProfile=2640-legacy-centered", self.desktop)
+        self.assertIn("IconSize=40", self.desktop)
+        self.assertIn("ZoomPercent=148", self.desktop)
         self.assertIn("Offset=12", self.desktop)
-        self.assertIn("Theme=Ming-Mint", self.desktop)
+        self.assertIn("Theme=Ming", self.desktop)
         self.assertIn("alignment center", self.desktop)
         self.assertIn("items-alignment center", self.desktop)
 
@@ -51,10 +51,10 @@ class MingMintThemeContracts(unittest.TestCase):
         drawer = load_drawer()
         geometry = drawer.drawer_geometry({"x": 10, "y": 20, "width": 1000, "height": 800})
         self.assertEqual(576.0, geometry.height)
-        self.assertEqual(190.0, geometry.y)
+        self.assertEqual(198.0, geometry.y)
         self.assertEqual(10, drawer.DRAWER_DOCK_GAP)
         self.assertEqual(32, drawer.DOCK_RESERVED_HEIGHT)
-        self.assertEqual(12, drawer.DRAWER_BOTTOM_MARGIN)
+        self.assertEqual(4, drawer.DRAWER_BOTTOM_MARGIN)
         self.assertIn("DRAWER_DOCK_GAP", self.drawer)
         self.assertIn("DOCK_RESERVED_HEIGHT", self.drawer)
 

@@ -324,6 +324,13 @@ if [[ ! -x "${command[0]}" ]]; then
     exit 127
 fi
 
+# Vendor hooks may already be running as root (for example from a package
+# maintainer action).  Do not nest pkexec in that case; desktop users still
+# cross the normal Polkit boundary below.
+if [[ "$(id -u)" -eq 0 && -z "${PKEXEC_UID:-}" && -z "${SUDO_USER:-}" ]]; then
+    exec "${command[@]}"
+fi
+
 if output="$(pkexec "${command[@]}" 2>&1)"; then
     rc=0
 else
@@ -1603,46 +1610,26 @@ MINGMINTMARKER
 
 configure_ming_mint_dock_profile() {
     local settings="/home/${MING_USER}/.config/plank/dock1/settings"
-    local theme_dir="/usr/share/plank/themes/Ming-Mint"
-    install -d -m 0755 "${theme_dir}"
     if [[ -f "${settings}" ]]; then
-        sed -i 's/^IconSize=.*/IconSize=32/' "${settings}"
+        # The Mint window/icon theme remains active, but the Dock itself
+        # starts from the proven 26.4.0 Ming profile.  The session watchdog
+        # later applies responsive icon sizing without changing the theme.
+        sed -i 's/^IconSize=.*/IconSize=40/' "${settings}"
         sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
-        sed -i 's/^ZoomPercent=.*/ZoomPercent=125/' "${settings}"
+        sed -i 's/^ZoomPercent=.*/ZoomPercent=148/' "${settings}"
         sed -i 's/^Offset=.*/Offset=12/' "${settings}"
-        sed -i 's/^Theme=.*/Theme=Ming-Mint/' "${settings}"
+        sed -i 's/^Theme=.*/Theme=Ming/' "${settings}"
     fi
-    cat > "${theme_dir}/dock.theme" << 'MINGMINTPLANK'
-[PlankTheme]
-TopRoundness=10
-BottomRoundness=10
-HorizPadding=8
-TopPadding=5
-BottomPadding=5
-ItemPadding=3
-IndicatorSize=3
-OuterStrokeColor=47;;119;;117;;72
-FillStartColor=255;;255;;255;;244
-FillEndColor=247;;251;;249;;244
-InnerStrokeColor=255;;255;;255;;180
-
-[PlankDockTheme]
-LaunchBounceTime=100
-LaunchBounceHeight=0.10
-UrgentBounceTime=120
-ItemMoveTime=90
-HoverTime=80
-MINGMINTPLANK
     cat > "/usr/local/sbin/ming-mint-dock-profile" << 'MINGMINTDOCK'
 #!/usr/bin/env bash
 set -u
 settings="${HOME}/.config/plank/dock1/settings"
 [[ -f "${settings}" ]] || exit 0
-sed -i -e 's/^IconSize=.*/IconSize=32/' \
+sed -i -e 's/^IconSize=.*/IconSize=40/' \
        -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
-       -e 's/^ZoomPercent=.*/ZoomPercent=125/' \
+       -e 's/^ZoomPercent=.*/ZoomPercent=148/' \
        -e 's/^Offset=.*/Offset=12/' \
-       -e 's/^Theme=.*/Theme=Ming-Mint/' "${settings}"
+       -e 's/^Theme=.*/Theme=Ming/' "${settings}"
 MINGMINTDOCK
     chmod 0755 /usr/local/sbin/ming-mint-dock-profile
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" 2>/dev/null || true
@@ -3724,11 +3711,8 @@ apply_plank_runtime_preferences() {
     theme="${theme//\'/}"
     theme_dconf="'Ming'"
     theme_dconf="'${theme:-Ming}'"
-    # MingMintCompact is the active profile.  Keep the legacy defaults above
-    # for migration detection, then enforce the compact values before Plank
-    # is started so upgraded users converge on the same geometry.
-    theme="Ming-Mint"
-    theme_dconf="'Ming-Mint'"
+    # Keep the approved legacy Ming theme.  Geometry is responsive so the
+    # Dock remains comfortable on both small legacy displays and wide panels.
     if command -v gsettings >/dev/null 2>&1; then
         current_theme="$(gsettings get "${plank_schema}" theme 2>/dev/null || true)"
     elif command -v dconf >/dev/null 2>&1; then
@@ -3747,16 +3731,26 @@ apply_plank_runtime_preferences() {
     zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
-    icon_size=32
+    local screen_width
+    screen_width="$(xrandr --current 2>/dev/null | sed -n 's/.*current \([0-9][0-9]*\) x .*/\1/p' | head -n1)"
+    [[ "${screen_width}" =~ ^[0-9]+$ ]] || screen_width=1366
+    if (( screen_width <= 1152 )); then
+        icon_size=32
+    elif (( screen_width <= 1600 )); then
+        icon_size=36
+    else
+        icon_size=40
+    fi
     zoom_enabled=true
-    zoom_percent=125
+    zoom_percent=148
     offset=12
+    log "responsive Dock geometry: width=${screen_width}px icon_size=${icon_size}px offset=${offset}px zoom=${zoom_percent}%"
     if [[ -f "${settings}" ]]; then
-        sed -i -e 's/^IconSize=.*/IconSize=32/' \
+        sed -i -e "s/^IconSize=.*/IconSize=${icon_size}/" \
                -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
-               -e 's/^ZoomPercent=.*/ZoomPercent=125/' \
-               -e 's/^Offset=.*/Offset=12/' \
-               -e 's/^Theme=.*/Theme=Ming-Mint/' "${settings}" 2>/dev/null || true
+               -e "s/^ZoomPercent=.*/ZoomPercent=${zoom_percent}/" \
+               -e "s/^Offset=.*/Offset=${offset}/" \
+               -e "s/^Theme=.*/Theme=${theme}/" "${settings}" 2>/dev/null || true
     fi
     case "${hide_mode}" in
         0) hide_mode_runtime=none ;;

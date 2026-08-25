@@ -1496,7 +1496,10 @@ class DeviceController:
             return "SSID 格式无效。"
         if len(ssid.encode("utf-8")) > 32 or any(ord(char) < 32 for char in ssid):
             return "SSID 格式无效。"
-        if not isinstance(bssid, str) or not BSSID_PATTERN.fullmatch(bssid):
+        # Some drivers omit BSSID from a scan row.  The opaque network_id
+        # still binds the cached SSID/interface, so NetworkManager can safely
+        # select the matching access point without a forced BSSID argument.
+        if not isinstance(bssid, str) or (bssid and not BSSID_PATTERN.fullmatch(bssid)):
             return "BSSID 格式无效。"
         if not isinstance(ifname, str) or not IFNAME_PATTERN.fullmatch(ifname):
             return "网络接口名称格式无效。"
@@ -1555,8 +1558,10 @@ class DeviceController:
                 ssid=ssid, bssid=bssid, ifname=ifname, network_id=network_id)
         command = [
             "nmcli", "--wait", "30", "device", "wifi", "connect", ssid,
-            "bssid", bssid, "ifname", ifname,
         ]
+        if bssid:
+            command.extend(("bssid", bssid))
+        command.extend(("ifname", ifname))
         if password is not None:
             command.insert(1, "--ask")
         if use_c_locale:

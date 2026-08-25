@@ -37,6 +37,26 @@ class LaunchResultTests(unittest.TestCase):
             self.assertEqual(request.desktop_file, event["desktop_file"])
             self.assertEqual("desktop", event["source"])
 
+    def test_settings_source_is_allowed_for_input_method_configuration(self):
+        request = self.launch.LaunchRequest(
+            (), source="settings", desktop_file="/usr/share/applications/fcitx5-configtool.desktop",
+            mode="desktop_app_info")
+        self.assertEqual("settings", request.source)
+
+    def test_window_probe_timeout_is_not_reported_as_launch_failure(self):
+        calls = []
+        request = self.launch.LaunchRequest(
+            (), source="settings", desktop_file="/usr/share/applications/fcitx5-configtool.desktop",
+            mode="desktop_app_info")
+        with mock.patch.object(
+                self.launch.COMMON, "run_command",
+                lambda command, timeout=2: calls.append(tuple(command)) or (0, "", "")):
+            self.launch.report_launch_error(
+                request, RuntimeError("应用已启动，但窗口未在等待时间内出现"))
+        self.assertTrue(calls)
+        self.assertNotIn("无法启动", calls[-1][-1])
+        self.assertIn("仍在加载", calls[-1][-1])
+
     def test_every_successful_launch_path_starts_exactly_one_feedback(self):
         feedback = []
         requests = (
@@ -122,6 +142,22 @@ class LaunchResultTests(unittest.TestCase):
             ["activated", "window_timeout", "activated", "window_timeout"], events)
         self.assertEqual(2, len(errors))
         self.assertTrue(all("窗口" in error for error in errors))
+
+    def test_window_match_accepts_desktop_exec_alias_for_gio_activation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            desktop = pathlib.Path(tempdir) / "fcitx5-configtool.desktop"
+            desktop.write_text(
+                "[Desktop Entry]\nType=Application\n"
+                "Name=Fcitx5 Configuration Tool\n"
+                "Exec=fcitx5-config-qt\n",
+                encoding="utf-8",
+            )
+            wmctrl = (
+                "0x001  0 777 host fcitx5-config-qt.Fcitx5ConfigQt "
+                "Fcitx5 Configuration\n"
+            )
+            self.assertTrue(self.launch.window_matches(
+                wmctrl, desktop_file=str(desktop)))
 
     def test_reduced_motion_keeps_static_launch_feedback(self):
         feedback = []

@@ -10,6 +10,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 
 
 def install_fcitx5_source():
@@ -276,6 +277,15 @@ class MingInputMethodContractTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("<pinyin|rime>", result.stderr)
         self.assertEqual("pinyin", engine)
+
+    def test_toggle_engine_switches_from_pinyin_to_rime(self):
+        result, engine = self.run_control("toggle")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("rime", engine)
+
+    def test_settings_exposes_visible_pinyin_and_rime_switch(self):
+        for marker in ("输入法", "拼音", "Rime", "set-engine"):
+            self.assertIn(marker, SETTINGS)
 
     def test_set_engine_falls_back_to_pinyin_when_rime_schema_is_unavailable(self):
         result, engine = self.run_control("set-engine", "rime", rime_schema=False)

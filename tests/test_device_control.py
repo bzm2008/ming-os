@@ -3,6 +3,7 @@ import io
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 import base64
 from contextlib import redirect_stderr
@@ -1434,6 +1435,37 @@ class WifiCliTests(unittest.TestCase):
         self.assertEqual("wlan0", result["ifname"])
         self.assertEqual([(connect_command, "secret\n")], input_runner.inputs)
         self.assertNotIn("secret", output.getvalue())
+
+    def test_network_id_connect_allows_driver_scan_without_bssid(self):
+        readback_command = c_command(
+            "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+        connect_command = c_command(
+            "nmcli", "--ask", "--wait", "30", "device", "wifi", "connect", "Hidden AP",
+            "ifname", "wlan0",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "wifi-scan.json"
+            network_id = self.device.DeviceController._wifi_network_id(
+                b"Hidden AP", "", "wlan0")
+            cache_path.write_text(json.dumps({
+                "schema": 1, "generated_at": int(time.time()),
+                "networks": [{
+                    "network_id": network_id, "ssid_bytes_b64": base64.b64encode(
+                        b"Hidden AP").decode("ascii"),
+                    "encoding": "utf-8", "bssid": "", "ifname": "wlan0",
+                }],
+            }), encoding="utf-8")
+            input_runner = FakeInputRunner({connect_command: (0, "Device activated", "")})
+            controller = self.device.DeviceController(
+                runner=FakeRunner({
+                    readback_command: (0, "wlan0:wifi:connected:Hidden AP", ""),
+                }),
+                input_runner=input_runner, executable=lambda _name: True,
+                wifi_scan_cache_path=cache_path)
+            result = controller.wifi_connect_network_id(network_id, "wlan0", password="secret")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([(connect_command, "secret\n")], input_runner.inputs)
 
     def test_network_id_connect_refreshes_stale_cache_before_connecting(self):
         scan_command = (

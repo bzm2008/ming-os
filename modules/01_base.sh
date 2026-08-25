@@ -3913,6 +3913,14 @@ chmod 0644 "${LOG}"
 exec >>"${LOG}" 2>&1
 
 echo "==== Ming finish reboot $(date -Is) ===="
+echo "安装完成，请拔出 U 盘或安装介质，然后重启。"
+if command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+    zenity --question \
+        --title="Ming OS 安装完成" \
+        --text="安装已完成。请拔出 U 盘或安装介质，然后重新启动电脑。" \
+        --ok-label="拔出后重启" --cancel-label="稍后重启" \
+        >/dev/null 2>&1 || exit 0
+fi
 sync
 
 if [ -d /sys/firmware/efi ] && command -v efibootmgr >/dev/null 2>&1; then
@@ -3945,6 +3953,7 @@ FINISHREBOOT
 ---
 restartNowEnabled: true
 restartNowChecked: true
+restartNowText: "安装完成。请拔出 U 盘或安装介质，然后重新启动。"
 restartNowCommand: "/usr/local/sbin/ming-finish-install-reboot"
 FINISHEDCONF
 

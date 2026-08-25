@@ -24,6 +24,7 @@ TIME_SYNC_HELPER = "/usr/local/sbin/ming-time-sync"
 DISPLAY_CONTROL_HELPER = "/usr/local/bin/ming-display-control"
 STORAGE_STATUS_HELPER = "/usr/local/bin/ming-storage-status"
 APPEARANCE_CONTROL_HELPER = "/usr/local/bin/ming-appearance-control"
+INPUT_CONTROL_PATH = "/usr/local/sbin/ming-input-control"
 APPEARANCE_THEMES = ["system", "light", "dark"]
 APPEARANCE_FONT_SIZES = [10, 11, 12, 14, 16]
 WALLPAPER_DIR = "/usr/share/backgrounds/ming-os"
@@ -2066,7 +2067,11 @@ class MingSettings(Adw.ApplicationWindow):
                         network["ifname"] or "未知"))
                 connect = Gtk.Button(label="连接")
                 connect.set_valign(Gtk.Align.CENTER)
-                connect.set_sensitive(bool(network["ssid"] and network["bssid"] and network["ifname"]))
+                # BSSID may be unavailable for hidden/driver-limited scans;
+                # the controller can recover it from the fresh network_id
+                # cache, so do not disable the only visible connect action.
+                connect.set_sensitive(bool(
+                    network["ssid"] and network["network_id"] and network["ifname"]))
                 connect.connect("clicked", self.on_wifi_connect, network)
                 row.add_suffix(connect)
                 new_grp.add(row)
@@ -2095,7 +2100,7 @@ class MingSettings(Adw.ApplicationWindow):
             write_wifi_connect_event("ui_failure", network, reason_code, detail)
             self.toast(user_text, "error")
 
-        required = ("network_id", "ssid", "bssid", "ifname")
+        required = ("network_id", "ssid", "ifname")
         missing = [field for field in required if not network.get(field)]
         if missing:
             fail(
@@ -2106,7 +2111,7 @@ class MingSettings(Adw.ApplicationWindow):
 
         network_id = str(network["network_id"])
         ssid = str(network["ssid"])
-        bssid = str(network["bssid"])
+        bssid = str(network.get("bssid") or "")
         ifname = str(network["ifname"])
         security = str(network.get("security") or "").strip().upper()
         encrypted = security not in {"", "--", "NONE", "OPEN"}
@@ -3035,6 +3040,69 @@ class MingSettings(Adw.ApplicationWindow):
         except OSError as exc:
             self.toast("界面大小已应用，但无法保存偏好：%s" % exc, "warning")
 
+    def refresh_input_method_status(self):
+        row = getattr(self, "input_method_status_row", None)
+        if row is None:
+            return
+
+        def done(rc, output, error):
+            try:
+                status = json.loads(output) if rc == 0 else {}
+            except (TypeError, ValueError):
+                status = {}
+            if rc != 0 or not status.get("framework", {}).get("available"):
+                row.set_title("输入法未就绪")
+                row.set_subtitle(error or "Fcitx5 未运行，请点击修复输入法。")
+                return
+            engine = status.get("current_engine") or status.get("profile", {}).get("default")
+            label = {"pinyin": "拼音", "rime": "Rime"}.get(engine, engine or "未知")
+            rime = status.get("rime", {}).get("available")
+            suffix = "，Rime 已就绪" if rime else "，Rime 组件未就绪"
+            row.set_title("当前输入法：%s" % label)
+            row.set_subtitle("可用快捷键：Ctrl+Space；也可在此页直接切换%s。" % suffix)
+
+        run_capture_async([INPUT_CONTROL_PATH, "status", "--json"], timeout=8, on_done=done)
+
+    def set_input_method_engine(self, button, engine):
+        button.set_sensitive(False)
+        label = {"pinyin": "拼音", "rime": "Rime"}.get(engine, engine)
+
+        def done(rc, output, error):
+            button.set_sensitive(True)
+            if rc == 0:
+                self.toast("已切换到%s。" % label, "info")
+            else:
+                detail = (error or output or "Fcitx5 未能切换输入法").strip()
+                self.toast("切换到%s失败：%s" % (label, detail[:180]), "error")
+            self.refresh_input_method_status()
+
+        run_capture_async([INPUT_CONTROL_PATH, "set-engine", engine], timeout=10, on_done=done)
+
+    def open_input_method_settings(self, _button):
+        candidates = (
+            "/usr/share/applications/fcitx5-configtool.desktop",
+            "/usr/share/applications/fcitx5-config-qt.desktop",
+        )
+        desktop_file = next((path for path in candidates if os.path.isfile(path)), "")
+        if desktop_file and os.path.isfile("/usr/local/bin/ming-launch"):
+            run_capture_async(
+                ["/usr/local/bin/ming-launch", "--desktop-file", desktop_file, "--source", "settings"],
+                timeout=8,
+                on_done=lambda rc, output, error: self.toast(
+                    "输入法设置已打开。" if rc == 0 else
+                    "无法打开输入法设置：%s" % (error or output or "启动代理失败"),
+                    "info" if rc == 0 else "error"))
+            return
+        if shutil.which("fcitx5-config-qt"):
+            try:
+                subprocess.Popen(["fcitx5-config-qt"], start_new_session=True)
+                self.toast("输入法设置已打开。", "info")
+                return
+            except OSError as exc:
+                self.toast("无法打开输入法设置：%s" % exc, "error")
+        else:
+            self.toast("系统未安装 Fcitx5 设置工具，请先点击修复输入法。", "error")
+
     # ---- 6. 高级设置：只展示 Ming 桌面仍然支持的有效选项 ----
     def build_advanced(self):
         sc, box = self.page_scroller()
@@ -3047,6 +3115,24 @@ class MingSettings(Adw.ApplicationWindow):
         intro.add(Adw.ActionRow(
             title="兼容模式说明",
             subtitle="原生 Xfce 面板、桌面图标和工作区设置已由 Ming 桌面接管，因此不再显示无效的 Xfce 设置入口。"))
+
+        input_grp = Adw.PreferencesGroup(
+            title="输入法",
+            description="默认使用 Fcitx5。可直接切换拼音和 Rime，切换结果会读回确认。")
+        box.append(input_grp)
+        self.input_method_status_row = Adw.ActionRow(
+            title="正在读取输入法状态", subtitle="正在检查 Fcitx5 和 Rime...")
+        input_grp.add(self.input_method_status_row)
+        pinyin_button = Gtk.Button(label="拼音")
+        rime_button = Gtk.Button(label="Rime")
+        config_button = Gtk.Button(label="输入法设置")
+        pinyin_button.connect("clicked", self.set_input_method_engine, "pinyin")
+        rime_button.connect("clicked", self.set_input_method_engine, "rime")
+        config_button.connect("clicked", self.open_input_method_settings)
+        input_grp.add(self.button_row("切换输入法", "拼音适合普通中文输入，Rime 适合自定义词库。", pinyin_button))
+        input_grp.add(self.button_row("切换输入法", "需要扩展词库时选择 Rime；组件未就绪会明确提示。", rime_button))
+        input_grp.add(self.button_row("高级输入法设置", "打开 Fcitx5 图形配置工具，不再误报已成功启动的窗口。", config_button))
+        self.refresh_input_method_status()
 
         window_grp = Adw.PreferencesGroup(title="窗口行为")
         box.append(window_grp)

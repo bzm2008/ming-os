@@ -21,7 +21,9 @@ DRAWER_HEIGHT_RATIO = 0.72
 # small fixed strip explicitly instead of anchoring the sheet to a Dock window.
 DOCK_RESERVED_HEIGHT = 32
 DRAWER_DOCK_GAP = 10
-DRAWER_BOTTOM_MARGIN = 12
+# Keep the sheet visually close to the Dock; the Dock gap and reserved strip
+# already provide separation, so a second large margin creates a dead zone.
+DRAWER_BOTTOM_MARGIN = 4
 IPC_VERSION = 1
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")

@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import stat
 import socket
 import subprocess
@@ -217,7 +218,7 @@ class LaunchRequest:
         else:
             raise ValueError("unsupported launch mode")
         self.argv = tuple(argv)
-        self.source = source if source in {"desktop", "drawer", "dock", "unknown"} else "unknown"
+        self.source = source if source in {"desktop", "drawer", "dock", "settings", "unknown"} else "unknown"
         self.rect = COMMON.Rect.from_mapping(rect) if rect is not None else None
         self.desktop_file = str(desktop_file or "")
         self.mode = mode
@@ -516,6 +517,19 @@ def desktop_window_tokens(desktop_file):
                     value = section.get(key, "").strip()
                     if value:
                         tokens.append(value.casefold())
+                # Gio activation has no child PID to correlate.  A number of
+                # desktop files are compatibility aliases whose filename
+                # differs from the actual executable/window class (for
+                # example fcitx5-configtool -> fcitx5-config-qt).  Include
+                # the safe executable basename as another window token.
+                try:
+                    command = shlex.split(section.get("Exec", ""), posix=True)
+                except ValueError:
+                    command = []
+                if command:
+                    executable = pathlib.Path(command[0]).name.strip()
+                    if executable:
+                        tokens.append(executable.casefold())
         except (OSError, configparser.Error):
             pass
     return tuple(dict.fromkeys(token for token in tokens if token))
@@ -583,8 +597,13 @@ def report_launch_error(request, error):
         pass
     label = pathlib.Path(request.desktop_file).stem if request.desktop_file else (
         request.argv[0] if request.argv else "应用")
+    error_text = str(error or "")
+    if "窗口未在等待时间内出现" in error_text:
+        notification = "{} 已请求启动，窗口仍在加载或后台运行".format(label)
+    else:
+        notification = "无法启动 {}".format(label)
     COMMON.run_command(
-        ["notify-send", "Ming OS", "无法启动 {}".format(label)], timeout=2
+        ["notify-send", "Ming OS", notification], timeout=2
     )
 
 
@@ -652,7 +671,7 @@ class LaunchBroker:
                 self._recent.pop(key, None)
                 if callable(finish):
                     finish()
-                error = RuntimeError("应用窗口未在等待时间内出现")
+                error = RuntimeError("应用已启动，但窗口未在等待时间内出现")
                 self.record_event(request, "window_timeout", error)
                 self.report_error(request, error)
 
@@ -906,7 +925,9 @@ def request_from_args(args):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--desktop-file")
-    parser.add_argument("--source", default="unknown", choices=("desktop", "drawer", "dock", "unknown"))
+    parser.add_argument(
+        "--source", default="unknown",
+        choices=("desktop", "drawer", "dock", "settings", "unknown"))
     parser.add_argument("--rect")
     parser.add_argument("--server", action="store_true")
     args = parser.parse_args(argv)

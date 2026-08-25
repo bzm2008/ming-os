@@ -2618,7 +2618,25 @@ class StatusWidget(Gtk.Box):
         else:
             style.remove_class("status-widget-compact")
         self.compact_button.set_visible(self.collapsed)
-        self.content_revealer.set_reveal_child(not self.collapsed)
+        expanded = self.content_revealer.get_child()
+        if self.collapsed:
+            # A Revealer can retain its child allocation for one frame after
+            # show_all() or an interrupted transition.  Hide and zero the
+            # complete expanded subtree so no action buttons leak into the
+            # compact pill area.
+            self.content_revealer.set_reveal_child(False)
+            self.content_revealer.set_visible(False)
+            self.content_revealer.set_size_request(-1, 0)
+            if expanded is not None:
+                expanded.set_visible(False)
+                expanded.set_size_request(-1, 0)
+        else:
+            self.content_revealer.set_visible(True)
+            self.content_revealer.set_reveal_child(True)
+            self.content_revealer.set_size_request(-1, -1)
+            if expanded is not None:
+                expanded.set_visible(True)
+                expanded.set_size_request(-1, -1)
         target_height = (
             STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
             else STATUS_WIDGET_EXPANDED_HEIGHT)
