@@ -1340,6 +1340,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.drawer = APP_DRAWER.read_text(encoding="utf-8")
         cls.settings = SETTINGS.read_text(encoding="utf-8")
         cls.apps = APPS_MODULE.read_text(encoding="utf-8")
         cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
@@ -1466,6 +1467,39 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("self.compact_battery_label.set_visible(show_battery)", status)
         self.assertIn("self.header_battery_label.set_text(battery_text)", status)
         self.assertNotIn("self.battery_label = self.resource_label", status)
+
+    def test_status_compact_capsule_uses_ming_mark_and_short_status_fields(self):
+        status = self.phone[self.phone.index("class StatusWidget"):
+                            self.phone.index("class WallpaperCanvas")]
+        self.assertIn('MING_WIDGET_MARK_ICON = "ming-mark"', self.phone)
+        for marker in (
+            "self.compact_wifi_icon",
+            "self.compact_battery_icon",
+            "self.compact_logo_image",
+            "self.compact_arrow_label",
+        ):
+            self.assertIn(marker, status)
+
+    def test_phone_desktop_binds_win_key_to_status_widget_toggle(self):
+        for marker in (
+            "def is_status_widget_toggle_key",
+            'self.connect("key-press-event", self.on_key_press)',
+            "def on_key_press(self, _window, event)",
+            "self.status.set_collapsed(not self.status.collapsed)",
+        ):
+            self.assertIn(marker, self.phone)
+
+    def test_fullscreen_and_drawer_lower_the_dock_without_killing_plank(self):
+        for marker in (
+            "active_fullscreen_window",
+            "drawer_window_visible",
+            "apply_dock_immersive_state",
+            "wmctrl -i -r \"${window_id}\" -b add,hidden,below",
+            "wmctrl -i -r \"${window_id}\" -b remove,hidden,below",
+        ):
+            self.assertIn(marker, self.desktop)
+        self.assertIn("apply_dock_immersive_state(True)", self.drawer)
+        self.assertIn("apply_dock_immersive_state(False)", self.drawer)
 
     def test_collapsed_status_widget_refreshes_low_frequency_network_and_battery_summary(self):
         status = self.phone[self.phone.index("class StatusWidget"):

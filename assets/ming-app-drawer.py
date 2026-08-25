@@ -26,6 +26,9 @@ DRAWER_DOCK_GAP = 10
 DRAWER_BOTTOM_MARGIN = 4
 IPC_VERSION = 1
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
+DRAWER_STATE_PATH = pathlib.Path(
+    os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+) / "ming-app-drawer-open"
 CATEGORIES = ("全部", "最近", "网络", "办公", "影音", "游戏", "工具", "系统")
 _CATEGORY_RULES = (
     ("网络", {"Network", "WebBrowser", "Email", "Chat"}),
@@ -123,6 +126,22 @@ def drawer_geometry(workarea):
     bottom = workarea.y + workarea.height
     y = bottom - height - DOCK_RESERVED_HEIGHT - DRAWER_DOCK_GAP - DRAWER_BOTTOM_MARGIN
     return COMMON.Rect(workarea.x, max(workarea.y, y), workarea.width, height)
+
+
+def write_drawer_state(opened):
+    try:
+        DRAWER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if opened:
+            DRAWER_STATE_PATH.write_text("1\n", encoding="ascii")
+        else:
+            DRAWER_STATE_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def apply_dock_immersive_state(opened):
+    """Publish drawer visibility for the session Dock coordinator."""
+    write_drawer_state(bool(opened))
 
 
 def reduced_motion_enabled(path=None):
@@ -493,6 +512,7 @@ class DrawerController:
         # Always rebuild the catalog before presentation.  This is intentionally
         # above the reduced-motion branch so an install is visible even when
         # animations are disabled.
+        apply_dock_immersive_state(True)
         self.apps = discover_apps()
         self.refresh()
         geometry = drawer_geometry(self._workarea())
@@ -515,6 +535,7 @@ class DrawerController:
         self.search.grab_focus()
 
     def hide(self):
+        apply_dock_immersive_state(False)
         if not self.window.get_visible():
             return
         transition = drawer_transition(reduced_motion_enabled())

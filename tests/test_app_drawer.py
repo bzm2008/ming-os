@@ -199,6 +199,14 @@ class AppDrawerCoreTests(unittest.TestCase):
             show.index("transition = drawer_transition(reduced_motion_enabled())"),
         )
 
+    def test_drawer_publishes_open_state_for_dock_immersive_mode(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        show = source[source.index("    def show(self):"):source.index("    def hide(self):")]
+        hide = source[source.index("    def hide(self):"):source.index("    def _animate_to", source.index("    def hide(self):"))]
+        self.assertIn("DRAWER_STATE_PATH", source)
+        self.assertIn("apply_dock_immersive_state(True)", show)
+        self.assertIn("apply_dock_immersive_state(False)", hide)
+
     def test_drawer_uses_shared_ming_launch_proxy_without_direct_argv_fallback(self):
         source = DRAWER_PATH.read_text(encoding="utf-8")
         launch = source[source.index("    def launch(self, app, widget):"):

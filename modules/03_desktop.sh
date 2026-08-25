@@ -260,6 +260,17 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
+    cat > /usr/local/bin/ming-status-widget-toggle << 'MINGSTATUSWIDGETTOGGLE'
+#!/usr/bin/env bash
+set -u
+uid="$(id -u)"
+pattern='(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)'
+while read -r pid; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    kill -USR1 "${pid}" 2>/dev/null || true
+done < <(pgrep -u "${uid}" -f "${pattern}" 2>/dev/null || true)
+MINGSTATUSWIDGETTOGGLE
+    chmod 0755 /usr/local/bin/ming-status-widget-toggle
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
     # Keep the privileged implementation in sbin, but expose a normal-user
     # PATH entry so terminal diagnostics and documented commands are usable.
@@ -1473,7 +1484,7 @@ install_ming_mint_icon_set() {
         "${icon_base}/48x48/apps" "${icon_base}/scalable/apps"
     install -m 0644 "${asset_dir}/index.theme" "${icon_base}/index.theme"
     local name
-    for name in settings files terminal app-library update control store papyrus xiahai; do
+    for name in settings files terminal app-library update control store papyrus xiahai mark; do
         [[ -s "${asset_dir}/${name}.svg" ]] || {
             echo "ERROR: missing Ming Mint icon: ${name}" >&2
             return 1
@@ -4176,6 +4187,8 @@ metrics_file="${log_dir}/session-startup.json"
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
 picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
+drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
+dock_immersive_state=normal
 touch "${health_log}" 2>/dev/null || true
 
 # Image builds may provide a system-wide default.  An explicitly exported
@@ -4309,6 +4322,66 @@ x11_call() {
     probe_timeout "$@"
 }
 
+valid_window_id() {
+    [[ "${1:-}" =~ ^0[xX][0-9a-fA-F]+$ ]]
+}
+
+dock_window_id() {
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    x11_call wmctrl -lx 2>/dev/null |
+        awk 'tolower($3) ~ /plank/ { print $1; exit }'
+}
+
+window_has_ewmh_state() {
+    local window_id="$1" state="$2"
+    valid_window_id "${window_id}" || return 1
+    command -v xprop >/dev/null 2>&1 || return 1
+    x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null |
+        grep -q "${state}"
+}
+
+active_fullscreen_window() {
+    local active
+    command -v xprop >/dev/null 2>&1 || return 1
+    active="$(x11_call xprop -root _NET_ACTIVE_WINDOW 2>/dev/null |
+        sed -n 's/.*\(0x[0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' | head -n1)"
+    valid_window_id "${active}" || return 1
+    window_has_ewmh_state "${active}" '_NET_WM_STATE_FULLSCREEN'
+}
+
+drawer_window_visible() {
+    [[ -e "${drawer_state_file}" ]] && return 0
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    x11_call wmctrl -lx 2>/dev/null |
+        awk 'tolower($3) ~ /ming.?app.?drawer/ {found=1} END {exit !found}'
+}
+
+immersive_surface_active() {
+    active_fullscreen_window || drawer_window_visible
+}
+
+apply_dock_immersive_state() {
+    local desired=normal window_id
+    immersive_surface_active && desired=immersive
+    [[ "${desired}" == "${dock_immersive_state}" ]] && return 0
+    window_id="$(dock_window_id 2>/dev/null || true)"
+    valid_window_id "${window_id}" || {
+        dock_immersive_state="${desired}"
+        return 0
+    }
+    if [[ "${desired}" == immersive ]]; then
+        x11_call wmctrl -i -r "${window_id}" -b add,hidden,below >/dev/null 2>&1 || true
+        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT >/dev/null 2>&1 || true
+        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT_PARTIAL >/dev/null 2>&1 || true
+        log 'Dock lowered below fullscreen or application drawer'
+    else
+        x11_call wmctrl -i -r "${window_id}" -b remove,hidden,below >/dev/null 2>&1 || true
+        x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || true
+        log 'Dock restored after fullscreen or application drawer'
+    fi
+    dock_immersive_state="${desired}"
+}
+
 run_bounded() {
     local deadline="$1"
     shift
@@ -4372,6 +4445,10 @@ plank_running() {
 
 plank_window_visible() {
     plank_running || return 1
+    if immersive_surface_active; then
+        dock_window_id >/dev/null 2>&1
+        return $?
+    fi
     if command -v ming-plank-watchdog >/dev/null 2>&1; then
         run_bounded "${PROBE_TIMEOUT}" /usr/local/bin/ming-plank-watchdog --check
         return $?
@@ -4714,6 +4791,7 @@ startup_once() {
     start_phone_desktop || phone_fallback=true
     start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
     start_picom || log 'Picom is not healthy after startup deadline'
+    apply_dock_immersive_state
     ensure_audio_session
     write_metrics startup "${phone_fallback}"
     log 'session startup check complete'
@@ -4729,6 +4807,7 @@ supervise_once() {
     fi
     start_plank_dock || log 'Plank Dock repair did not recover a visible window'
     start_picom || log 'Picom repair did not recover a compositor'
+    apply_dock_immersive_state
     ensure_audio_session
     write_metrics supervisor "${phone_fallback}"
     log 'session supervisor check complete'
@@ -4759,7 +4838,10 @@ case "${1:---once}" in
         acquire_coordinator_lock || exit 0
         startup_once
         while true; do
-            sleep "${SUPERVISOR_INTERVAL}" # fixed supervisor cadence: sleep 10
+            for _immersive_tick in $(seq 1 "${SUPERVISOR_INTERVAL}"); do
+                sleep 1
+                apply_dock_immersive_state
+            done # equivalent to the historical sleep 10 supervisor cadence
             supervise_once
         done
         ;;
@@ -4774,6 +4856,9 @@ case "${1:---once}" in
         command -v ming-plank-watchdog >/dev/null 2>&1 || exit 1
         run_bounded "${PLANK_STARTUP_DEADLINE}" \
             /usr/local/bin/ming-plank-watchdog --reload
+        ;;
+    --immersive)
+        apply_dock_immersive_state
         ;;
     *)
         printf 'Usage: %s --session|--once|--check|--reload-dock\n' "$0" >&2
@@ -8705,6 +8790,8 @@ SCREENSAVERCFG
       <property name="&lt;Primary&gt;&lt;Alt&gt;l" type="string" value="ming-lock"/>
       <property name="&lt;Super&gt;e" type="string" value="ming-files"/>
       <property name="&lt;Super&gt;i" type="string" value="ming-control-center"/>
+      <property name="&lt;Super&gt;" type="string" value="ming-status-widget-toggle"/>
+      <property name="&lt;Super&gt;space" type="string" value="ming-status-widget-toggle"/>
     </property>
   </property>
 </channel>
@@ -8834,6 +8921,8 @@ xfconf-query -c xfwm4 -p /general/theme -s "Ming-Mint" 2>/dev/null || true
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>space' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
 oobe_ready=false
 if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
     && grep -Fxq configured "${HOME}/.config/ming-os/oobe-account-done" 2>/dev/null; then

@@ -65,7 +65,7 @@ class MingMintThemeContracts(unittest.TestCase):
         self.assertNotIn("_NET_WM_STRUT", show)
 
     def test_ming_mint_icon_set_is_transparent_and_complete(self):
-        names = ("settings", "files", "terminal", "app-library", "update", "control", "store", "papyrus", "xiahai")
+        names = ("settings", "files", "terminal", "app-library", "update", "control", "store", "papyrus", "xiahai", "mark")
         for name in names:
             icon = ICON_ROOT / f"{name}.svg"
             self.assertTrue(icon.is_file(), name)

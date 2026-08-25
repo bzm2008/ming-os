@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -28,6 +29,20 @@ COMPACT_BATTERY_REFRESH_SECONDS = 60
 STATUS_SUMMARY_REFRESH_SECONDS = 45
 STATUS_RESOURCE_REFRESH_SECONDS = 30
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
+MING_WIDGET_MARK_ICON = "ming-mark"
+
+
+def is_status_widget_toggle_key(keyval):
+    """Accept the left/right Windows keys without stealing text shortcuts."""
+    gdk = globals().get("Gdk")
+    if gdk is None:
+        return False
+    return keyval in {
+        getattr(gdk, "KEY_Super_L", 0),
+        getattr(gdk, "KEY_Super_R", 0),
+        getattr(gdk, "KEY_Meta_L", 0),
+        getattr(gdk, "KEY_Meta_R", 0),
+    }
 
 
 def normalize_metric_mode(value):
@@ -2221,6 +2236,7 @@ class StatusSlider(Gtk.EventBox):
             | Gdk.EventMask.BUTTON_RELEASE_MASK
             | Gdk.EventMask.POINTER_MOTION_MASK
             | Gdk.EventMask.TOUCH_MASK
+            | Gdk.EventMask.KEY_PRESS_MASK
         )
         self.canvas = Gtk.DrawingArea()
         self.canvas.set_size_request(-1, 22)
@@ -2432,34 +2448,57 @@ class StatusWidget(Gtk.Box):
 
         self.compact_button = Gtk.Button()
         self.compact_button.get_style_context().add_class("status-compact-pill")
-        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.compact_time_label = Gtk.Label()
         self.compact_time_label.get_style_context().add_class("status-compact-time")
         compact.pack_start(self.compact_time_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
         self.compact_date_label = Gtk.Label()
         self.compact_date_label.get_style_context().add_class("status-compact-date")
         compact.pack_start(self.compact_date_label, False, False, 0)
-        self.compact_network_separator = Gtk.Label(label="|")
-        compact.pack_start(self.compact_network_separator, False, False, 0)
+        self.compact_wifi_icon = Gtk.Image.new_from_icon_name(
+            "network-wireless-symbolic", Gtk.IconSize.MENU)
+        self.compact_wifi_icon.set_tooltip_text("Wi-Fi 状态")
+        compact.pack_start(self.compact_wifi_icon, False, False, 0)
         self.compact_network_label = Gtk.Label(label="网络 --")
         self.compact_network_label.get_style_context().add_class("status-compact-date")
+        self.compact_network_label.set_no_show_all(True)
+        self.compact_network_label.set_visible(False)
         compact.pack_start(self.compact_network_label, False, False, 0)
         self.compact_battery_separator = Gtk.Label(label="|")
         self.compact_battery_separator.set_no_show_all(True)
         self.compact_battery_separator.set_visible(False)
-        compact.pack_start(self.compact_battery_separator, False, False, 0)
+        self.compact_battery_icon = Gtk.Image.new_from_icon_name(
+            "battery-good-symbolic", Gtk.IconSize.MENU)
+        self.compact_battery_icon.set_tooltip_text("电池状态")
+        self.compact_battery_icon.set_no_show_all(True)
+        self.compact_battery_icon.set_visible(False)
+        compact.pack_start(self.compact_battery_icon, False, False, 0)
         self.compact_battery_label = Gtk.Label()
         self.compact_battery_label.get_style_context().add_class("status-compact-battery")
         self.compact_battery_label.set_no_show_all(True)
         self.compact_battery_label.set_visible(False)
         compact.pack_start(self.compact_battery_label, False, False, 0)
-        compact.pack_start(Gtk.Label(label="|"), False, False, 0)
-        self.compact_arrow_label = Gtk.Label(label="展开 ▾")
+        self.compact_logo_image = Gtk.Image()
+        mark_paths = (
+            Path("/usr/share/icons/Ming-Mint/scalable/apps/ming-mark.svg"),
+            Path("/usr/share/icons/hicolor/scalable/apps/ming-mark.svg"),
+        )
+        mark_path = next((path for path in mark_paths if path.is_file()), None)
+        if mark_path is not None:
+            self.compact_logo_image.set_from_file(str(mark_path))
+        else:
+            self.compact_logo_image.set_from_icon_name(
+                MING_WIDGET_MARK_ICON, Gtk.IconSize.MENU)
+        self.compact_logo_image.set_pixel_size(18)
+        self.compact_logo_image.set_tooltip_text("展开状态控制")
+        compact.pack_start(self.compact_logo_image, False, False, 0)
+        self.compact_arrow_label = Gtk.Label(label="⌄")
         self.compact_arrow_label.get_style_context().add_class("status-compact-arrow")
         compact.pack_start(self.compact_arrow_label, False, False, 0)
         self.compact_button.add(compact)
-        self.compact_button.connect("clicked", lambda _button: self.set_collapsed(False))
+        self.compact_button.set_tooltip_text("展开/收起状态控制")
+        self.compact_button.connect(
+            "clicked", lambda _button: self.set_collapsed(not self.collapsed))
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.time_label = Gtk.Label()
@@ -2480,8 +2519,21 @@ class StatusWidget(Gtk.Box):
         self.header_battery_label.set_visible(False)
         header_details.pack_start(self.header_battery_label, False, False, 0)
         header.pack_start(header_details, False, False, 0)
-        self.collapse_button = Gtk.Button(label="收起 ▴")
+        self.collapse_button = Gtk.Button()
         self.collapse_button.get_style_context().add_class("status-button")
+        collapse_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        self.collapse_logo_image = Gtk.Image()
+        collapse_mark_path = next((path for path in mark_paths if path.is_file()), None)
+        if collapse_mark_path is not None:
+            self.collapse_logo_image.set_from_file(str(collapse_mark_path))
+        else:
+            self.collapse_logo_image.set_from_icon_name(
+                MING_WIDGET_MARK_ICON, Gtk.IconSize.MENU)
+        self.collapse_logo_image.set_pixel_size(16)
+        collapse_content.pack_start(self.collapse_logo_image, False, False, 0)
+        collapse_content.pack_start(Gtk.Label(label="⌃"), False, False, 0)
+        self.collapse_button.add(collapse_content)
+        self.collapse_button.set_tooltip_text("收起状态控制")
         self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
         header.pack_start(self.collapse_button, False, False, 0)
 
@@ -3344,6 +3396,12 @@ class StatusWidget(Gtk.Box):
         self.compact_network_label.set_text(
             "网络 在线" if ethernet_ready else "网络 可用" if wifi_ready else "网络 --"
         )
+        wifi_icon = (
+            "network-wired-symbolic" if ethernet_ready else
+            "network-wireless-symbolic" if wifi_ready else
+            "network-wireless-disabled-symbolic"
+        )
+        self.compact_wifi_icon.set_from_icon_name(wifi_icon, Gtk.IconSize.MENU)
         return self.apply_battery_status(battery)
 
     def apply_battery_status(self, battery):
@@ -3353,9 +3411,14 @@ class StatusWidget(Gtk.Box):
         self.battery_text = battery_text
         self.header_battery_label.set_text(battery_text)
         self.header_battery_label.set_visible(show_battery)
-        self.compact_battery_separator.set_visible(show_battery)
-        self.compact_battery_label.set_text(battery_text)
+        self.compact_battery_separator.set_visible(False)
+        self.compact_battery_icon.set_visible(show_battery)
+        self.compact_battery_label.set_text(str(battery.get("text", "--")) if show_battery else "")
         self.compact_battery_label.set_visible(show_battery)
+        if show_battery:
+            state = str(battery.get("state", "")).casefold()
+            icon = "battery-charging-symbolic" if "charg" in state else "battery-good-symbolic"
+            self.compact_battery_icon.set_from_icon_name(icon, Gtk.IconSize.MENU)
         self.battery_refreshing = False
         return False
 
@@ -3503,11 +3566,17 @@ class PhoneDesktop(Gtk.Window):
             | Gdk.EventMask.BUTTON_RELEASE_MASK
             | Gdk.EventMask.POINTER_MOTION_MASK
             | Gdk.EventMask.TOUCH_MASK
+            | Gdk.EventMask.KEY_PRESS_MASK
         )
         self.connect("button-press-event", self.on_window_button_press)
         self.connect("motion-notify-event", self.on_window_motion)
         self.connect("button-release-event", self.on_window_button_release)
         self.connect("touch-event", self.on_window_touch)
+        self.connect("key-press-event", self.on_key_press)
+        try:
+            signal.signal(signal.SIGUSR1, self._on_toggle_signal)
+        except (AttributeError, ValueError):
+            log("status widget signal toggle unavailable")
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
@@ -3544,6 +3613,7 @@ class PhoneDesktop(Gtk.Window):
         self.fixed_touch_state = InteractionState()
         self.drag_positions = {}
         self.layer_enforcement_pending = False
+        self._last_status_toggle_at = 0.0
         self.status = StatusWidget()
         self.launch_feedback = LaunchFeedbackOverlay()
         self.launch_feedback.set_sensitive(False)
@@ -3600,6 +3670,25 @@ class PhoneDesktop(Gtk.Window):
             READY_MARKER.write_text(datetime.datetime.now().isoformat(), encoding="utf-8")
         except Exception:
             pass
+        return False
+
+    def toggle_status_widget(self):
+        now = time.monotonic()
+        if now - self._last_status_toggle_at < 0.25:
+            return False
+        self._last_status_toggle_at = now
+        self.status.set_collapsed(not self.status.collapsed)
+        return False
+
+    def _on_toggle_signal(self, _signum, _frame):
+        # Python signal handlers run on the GTK thread boundary; schedule the
+        # actual widget mutation through GLib so GTK never sees a foreign call.
+        GLib.idle_add(self.toggle_status_widget)
+
+    def on_key_press(self, _window, event):
+        if is_status_widget_toggle_key(getattr(event, "keyval", 0)):
+            self.toggle_status_widget()
+            return True
         return False
 
     @staticmethod

@@ -435,6 +435,16 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertNotIn(direct, self.autostart)
 
+    def test_session_coordinator_handles_fullscreen_and_drawer_dock_state(self):
+        for marker in (
+            "active_fullscreen_window",
+            "drawer_window_visible",
+            "apply_dock_immersive_state",
+            "wmctrl -i -r \"${window_id}\" -b add,hidden,below",
+            "wmctrl -i -r \"${window_id}\" -b remove,hidden,below",
+        ):
+            self.assertIn(marker, self.session_healthcheck)
+
     def test_session_healthcheck_records_json_metrics_and_safe_fallbacks(self):
         for marker in (
             "session-startup.json",
