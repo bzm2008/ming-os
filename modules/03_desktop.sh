@@ -8791,6 +8791,8 @@ SCREENSAVERCFG
       <property name="&lt;Super&gt;e" type="string" value="ming-files"/>
       <property name="&lt;Super&gt;i" type="string" value="ming-control-center"/>
       <property name="&lt;Super&gt;" type="string" value="ming-status-widget-toggle"/>
+      <property name="&lt;Super_L&gt;" type="string" value="ming-status-widget-toggle"/>
+      <property name="&lt;Super_R&gt;" type="string" value="ming-status-widget-toggle"/>
       <property name="&lt;Super&gt;space" type="string" value="ming-status-widget-toggle"/>
     </property>
   </property>
@@ -8922,6 +8924,8 @@ xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super_L>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super_R>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>space' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
 oobe_ready=false
 if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
