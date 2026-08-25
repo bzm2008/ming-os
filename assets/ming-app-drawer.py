@@ -142,6 +142,18 @@ def write_drawer_state(opened):
 def apply_dock_immersive_state(opened):
     """Publish drawer visibility for the session Dock coordinator."""
     write_drawer_state(bool(opened))
+    try:
+        subprocess.run(
+            ["ming-session-healthcheck", "--immersive"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # The session loop still observes DRAWER_STATE_PATH and repairs the
+        # Dock on its next bounded tick when the helper is unavailable.
+        pass
 
 
 def reduced_motion_enabled(path=None):
