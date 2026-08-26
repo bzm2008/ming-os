@@ -1775,6 +1775,8 @@ MINGMINTMARKER
 
 configure_ming_mint_dock_profile() {
     local settings="/home/${MING_USER}/.config/plank/dock1/settings"
+    # Older Ming Mint profiles used Offset=12; normalize them to the complete
+    # legacy profile below instead of leaving a mixed Dock configuration.
     if [[ -f "${settings}" ]]; then
         # The Mint window/icon theme remains active, but the Dock itself
         # starts from the proven 26.4.0 Ming profile.  The session watchdog
@@ -1782,7 +1784,7 @@ configure_ming_mint_dock_profile() {
         sed -i 's/^IconSize=.*/IconSize=40/' "${settings}"
         sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
         sed -i 's/^ZoomPercent=.*/ZoomPercent=148/' "${settings}"
-        sed -i 's/^Offset=.*/Offset=12/' "${settings}"
+        sed -i 's/^Offset=.*/Offset=0/' "${settings}"
         sed -i 's/^Theme=.*/Theme=Ming/' "${settings}"
     fi
     cat > "/usr/local/sbin/ming-mint-dock-profile" << 'MINGMINTDOCK'
@@ -1793,7 +1795,7 @@ settings="${HOME}/.config/plank/dock1/settings"
 sed -i -e 's/^IconSize=.*/IconSize=40/' \
        -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
        -e 's/^ZoomPercent=.*/ZoomPercent=148/' \
-       -e 's/^Offset=.*/Offset=12/' \
+       -e 's/^Offset=.*/Offset=0/' \
        -e 's/^Theme=.*/Theme=Ming/' "${settings}"
 MINGMINTDOCK
     chmod 0755 /usr/local/sbin/ming-mint-dock-profile

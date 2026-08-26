@@ -2074,7 +2074,6 @@ plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockIte
 # but require one complete profile rather than mixing values from both.
 dock_profiles = [
     ["Alignment=3", "Offset=0", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"],
-    ["Alignment=3", "Offset=12", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"],
     ["Alignment=3", "Offset=12", "IconSize=32", "ZoomEnabled=true", "ZoomPercent=125", "HideMode=0", "Theme=Ming-Mint"],
 ]
 if not any(all(marker in plank_settings for marker in profile) for profile in dock_profiles):
