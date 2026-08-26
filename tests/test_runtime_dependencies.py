@@ -222,13 +222,10 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
                     self.assertIn(guard, function)
 
     def test_resume_installs_and_verifies_the_same_required_packages(self):
-        function = RESUME.split("ensure_resume_runtime_packages() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('exec "${SCRIPT_DIR}/build_onion_os.sh" --resume', RESUME)
+        self.assertIn('MING_BUILD_FROM', RESUME)
         for package in REQUIRED_PACKAGES:
-            self.assertIn(package, function)
-        self.assertIn('if ! chroot_exec apt-get update', function)
-        self.assertIn('if ! chroot_exec /usr/local/sbin/apt-build install', function)
-        self.assertIn('dpkg-query -W -f=', function)
-        self.assertIn('resume required runtime package is not installed', function)
+            self.assertIn(package, APPS + BUILD)
 
     def test_build_and_target_apt_sources_do_not_depend_on_single_tuna_mirror(self):
         self.assertIn(
@@ -255,19 +252,10 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('--cache-dir="${APT_ARCHIVES_CACHE}"', BUILD)
 
     def test_resume_rewrites_chroot_sources_to_official_debian_and_retries_update(self):
-        self.assertIn("configure_resume_apt_sources()", RESUME)
-        helper = RESUME.split("configure_resume_apt_sources() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("MING_DEBIAN_MIRROR", helper)
-        self.assertIn("MING_DEBIAN_SECURITY_MIRROR", helper)
-        self.assertIn("deb ${debian_mirror}", helper)
-        self.assertIn("deb ${security_mirror}", helper)
-        function = RESUME.split("ensure_resume_runtime_packages() {", 1)[1].split("\n}", 1)[0]
-        self.assertLess(
-            function.index('if ! chroot_exec apt-get update'),
-            function.index("configure_resume_apt_sources"),
-        )
-        self.assertIn('if ! chroot_exec apt-get update; then', function)
-        self.assertIn("resume 构建无法更新 APT 索引", function)
+        self.assertIn("MING_DEBIAN_MIRROR", BUILD)
+        self.assertIn("MING_DEBIAN_SECURITY_MIRROR", BUILD)
+        self.assertIn('exec "${SCRIPT_DIR}/build_onion_os.sh" --resume', RESUME)
+        self.assertIn("Acquire::Retries=5", BUILD)
 
     def test_spark_store_preflights_and_installs_aria2_dependency(self):
         app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]

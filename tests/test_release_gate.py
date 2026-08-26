@@ -191,11 +191,12 @@ class ReleaseGateContracts(unittest.TestCase):
             '--keyring="${DEBIAN_ARCHIVE_KEYRING}"',
         ):
             self.assertIn(marker, self.build)
+        preflight = self.build.split("stage_host_preflight() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(preflight.index("install_build_deps"),
+                        preflight.index("verify_debootstrap_keyring"))
         main = self.build.split("main() {", 1)[1]
-        self.assertLess(main.index("install_build_deps"),
-                        main.index("verify_debootstrap_keyring"))
-        self.assertLess(main.index("verify_debootstrap_keyring"),
-                        main.index("run_debootstrap"))
+        self.assertLess(main.index("run_stage host-preflight"),
+                        main.index("run_stage debootstrap"))
 
     def test_build_locks_clean_source_identity_until_packaging_finishes(self):
         for marker in (
@@ -209,7 +210,7 @@ class ReleaseGateContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.build)
         main = self.build.split("main() {", 1)[1]
-        self.assertLess(main.index("capture_build_identity"), main.index("run_debootstrap"))
+        self.assertLess(main.index("capture_build_identity"), main.index("run_stage debootstrap"))
         self.assertLess(main.index("verify_build_identity"), main.index("build_iso"))
         self.assertGreater(main.rindex("verify_build_identity"), main.index("build_iso"))
 
@@ -227,7 +228,7 @@ class ReleaseGateContracts(unittest.TestCase):
         handoff = self.build[self.build.index('if [[ "${SCRIPT_DIR}" == /mnt/* ]]'):
                              self.build.index("\n}", self.build.index('if [[ "${SCRIPT_DIR}" == /mnt/* ]]'))]
         self.assertIn('"${OUTPUT_DIR}/SHA256SUMS"', handoff)
-        self.assertIn('"${build_sidecar}"', handoff)
+        self.assertIn('"${BUILD_SIDECAR}"', handoff)
         self.assertIn("verify_build_identity", handoff)
 
     def test_rootfs_gate_rejects_root_owned_default_user_state(self):
@@ -576,23 +577,19 @@ class ReleaseGateContracts(unittest.TestCase):
             self.assertIn(marker, self.desktop)
 
     def test_resume_replays_apps_before_desktop(self):
-        resume = RESUME.read_text(encoding="utf-8")
-        modules = resume.split("local modules=(", 1)[1].split(")", 1)[0]
+        modules = self.build.split("run_modules() {", 1)[1].split(")", 1)[0]
         self.assertIn('"02_apps.sh"', modules)
         self.assertLess(modules.index('"02_apps.sh"'), modules.index('"03_desktop.sh"'))
 
     def test_resume_settles_every_module_and_rejects_dpkg_audit_output(self):
-        resume = RESUME.read_text(encoding="utf-8")
-        module_loop = resume.split('for mod in "${modules[@]}"; do', 1)[1].split("done", 1)[0]
-        self.assertIn('settle_chroot_dpkg "${mod}"', module_loop)
-        self.assertIn('chroot_exec dpkg --audit', resume)
-        self.assertIn('resume build has unfinished dpkg packages', resume)
+        self.assertIn('settle_chroot_dpkg "${mod}"', self.build)
+        self.assertIn('chroot_exec dpkg --audit', self.build)
+        self.assertIn('resume build has unfinished dpkg packages', self.build)
 
     def test_resume_generates_initramfs_before_cleaning_or_unmounting_chroot(self):
-        resume = RESUME.read_text(encoding="utf-8")
-        main = resume.split("resume_main() {", 1)[1].split("resume_main \"$@\"", 1)[0]
-        self.assertLess(main.index("generate_initramfs"), main.index("clean_chroot"))
-        self.assertLess(main.index("generate_initramfs"), main.index("\n    umount_chroot\n"))
+        main = self.build.split("main() {", 1)[1].split("main \"$@\"", 1)[0]
+        self.assertLess(main.index("run_stage initramfs"), main.index("run_stage clean-rootfs"))
+        self.assertLess(main.index("run_stage initramfs"), main.index("\n    umount_chroot\n"))
 
     def test_initramfs_generation_updates_resume_and_creates_fresh_images(self):
         generator = self.build.split("generate_initramfs() {", 1)[1].split(
@@ -612,11 +609,10 @@ class ReleaseGateContracts(unittest.TestCase):
 
     def test_finalizer_regenerates_late_dock_launchers_after_module_order(self):
         finalizer = FINALIZE.read_text(encoding="utf-8")
-        for source in (self.build, RESUME.read_text(encoding="utf-8")):
-            modules = source.split("local modules=(", 1)[1].split(")", 1)[0]
-            self.assertLess(modules.index('"03_desktop.sh"'), modules.index('"06_ota_update.sh"'))
-            self.assertLess(modules.index('"06_ota_update.sh"'), modules.index('"08_settings_hub.sh"'))
-            self.assertLess(modules.index('"08_settings_hub.sh"'), modules.index('"07_finalize.sh"'))
+        modules = self.build.split("run_modules() {", 1)[1].split(")", 1)[0]
+        self.assertLess(modules.index('"03_desktop.sh"'), modules.index('"06_ota_update.sh"'))
+        self.assertLess(modules.index('"06_ota_update.sh"'), modules.index('"08_settings_hub.sh"'))
+        self.assertLess(modules.index('"08_settings_hub.sh"'), modules.index('"07_finalize.sh"'))
 
         helper = "/usr/local/sbin/ming-refresh-dock-launchers"
         self.assertIn(helper, self.desktop)

@@ -17,10 +17,15 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn('if [[ "${MING_SKIP_XIAHAI}" != "1" ]]', BUILD)
         self.assertIn('os.environ.get("MING_SKIP_XIAHAI") != "1" and "xiahai-xiaoming.dockitem"', BUILD)
 
-    def test_internal_build_can_reuse_a_completed_chroot_without_changing_default(self):
+    def test_internal_build_reuse_flag_requires_checkpoint_validation(self):
         self.assertIn('MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"', BUILD)
         self.assertIn('"${MING_REUSE_CHROOT}" == "1"', BUILD)
-        self.assertIn('"${MING_REUSE_CHROOT}" != "1"', BUILD)
+        self.assertIn("resume is checkpoint validated", BUILD)
+        self.assertNotIn(
+            'if [[ "${MING_REUSE_CHROOT}" == "1" ]]; then\n'
+            '        if [[ -f "${CHROOT_DIR}/etc/ming-version" ]]; then',
+            BUILD,
+        )
 
     def test_xiahai_vendor_asset_is_present_and_named(self):
         receipt = ROOT / "assets" / "vendor" / "xiahai-xiaoming" / "receipt.json"

@@ -40,8 +40,15 @@ readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
 readonly APT_ARCHIVES_CACHE="${MING_APT_ARCHIVES_CACHE:-${LINUX_WORKDIR}/apt-archives}"
+readonly CHROOT_CACHE_DIR="${MING_CHROOT_CACHE_DIR:-${LINUX_WORKDIR}/chroot-cache}"
+readonly BUILD_STATE_ROOT="${MING_BUILD_STATE_ROOT:-${LINUX_WORKDIR}/build-state}"
+BUILD_STATE_DIR="${MING_BUILD_STATE_DIR:-${BUILD_STATE_ROOT}/${MING_BUILD_PROFILE:-release}}"
+readonly BUILD_STATE_HELPER="${SCRIPT_DIR}/scripts/ming_build_state.py"
+readonly BUILD_LOCK_PATH="${LINUX_WORKDIR}/build.lock"
 readonly CHROOT_DIR="${LINUX_WORKDIR}/chroot"
-readonly OUTPUT_DIR="${LINUX_WORKDIR}/output"
+readonly OUTPUT_ROOT="${MING_OUTPUT_ROOT:-${LINUX_WORKDIR}/output}"
+OUTPUT_DIR="${MING_OUTPUT_DIR:-${OUTPUT_ROOT}/${MING_BUILD_PROFILE:-release}}"
+readonly CHECKPOINT_DIR="${LINUX_WORKDIR}/checkpoints"
 readonly ISO_DIR="${LINUX_WORKDIR}/iso_build"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
 readonly CONFIG_DIR="${SCRIPT_DIR}/config"
@@ -50,10 +57,39 @@ readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
 readonly MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI:-0}"
 readonly MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"
+readonly MING_CLEAN_ISO_WORKDIR="${MING_CLEAN_ISO_WORKDIR:-0}"
+readonly PROFILE_RELEASE="release"
+readonly PROFILE_FAST_TEST="fast-test"
+readonly PROFILE_LEGACY_LOWRAM="legacy-lowram"
+readonly PROFILE_COMPAT_HWE="compat-hwe"
 export MING_SKIP_XIAHAI
 BUILD_SOURCE_COMMIT=""
 BUILD_TIME_UTC=""
 BUILD_ID=""
+MING_BUILD_PROFILE="${MING_BUILD_PROFILE:-release}"
+MING_BUILD_RESUME=0
+MING_BUILD_FRESH=0
+MING_BUILD_FROM=""
+MING_BUILD_COMPRESSION="xz"
+MING_BUILD_INPUT_HASH=""
+MING_BUILD_LOCK_FD=""
+CURRENT_STAGE=""
+CURRENT_COMMAND=""
+CURRENT_STAGE_LINE=0
+declare -a MING_SQUASHFS_ARGS=()
+declare -a STAGE_ARTIFACTS=()
+declare -a BUILD_STAGES=(
+    host-preflight
+    debootstrap
+    prepare-chroot
+    modules
+    initramfs
+    clean-rootfs
+    squashfs
+    boot-assets
+    iso
+    publish-artifacts
+)
 declare -a GIT_COMMAND=()
 # 日志颜色
 readonly RED='\033[0;31m'
@@ -74,6 +110,268 @@ log_error() {
 }
 log_step() {
     echo -e "\n${BLUE}=====> $1 <=====${NC}\n"
+}
+
+print_build_usage() {
+    cat <<'USAGE'
+Usage: sudo ./build_onion_os.sh [options]
+
+  --fresh                 discard safe checkpoints and rebuild from debootstrap
+  --resume                continue a build with matching source and profile inputs
+  --from STAGE            rerun STAGE and all later stages
+  --profile PROFILE       release | fast-test | legacy-lowram | compat-hwe
+  --help                  show this help
+
+Profiles: release:xz fast-test:zstd legacy-lowram:zstd compat-hwe:xz
+
+Environment:
+  MING_CLEAN_ISO_WORKDIR=1  remove the resumable ISO work directory after success
+USAGE
+}
+
+parse_build_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fresh)
+                MING_BUILD_FRESH=1
+                ;;
+            --resume)
+                MING_BUILD_RESUME=1
+                ;;
+            --from)
+                [[ $# -ge 2 ]] || { log_error "--from requires a stage"; return 2; }
+                MING_BUILD_FROM="$2"
+                MING_BUILD_RESUME=1
+                shift
+                ;;
+            --profile)
+                [[ $# -ge 2 ]] || { log_error "--profile requires a value"; return 2; }
+                MING_BUILD_PROFILE="$2"
+                shift
+                ;;
+            --help|-h)
+                print_build_usage
+                exit 0
+                ;;
+            *)
+                log_error "unknown build option: $1"
+                print_build_usage >&2
+                return 2
+                ;;
+        esac
+        shift
+    done
+    if [[ "${MING_BUILD_FRESH}" == "1" && "${MING_BUILD_RESUME}" == "1" ]]; then
+        log_error "--fresh and --resume cannot be used together"
+        return 2
+    fi
+    # Compatibility for older automation. Reuse is now checkpoint-validated.
+    if [[ "${MING_REUSE_CHROOT}" == "1" ]]; then
+        log_warn "MING_REUSE_CHROOT is deprecated; resume is checkpoint validated"
+        MING_BUILD_RESUME=1
+        MING_BUILD_FROM="${MING_BUILD_FROM:-modules}"
+    fi
+    if [[ "${MING_BUILD_FRESH}" == "0" && "${MING_BUILD_RESUME}" == "0" ]]; then
+        MING_BUILD_FRESH=1
+    fi
+}
+
+configure_build_profile() {
+    case "${MING_BUILD_PROFILE}" in
+        "${PROFILE_RELEASE}")
+            MING_BUILD_COMPRESSION="xz"
+            MING_SQUASHFS_ARGS=(-comp xz -Xbcj x86 -b 1M -no-xattrs -no-progress)
+            ;;
+        "${PROFILE_FAST_TEST}")
+            MING_BUILD_COMPRESSION="zstd"
+            MING_SQUASHFS_ARGS=(-comp zstd -Xcompression-level 6 -b 1M -no-xattrs -no-progress)
+            ;;
+        "${PROFILE_LEGACY_LOWRAM}")
+            MING_BUILD_COMPRESSION="zstd"
+            MING_SQUASHFS_ARGS=(-comp zstd -Xcompression-level 10 -b 1M -no-xattrs -no-progress)
+            ;;
+        "${PROFILE_COMPAT_HWE}")
+            MING_BUILD_COMPRESSION="xz"
+            MING_SQUASHFS_ARGS=(-comp xz -Xbcj x86 -b 1M -no-xattrs -no-progress)
+            ;;
+        *)
+            log_error "unknown build profile: ${MING_BUILD_PROFILE}"
+            return 2
+            ;;
+    esac
+    OUTPUT_DIR="${MING_OUTPUT_DIR:-${OUTPUT_ROOT}/${MING_BUILD_PROFILE}}"
+    BUILD_STATE_DIR="${MING_BUILD_STATE_DIR:-${BUILD_STATE_ROOT}/${MING_BUILD_PROFILE}}"
+}
+
+acquire_build_lock() {
+    mkdir -p "${LINUX_WORKDIR}"
+    require_cmd flock "apt install util-linux"
+    exec {MING_BUILD_LOCK_FD}>"${BUILD_LOCK_PATH}"
+    if ! flock -n "${MING_BUILD_LOCK_FD}"; then
+        log_error "another Ming OS build is already using ${LINUX_WORKDIR}"
+        return 1
+    fi
+}
+
+source_tree_sha256() {
+    git_build ls-tree -r --full-tree HEAD | sha256sum | awk '{print $1}'
+}
+
+build_inputs_sha256() {
+    {
+        printf '%s\0' "${MING_OS_BUILD_SUFFIX}" "${ISO_VOLUME_ID}" \
+            "${MING_SKIP_XIAHAI}" "${MING_BUILD_PROFILE}"
+        while IFS= read -r -d '' input_file; do
+            sha256sum "${input_file}"
+        done < <(find "${MODULES_DIR}" "${CONFIG_DIR}" "${SCRIPT_DIR}/assets" \
+            -type f -print0 | sort -z)
+        sha256sum "${SCRIPT_DIR}/build_onion_os.sh" \
+            "${SCRIPT_DIR}/resume_build.sh" "${BUILD_STATE_HELPER}"
+    } | sha256sum | awk '{print $1}'
+}
+
+file_sha256_or_missing() {
+    local path="$1"
+    if [[ -s "${path}" ]]; then
+        sha256sum "${path}" | awk '{print $1}'
+    else
+        printf 'missing'
+    fi
+}
+
+tools_fingerprint() {
+    local tool
+    for tool in debootstrap mksquashfs xorriso grub-mkimage; do
+        printf '%s=' "${tool}"
+        command -v "${tool}" >/dev/null 2>&1 \
+            && "${tool}" --version 2>&1 | head -n 1 \
+            || printf 'missing\n'
+    done | sha256sum | awk '{print $1}'
+}
+
+initialize_build_state() {
+    require_cmd python3 "apt install python3"
+    [[ -f "${BUILD_STATE_HELPER}" ]] || {
+        log_error "missing build state helper: ${BUILD_STATE_HELPER}"
+        return 1
+    }
+    local state_args=(
+        init
+        --state-dir "${BUILD_STATE_DIR}"
+        --build-id "${BUILD_ID}"
+        --build-time-utc "${BUILD_TIME_UTC}"
+        --version "${MING_OS_VERSION}"
+        --source-commit "${BUILD_SOURCE_COMMIT}"
+        --source-tree-sha256 "$(source_tree_sha256)"
+        --modules-sha256 "$(build_inputs_sha256)"
+        --profile "${MING_BUILD_PROFILE}"
+        --suite "${DEBIAN_SUITE}"
+        --arch "${ARCH}"
+        --debian-mirror "${DEBIAN_MIRROR}"
+        --security-mirror "${DEBIAN_SECURITY_MIRROR}"
+        --squashfs-compression "${MING_BUILD_COMPRESSION}"
+        --build-suffix "${MING_OS_BUILD_SUFFIX}"
+        --iso-volume-id "${ISO_VOLUME_ID}"
+        --skip-xiahai "${MING_SKIP_XIAHAI}"
+        --xiahai-sha256 "$(file_sha256_or_missing "${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb")"
+        --keyring-sha256 "$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")"
+        --apt-snapshot-sha256 "pending"
+        --tools-fingerprint "$(tools_fingerprint)"
+    )
+    [[ "${MING_BUILD_FRESH}" == "1" ]] && state_args+=(--fresh)
+    [[ "${MING_BUILD_RESUME}" == "1" ]] && state_args+=(--resume)
+    [[ -n "${MING_BUILD_FROM}" ]] && state_args+=(--from "${MING_BUILD_FROM}")
+
+    local payload
+    payload="$(python3 "${BUILD_STATE_HELPER}" "${state_args[@]}")"
+    read -r MING_BUILD_INPUT_HASH BUILD_ID BUILD_TIME_UTC < <(
+        python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["input_hash"], p["build_id"], p["build_time_utc"])' \
+            <<<"${payload}"
+    )
+    export BUILD_ID BUILD_TIME_UTC MING_BUILD_INPUT_HASH
+}
+
+state_is_complete() {
+    python3 "${BUILD_STATE_HELPER}" is-complete \
+        --state-dir "${BUILD_STATE_DIR}" --stage "$1" \
+        --input-hash "${MING_BUILD_INPUT_HASH}"
+}
+
+state_mark_started() {
+    python3 "${BUILD_STATE_HELPER}" start \
+        --state-dir "${BUILD_STATE_DIR}" --stage "$1" \
+        --input-hash "${MING_BUILD_INPUT_HASH}" >/dev/null
+}
+
+state_mark_completed() {
+    local stage="$1"
+    shift
+    local args=()
+    local artifact
+    for artifact in "$@"; do
+        [[ -n "${artifact}" ]] && args+=(--artifact "${artifact}")
+    done
+    python3 "${BUILD_STATE_HELPER}" complete \
+        --state-dir "${BUILD_STATE_DIR}" --stage "${stage}" \
+        --input-hash "${MING_BUILD_INPUT_HASH}" "${args[@]}" >/dev/null
+}
+
+invalidate_from() {
+    python3 "${BUILD_STATE_HELPER}" invalidate-from \
+        --state-dir "${BUILD_STATE_DIR}" --stage "$1" >/dev/null
+}
+
+invalidate_successors() {
+    local stage="$1"
+    local candidate found=0
+    for candidate in "${BUILD_STAGES[@]}"; do
+        if [[ "${found}" == "1" ]]; then
+            invalidate_from "${candidate}"
+        elif [[ "${candidate}" == "${stage}" ]]; then
+            found=1
+        fi
+    done
+}
+
+record_build_failure() {
+    local stage="$1" exit_code="$2" action="$3" line="$4"
+    [[ -n "${MING_BUILD_INPUT_HASH}" && -n "${stage}" ]] || return 0
+    # The helper writes ${BUILD_STATE_DIR}/last-failure.json with a redacted resume_hint.
+    python3 "${BUILD_STATE_HELPER}" fail \
+        --state-dir "${BUILD_STATE_DIR}" --stage "${stage}" \
+        --input-hash "${MING_BUILD_INPUT_HASH}" --exit-code "${exit_code}" \
+        --command "${action}" --line "${line}" >/dev/null 2>&1 || true
+}
+
+build_error_trap() {
+    local exit_code=$?
+    local line="${BASH_LINENO[0]:-${CURRENT_STAGE_LINE:-0}}"
+    local failed_command="${CURRENT_COMMAND:-${BASH_COMMAND:-unknown}}"
+    local pipeline_status="${PIPESTATUS[*]:-}"
+    CURRENT_COMMAND="${failed_command} pipeline=${pipeline_status}"
+    record_build_failure "${CURRENT_STAGE}" "${exit_code}" "${CURRENT_COMMAND}" "${line}"
+    umount_chroot >/dev/null 2>&1 || true
+    exit "${exit_code}"
+}
+
+run_stage() {
+    local stage="$1"
+    shift
+    if [[ "${stage}" != "host-preflight" ]] && state_is_complete "${stage}"; then
+        log_info "checkpoint valid; skipping completed stage: ${stage}"
+        return 0
+    fi
+    if [[ "${stage}" != "host-preflight" ]]; then
+        invalidate_successors "${stage}"
+    fi
+    CURRENT_STAGE="${stage}"
+    CURRENT_COMMAND="$*"
+    CURRENT_STAGE_LINE="${LINENO}"
+    state_mark_started "${stage}"
+    "$@"
+    state_mark_completed "${stage}" "${STAGE_ARTIFACTS[@]}"
+    STAGE_ARTIFACTS=()
+    CURRENT_COMMAND=""
 }
 # 检查命令是否存在，不存在则报错退出
 # 参数: $1=命令名 $2=安装提示(可选)
@@ -218,12 +516,22 @@ install_build_deps() {
     log_warn "缺少构建依赖: ${missing_bins[*]}"
     if command -v apt-get &>/dev/null; then
         local apt_ok=0
-        if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]] && apt-get update; then
+        local apt_options=(
+            -o Acquire::Retries=5
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+            -o Acquire::http::Pipeline-Depth=0
+            -o Acquire::Queue-Mode=access
+        )
+        if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]] \
+            && DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none \
+                apt-get "${apt_options[@]}" update; then
             apt_ok=1
         else
             log_warn "apt-get update 失败，改用已有缓存继续安装"
         fi
-        if ! apt-get install -y --no-install-recommends \
+        if ! DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none \
+            apt-get "${apt_options[@]}" install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
             mtools dosfstools debian-archive-keyring; then
@@ -266,6 +574,7 @@ run_debootstrap() {
     fi
     mkdir -p "${CHROOT_DIR}"
     mkdir -p "${APT_ARCHIVES_CACHE}"
+    validate_apt_cache_manifest
     debootstrap \
         --cache-dir="${APT_ARCHIVES_CACHE}" \
         --arch="${ARCH}" \
@@ -275,11 +584,95 @@ run_debootstrap() {
         "${DEBIAN_SUITE}" \
         "${CHROOT_DIR}" \
         "${DEBIAN_MIRROR}"
+    write_apt_cache_manifest
     log_info "debootstrap 完成"
+}
+
+validate_apt_cache_manifest() {
+    local manifest="${APT_ARCHIVES_CACHE}/cache-manifest.json"
+    if [[ ! -s "${manifest}" ]]; then
+        return 0
+    fi
+    if ! python3 - "${manifest}" "${DEBIAN_SUITE}" "${ARCH}" \
+        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if (
+        payload.get("suite") == sys.argv[2]
+        and payload.get("arch") == sys.argv[3]
+        and payload.get("mirror") == sys.argv[4]
+        and payload.get("security_mirror") == sys.argv[5]
+    )
+    else 1
+)
+PY
+    then
+        log_warn "APT cache invalid for this suite/arch; clearing only partial downloads"
+        rm -rf "${APT_ARCHIVES_CACHE}/partial"
+    fi
+}
+
+write_apt_cache_manifest() {
+    mkdir -p "${APT_ARCHIVES_CACHE}"
+    local manifest="${APT_ARCHIVES_CACHE}/cache-manifest.json"
+    local partial="${APT_ARCHIVES_CACHE}/cache-manifest.json.partial"
+    rm -f "${partial}"
+    python3 - "${partial}" "${DEBIAN_SUITE}" "${ARCH}" \
+        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "suite": sys.argv[2],
+            "arch": sys.argv[3],
+            "mirror": sys.argv[4],
+            "security_mirror": sys.argv[5],
+            "cache_schema": 1,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="ascii",
+)
+PY
+    mv -f "${partial}" "${manifest}"
+}
+
+write_stage_marker() {
+    local stage="$1"
+    mkdir -p "${CHECKPOINT_DIR}/${MING_BUILD_PROFILE}"
+    printf 'stage=%s\ninput_hash=%s\nupdated_at=%s\n' \
+        "${stage}" "${MING_BUILD_INPUT_HASH}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "${CHECKPOINT_DIR}/${MING_BUILD_PROFILE}/${stage}.marker.partial"
+    mv -f "${CHECKPOINT_DIR}/${MING_BUILD_PROFILE}/${stage}.marker.partial" \
+        "${CHECKPOINT_DIR}/${MING_BUILD_PROFILE}/${stage}.marker"
+}
+
+stage_marker_path() {
+    printf '%s/%s/%s.marker' "${CHECKPOINT_DIR}" "${MING_BUILD_PROFILE}" "$1"
 }
 # ======================== chroot 环境管理 ========================
 mount_chroot() {
     log_info "挂载 chroot 必要文件系统"
+    mkdir -p "${CHROOT_CACHE_DIR}/apt-archives/partial"
+    mkdir -p "${CHROOT_DIR}/var/cache/apt/archives"
+    if ! mountpoint -q "${CHROOT_DIR}/var/cache/apt/archives" 2>/dev/null; then
+        mount --bind "${CHROOT_CACHE_DIR}/apt-archives" \
+            "${CHROOT_DIR}/var/cache/apt/archives"
+    fi
     mount --bind /dev "${CHROOT_DIR}/dev"
     mount --bind /dev/pts "${CHROOT_DIR}/dev/pts"
     mount --bind /proc "${CHROOT_DIR}/proc"
@@ -292,7 +685,7 @@ mount_chroot() {
 }
 umount_chroot() {
     log_info "卸载 chroot 文件系统"
-    local mounts=("dev/shm" "dev/pts" "run" "sys" "proc" "dev")
+    local mounts=("var/cache/apt/archives" "dev/shm" "dev/pts" "run" "sys" "proc" "dev")
     for m in "${mounts[@]}"; do
         if mountpoint -q "${CHROOT_DIR}/${m}" 2>/dev/null; then
             umount -l "${CHROOT_DIR}/${m}" 2>/dev/null || true
@@ -457,7 +850,6 @@ APT_FRONTEND_WRAPPER
 # ======================== 模块脚本执行 ========================
 run_modules() {
     log_step "在 chroot 中执行模块脚本"
-    prepare_chroot_scripts
     local modules=(
         "01_base.sh"
         "02_apps.sh"
@@ -484,7 +876,14 @@ run_modules() {
 # ======================== 清理 chroot ========================
 clean_chroot() {
     log_step "清理 chroot 环境"
-    chroot_exec bash -c "apt clean"
+    # APT archives are bind-mounted from CHROOT_CACHE_DIR. Do not run apt clean
+    # while the mount is active, otherwise an interrupted build destroys the
+    # host cache it is meant to reuse.
+    if mountpoint -q "${CHROOT_DIR}/var/cache/apt/archives" 2>/dev/null; then
+        log_info "保留宿主 APT archives cache；只清理 target metadata"
+    else
+        chroot_exec bash -c "apt clean"
+    fi
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
     chroot_exec bash -c "rm -rf /tmp/ming-build"
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
@@ -2688,124 +3087,167 @@ GRUBCFG
 }
 
 
-build_iso() {
-    log_step "构建 ISO 镜像"
-    rm -rf "${ISO_DIR}" "${OUTPUT_DIR}"
-    mkdir -p "${ISO_DIR}" "${OUTPUT_DIR}"
-    mkdir -p "${ISO_DIR}/boot/grub"
-    mkdir -p "${ISO_DIR}/boot/grub/themes/ming"
-    mkdir -p "${ISO_DIR}/live"
-    if [[ ! -s "${SCRIPT_DIR}/assets/grub-theme/theme.txt" ]]; then
-        log_error "缺少 Ming GRUB 主题资源"
-        exit 1
-    fi
-    install -m 0644 "${SCRIPT_DIR}/assets/grub-theme/theme.txt" "${ISO_DIR}/boot/grub/themes/ming/theme.txt"
-
-    local kernel_version kernel_path kernel_sha
-    kernel_version=$(select_latest_kernel)
-    if [[ -z "${kernel_version}" ]]; then
+derive_iso_context() {
+    local kernel_version kernel_path initrd_path suffix
+    kernel_version="$(select_latest_kernel)"
+    [[ -n "${kernel_version}" ]] || {
         log_error "未找到 chroot 内核: ${CHROOT_DIR}/boot/vmlinuz-*"
-        exit 1
-    fi
-    kernel_path="${CHROOT_DIR}/boot/vmlinuz-${kernel_version}"
-    local initrd_path
+        return 1
+    }
+    KERNEL_PATH="${CHROOT_DIR}/boot/vmlinuz-${kernel_version}"
     initrd_path="${CHROOT_DIR}/boot/initrd.img-${kernel_version}"
     if [[ ! -s "${initrd_path}" ]]; then
-        initrd_path=$(find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'initrd.img-*' | sort -V | tail -n 1)
+        initrd_path="$(find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'initrd.img-*' | sort -V | tail -n 1)"
     fi
-    if [[ ! -s "${initrd_path}" ]]; then
+    [[ -s "${initrd_path}" ]] || {
         log_error "未找到 initrd: ${CHROOT_DIR}/boot/initrd.img-*"
-        exit 1
-    fi
-
-    validate_linux_kernel "${kernel_path}" "source ${kernel_version}"
-    kernel_sha=$(sha256sum "${kernel_path}" | awk '{print $1}')
-
-    cp "${kernel_path}" "${ISO_DIR}/live/vmlinuz"
-    cp "${initrd_path}" "${ISO_DIR}/live/initrd"
-    cmp -s "${kernel_path}" "${ISO_DIR}/live/vmlinuz" || {
-        log_error "复制到 ISO 工作目录的 vmlinuz 与源内核不一致"
-        exit 1
+        return 1
     }
-    validate_linux_kernel "${ISO_DIR}/live/vmlinuz" "ISO workdir /live/vmlinuz"
+    INITRD_PATH="${initrd_path}"
+    KERNEL_SHA="$(sha256sum "${KERNEL_PATH}" | awk '{print $1}')"
+    suffix="${MING_OS_BUILD_SUFFIX}"
+    ISO_NAME="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64"
+    [[ -n "${suffix}" ]] && ISO_NAME+="-${suffix}"
+    [[ "${MING_BUILD_PROFILE}" == "release" ]] || ISO_NAME+="-${MING_BUILD_PROFILE}"
+    ISO_NAME+=".iso"
+    BUILD_SIDECAR="${OUTPUT_DIR}/${ISO_NAME%.iso}.build.json"
+}
+
+stage_squashfs() {
+    log_step "阶段: 生成 squashfs (${MING_BUILD_PROFILE}:${MING_BUILD_COMPRESSION})"
+    rm -rf "${ISO_DIR}"
+    mkdir -p "${ISO_DIR}/boot/grub" "${ISO_DIR}/boot/grub/themes/ming" "${ISO_DIR}/live"
+    mkdir -p "${OUTPUT_DIR}"
+    derive_iso_context
+    validate_linux_kernel "${KERNEL_PATH}" "source kernel"
     require_cmd sha256sum "coreutils"
     validate_calamares_config
     validate_r4_compatibility
-    log_info "使用内核 ${kernel_version}, SHA256=${kernel_sha}"
+    # Do not include any live mount in the compressed rootfs.
+    if command -v findmnt >/dev/null 2>&1; then
+        if findmnt -R "${CHROOT_DIR}" 2>/dev/null | grep -Fq "${CHROOT_DIR}/"; then
+            log_error "chroot still has nested mounts; refusing to compress a live mount"
+            return 1
+        fi
+    fi
+    local squashfs_partial="${ISO_DIR}/live/filesystem.squashfs.partial"
+    rm -f "${squashfs_partial}" "${ISO_DIR}/live/filesystem.squashfs"
+    mksquashfs "${CHROOT_DIR}" "${squashfs_partial}" "${MING_SQUASHFS_ARGS[@]}"
+    [[ -s "${squashfs_partial}" ]] || {
+        log_error "mksquashfs produced an empty filesystem"
+        return 1
+    }
+    mv -f "${squashfs_partial}" "${ISO_DIR}/live/filesystem.squashfs"
+    STAGE_ARTIFACTS=("${ISO_DIR}/live/filesystem.squashfs")
+}
 
-    log_info "生成 squashfs 文件系统..."
-    mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
-        -comp xz \
-        -Xbcj x86 \
-        -b 1M \
-        -no-xattrs \
-        -no-progress
-
+stage_boot_assets() {
+    log_step "阶段: 准备 BIOS/UEFI 引导资源"
+    derive_iso_context
+    install -m 0644 "${SCRIPT_DIR}/assets/grub-theme/theme.txt" \
+        "${ISO_DIR}/boot/grub/themes/ming/theme.txt"
+    cp "${KERNEL_PATH}" "${ISO_DIR}/live/vmlinuz.partial"
+    cp "${INITRD_PATH}" "${ISO_DIR}/live/initrd.partial"
+    cmp -s "${KERNEL_PATH}" "${ISO_DIR}/live/vmlinuz.partial" || return 1
+    mv -f "${ISO_DIR}/live/vmlinuz.partial" "${ISO_DIR}/live/vmlinuz"
+    mv -f "${ISO_DIR}/live/initrd.partial" "${ISO_DIR}/live/initrd"
+    validate_linux_kernel "${ISO_DIR}/live/vmlinuz" "ISO workdir /live/vmlinuz"
     write_grub_config
     validate_iso_grub_config
-
-    log_info "配置 GRUB 字体..."
     mkdir -p "${ISO_DIR}/boot/grub/fonts"
-    if [[ ! -s /usr/share/grub/unicode.pf2 ]]; then
+    [[ -s /usr/share/grub/unicode.pf2 ]] || {
         log_error "required GRUB unicode font is missing: /usr/share/grub/unicode.pf2"
-        exit 1
-    fi
+        return 1
+    }
     cp /usr/share/grub/unicode.pf2 "${ISO_DIR}/boot/grub/fonts/"
-
     if [[ -f "${CHROOT_DIR}/boot/memtest86+x64.efi" ]]; then
-        mkdir -p "${ISO_DIR}/boot"
         cp "${CHROOT_DIR}/boot/memtest86+x64.efi" "${ISO_DIR}/boot/"
     fi
+    STAGE_ARTIFACTS=(
+        "${ISO_DIR}/live/vmlinuz"
+        "${ISO_DIR}/live/initrd"
+        "${ISO_DIR}/boot/grub/grub.cfg"
+        "${ISO_DIR}/boot/grub/themes/ming/theme.txt"
+        "${ISO_DIR}/boot/grub/fonts/unicode.pf2"
+    )
+}
 
-    log_info "生成 ISO 镜像文件..."
-    local suffix="${MING_OS_BUILD_SUFFIX}"
-    local iso_name
-    if [[ -n "${suffix}" ]]; then
-        iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64-${suffix}.iso"
-    else
-        iso_name="ming-os-${MING_OS_VERSION}-${MING_OS_EDITION,,}-amd64.iso"
-    fi
+stage_iso() {
+    log_step "阶段: 生成 ISO 镜像"
+    derive_iso_context
+    local iso_partial_name="${ISO_NAME}.partial"
+    local iso_partial_path="${OUTPUT_DIR}/${iso_partial_name}"
+    rm -f -- "${iso_partial_path}"
+    build_iso_manual "${iso_partial_name}"
+    [[ -s "${iso_partial_path}" ]] || {
+        log_error "ISO 镜像生成失败"
+        return 1
+    }
+    validate_iso_kernel "${iso_partial_path}" "${KERNEL_SHA}"
+    validate_iso_boot_layout "${iso_partial_path}"
+    mv -f -- "${iso_partial_path}" "${OUTPUT_DIR}/${ISO_NAME}"
+    STAGE_ARTIFACTS=("${OUTPUT_DIR}/${ISO_NAME}")
+}
 
-    build_iso_manual "${iso_name}"
-
-    if [[ -f "${OUTPUT_DIR}/${iso_name}" ]]; then
-        validate_iso_kernel "${OUTPUT_DIR}/${iso_name}" "${kernel_sha}"
-        validate_iso_boot_layout "${OUTPUT_DIR}/${iso_name}"
-        local iso_size
-        local iso_sha256 build_sidecar
-        iso_sha256="$(sha256sum "${OUTPUT_DIR}/${iso_name}" | awk '{print $1}')"
-        printf '%s  %s\n' "${iso_sha256}" "${iso_name}" > "${OUTPUT_DIR}/SHA256SUMS"
-        # Keep the per-ISO checksum sidecar in sync with the canonical sums file.
-        printf '%s  %s\n' "${iso_sha256}" "${iso_name}" > "${OUTPUT_DIR}/${iso_name}.sha256"
-        build_sidecar="${OUTPUT_DIR}/${iso_name%.iso}.build.json"
-        python3 - "${build_sidecar}" "${MING_OS_VERSION}" "${BUILD_ID}" \
-            "${BUILD_SOURCE_COMMIT}" "${BUILD_TIME_UTC}" "${iso_sha256}" <<'PY'
+stage_publish_artifacts() {
+    log_step "阶段: 发布校验和与构建元数据"
+    derive_iso_context
+    local iso_sha256 iso_size
+    iso_sha256="$(sha256sum "${OUTPUT_DIR}/${ISO_NAME}" | awk '{print $1}')"
+    iso_size="$(stat -c '%s' "${OUTPUT_DIR}/${ISO_NAME}")"
+    printf '%s  %s\n' "${iso_sha256}" "${ISO_NAME}" > "${OUTPUT_DIR}/SHA256SUMS.partial"
+    mv -f "${OUTPUT_DIR}/SHA256SUMS.partial" "${OUTPUT_DIR}/SHA256SUMS"
+    printf '%s  %s\n' "${iso_sha256}" "${ISO_NAME}" > "${OUTPUT_DIR}/${ISO_NAME}.sha256.partial"
+    mv -f "${OUTPUT_DIR}/${ISO_NAME}.sha256.partial" "${OUTPUT_DIR}/${ISO_NAME}.sha256"
+    python3 - "${BUILD_SIDECAR}.partial" "${MING_OS_VERSION}" "${BUILD_ID}" \
+        "${BUILD_SOURCE_COMMIT}" "${BUILD_TIME_UTC}" "${iso_sha256}" \
+        "${iso_size}" "${MING_BUILD_PROFILE}" "${MING_BUILD_COMPRESSION}" <<'PY'
 import json
 import pathlib
 import sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "version": sys.argv[2], "build_id": sys.argv[3],
     "source_commit": sys.argv[4], "build_time_utc": sys.argv[5],
-    "iso_sha256": sys.argv[6],
+    "iso_sha256": sys.argv[6], "iso_size": int(sys.argv[7]),
+    "profile": sys.argv[8], "compression": sys.argv[9],
+    "release_eligible": sys.argv[8] == "release",
 }, ensure_ascii=True, sort_keys=True) + "\n", encoding="ascii")
 PY
-        iso_size=$(du -sh "${OUTPUT_DIR}/${iso_name}" | cut -f1)
-        log_info "ISO 镜像生成成功: ${OUTPUT_DIR}/${iso_name} (${iso_size})"
-    else
-        log_error "ISO 镜像生成失败"
-        exit 1
-    fi
-    rm -rf "${ISO_DIR}"
-
+    mv -f "${BUILD_SIDECAR}.partial" "${BUILD_SIDECAR}"
     if [[ "${SCRIPT_DIR}" == /mnt/* ]]; then
-        local win_output_dir="${SCRIPT_DIR}/output"
-        mkdir -p "${win_output_dir}"
-        cp "${OUTPUT_DIR}/${iso_name}" "${win_output_dir}/${iso_name}"
-        cp "${OUTPUT_DIR}/SHA256SUMS" "${win_output_dir}/SHA256SUMS"
-        cp "${OUTPUT_DIR}/${iso_name}.sha256" "${win_output_dir}/${iso_name}.sha256"
-        cp "${build_sidecar}" "${win_output_dir}/$(basename "${build_sidecar}")"
-        verify_build_identity
-        log_info "ISO 已复制到 Windows 目录: ${win_output_dir}/${iso_name}"
+        if [[ "${MING_BUILD_PROFILE}" == "release" ]]; then
+            local win_output_dir="${SCRIPT_DIR}/output"
+            mkdir -p "${win_output_dir}"
+            cp "${OUTPUT_DIR}/${ISO_NAME}" "${win_output_dir}/${ISO_NAME}"
+            cp "${OUTPUT_DIR}/SHA256SUMS" "${win_output_dir}/SHA256SUMS"
+            cp "${OUTPUT_DIR}/${ISO_NAME}.sha256" "${win_output_dir}/${ISO_NAME}.sha256"
+            cp "${BUILD_SIDECAR}" "${win_output_dir}/$(basename "${BUILD_SIDECAR}")"
+            verify_build_identity
+            log_info "ISO 已复制到 Windows 目录: ${win_output_dir}/${ISO_NAME}"
+        else
+            log_warn "${MING_BUILD_PROFILE} 仅用于内部验收，不复制到发布目录"
+        fi
+    elif [[ "${MING_BUILD_PROFILE}" != "release" ]]; then
+        log_warn "${MING_BUILD_PROFILE} 仅用于内部验收，不复制到发布目录"
+    fi
+    log_info "ISO 镜像生成成功: ${OUTPUT_DIR}/${ISO_NAME} (${iso_size} bytes)"
+    STAGE_ARTIFACTS=(
+        "${OUTPUT_DIR}/${ISO_NAME}"
+        "${OUTPUT_DIR}/SHA256SUMS"
+        "${OUTPUT_DIR}/${ISO_NAME}.sha256"
+        "${BUILD_SIDECAR}"
+    )
+}
+
+build_iso() {
+    run_stage squashfs stage_squashfs
+    run_stage boot-assets stage_boot_assets
+    run_stage iso stage_iso
+    run_stage publish-artifacts stage_publish_artifacts
+    if [[ "${MING_CLEAN_ISO_WORKDIR}" == "1" ]]; then
+        rm -rf -- "${ISO_DIR}"
+    else
+        log_info "保留 ISO 中间目录，便于后续断点续建: ${ISO_DIR}"
     fi
 }
 
@@ -3033,7 +3475,63 @@ EOF
         return 1
     fi
 }
-# ======================== 主流程 ========================
+# ======================== 分阶段主流程 ========================
+stage_host_preflight() {
+    check_host_environment
+    install_build_deps
+    verify_debootstrap_keyring
+}
+
+stage_debootstrap() {
+    run_debootstrap
+    write_stage_marker debootstrap
+    STAGE_ARTIFACTS=(
+        "$(stage_marker_path debootstrap)"
+        "${CHROOT_DIR}/etc/debian_version"
+    )
+}
+
+stage_prepare_chroot() {
+    prepare_chroot_scripts
+    write_stage_marker prepare-chroot
+    STAGE_ARTIFACTS=(
+        "$(stage_marker_path prepare-chroot)"
+        "${CHROOT_DIR}/tmp/ming-build/modules/01_base.sh"
+    )
+}
+
+stage_modules() {
+    run_modules
+    write_rootfs_build_identity
+    write_stage_marker modules
+    STAGE_ARTIFACTS=(
+        "$(stage_marker_path modules)"
+        "${CHROOT_DIR}/etc/ming-os-build.json"
+    )
+}
+
+stage_initramfs() {
+    generate_initramfs
+    write_stage_marker initramfs
+    STAGE_ARTIFACTS=("$(stage_marker_path initramfs)")
+    while IFS= read -r initrd_path; do
+        [[ -n "${initrd_path}" ]] && STAGE_ARTIFACTS+=("${initrd_path}")
+    done < <(find "${CHROOT_DIR}/boot" -maxdepth 1 -type f -name 'initrd.img-*' -print)
+}
+
+stage_clean_rootfs() {
+    local audit_output
+    audit_output="$(chroot_exec dpkg --audit)"
+    if [[ -n "${audit_output}" ]]; then
+        log_error "resume build has unfinished dpkg packages"
+        printf '%s\n' "${audit_output}" >&2
+        return 1
+    fi
+    clean_chroot
+    write_stage_marker clean-rootfs
+    STAGE_ARTIFACTS=("$(stage_marker_path clean-rootfs)")
+}
+
 main() {
     echo -e "${GREEN}"
     echo "  ╔══════════════════════════════════════════╗"
@@ -3041,30 +3539,27 @@ main() {
     echo "  ║     层层精简，层层用心                    ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
-    local start_time
+    local start_time end_time duration minutes seconds
     start_time=$(date +%s)
+    parse_build_args "$@"
+    configure_build_profile
+    acquire_build_lock
     capture_build_identity
-    check_host_environment
-    install_build_deps
-    verify_debootstrap_keyring
-    mkdir -p "${LINUX_WORKDIR}"
-    if [[ "${MING_REUSE_CHROOT}" == "1" && -f "${CHROOT_DIR}/etc/ming-version" ]]; then
-        log_warn "MING_REUSE_CHROOT=1: reusing the previously configured chroot for this internal build"
-    else
-        run_debootstrap
-    fi
+    initialize_build_state
+    trap 'build_error_trap' ERR INT TERM HUP
+
+    run_stage host-preflight stage_host_preflight
+    run_stage debootstrap stage_debootstrap
+
     mount_chroot
     trap 'umount_chroot' EXIT
-    if [[ "${MING_REUSE_CHROOT}" != "1" ]]; then
-        run_modules
-    else
-        log_info "Skipping module installation because the configured chroot is being reused"
-    fi
-    write_rootfs_build_identity
-    generate_initramfs
-    clean_chroot
+    run_stage prepare-chroot stage_prepare_chroot
+    run_stage modules stage_modules
+    run_stage initramfs stage_initramfs
+    run_stage clean-rootfs stage_clean_rootfs
     umount_chroot
     trap - EXIT
+
     verify_build_identity
     build_iso
     verify_build_identity

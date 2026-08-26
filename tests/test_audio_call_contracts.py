@@ -27,14 +27,16 @@ class AudioCallBuildContracts(unittest.TestCase):
         self.assertNotIn("pulseaudio-module-bluetooth", required_block)
 
     def test_build_and_resume_gates_require_the_pipewire_runtime_stack(self):
-        for source in (self.apps, (ROOT / "build_onion_os.sh").read_text(encoding="utf-8"),
-                       (ROOT / "resume_build.sh").read_text(encoding="utf-8")):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        resume = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
+        for source in (self.apps, build):
             for package in (
                 "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber",
                 "libspa-0.2-bluetooth",
                 "dbus-user-session", "dbus-x11", "libpam-systemd",
             ):
                 self.assertIn(package, source)
+        self.assertIn('exec "${SCRIPT_DIR}/build_onion_os.sh" --resume', resume)
         self.assertIn("configure_pipewire_audio", self.apps)
         self.assertIn(
             "systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service",
