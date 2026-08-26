@@ -34,7 +34,7 @@ class Ota2641CompatibilityTests(unittest.TestCase):
         cls.cli = generated_cli()
         cls.cli_prefix = generated_cli_prefix()
 
-    def route(self, source, target):
+    def route(self, source, target, source_build_id="", target_build_id=""):
         with tempfile.TemporaryDirectory(prefix="ming-ota-2641-") as directory:
             script = pathlib.Path(directory) / "route.sh"
             script.write_text(
@@ -43,7 +43,7 @@ class Ota2641CompatibilityTests(unittest.TestCase):
                 newline="\n",
             )
             return subprocess.run(
-                [str(GIT_BASH), git_path(script), source, target],
+                [str(GIT_BASH), git_path(script), source, target, source_build_id, target_build_id],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -51,7 +51,14 @@ class Ota2641CompatibilityTests(unittest.TestCase):
                 timeout=15,
             )
 
-    def check(self, source):
+    def check(
+        self,
+        source,
+        *,
+        source_build_id="",
+        target_version="26.4.1",
+        target_build_id="2641-rc4-550d0b83a3a2-20260826T103412Z",
+    ):
         response = json.dumps({
             "schema": "ming.update.discovery.v1",
             "available": True,
@@ -59,7 +66,8 @@ class Ota2641CompatibilityTests(unittest.TestCase):
             "capability": "transactional-slot-v1",
             "has_update": True,
             "ready": True,
-            "version": "26.4.1",
+            "version": target_version,
+            "build_id": target_build_id,
             "update_type": "major",
             "download_url": "https://ming.sca-hub.cn/download/ming-os-26.4.1.iso",
             "checksum": "a" * 64,
@@ -88,6 +96,11 @@ class Ota2641CompatibilityTests(unittest.TestCase):
                 'current_version() {\n    cat /etc/ming-version 2>/dev/null || echo "unknown"\n}',
                 'current_version() { printf "%s\\n" "%s"; }' % ("%s", source),
             )
+            if source_build_id:
+                cli = cli.replace(
+                    'current_build_id() {\n    jq -r \'.build_id // empty\' /etc/ming-os-build.json 2>/dev/null || true\n}',
+                    'current_build_id() { printf "%s\\n" "%s"; }' % ("%s", source_build_id),
+                )
             injected = '''
 check_network() { return 0; }
 api_url() { printf '%s\\n' "https://test.invalid"; }
@@ -109,6 +122,39 @@ minisign() { return 0; }
             cached = cache / "update_info.json"
             contents = cached.read_text(encoding="utf-8") if cached.exists() else ""
         return result, contents
+
+    def test_accepts_rc_build_forward_route_with_same_public_version(self):
+        result = self.route(
+            "26.4.1",
+            "26.4.1",
+            "2641-rc3-054c2a2355ed-20260824T095743Z",
+            "2641-rc4-550d0b83a3a2-20260826T103412Z",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_rejects_rc_build_replay_or_downgrade_with_same_public_version(self):
+        cases = (
+            (
+                "2641-rc4-550d0b83a3a2-20260826T103412Z",
+                "2641-rc4-550d0b83a3a2-20260826T103412Z",
+            ),
+            (
+                "2641-rc4-550d0b83a3a2-20260826T103412Z",
+                "2641-rc3-054c2a2355ed-20260824T095743Z",
+            ),
+            (
+                "2641-rc3-054c2a2355ed-20260824T095743Z",
+                "",
+            ),
+            (
+                "2641-rc3-054c2a2355ed-20260824T095743Z",
+                "2642-rc4-550d0b83a3a2-20260826T103412Z",
+            ),
+        )
+        for source_build_id, target_build_id in cases:
+            with self.subTest(source_build_id=source_build_id, target_build_id=target_build_id):
+                result = self.route("26.4.1", "26.4.1", source_build_id, target_build_id)
+                self.assertNotEqual(0, result.returncode)
 
     def test_accepts_every_supported_2641_source_family(self):
         for source in (
@@ -198,6 +244,20 @@ minisign() { return 0; }
                 result, cached = self.check(source)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("26.4.1", json.loads(cached)["version"])
+
+    def test_check_caches_same_version_rc_build_when_build_id_advances(self):
+        result, cached = self.check(
+            "26.4.1",
+            source_build_id="2641-rc3-054c2a2355ed-20260824T095743Z",
+            target_build_id="2641-rc4-550d0b83a3a2-20260826T103412Z",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        cached_manifest = json.loads(cached)
+        self.assertEqual("26.4.1", cached_manifest["version"])
+        self.assertEqual(
+            "2641-rc4-550d0b83a3a2-20260826T103412Z",
+            cached_manifest["build_id"],
+        )
 
     def test_check_rejects_an_unsupported_2641_source_before_caching(self):
         result, cached = self.check("26.2.99")

@@ -101,6 +101,7 @@ get_config '.update_server'
             "has_update": True,
             "ready": True,
             "version": "26.4.1",
+            "build_id": "2641-rc4-550d0b83a3a2-20260826T103412Z",
             "update_type": "major",
             "download_url": "https://ming.sca-hub.cn/download/test.iso",
             "checksum": "a" * 64,

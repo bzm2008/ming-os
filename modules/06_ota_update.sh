@@ -383,15 +383,16 @@ fetch_authoritative_major_manifest() {
 }
 
 validate_staging_inputs() {
-    local state_path="$1" state status version iso_path checksum actual_checksum
+    local state_path="$1" state status version build_id iso_path checksum actual_checksum
     local backup_uuid backup_manifest backup_manifest_relative strategy iso_name
     local iso_uuid iso_mount_target iso_boot_path shared_status
     local manifest_uuid manifest_complete manifest_strategy mount_target expected_relative
-    local authoritative authoritative_tmp authoritative_version authoritative_checksum authoritative_filename
+    local authoritative authoritative_tmp authoritative_version authoritative_build_id authoritative_checksum authoritative_filename
     local authoritative_ready authoritative_available authoritative_type
     state="$(cat "${state_path}")"
     status="$(printf '%s' "${state}" | jq -r '.status // ""')"
     version="$(printf '%s' "${state}" | jq -r '.version // ""')"
+    build_id="$(printf '%s' "${state}" | jq -r '.build_id // ""')"
     iso_path="$(printf '%s' "${state}" | jq -r '.iso_path // ""')"
     checksum="$(printf '%s' "${state}" | jq -r '.checksum // ""')"
     backup_uuid="$(printf '%s' "${state}" | jq -r '.backup_uuid // ""')"
@@ -460,11 +461,13 @@ validate_staging_inputs() {
     authoritative_ready="$(jq -r '.ready // true' "${authoritative_tmp}")"
     authoritative_type="$(jq -r '.update_type // "major"' "${authoritative_tmp}")"
     authoritative_version="$(jq -r '.version // .latest_version // ""' "${authoritative_tmp}")"
+    authoritative_build_id="$(jq -r '.build_id // ""' "${authoritative_tmp}")"
     authoritative_checksum="$(jq -r '.checksum // .sha256 // ""' "${authoritative_tmp}")"
     authoritative_filename="$(jq -r '.filename // .iso_name // empty' "${authoritative_tmp}")"
     authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
     if [[ "${authoritative_available}" != "true" || "${authoritative_ready}" != "true" ||
           "${authoritative_type}" != "major" || "${authoritative_version}" != "${version}" ||
+          "${authoritative_build_id}" != "${build_id}" ||
           "${authoritative_checksum,,}" != "${checksum,,}" ||
           "$(basename -- "${authoritative_filename}")" != "${iso_name}" ]]; then
         rm -f "${authoritative_tmp}"
@@ -529,6 +532,10 @@ validate_staging_inputs() {
 
 current_version() {
     cat /etc/ming-version 2>/dev/null || echo "unknown"
+}
+
+current_build_id() {
+    jq -r '.build_id // empty' /etc/ming-os-build.json 2>/dev/null || true
 }
 
 readonly OTA_2641_TARGET_VERSION="26.4.1"
@@ -608,11 +615,41 @@ version_is_strictly_newer() {
     (( 10#${target_revision} > 10#${source_revision} ))
 }
 
+ota_release_key() {
+    local version="$1" major minor patch
+    [[ "${version}" =~ ^([0-9]+)[.]([0-9]+)([.]([0-9]+))? ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[4]:-0}"
+    printf '%s%s%s\n' "${major}" "${minor}" "${patch}"
+}
+
+ota_rc_build_number() {
+    local version="$1" build_id="$2" release_key
+    release_key="$(ota_release_key "${version}")" || return 1
+    [[ "${build_id}" =~ ^${release_key}-rc([0-9]+)-[A-Fa-f0-9]{7,40}-[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+rc_build_is_strictly_newer() {
+    local source_version="$1" target_version="$2" source_build_id="$3" target_build_id="$4"
+    local source_rc target_rc
+    [[ "${source_version}" == "${target_version}" ]] || return 1
+    [[ "${target_version}" == "${OTA_2641_TARGET_VERSION}" ]] || return 1
+    source_rc="$(ota_rc_build_number "${source_version}" "${source_build_id}")" || return 1
+    target_rc="$(ota_rc_build_number "${target_version}" "${target_build_id}")" || return 1
+    (( 10#${target_rc} > 10#${source_rc} ))
+}
+
 validate_update_route() {
     local source="$1" target="$2"
+    local source_build_id="${3:-}" target_build_id="${4:-}"
 
     if ! version_is_strictly_newer "${source}" "${target}"; then
-        log_error "目标版本 ${target} 不是当前版本 ${source} 的严格前进版本，拒绝 OTA。"
+        if rc_build_is_strictly_newer "${source}" "${target}" "${source_build_id}" "${target_build_id}"; then
+            return 0
+        fi
+        log_error "目标版本 ${target} / 构建 ${target_build_id:-unknown} 不是当前版本 ${source} / 构建 ${source_build_id:-unknown} 的严格前进版本，拒绝 OTA。"
         return 1
     fi
 
@@ -734,6 +771,9 @@ validate_ota_manifest_schema() {
             ((.version // .latest_version // "") |
                 type == "string" and test("^[0-9]+(\\.[0-9]+){1,3}[A-Za-z0-9._-]*$")) and
             (if ((.update_type // "major") == "major") then
+                (if ((.version // .latest_version // "") == "26.4.1") then
+                    ((.build_id // "") | type == "string" and test("^2641-rc[0-9]+-[A-Fa-f0-9]{7,40}-[0-9]{8}T[0-9]{6}Z$"))
+                 else true end) and
                 ((.checksum // .sha256 // "") |
                     type == "string" and test("^[A-Fa-f0-9]{64}$")) and
                 ((.download_url // .url // "") |
@@ -965,7 +1005,7 @@ check_update() {
     fi
     rm -f "${response_manifest}"
 
-    local server_error ready has_update new_version notes update_type
+    local server_error ready has_update new_version new_build_id notes update_type
     server_error=$(printf '%s' "${response}" | jq -r '.error // ""')
     if [[ -n "${server_error}" ]]; then
         log_error "更新服务器错误：${server_error}"
@@ -975,10 +1015,11 @@ check_update() {
     ready=$(printf '%s' "${response}" | jq -r '.ready // true')
     has_update=$(printf '%s' "${response}" | jq -r '.has_update // .update_available // .available // false')
     new_version=$(printf '%s' "${response}" | jq -r '.version // .latest_version // "unknown"')
+    new_build_id=$(printf '%s' "${response}" | jq -r '.build_id // ""')
     notes=$(printf '%s' "${response}" | jq -r '.release_notes // .message // "暂无更新说明。"')
     update_type=$(printf '%s' "${response}" | jq -r '.update_type // "major"')
 
-    if [[ "${has_update}" == "true" ]] && ! validate_update_route "${version}" "${new_version}"; then
+    if [[ "${has_update}" == "true" ]] && ! validate_update_route "${version}" "${new_version}" "$(current_build_id)" "${new_build_id}"; then
         rm -f "${manifest}"
         set_config '.last_check' "$(date -Iseconds)"
         record_check_result false false "" "" ""
@@ -1038,15 +1079,16 @@ download_update() {
         return 1
     fi
 
-    local info url version checksum expected_size iso_name safe_iso_name iso_file tmp_file retries
+    local info url version build_id checksum expected_size iso_name safe_iso_name iso_file tmp_file retries
     info=$(cat "${manifest}")
     url=$(printf '%s' "${info}" | jq -r '.download_url // .url // ""')
     version=$(printf '%s' "${info}" | jq -r '.version // "unknown"')
+    build_id=$(printf '%s' "${info}" | jq -r '.build_id // ""')
     checksum=$(printf '%s' "${info}" | jq -r '.checksum // .sha256 // ""')
     expected_size=$(printf '%s' "${info}" | jq -r '.size // 0')
     iso_name=$(printf '%s' "${info}" | jq -r '.filename // .iso_name // empty')
     iso_name=${iso_name:-ming-os-${version}.iso}
-    validate_update_route "$(current_version)" "${version}" || return 1
+    validate_update_route "$(current_version)" "${version}" "$(current_build_id)" "${build_id}" || return 1
     safe_iso_name="$(basename -- "${iso_name}")"
     if [[ "${iso_name}" != "${safe_iso_name}" || "${safe_iso_name}" == "." || "${safe_iso_name}" == ".." ]]; then
         log_error "ISO filename must be a basename"
@@ -1105,6 +1147,7 @@ download_update() {
 {
   "status": "downloaded",
   "version": "${version}",
+  "build_id": "${build_id}",
   "iso_path": "${iso_file}",
   "download_url": "${url}",
   "checksum": "${checksum}",
@@ -1129,7 +1172,7 @@ install_update() {
         return 1
     fi
 
-    local state status iso_path iso_boot_path version mount_point custom_cfg tmp_cfg previous_cfg candidate_record record_tmp
+    local state status iso_path iso_boot_path version build_id mount_point custom_cfg tmp_cfg previous_cfg candidate_record record_tmp
     local backup_uuid backup_manifest backup_manifest_rel
     candidate_record="$(mktemp)"
     if ! validate_staging_inputs "${sfile}" > "${candidate_record}"; then
@@ -1142,6 +1185,7 @@ install_update() {
     iso_path=$(printf '%s' "${state}" | jq -r '.iso_path // ""')
     iso_boot_path=$(printf '%s' "${state}" | jq -r '.iso_boot_path // ""')
     version=$(printf '%s' "${state}" | jq -r '.version // "unknown"')
+    build_id=$(printf '%s' "${state}" | jq -r '.build_id // ""')
     backup_uuid=$(printf '%s' "${state}" | jq -r '.backup_uuid // ""')
     backup_manifest=$(printf '%s' "${state}" | jq -r '.backup_manifest // ""')
     backup_manifest_rel=$(printf '%s' "${state}" | jq -r '.backup_manifest_relative // ""')
@@ -1151,7 +1195,7 @@ install_update() {
         log_error "root staging validation did not produce a validated record"
         return 1
     fi
-    validate_update_route "$(current_version)" "${version}" || {
+    validate_update_route "$(current_version)" "${version}" "$(current_build_id)" "${build_id}" || {
         rm -f "${candidate_record}"
         return 1
     }
@@ -1271,6 +1315,7 @@ manifest_apply_identity() {
           available: (.has_update // .update_available // false),
           ready: (.ready // true),
           version: (.version // .latest_version // ""),
+          build_id: (.build_id // ""),
           update_type: (.update_type // "major"),
           apt_packages: ((.apt_packages // []) |
             if type == "array" then map(select(type == "string")) | sort else [] end),
@@ -1756,9 +1801,9 @@ apply_manifest_apt_update() {
 # Calamares 在分区前再次比较目标根分区与保留介质的物理盘祖先。
 prepare_authoritative_ab_iso() {
     local sfile="$1" authoritative temporary
-    local state_version state_checksum state_iso state_name
+    local state_version state_build_id state_checksum state_iso state_name
     local authoritative_available authoritative_ready authoritative_type
-    local authoritative_version authoritative_checksum authoritative_filename
+    local authoritative_version authoritative_build_id authoritative_checksum authoritative_filename
     local trusted_iso trusted_tmp actual_checksum
 
     [[ -f "${sfile}" && ! -L "${sfile}" ]] || {
@@ -1766,6 +1811,7 @@ prepare_authoritative_ab_iso() {
         return 1
     }
     state_version="$(jq -r '.version // ""' "${sfile}")"
+    state_build_id="$(jq -r '.build_id // ""' "${sfile}")"
     state_checksum="$(jq -r '.checksum // ""' "${sfile}")"
     state_iso="$(jq -r '.iso_path // ""' "${sfile}")"
     [[ "${state_version}" =~ ^[0-9]+(\.[0-9]+){1,3}([A-Za-z0-9._-]*)?$ ]] || return 1
@@ -1798,12 +1844,14 @@ prepare_authoritative_ab_iso() {
     authoritative_ready="$(jq -r '.ready // true' "${temporary}")"
     authoritative_type="$(jq -r '.update_type // "major"' "${temporary}")"
     authoritative_version="$(jq -r '.version // .latest_version // ""' "${temporary}")"
+    authoritative_build_id="$(jq -r '.build_id // ""' "${temporary}")"
     authoritative_checksum="$(jq -r '.checksum // .sha256 // ""' "${temporary}")"
     authoritative_filename="$(jq -r '.filename // .iso_name // empty' "${temporary}")"
     rm -f "${temporary}"
     authoritative_filename="${authoritative_filename:-ming-os-${authoritative_version}.iso}"
     if [[ "${authoritative_available}" != true || "${authoritative_ready}" != true ||
           "${authoritative_type}" != major || "${authoritative_version}" != "${state_version}" ||
+          "${authoritative_build_id}" != "${state_build_id}" ||
           "${authoritative_checksum,,}" != "${state_checksum,,}" ||
           "${authoritative_filename}" != "$(basename -- "${authoritative_filename}")" ||
           "${state_name}" != "${authoritative_filename}" ]]; then
@@ -1811,7 +1859,7 @@ prepare_authoritative_ab_iso() {
         rm -f "${trusted_tmp}"
         return 1
     fi
-    validate_update_route "$(current_version)" "${authoritative_version}" || {
+    validate_update_route "$(current_version)" "${authoritative_version}" "$(current_build_id)" "${authoritative_build_id}" || {
         rm -f "${trusted_tmp}"
         return 1
     }
@@ -1826,8 +1874,9 @@ prepare_authoritative_ab_iso() {
     mv -f -- "${trusted_tmp}" "${trusted_iso}"
     sync -f "${AB_STAGING_DIR}"
     jq -n --arg iso_path "${trusted_iso}" --arg version "${authoritative_version}" \
+        --arg build_id "${authoritative_build_id}" \
         --arg checksum "${authoritative_checksum,,}" \
-        '{iso_path: $iso_path, version: $version, checksum: $checksum}'
+        '{iso_path: $iso_path, version: $version, build_id: $build_id, checksum: $checksum}'
 }
 
 major_install_to_inactive_slot() {
@@ -2019,7 +2068,7 @@ apply_update() {
     # supplies a manifest path+fingerprint, root rechecks the server and then
     # applies that exact displayed manifest (or refuses if it has changed).
     init_config
-    local manifest manifest_sha256 update_type available ready target_version already_checked=false restart_after_stage=false
+    local manifest manifest_sha256 update_type available ready target_version target_build_id already_checked=false restart_after_stage=false
     local selected_manifest="" selected_sha256=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2091,11 +2140,12 @@ apply_update() {
     ready="$(jq -r '.ready // true' "${manifest}" 2>/dev/null || true)"
     update_type="$(jq -r '.update_type // "major"' "${manifest}" 2>/dev/null || true)"
     target_version="$(jq -r '.version // .latest_version // "unknown"' "${manifest}" 2>/dev/null || true)"
+    target_build_id="$(jq -r '.build_id // ""' "${manifest}" 2>/dev/null || true)"
     if [[ "${available}" != "true" || "${ready}" != "true" ]]; then
         log_error "更新尚未准备完成，请稍后再次检查。"
         return 1
     fi
-    validate_update_route "$(current_version)" "${target_version}" || return 1
+    validate_update_route "$(current_version)" "${target_version}" "$(current_build_id)" "${target_build_id}" || return 1
 
     case "${update_type}" in
         patch|minor)
