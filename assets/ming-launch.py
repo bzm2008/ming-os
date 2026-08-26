@@ -218,7 +218,7 @@ class LaunchRequest:
         else:
             raise ValueError("unsupported launch mode")
         self.argv = tuple(argv)
-        self.source = source if source in {"desktop", "drawer", "dock", "settings", "unknown"} else "unknown"
+        self.source = source if source in {"desktop", "drawer", "dock", "settings", "toolbox", "unknown"} else "unknown"
         self.rect = COMMON.Rect.from_mapping(rect) if rect is not None else None
         self.desktop_file = str(desktop_file or "")
         self.mode = mode
@@ -241,6 +241,8 @@ def allowed_application_dirs(home=None):
     home = pathlib.Path(home or pathlib.Path.home())
     return (
         home / ".local/share/applications",
+        home / ".local/share/ming-wine/targets",
+        home / ".local/share/ming-android/targets",
         pathlib.Path("/usr/local/share/applications"),
         pathlib.Path("/usr/share/applications"),
     )

@@ -240,7 +240,7 @@ install_ming_shell_components() {
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py; do
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-spark-wine-package.py ming-android-runtime.py ming-toolbox.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -280,6 +280,12 @@ exec /usr/local/sbin/ming-package-installer "$@"
 MINGPACKAGEINSTALLER
     chmod 0755 /usr/local/bin/ming-package-installer
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
+    install -m 0755 "${asset_dir}/ming-wine-installer.py" /usr/local/bin/ming-wine-installer
+    install -m 0755 "${asset_dir}/ming-wine-installer.py" "${lib_dir}/ming-wine-installer.py"
+    install -m 0755 "${asset_dir}/ming-spark-wine-package.py" /usr/local/bin/ming-spark-wine-package
+    install -m 0755 "${asset_dir}/ming-android-runtime.py" /usr/local/bin/ming-android-runtime
+    install -m 0755 "${asset_dir}/ming-android-runtime.py" "${lib_dir}/ming-android-runtime.py"
+    install -m 0755 "${asset_dir}/ming-toolbox.py" /usr/local/bin/ming-toolbox
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
     # All GUI-triggered privileged operations cross one narrow, auditable
@@ -324,6 +330,21 @@ case "${route}" in
         }
         command=(/usr/local/sbin/ming-radio-repair bluetooth)
         ;;
+    wine)
+        [[ "$#" -eq 1 && ( "$1" == enable-wine32 || "$1" == install-fonts ) ]] || {
+            echo "Wine 兼容组件请求无效。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-wine-runtime "$1")
+        ;;
+    android)
+        # The "android" route is intentionally limited to four root actions.
+        [[ "$#" -eq 1 && ( "$1" == install-deps || "$1" == start-container || "$1" == stop-container || "$1" == repair ) ]] || {
+            echo "Android 系统操作无效，只允许固定的运行时动作。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-android-runtime "$1")
+        ;;
     *)
         echo "拒绝未受信任的系统授权操作。" >&2
         exit 2
@@ -366,6 +387,70 @@ exit "${rc}"
 MINGAUTHORIZE
     chmod 0755 /usr/local/bin/ming-authorized-action
 
+    cat > /usr/local/sbin/ming-android-runtime << 'MINGANDROIDROOT'
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-}"
+case "${action}" in
+    install-deps)
+        exec /usr/bin/apt-get -y -o Dpkg::Use-Pty=0 install waydroid cage lxc
+        ;;
+    start-container)
+        exec /usr/bin/waydroid container start
+        ;;
+    stop-container)
+        exec /usr/bin/waydroid container stop
+        ;;
+    repair)
+        /usr/bin/waydroid container stop >/dev/null 2>&1 || true
+        exec /usr/bin/waydroid init
+        ;;
+    *)
+        echo "拒绝未受信任的 Android 运行时动作。" >&2
+        exit 2
+        ;;
+esac
+MINGANDROIDROOT
+    chmod 0755 /usr/local/sbin/ming-android-runtime
+
+    cat > /usr/share/polkit-1/actions/org.ming.android.runtime.policy << 'MINGANDROIDPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming.android.runtime">
+    <description>Configure the optional Ming Android runtime</description>
+    <message>配置 Android 运行环境需要管理员授权。</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-android-runtime</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+MINGANDROIDPOLICY
+
+    cat > /usr/share/polkit-1/actions/org.ming.wine.runtime.policy << 'MINGWINERUNTIMEPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.ming.wine.runtime">
+    <description>Enable optional Ming Wine compatibility components</description>
+    <message>启用 Wine 32 位兼容组件需要管理员授权。</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-wine-runtime</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+MINGWINERUNTIMEPOLICY
+
     # AppImage files normally mount through FUSE.  Older kernels, containers
     # and some virtual machines do not expose /dev/fuse, so all generated
     # launchers go through this small user-level dispatcher and use the
@@ -390,6 +475,73 @@ fi
 exec "${appimage}" --appimage-extract-and-run "$@"
 MINGAPPIMAGERUN
     chmod 0755 /usr/local/bin/ming-appimage-run
+
+    cat > /usr/local/sbin/ming-wine-runtime << 'MINGWINERUNTIME'
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-}"
+[[ "${EUID:-$(id -u)}" -eq 0 ]] || {
+    echo "Wine 系统组件需要管理员授权。" >&2
+    exit 3
+}
+case "${action}" in
+    enable-wine32)
+        dpkg --add-architecture i386
+        if ! apt-get update || ! apt-get install -y --no-install-recommends wine32:i386 libwine:i386 fonts-wine; then
+            apt-get purge -y wine32:i386 libwine:i386 >/dev/null 2>&1 || true
+            dpkg --remove-architecture i386 >/dev/null 2>&1 || true
+            echo '{"ok":false,"state":"wine32_failed"}'
+            exit 1
+        fi
+        dpkg-query -W -f='${db:Status-Abbrev}' wine32:i386 2>/dev/null | grep -q '^ii ' || exit 1
+        printf '%s\n' '{"ok":true,"state":"wine32_ready"}'
+        ;;
+    install-fonts)
+        apt-get install -y --no-install-recommends fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2
+        printf '%s\n' '{"ok":true,"state":"wine_fonts_ready"}'
+        ;;
+    *)
+        echo "拒绝执行未列入白名单的 Wine 操作。" >&2
+        exit 2
+        ;;
+esac
+MINGWINERUNTIME
+    chmod 0755 /usr/local/sbin/ming-wine-runtime
+
+    cat > /usr/share/applications/ming-toolbox.desktop << 'MINGTOOLBOXDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Ming 工具箱
+Name[zh_CN]=Ming 工具箱
+Comment=Manage Windows/Wine applications and system tools
+Comment[zh_CN]=管理 Windows/Wine 应用与系统工具
+Exec=/usr/local/bin/ming-toolbox
+Icon=ming-toolbox
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true
+MINGTOOLBOXDESKTOP
+    cp /usr/share/applications/ming-toolbox.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-toolbox.desktop"
+
+    cat > /usr/share/applications/ming-wine-installer.desktop << 'MINGWINEINSTALLDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Install Windows application with Ming Toolbox
+Name[zh_CN]=使用 Ming 工具箱安装 Windows 应用
+Exec=/usr/local/bin/ming-toolbox --install-windows %f
+Icon=application-x-ms-dos-executable
+Terminal=false
+MimeType=application/x-ms-dos-executable;application/x-msi;
+NoDisplay=true
+StartupNotify=true
+MINGWINEINSTALLDESKTOP
+    cp /usr/share/applications/ming-wine-installer.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-wine-installer.desktop"
 
     cat > /usr/local/bin/ming-refresh-desktop-state << 'MINGREFRESHDESKTOP'
 #!/usr/bin/env bash
@@ -822,6 +974,8 @@ config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
 config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
 config["Default Applications"]["application/x-appimage"] = "ming-appimage-installer.desktop"
+config["Default Applications"]["application/x-ms-dos-executable"] = "ming-wine-installer.desktop"
+config["Default Applications"]["application/x-msi"] = "ming-wine-installer.desktop"
 existing = config["Added Associations"].get("inode/directory", "")
 items = [item for item in existing.split(";") if item]
 items = ["ming-files.desktop"] + [item for item in items if item != "ming-files.desktop"]
@@ -1484,7 +1638,7 @@ install_ming_mint_icon_set() {
         "${icon_base}/48x48/apps" "${icon_base}/scalable/apps"
     install -m 0644 "${asset_dir}/index.theme" "${icon_base}/index.theme"
     local name
-    for name in settings files terminal app-library update control store papyrus xiahai mark; do
+    for name in settings files terminal app-library update control store toolbox papyrus xiahai mark; do
         [[ -s "${asset_dir}/${name}.svg" ]] || {
             echo "ERROR: missing Ming Mint icon: ${name}" >&2
             return 1
@@ -7119,6 +7273,16 @@ configure_simplified_menus() {
     <description>验证并安装本地 Debian 软件包</description>
     <range>*</range>
     <patterns>*.deb</patterns>
+    <other-files/>
+</action>
+<action>
+    <icon>application-x-ms-dos-executable</icon>
+    <name>使用 Ming 工具箱安装 Windows 应用</name>
+    <submenu></submenu>
+    <command>/usr/local/bin/ming-toolbox --install-windows "%f"</command>
+    <description>在独立 Wine 环境中安全安装 EXE 或 MSI</description>
+    <range>*</range>
+    <patterns>*.exe;*.EXE;*.msi;*.MSI</patterns>
     <other-files/>
 </action>
 <action>

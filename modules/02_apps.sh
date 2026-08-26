@@ -61,6 +61,10 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     zenity
     im-config
     blueman
+    wine
+    wine64
+    libwine
+    fonts-wine
 )
 
 run_required_step() {
@@ -2423,6 +2427,7 @@ case "$action" in
         else
             echo "已安装，但桌面刷新失败；请在应用库中点击“刷新桌面”后重试。" >&2
             json_log installed_with_refresh_warning "$*"
+            exit 9
         fi
         ;;
     aptss)
@@ -2454,6 +2459,7 @@ case "$action" in
         else
             echo "操作已完成，但桌面刷新失败；请稍后重试刷新。" >&2
             json_log installed_with_refresh_warning "aptss:$subaction $*"
+            exit 9
         fi
         ;;
     ssinstall)
@@ -2466,6 +2472,7 @@ case "$action" in
         else
             echo "软件已安装，但桌面刷新失败；请稍后重试刷新。" >&2
             json_log installed_with_refresh_warning "ssinstall $*"
+            exit 9
         fi
         ;;
     apm)
@@ -2502,6 +2509,7 @@ case "$action" in
         else
             echo "APM 软件已安装，但桌面刷新失败；请稍后重试刷新。" >&2
             json_log installed_with_refresh_warning "apm:$subaction $*"
+            exit 9
         fi
         ;;
     *)
@@ -2597,7 +2605,7 @@ MINGSPARKARIA2C
     <description>Install or remove Spark applications through Ming OS</description>
     <message>安装或卸载星火应用需要本机管理员授权。</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
+      <allow_any>no</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
@@ -2617,6 +2625,14 @@ set -euo pipefail
 
 if [ "$(id -u)" -eq 0 ]; then
     exec /usr/local/sbin/ming-spark-package-control "$@"
+fi
+if [[ "${1:-}" == "wine-install" ]]; then
+    shift
+    exec /usr/local/bin/ming-spark-windows-install "$@"
+fi
+if [[ "${1:-}" == "wine-manifest-install" ]]; then
+    shift
+    exec /usr/local/bin/ming-spark-wine-package "$@"
 fi
 if [[ "${1:-}" == "apm" ]]; then
     subaction="${2:-}"
@@ -2933,6 +2949,27 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=15
 APPRECAUTOSTART
     chown "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-app-recommend.desktop"
+    # Spark-signed Windows packages are handed to ming-toolbox --install-windows.
+    # Local .exe/.msi files never execute inside Spark's vendor shell.
+
+    cat > /usr/local/bin/ming-spark-windows-install << 'MINGSPARKWINDOWS'
+#!/usr/bin/env bash
+set -euo pipefail
+manifest="$1"
+case "$manifest" in
+    *.json)
+        exec /usr/local/bin/ming-spark-wine-package "$manifest"
+        ;;
+    *.exe|*.EXE|*.msi|*.MSI)
+        exec /usr/local/bin/ming-toolbox --install-windows "$manifest"
+        ;;
+    *)
+        echo "Spark Windows 应用入口只接受签名 JSON 清单或本地 .exe/.msi 文件。" >&2
+        exit 2
+        ;;
+esac
+MINGSPARKWINDOWS
+    chmod 0755 /usr/local/bin/ming-spark-windows-install
 
 }
 
