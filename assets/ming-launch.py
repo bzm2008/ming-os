@@ -68,6 +68,15 @@ SANDBOX_RETRY_ALLOWLIST = {
 }
 
 XIAHAI_GPU_RETRY_ARGUMENT = "--disable-gpu"
+XIAHAI_GPU_RETRY_SIGNATURES = (
+    "gpu process",
+    "gpu initialization",
+    "gpu init",
+    "failed to initialize gpu",
+    "egl initialization",
+    "glx initialization",
+    "hardware acceleration failed",
+)
 
 
 def _load_common():
@@ -152,7 +161,13 @@ def sandbox_retry_argv(desktop_file, argv, error):
 
 def xiahai_gpu_retry_argv(desktop_file, argv, error):
     """Retry the trusted Xiahai launcher once with software rendering."""
-    if not error or not isinstance(argv, (tuple, list)) or not argv:
+    error_text = str(error or "").casefold()
+    if (
+        not error_text
+        or not any(signature in error_text for signature in XIAHAI_GPU_RETRY_SIGNATURES)
+        or not isinstance(argv, (tuple, list))
+        or not argv
+    ):
         return None
     metadata = _sandbox_desktop_metadata(desktop_file, argv)
     allowed = SANDBOX_RETRY_ALLOWLIST["xiahai"]

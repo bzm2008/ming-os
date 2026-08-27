@@ -231,6 +231,7 @@ class StoreControl:
             rc, _output, _error = self._call(command, timeout=60)
             checks[name] = rc == 0
         runtime = pathlib.Path("/run/user") / str(uid)
+        checks["desktop_shell"] = False
         if runtime.is_dir():
             rc, _output, _error = self._call((
                 "runuser", "-u", user_name, "--", "env",

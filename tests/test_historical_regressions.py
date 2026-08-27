@@ -1,5 +1,8 @@
 import pathlib
 import re
+import os
+import subprocess
+import tempfile
 import unittest
 
 
@@ -13,6 +16,11 @@ BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
 STORE_CORE = (ROOT / "assets" / "ming-store-core.py").read_text(encoding="utf-8")
 STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
+
+
+def git_bash_path(path):
+    value = str(path.resolve()).replace("\\", "/")
+    return "/%s%s" % (value[0].lower(), value[2:])
 
 
 class HistoricalRegressionContracts(unittest.TestCase):
@@ -34,6 +42,12 @@ class HistoricalRegressionContracts(unittest.TestCase):
         )[0]
         self.assertIn('"runuser", "-u", user_name, "--", "env"', refresh)
         self.assertIn('"XDG_RUNTIME_DIR=" + str(runtime)', refresh)
+
+    def test_store_refresh_marks_missing_graphical_runtime_as_failed(self):
+        refresh = STORE_CONTROL.split("    def _refresh_desktop", 1)[1].split(
+            "    @staticmethod", 1
+        )[0]
+        self.assertIn('checks["desktop_shell"] = False', refresh)
 
     def test_store_downloader_is_https_only_retriable_and_hash_verified(self):
         downloader = STORE_CORE.split("class SecureDownloader", 1)[1].split(
@@ -63,6 +77,222 @@ class HistoricalRegressionContracts(unittest.TestCase):
         self.assertNotRegex(cleanup, r"(?m)^[ \t]*(?:rm|find)\b[^\n]*/opt/apps")
         self.assertIn("do not touch /opt/apps", cleanup.lower())
         self.assertIn('require_absent(residue, "Spark/APM residue")', BUILD)
+
+    def test_spark_runtime_retirement_hard_fails_when_removal_or_verification_fails(self):
+        cleanup = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn(
+            'if ! apt-get remove --no-auto-remove -y "${installed[@]}"; then',
+            cleanup,
+        )
+        self.assertIn('apt-get -s remove --no-auto-remove', cleanup)
+        self.assertIn('意外连带移除用户软件', cleanup)
+        self.assertIn('query_legacy_package_state', cleanup)
+        self.assertIn('包数据库状态读取失败', FINALIZE)
+        self.assertIn('LC_ALL=C apt-get -s remove', cleanup)
+        self.assertIn('absent|un*|rc*', cleanup)
+        self.assertIn('return 1', cleanup)
+        self.assertIn('for package in "${legacy_packages[@]}"; do', cleanup)
+        self.assertIn('仍处于已安装状态', cleanup)
+        self.assertIn('retire_legacy_store_runtime || return 1', FINALIZE)
+
+    def test_spark_runtime_retirement_returns_failure_when_apt_remove_fails(self):
+        bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+
+        helper = FINALIZE.split("query_legacy_package_state() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        helper = "query_legacy_package_state() {" + helper + "\n}"
+        function = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        function = "retire_legacy_store_runtime() {" + function + "\n}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "systemctl").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            (bin_dir / "dpkg-query").write_text(
+                "#!/usr/bin/env bash\nprintf 'ii '\n", encoding="utf-8", newline="\n"
+            )
+            (bin_dir / "apt-get").write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"${1:-}\" == '-s' ]]; then printf 'Remv spark-store [1.0]\\n'; exit 0; fi\n"
+                "exit 42\n", encoding="utf-8", newline="\n"
+            )
+            (bin_dir / "rm").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            (bin_dir / "find").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            for command in bin_dir.iterdir():
+                command.chmod(0o755)
+            script = root / "retire.sh"
+            script.write_text(
+                "#!/usr/bin/env bash\nset -uo pipefail\n"
+                + helper + "\n" + function
+                + "\nretire_legacy_store_runtime\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            script.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = git_bash_path(bin_dir) + ":/usr/bin:/bin"
+            completed = subprocess.run(
+                [str(bash), git_bash_path(script)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=10,
+            )
+
+        self.assertNotEqual(0, completed.returncode)
+
+    def test_spark_runtime_retirement_rejects_reverse_dependency_removal(self):
+        bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+
+        function = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        function = "retire_legacy_store_runtime() {" + function + "\n}"
+        helper = FINALIZE.split("query_legacy_package_state() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        helper = "query_legacy_package_state() {" + helper + "\n}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, content in {
+                "systemctl": "#!/usr/bin/env bash\nexit 0\n",
+                "dpkg-query": "#!/usr/bin/env bash\nprintf 'ii '\n",
+                "apt-get": (
+                    "#!/usr/bin/env bash\n"
+                    "if [[ \"${1:-}\" == '-s' ]]; then\n"
+                    "  printf 'Remv spark-store [1.0]\\nRemv user-installed-app [2.0]\\n'\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "exit 99\n"
+                ),
+                "rm": "#!/usr/bin/env bash\nexit 0\n",
+                "find": "#!/usr/bin/env bash\nexit 0\n",
+            }.items():
+                command = bin_dir / name
+                command.write_text(content, encoding="utf-8", newline="\n")
+                command.chmod(0o755)
+            script = root / "retire.sh"
+            script.write_text(
+                "#!/usr/bin/env bash\nset -uo pipefail\n"
+                + helper + "\n" + function
+                + "\nretire_legacy_store_runtime\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            env = os.environ.copy()
+            env["PATH"] = git_bash_path(bin_dir) + ":/usr/bin:/bin"
+            completed = subprocess.run(
+                [str(bash), git_bash_path(script)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=10,
+            )
+
+        self.assertNotEqual(0, completed.returncode)
+
+    def test_spark_runtime_retirement_rejects_unreadable_package_state(self):
+        bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+        helper = FINALIZE.split("query_legacy_package_state() {", 1)[1].split("\n}", 1)[0]
+        helper = "query_legacy_package_state() {" + helper + "\n}"
+        function = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split("\n}", 1)[0]
+        function = "retire_legacy_store_runtime() {" + function + "\n}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, content in {
+                "systemctl": "#!/usr/bin/env bash\nexit 0\n",
+                "dpkg-query": "#!/usr/bin/env bash\nexit 2\n",
+                "rm": "#!/usr/bin/env bash\nexit 0\n",
+                "find": "#!/usr/bin/env bash\nexit 0\n",
+            }.items():
+                command = bin_dir / name
+                command.write_text(content, encoding="utf-8", newline="\n")
+                command.chmod(0o755)
+            script = root / "retire.sh"
+            script.write_text("#!/usr/bin/env bash\nset -uo pipefail\n" + helper + "\n" + function + "\nretire_legacy_store_runtime\n", encoding="utf-8", newline="\n")
+            script.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = git_bash_path(bin_dir) + ":/usr/bin:/bin"
+            completed = subprocess.run([str(bash), git_bash_path(script)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=10)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("包数据库状态读取失败", completed.stderr)
+
+    def test_spark_runtime_retirement_returns_failure_when_package_remains_installed(self):
+        bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        if not bash.is_file():
+            self.skipTest("Git Bash is unavailable")
+
+        helper = FINALIZE.split("query_legacy_package_state() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        helper = "query_legacy_package_state() {" + helper + "\n}"
+        function = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        function = "retire_legacy_store_runtime() {" + function + "\n}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, content in {
+                "systemctl": "#!/usr/bin/env bash\nexit 0\n",
+                "dpkg-query": "#!/usr/bin/env bash\nprintf 'ii '\n",
+                "apt-get": "#!/usr/bin/env bash\nexit 0\n",
+                "rm": "#!/usr/bin/env bash\nexit 0\n",
+                "find": "#!/usr/bin/env bash\nexit 0\n",
+            }.items():
+                command = bin_dir / name
+                command.write_text(content, encoding="utf-8", newline="\n")
+                command.chmod(0o755)
+            script = root / "retire.sh"
+            script.write_text(
+                "#!/usr/bin/env bash\nset -uo pipefail\n"
+                + helper + "\n" + function
+                + "\nretire_legacy_store_runtime\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            script.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = git_bash_path(bin_dir) + ":/usr/bin:/bin"
+            completed = subprocess.run(
+                [str(bash), git_bash_path(script)],
+                check=False,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                env=env,
+                timeout=10,
+            )
+
+        self.assertNotEqual(0, completed.returncode)
 
     def test_collapsed_widget_hides_and_zeroes_expanded_content(self):
         state = PHONE.split("def apply_collapsed_state", 1)[1].split(

@@ -2050,22 +2050,110 @@ fi
 DRIVERDIAG
     chmod 0755 /usr/local/bin/ming-driver-diagnose
 
-    cat > /usr/local/bin/ming-diagnostic-bundle << 'DIAGBUNDLE'
+cat > /usr/local/bin/ming-diagnostic-bundle << 'DIAGBUNDLE'
 #!/usr/bin/env bash
 set -uo pipefail
+umask 077
 OUT_DIR="${HOME:-/tmp}/Desktop"
 [[ -d "${OUT_DIR}" ]] || OUT_DIR="/tmp"
 STAMP="$(date '+%Y%m%d-%H%M%S')"
-WORK="/tmp/ming-diagnostics-${STAMP}"
-ARCHIVE="${OUT_DIR}/Ming-OS-诊断包-${STAMP}.tar.gz"
-mkdir -p "${WORK}"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/ming-diagnostics.XXXXXX")" || {
+    echo "无法建立诊断临时目录。" >&2
+    exit 1
+}
+RAW_WORK="$(mktemp -d "${TMPDIR:-/tmp}/ming-diagnostics-raw.XXXXXX")" || {
+    rm -rf "${WORK}"
+    echo "无法建立诊断采集目录。" >&2
+    exit 1
+}
+ARCHIVE="$(mktemp --suffix=.tar.gz "${OUT_DIR}/Ming-OS-诊断包-${STAMP}-XXXXXX")" || {
+    rm -rf "${WORK}" "${RAW_WORK}"
+    echo "无法建立诊断归档文件。" >&2
+    exit 1
+}
+MAX_FILES=128
+MAX_FILE_BYTES=$((4 * 1024 * 1024))
+MAX_TOTAL_BYTES=$((5 * 1024 * 1024))
+MAX_ARCHIVE_BYTES=$((8 * 1024 * 1024))
+staged_files=0
+staged_total=0
+chmod 0700 "${WORK}" "${RAW_WORK}" "${ARCHIVE}" || {
+    rm -rf "${WORK}" "${RAW_WORK}" "${ARCHIVE}"
+    echo "无法设置诊断临时文件权限。" >&2
+    exit 1
+}
+diagnostic_bundle_ready=0
+cleanup_diagnostic_bundle() {
+    rm -rf "${WORK}" "${RAW_WORK}"
+    if [[ "${diagnostic_bundle_ready}" != "1" ]]; then
+        rm -f "${ARCHIVE}"
+    fi
+}
+trap cleanup_diagnostic_bundle EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+
+# Only copy regular, unlinked UTF-8/text files.  The link-count check keeps a
+# diagnostic archive from exposing another file through a hard link.  Files
+# are copied with explicit 0600 permissions and a caller-supplied safe name.
+stage_text_file() {
+    local src="$1" dest="$2" size links
+    [[ "${dest}" != /* && "${dest}" != *".."* ]] || return 1
+    [[ -f "${src}" && ! -L "${src}" ]] || return 1
+    links="$(stat -c '%h' -- "${src}" 2>/dev/null || echo 2)"
+    [[ "${links}" == "1" ]] || return 1
+    size="$(stat -c '%s' -- "${src}" 2>/dev/null || echo $((MAX_FILE_BYTES + 1)))"
+    [[ "${size}" =~ ^[0-9]+$ && "${size}" -le "${MAX_FILE_BYTES}" ]] || return 1
+    (( staged_files < MAX_FILES )) || return 1
+    (( staged_total + size <= MAX_TOTAL_BYTES )) || return 1
+    if [[ -s "${src}" ]] && ! LC_ALL=C grep -Iq . -- "${src}" 2>/dev/null; then
+        return 1
+    fi
+    iconv -f UTF-8 -t UTF-8 "${src}" >/dev/null 2>&1 || return 1
+    install -d -m 0700 "$(dirname "${WORK}/${dest}")" || return 1
+    cp --reflink=auto -- "${src}" "${WORK}/${dest}" 2>/dev/null || return 1
+    if ! sed -E -i \
+        -e 's#(password|passphrase|passwd|token|secret|api[_-]?key|authorization|cookie)([[:space:]]*[=:][[:space:]]*|[[:space:]]+).*#\1=<redacted>#Ig' \
+        -e 's#(SSID|BSSID)[[:space:]]*[=:][[:space:]]*.*#\1=<redacted>#Ig' \
+        -e 's#/(home|root)/[^[:space:]/]+#/<redacted>#g' \
+        -e 's#(machine[-_]?id|serial(number)?|MAC([[:space:]]+address)?|IPv?4|username|user)[[:space:]]*[=:][[:space:]]*.*#\1=<redacted>#Ig' \
+        -e 's#([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}#<redacted>#Ig' \
+        -e 's#([0-9]{1,3}\.){3}[0-9]{1,3}#<redacted>#g' \
+        -e 's#([[:xdigit:]]{1,4}:){2,7}[[:xdigit:]]{0,4}#<redacted>#Ig' \
+        "${WORK}/${dest}"; then
+        rm -f "${WORK}/${dest}"
+        return 1
+    fi
+    chmod 0600 "${WORK}/${dest}"
+    ((staged_files += 1))
+    ((staged_total += size))
+}
+
+stage_path() {
+    local src="$1" label="$2" path rel index=0
+    if [[ -f "${src}" || -L "${src}" ]]; then
+        stage_text_file "${src}" "logs/${label}.txt" || true
+        return
+    fi
+    [[ -d "${src}" && ! -L "${src}" ]] || return
+    while IFS= read -r -d '' path; do
+        rel="${path#${src}/}"
+        # Keep names deterministic and harmless while retaining enough context
+        # for a developer to identify the originating log.
+        rel="${rel//[^A-Za-z0-9._-]/_}"
+        stage_text_file "${path}" "logs/${label}-${index}-${rel}" || true
+        ((index += 1))
+        (( staged_files >= MAX_FILES )) && break
+        (( staged_total >= MAX_TOTAL_BYTES )) && break
+    done < <(find -P "${src}" -type f -print0 2>/dev/null)
+}
 
 collect() {
     local name="$1"; shift
     {
         echo "$ $*"
         "$@" 2>&1 || true
-    } > "${WORK}/${name}.txt"
+    } > "${RAW_WORK}/${name}.txt"
 }
 
 collect system uname -a
@@ -2091,12 +2179,28 @@ for src in \
     /var/log/calamares.log \
     /var/log/installer \
     /var/log/Xorg.0.log; do
-    if [[ -e "${src}" ]]; then
-        cp -a "${src}" "${WORK}/" 2>/dev/null || true
-    fi
+    stage_path "${src}" "$(basename "${src}")"
 done
 
-tar -C "$(dirname "${WORK}")" -czf "${ARCHIVE}" "$(basename "${WORK}")"
+while IFS= read -r -d '' collected; do
+    stage_text_file "${collected}" "logs/collect-$(basename "${collected}")" || true
+done < <(find -P "${RAW_WORK}" -type f -print0 2>/dev/null)
+rm -rf "${RAW_WORK}"
+
+if ! (cd "${WORK}" && find -P . -type f ! -type l -print0 \
+    | tar --create --gzip --format=gnu --owner=0 --group=0 --numeric-owner \
+        --mtime='@0' --mode='u=rw,go=' --file="${ARCHIVE}" -C . \
+        --null --no-recursion --files-from=-); then
+    rm -rf "${WORK}"
+    echo "无法生成安全诊断包。" >&2
+    exit 1
+fi
+if [[ "$(wc -c < "${ARCHIVE}")" -gt "${MAX_ARCHIVE_BYTES}" ]]; then
+    rm -rf "${WORK}" "${ARCHIVE}"
+    echo "诊断包超过 8MB 限制。" >&2
+    exit 3
+fi
+diagnostic_bundle_ready=1
 rm -rf "${WORK}"
 
 if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
@@ -2108,9 +2212,10 @@ fi
 DIAGBUNDLE
     chmod 0755 /usr/local/bin/ming-diagnostic-bundle
 
-    cat > /usr/local/bin/ming-diagnostic-upload << 'DIAGUPLOAD'
+cat > /usr/local/bin/ming-diagnostic-upload << 'DIAGUPLOAD'
 #!/usr/bin/env bash
 set -uo pipefail
+umask 077
 
 endpoint="${MING_DIAGNOSTIC_ENDPOINT:-https://ming.sca-hub.cn/api/ming-diagnostics/reports}"
 schema=ming.diagnostic.v1
@@ -2123,23 +2228,138 @@ if [[ -z "${archive}" || ! -s "${archive}" ]]; then
 fi
 [[ -s "${archive}" ]] || { echo "无法生成诊断包。" >&2; exit 2; }
 
-work="$(mktemp -d)"
-cleanup() { rm -rf "${work}"; }
-trap cleanup EXIT
-if ! tar -xzf "${archive}" -C "${work}" >/dev/null 2>&1; then
-    echo "诊断包格式无效。" >&2
+MAX_ARCHIVE_BYTES=$((8 * 1024 * 1024))
+MAX_FILES=128
+MAX_FILE_BYTES=$((4 * 1024 * 1024))
+MAX_TOTAL_BYTES=$((5 * 1024 * 1024))
+if [[ ! -f "${archive}" || -L "${archive}" ]]; then
+    echo "诊断包必须是普通文件。" >&2
     exit 2
 fi
-find "${work}" -type f -size -4M -exec sed -E -i \
-    -e '/(SSID|BSSID|password|passphrase|passwd|authorization|cookie|token|api[_-]?key|username|user=)/Id' \
-    -e 's#/(home|root)/[^[:space:]/]+#/<redacted>#g' \
-    -e 's#([Pp]assword|[Pp]assphrase|token|secret|api[_-]?key)[=:][^[:space:]]+#\1=<redacted>#g' \
-    -e 's#(SSID|ssid|BSSID|bssid)[=:][^[:space:]]+#\1=<redacted>#g' {} + 2>/dev/null || true
-safe_archive="$(mktemp "${TMPDIR:-/tmp}/ming-diagnostic-sanitized.XXXXXX.tar.gz")"
-trap 'rm -rf "${work}" "${safe_archive}"' EXIT
-tar -czf "${safe_archive}" -C "${work}" .
-if [[ "$(wc -c < "${safe_archive}")" -gt 8388608 ]]; then
+archive_bytes="$(stat -c '%s' -- "${archive}" 2>/dev/null || echo $((MAX_ARCHIVE_BYTES + 1)))"
+if [[ ! "${archive_bytes}" =~ ^[0-9]+$ || "${archive_bytes}" -gt "${MAX_ARCHIVE_BYTES}" ]]; then
     echo "诊断包超过 8MB 限制。" >&2
+    exit 3
+fi
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/ming-diagnostic-upload.XXXXXX")" || {
+    echo "无法建立安全诊断临时目录。" >&2
+    exit 2
+}
+if ! chmod 0700 "${work}"; then
+    rm -rf "${work}"
+    echo "无法设置安全诊断临时目录权限。" >&2
+    exit 2
+fi
+safe_archive=""
+cleanup() { rm -rf "${work}" "${safe_archive:-}"; }
+trap cleanup EXIT
+
+# tarfile validates every member before anything is extracted.  It rejects
+# links/devices/directories, path traversal, nested archives, binary payloads,
+# oversized members and archive bombs.  Repacked names and metadata never carry
+# the user's original home path or ownership information to the server.
+if ! python3 - "${archive}" "${work}" "${MAX_FILES}" "${MAX_FILE_BYTES}" "${MAX_TOTAL_BYTES}" <<'PY' 2>/dev/null
+import os
+import re
+import sys
+import tarfile
+from pathlib import PurePosixPath
+
+archive, destination = sys.argv[1:3]
+max_files, max_file_bytes, max_total_bytes = map(int, sys.argv[3:])
+archive_suffixes = {
+    ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".zip", ".7z", ".rar",
+    ".lz", ".lz4", ".lzma", ".cab", ".cpio", ".ar", ".deb", ".apk", ".iso",
+}
+redactions = (
+    (re.compile(r"(?im)(\b(?:password|passphrase|passwd|token|secret|api[_-]?key|authorization|cookie)\b(?:\s*[=:]\s*|\s+))[^\r\n]*"), r"\1<redacted>"),
+    (re.compile(r"(?im)(\b(?:ssid|bssid)\b\s*[=:]\s*)[^\r\n]*"), r"\1<redacted>"),
+    (re.compile(r"/(?:home|root)/[^\s/]+"), "/<redacted>"),
+    (re.compile(r"(?im)(\b(?:machine[-_]?id|serial(?:number)?|mac(?:\s+address)?|ipv?4|username|user)\b\s*[=:]\s*)[^\r\n]*"), r"\1<redacted>"),
+    (re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b"), "<redacted>"),
+    (re.compile(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"), "<redacted>"),
+    (re.compile(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b"), "<redacted>"),
+)
+
+def reject(reason):
+    raise ValueError(reason)
+
+with open(archive, "rb") as raw:
+    if raw.read(2) != b"\x1f\x8b":
+        reject("诊断包必须是 gzip 格式")
+
+seen = set()
+total = 0
+count = 0
+with tarfile.open(archive, mode="r:gz") as source:
+    for member in source:
+        count += 1
+        if count > max_files:
+            reject("诊断包文件数量超过限制")
+        if not member.isreg() or member.issym() or member.islnk() or member.isdir():
+            reject("诊断包包含非普通文本文件")
+        name = member.name
+        if not name or "\x00" in name:
+            reject("诊断包文件名无效")
+        path = PurePosixPath(name)
+        if path.is_absolute() or any(part in ("", "..") for part in path.parts):
+            reject("诊断包包含不安全路径")
+        if name.casefold().endswith(tuple(archive_suffixes)):
+            reject("诊断包禁止嵌套压缩文件")
+        if member.size < 0 or member.size > max_file_bytes:
+            reject("诊断包单文件超过 4MB 限制")
+        if name in seen:
+            reject("诊断包包含重复文件")
+        seen.add(name)
+        total += member.size
+        if total > max_total_bytes:
+            reject("诊断包内容超过 5MB 限制")
+        stream = source.extractfile(member)
+        if stream is None:
+            reject("诊断包文件无法读取")
+        payload = stream.read(max_file_bytes + 1)
+        if len(payload) != member.size or len(payload) > max_file_bytes:
+            reject("诊断包文件读取超出限制")
+        if b"\x00" in payload:
+            reject("诊断包包含二进制内容")
+        if payload.startswith((b"PK\x03\x04", b"PK\x05\x06", b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"ustar")):
+            reject("诊断包禁止嵌套压缩文件")
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            reject("诊断包包含非文本内容")
+        if any(ord(char) < 32 and char not in "\r\n\t" for char in text):
+            reject("诊断包包含不可读控制字符")
+        for pattern, replacement in redactions:
+            text = pattern.sub(replacement, text)
+        output = os.path.join(destination, "file-%03d.txt" % count)
+        with open(output, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.chmod(output, 0o600)
+PY
+then
+    echo "诊断包包含不安全内容，已拒绝上传。" >&2
+    exit 2
+fi
+
+safe_archive="$(mktemp --suffix=.tar.gz "${TMPDIR:-/tmp}/ming-diagnostic-sanitized.XXXXXX")" || {
+    echo "无法建立安全诊断归档文件。" >&2
+    exit 2
+}
+if ! chmod 0600 "${safe_archive}"; then
+    echo "无法设置安全诊断归档权限。" >&2
+    exit 2
+fi
+if ! (cd "${work}" && find -P . -type f ! -type l -print0 \
+    | tar --create --gzip --format=gnu --owner=0 --group=0 --numeric-owner \
+        --mtime='@0' --mode='u=rw,go=' --file="${safe_archive}" -C . \
+        --null --no-recursion --files-from=-); then
+    echo "无法重新打包脱敏诊断内容。" >&2
+    exit 2
+fi
+if [[ "$(wc -c < "${safe_archive}")" -gt "${MAX_ARCHIVE_BYTES}" ]]; then
+    echo "脱敏诊断包超过 8MB 限制。" >&2
     exit 3
 fi
 response="$(curl -4 -fsS --max-time 30 \

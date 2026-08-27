@@ -212,20 +212,68 @@ X-GNOME-Autostart-enabled=false
 PANELDISABLED
 }
 
+query_legacy_package_state() {
+    local package="$1" output rc
+    output="$(dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null)"
+    rc=$?
+    if [[ "${rc}" -eq 0 ]]; then
+        printf '%s\n' "${output}"
+        return 0
+    fi
+    if [[ "${rc}" -eq 1 && -z "${output}" ]]; then
+        printf '%s\n' absent
+        return 0
+    fi
+    echo "[07_finalize][ERROR] 旧组件 ${package} 的包数据库状态读取失败（退出码 ${rc}）" >&2
+    return 1
+}
+
 retire_legacy_store_runtime() {
-    local package installed=()
+    local package state plan planned allowed installed=()
+    local legacy_packages=(spark-store apm cn.flamescion.bookworm-compatibility-mode)
+    echo "[07_finalize] 检查并退役旧 Spark/APM 运行时 ..."
     systemctl disable --now spark-update-notifier.service \
         spark-store-refresh.service 2>/dev/null || true
-    for package in spark-store apm cn.flamescion.bookworm-compatibility-mode; do
-        if dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null \
-            | grep -q '^ii '; then
-            installed+=("${package}")
-        fi
+    for package in "${legacy_packages[@]}"; do
+        state="$(query_legacy_package_state "${package}")" || return 1
+        case "${state}" in
+            absent|un*|rc*) ;;
+            *) installed+=("${package}") ;;
+        esac
     done
     if (( ${#installed[@]} > 0 )); then
-        apt-get remove --no-auto-remove -y "${installed[@]}" || {
-            echo "[07_finalize][WARN] 旧应用商店组件暂未完全移除，将在下次升级重试" >&2
-        }
+        echo "[07_finalize] 正在移除旧组件（保留第三方应用和用户数据）: ${installed[*]}"
+        if ! plan="$(LC_ALL=C apt-get -s remove --no-auto-remove -y "${installed[@]}" 2>&1)"; then
+            echo "[07_finalize][ERROR] 无法验证旧组件卸载计划，停止收尾" >&2
+            printf '%s\n' "${plan}" >&2
+            return 1
+        fi
+        while read -r _ planned _; do
+            [[ -n "${planned:-}" ]] || continue
+            planned="${planned%%:*}"
+            allowed=0
+            for package in "${legacy_packages[@]}"; do
+                [[ "${planned}" == "${package}" ]] && allowed=1 && break
+            done
+            if [[ "${allowed}" != "1" ]]; then
+                echo "[07_finalize][ERROR] 卸载旧商店会意外连带移除用户软件 ${planned}，已停止收尾" >&2
+                return 1
+            fi
+        done < <(awk '/^Remv[[:space:]]/ {print}' <<<"${plan}")
+        if ! apt-get remove --no-auto-remove -y "${installed[@]}"; then
+            echo "[07_finalize][ERROR] 旧 Spark/APM 组件移除失败，停止收尾以避免生成含残留的镜像" >&2
+            return 1
+        fi
+        for package in "${legacy_packages[@]}"; do
+            state="$(query_legacy_package_state "${package}")" || return 1
+            if [[ "${state}" != "absent" && "${state}" != un* && "${state}" != rc* ]]; then
+                echo "[07_finalize][ERROR] 旧组件 ${package} 移除后仍处于已安装状态（${state}），停止收尾" >&2
+                return 1
+            fi
+        done
+        echo "[07_finalize] 旧 Spark/APM 运行时已确认移除"
+    else
+        echo "[07_finalize] 未检测到已安装的旧 Spark/APM 运行时"
     fi
     rm -f /usr/share/polkit-1/actions/org.ming.spark.package-control.policy \
         /usr/share/polkit-1/actions/store.spark-app.*.policy \
@@ -337,7 +385,7 @@ main() {
     seed_trusted_desktop_receipts
     verify_other_os_detector || return 1
     disable_phone_panel_restore
-    retire_legacy_store_runtime
+    retire_legacy_store_runtime || return 1
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

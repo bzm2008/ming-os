@@ -16,7 +16,18 @@
 - 小组件：状态迁移到 A 方案 v2，默认折叠；胶囊只保留时间、日期、Wi-Fi、电池和 Ming 展开按钮，资源采样仅在展开时运行。
 - `RC4-DIAG-016`：Staging 源码增加服务端二次解包、限制、脱敏、重打包和新 SHA256；恶意路径、链接、设备、二进制、嵌套压缩及超限包会被拒绝。相关 Node 测试已通过，但没有发现与生产隔离的远程 Staging 发布入口，因此本轮没有远程部署，避免误改生产服务。
 
-源码验证结果：`python -m unittest discover -s tests` 执行 1301 项并通过，7 项因当前 Windows 缺少 GTK 或完整 Linux 文件语义而跳过；修改的 33 个 Python 文件编译通过，5 个 Shell 文件语法通过，Staging Node 测试 19 项通过，`git diff --check` 通过。
+源码验证结果：`python -m unittest discover -s tests` 执行 1301 项，其中 1294 项通过、7 项因当前 Windows 缺少 GTK 或完整 Linux 文件语义而跳过；修改的 33 个 Python 文件编译通过，5 个 Shell 文件语法通过，Staging Node 测试 19 项通过，`git diff --check` 通过。
+
+### 2026-08-27 审计加固更新
+
+本轮针对历史验收中尚未关闭的安全与可靠性缺口完成源码修复，仍未构建 ISO、操作 VM 或部署生产服务：
+
+- 诊断包生成端使用随机临时目录和归档名，限制 128 个文件、单文件 4 MiB、总内容 5 MiB、归档 8 MiB；仅收集普通 UTF-8 文本，拒绝符号链接、硬链接、设备文件、二进制和路径穿越，并在客户端统一脱敏。
+- 诊断上传端不再直接执行无约束 `tar -xzf`；先用 `tarfile` 完整校验 gzip、成员类型、路径、重复名、嵌套压缩、大小、文本编码和控制字符，再重命名、脱敏、以 0600 权限重新打包后上传。
+- 旧 Spark/APM/ACE 退役改为硬门禁：`apt-get remove --no-auto-remove` 失败或任一旧包仍为 `ii` 状态时，收尾流程立即失败；不执行 `autoremove`，不触碰 `/opt/apps` 或用户数据。
+- Xiahai 的 `--disable-gpu` 只在明确 GPU/图形初始化错误时触发；权限错误、文件缺失、普通退出和沙盒错误不会被误判为 GPU 故障。商店图形刷新在缺少 `/run/user/<uid>` 时明确返回刷新告警，不再跳过检查后报告成功。
+
+新增行为测试先确认旧实现失败，再验证修复：诊断归档、旧组件清理、Xiahai 回退和商店刷新相关回归均通过。最新完整源码验证为：`python -m unittest discover -s tests` 执行 1312 项，其中 1305 项通过、7 项跳过；修改过的 Python 编译通过，修改过的 Shell 语法通过，`git diff --check` 通过。上述结果仍不等价于 ISO、VM 或真实硬件验收。
 
 ## 验收环境
 

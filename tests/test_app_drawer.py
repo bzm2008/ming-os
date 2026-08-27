@@ -346,6 +346,14 @@ class LaunchBrokerCoreTests(unittest.TestCase):
                 argv + ("--disable-gpu",),
                 gpu_retry(desktop_file, argv, ordinary_error),
             )
+            for non_gpu_error in (
+                RuntimeError("Permission denied: /opt/xiahai-xiaoming/xiahai-xiaoming"),
+                RuntimeError("No such file or directory"),
+                RuntimeError("application exited with status 1"),
+                RuntimeError("sandbox setup failed"),
+            ):
+                with self.subTest(error=str(non_gpu_error)):
+                    self.assertIsNone(gpu_retry(desktop_file, argv, non_gpu_error))
             sandbox_error = RuntimeError("No usable sandbox!")
             gpu_argv = argv + ("--disable-gpu",)
             self.assertEqual(
