@@ -260,23 +260,28 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
-    def test_spark_notifier_unit_is_normalized_and_release_gated(self):
-        """The vendor unit must not ship invalid retry directives or executable bits."""
+    def test_retired_spark_units_are_removed_and_release_gate_rejects_residue(self):
         finalizer = FINALIZE.read_text(encoding="utf-8")
-        for marker in (
-            "normalize_spark_update_notifier_unit",
-            "StartLimitIntervalSec=1h",
-            "StartLimitBurst=3",
-            "RestartSec=15",
-            'chmod 0644 "${unit}"',
+        cleanup = finalizer.split("retire_legacy_store_runtime() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("spark-update-notifier.service", cleanup)
+        self.assertIn("systemctl disable --now", cleanup)
+        self.assertIn("apt-get remove --no-auto-remove", cleanup)
+        self.assertIn("/etc/apt/preferences.d/90-ming-spark-store", cleanup)
+        self.assertIn('require_absent(residue, "Spark/APM residue")', self.build)
+        for residue in (
+            "usr/bin/apm",
+            "usr/bin/bookworm-run",
+            "usr/bin/trixie-run",
+            "etc/apt/preferences.d/90-ming-spark-store",
+            "usr/share/polkit-1/actions/org.ming.spark.package-control.policy",
+            "usr/share/polkit-1/actions/store.spark-app.spark-store.policy",
+            "usr/share/polkit-1/actions/store.spark-app.ssinstall.policy",
+            "usr/lib/systemd/system/spark-update-notifier.service",
+            "etc/systemd/system/spark-store-refresh.service",
+            "usr/share/applications/spark-store.desktop",
+            "usr/share/applications/ming-install-spark-store.desktop",
         ):
-            self.assertIn(marker, finalizer)
-        for marker in (
-            "spark-update-notifier.service",
-            "systemd-analyze verify",
-            "must not be executable",
-        ):
-            self.assertIn(marker, self.build)
+            self.assertIn(f'"{residue}"', self.build)
 
     def test_rootfs_gate_classifies_generated_helpers_by_interpreter(self):
         """Shell helpers must not be sent through Python bytecode validation."""
@@ -314,7 +319,8 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("FillEndColor=242;;250;;247;;238", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
         self.assertIn("BottomPadding=2", self.build)
-        self.assertIn("Offset=0", self.build)
+        self.assertIn("Offset=12", self.build)
+        self.assertIn("MingDockProfile=2641-responsive-centered", self.build)
 
     def test_rootfs_gate_requires_static_dark_theme_assets(self):
         for marker in (

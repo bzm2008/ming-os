@@ -39,6 +39,37 @@ class ControlRequestStateTests(unittest.TestCase):
     def test_control_state_class_is_declared(self):
         self.assertIn("class ControlRequestState", self.source)
 
+    def test_missing_or_legacy_widget_state_defaults_to_collapsed_schema_v2(self):
+        namespace = load_metric_functions()
+        load_state = namespace["load_widget_state"]
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = pathlib.Path(temporary) / "status-widget.json"
+            self.assertEqual(
+                {"schema_version": 2, "collapsed": True, "metric_mode": "memory"},
+                load_state(state_path),
+            )
+            state_path.write_text(
+                json.dumps({"collapsed": False, "metric_mode": "cpu"}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                {"schema_version": 2, "collapsed": True, "metric_mode": "memory"},
+                load_state(state_path),
+            )
+
+    def test_schema_v2_widget_state_round_trips_expanded_preference(self):
+        namespace = load_metric_functions()
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = pathlib.Path(temporary) / "status-widget.json"
+            namespace["save_widget_state"](
+                False, path=state_path, metric_mode="network")
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, persisted["schema_version"])
+            self.assertEqual(
+                {"schema_version": 2, "collapsed": False, "metric_mode": "network"},
+                namespace["load_widget_state"](state_path),
+            )
+
     def test_new_request_supersedes_old_response(self):
         if self.state_type is None:
             self.skipTest("ControlRequestState is not implemented yet")

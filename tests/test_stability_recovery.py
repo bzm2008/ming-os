@@ -177,7 +177,7 @@ class DisplayControlPureTests(unittest.TestCase):
 
 
 class StatusWidgetStatePureTests(unittest.TestCase):
-    def test_widget_state_is_limited_to_collapsed_and_recovers_from_corruption(self):
+    def test_widget_state_is_schema_v2_and_recovers_collapsed_from_corruption(self):
         prefix = PHONE.split("\nimport gi\n", 1)[0]
         self.assertIn("def load_widget_state", prefix)
         self.assertIn("def save_widget_state", prefix)
@@ -185,12 +185,13 @@ class StatusWidgetStatePureTests(unittest.TestCase):
         exec(prefix, namespace)
         with tempfile.TemporaryDirectory() as temporary:
             state_path = pathlib.Path(temporary) / "status-widget.json"
-            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
+            default_state = {"schema_version": 2, "collapsed": True, "metric_mode": "memory"}
+            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
             state_path.write_text("not json", encoding="utf-8")
-            self.assertEqual({"collapsed": False, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
+            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
             namespace["save_widget_state"](True, state_path)
-            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, json.loads(state_path.read_text(encoding="utf-8")))
-            self.assertEqual({"collapsed": True, "metric_mode": "memory"}, namespace["load_widget_state"](state_path))
+            self.assertEqual(default_state, json.loads(state_path.read_text(encoding="utf-8")))
+            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
 
 
 class ApplicationCatalogRefreshTests(unittest.TestCase):

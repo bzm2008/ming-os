@@ -43,7 +43,7 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         main = function_body(APPS, "main")
         self.assertIn("run_required_step install_xiahai_xiaoming || return 1", main)
         self.assertLess(main.index("install_required_desktop_runtime"), main.index("install_xiahai_xiaoming"))
-        self.assertLess(main.index("install_xiahai_xiaoming"), main.index("install_app_store"))
+        self.assertLess(main.index("install_xiahai_xiaoming"), main.index("install_utilities"))
 
     def test_rootfs_gate_requires_xiahai_runtime_entrypoints(self):
         for marker in (

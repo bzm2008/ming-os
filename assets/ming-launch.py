@@ -40,6 +40,11 @@ SANDBOX_RETRY_SIGNATURES = (
     "without --no-sandbox",
 )
 SANDBOX_RETRY_ALLOWLIST = {
+    "xiahai": {
+        "desktop_ids": {"xiahai-xiaoming", "ming-xiahai"},
+        "wm_classes": {"xiahai-xiaoming", "xiahai"},
+        "programs": {"xiahai-xiaoming"},
+    },
     "wechat": {
         "desktop_ids": {"wechat", "weixin", "ming-wechat"},
         "wm_classes": {"wechat", "weixin"},
@@ -61,6 +66,8 @@ SANDBOX_RETRY_ALLOWLIST = {
         "programs": {"wps", "et", "wpp", "wpspdf"},
     },
 }
+
+XIAHAI_GPU_RETRY_ARGUMENT = "--disable-gpu"
 
 
 def _load_common():
@@ -98,7 +105,11 @@ def _sandbox_desktop_metadata(desktop_file, argv):
                 "NoDisplay", fallback=False):
             return None
         entry = COMMON.parse_desktop_file(path)
-        if entry is None or tuple(argv) != tuple(entry.argv):
+        ordinary_argv = tuple(argv)
+        while ordinary_argv and ordinary_argv[-1] in {
+                XIAHAI_GPU_RETRY_ARGUMENT, "--no-sandbox"}:
+            ordinary_argv = ordinary_argv[:-1]
+        if entry is None or ordinary_argv != tuple(entry.argv):
             return None
         try:
             program = COMMON.desktop_exec_program(entry.argv)
@@ -137,6 +148,32 @@ def sandbox_retry_argv(desktop_file, argv, error):
     if not argv or "--no-sandbox" in argv or not _sandbox_retry_allowed(desktop_file, argv):
         return None
     return tuple(argv) + ("--no-sandbox",)
+
+
+def xiahai_gpu_retry_argv(desktop_file, argv, error):
+    """Retry the trusted Xiahai launcher once with software rendering."""
+    if not error or not isinstance(argv, (tuple, list)) or not argv:
+        return None
+    metadata = _sandbox_desktop_metadata(desktop_file, argv)
+    allowed = SANDBOX_RETRY_ALLOWLIST["xiahai"]
+    if not metadata or metadata["program"] not in allowed["programs"]:
+        return None
+    if not (
+        metadata["desktop_id"] in allowed["desktop_ids"]
+        or metadata["wm_class"] in allowed["wm_classes"]
+    ):
+        return None
+    if XIAHAI_GPU_RETRY_ARGUMENT in argv:
+        return None
+    return tuple(argv) + (XIAHAI_GPU_RETRY_ARGUMENT,)
+
+
+def compatibility_retry_argv(desktop_file, argv, error):
+    """Apply the bounded GPU retry before the sandbox-only fallback."""
+    return (
+        xiahai_gpu_retry_argv(desktop_file, argv, error)
+        or sandbox_retry_argv(desktop_file, argv, error)
+    )
 
 
 def _spawn_with_stderr(argv):
@@ -646,22 +683,36 @@ class LaunchBroker:
                     finish()
 
             def failed(error):
-                retry_argv = sandbox_retry_argv(
+                retry_argv = compatibility_retry_argv(
                     request.desktop_file, launch_argv, error
                 ) if launch_argv else None
                 if retry_argv is not None:
                     if callable(finish):
                         finish()
-                    self.record_event(request, "sandbox_retry", error)
+                    retry_kind = (
+                        "gpu_retry" if XIAHAI_GPU_RETRY_ARGUMENT in retry_argv
+                        and XIAHAI_GPU_RETRY_ARGUMENT not in launch_argv
+                        else "sandbox_retry"
+                    )
+                    self.record_event(request, retry_kind, error)
+                    if retry_kind == "sandbox_retry" and "xiahai" in str(
+                            request.desktop_file).casefold():
+                        COMMON.run_command(
+                            ["notify-send", "Xiahai Xiaoming",
+                             "沙盒初始化失败，已仅对本应用使用安全兼容模式重试。"],
+                            timeout=2,
+                        )
                     try:
                         retry_process = self.spawn(retry_argv)
                     except (OSError, ValueError, subprocess.SubprocessError) as exc:
                         self._recent.pop(key, None)
-                        self.record_event(request, "sandbox_retry_failed", exc)
+                        self.record_event(request, retry_kind + "_failed", exc)
                         self.report_error(request, exc)
                         return
-                    self.record_event(request, "sandbox_retry_spawned")
-                    watch_for_window(retry_process, "sandbox_retry_exit")
+                    self.record_event(request, retry_kind + "_spawned")
+                    watch_for_window(
+                        retry_process, retry_kind + "_exit", launch_argv=retry_argv
+                    )
                     return
                 self._recent.pop(key, None)
                 if callable(finish):

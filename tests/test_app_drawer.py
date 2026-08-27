@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -54,10 +55,13 @@ class AppDrawerCoreTests(unittest.TestCase):
                 store.touch(item)
             self.assertEqual(["d.desktop", "c.desktop", "a.desktop"], store.load())
 
-    def test_drawer_uses_bottom_seventy_two_percent_above_compact_dock(self):
-        geometry = self.drawer.drawer_geometry({"x": 10, "y": 20, "width": 1000, "height": 800})
+    def test_drawer_anchors_to_bottom_when_immersive_mode_hides_dock(self):
+        workarea = {"x": 10, "y": 20, "width": 1000, "height": 800}
+        geometry = self.drawer.drawer_geometry(workarea, dock_visible=False)
         self.assertEqual(576.0, geometry.height)
-        self.assertEqual(198.0, geometry.y)
+        self.assertEqual(240.0, geometry.y)
+        with_dock = self.drawer.drawer_geometry(workarea, dock_visible=True)
+        self.assertEqual(198.0, with_dock.y)
         self.assertEqual(32, self.drawer.DOCK_RESERVED_HEIGHT)
         self.assertEqual(10, self.drawer.DRAWER_DOCK_GAP)
         self.assertEqual(160, self.drawer.ANIMATION_DURATION_MS)
@@ -207,6 +211,20 @@ class AppDrawerCoreTests(unittest.TestCase):
         self.assertIn("apply_dock_immersive_state(True)", show)
         self.assertIn("apply_dock_immersive_state(False)", hide)
 
+    def test_drawer_open_state_records_the_owning_process(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state = pathlib.Path(tempdir) / "drawer-open"
+            with mock.patch.object(self.drawer, "DRAWER_STATE_PATH", state):
+                self.drawer.write_drawer_state(True)
+                self.assertEqual(str(os.getpid()), state.read_text(encoding="ascii").strip())
+                self.drawer.write_drawer_state(False)
+                self.assertFalse(state.exists())
+
+    def test_drawer_show_geometry_does_not_reserve_a_hidden_dock(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        show = source[source.index("    def show(self):"):source.index("    def hide(self):")]
+        self.assertIn("drawer_geometry(self._workarea(), dock_visible=False)", show)
+
     def test_drawer_uses_shared_ming_launch_proxy_without_direct_argv_fallback(self):
         source = DRAWER_PATH.read_text(encoding="utf-8")
         launch = source[source.index("    def launch(self, app, widget):"):
@@ -308,6 +326,41 @@ class LaunchBrokerCoreTests(unittest.TestCase):
                     argv + ("--no-sandbox",),
                     RuntimeError("No usable sandbox!"),
                 )
+            )
+
+    def test_xiahai_retries_gpu_then_sandbox_without_affecting_other_apps(self):
+        gpu_retry = self.launch.xiahai_gpu_retry_argv
+        compatible_retry = self.launch.compatibility_retry_argv
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            desktop_file = root / "xiahai-xiaoming.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nType=Application\nName=Xiahai Xiaoming\n"
+                "Exec=/opt/xiahai-xiaoming/xiahai-xiaoming\n"
+                "StartupWMClass=xiahai-xiaoming\n",
+                encoding="utf-8",
+            )
+            argv = ("/opt/xiahai-xiaoming/xiahai-xiaoming",)
+            ordinary_error = RuntimeError("GPU process exited during startup")
+            self.assertEqual(
+                argv + ("--disable-gpu",),
+                gpu_retry(desktop_file, argv, ordinary_error),
+            )
+            sandbox_error = RuntimeError("No usable sandbox!")
+            gpu_argv = argv + ("--disable-gpu",)
+            self.assertEqual(
+                gpu_argv + ("--no-sandbox",),
+                compatible_retry(desktop_file, gpu_argv, sandbox_error),
+            )
+
+            unknown = root / "unknown.desktop"
+            unknown.write_text(
+                "[Desktop Entry]\nType=Application\nName=Unknown\n"
+                "Exec=/opt/vendor/client\nStartupWMClass=VendorClient\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                gpu_retry(unknown, ("/opt/vendor/client",), ordinary_error)
             )
 
     def test_allowlisted_system_entry_retries_only_after_ordinary_process_failure(self):

@@ -38,20 +38,24 @@ class MingMintThemeContracts(unittest.TestCase):
         self.assertIn("initial-opacity\" type=\"double\" value=\"1.0\"", self.desktop)
         self.assertIn("background-opacity=100", self.desktop)
 
-    def test_legacy_dock_profile_is_applied_at_runtime(self):
-        self.assertIn("MingDockProfile=2640-legacy-centered", self.desktop)
+    def test_responsive_dock_profile_is_applied_at_runtime(self):
+        self.assertIn("MingDockProfile=2641-responsive-centered", self.desktop)
         self.assertIn("IconSize=40", self.desktop)
         self.assertIn("ZoomPercent=148", self.desktop)
         self.assertIn("Offset=12", self.desktop)
+        self.assertIn("short_side <= 720", self.desktop)
+        self.assertIn("short_side <= 900", self.desktop)
         self.assertIn("Theme=Ming", self.desktop)
         self.assertIn("alignment center", self.desktop)
         self.assertIn("items-alignment center", self.desktop)
 
-    def test_drawer_geometry_reserves_dock_and_bottom_gap(self):
+    def test_drawer_geometry_only_reserves_a_visible_dock(self):
         drawer = load_drawer()
-        geometry = drawer.drawer_geometry({"x": 10, "y": 20, "width": 1000, "height": 800})
+        workarea = {"x": 10, "y": 20, "width": 1000, "height": 800}
+        geometry = drawer.drawer_geometry(workarea, dock_visible=False)
         self.assertEqual(576.0, geometry.height)
-        self.assertEqual(198.0, geometry.y)
+        self.assertEqual(240.0, geometry.y)
+        self.assertEqual(198.0, drawer.drawer_geometry(workarea, dock_visible=True).y)
         self.assertEqual(10, drawer.DRAWER_DOCK_GAP)
         self.assertEqual(32, drawer.DOCK_RESERVED_HEIGHT)
         self.assertEqual(4, drawer.DRAWER_BOTTOM_MARGIN)
@@ -85,7 +89,7 @@ class MingMintThemeContracts(unittest.TestCase):
             ("ming-terminal.desktop", "ming-terminal"),
             ("ming-app-library.desktop", "ming-app-library"),
             ("ming-update.desktop", "ming-update"),
-            ("spark-store.desktop", "ming-store"),
+            ("ming-store.desktop", "ming-store"),
         ):
             self.assertIn(f"[{desktop_name}]={icon_name}", self.desktop)
 

@@ -120,11 +120,12 @@ def deduplicate_apps(apps):
     return list(selected.values())
 
 
-def drawer_geometry(workarea):
+def drawer_geometry(workarea, dock_visible=True):
     workarea = COMMON.Rect.from_mapping(workarea)
     height = round(workarea.height * DRAWER_HEIGHT_RATIO)
     bottom = workarea.y + workarea.height
-    y = bottom - height - DOCK_RESERVED_HEIGHT - DRAWER_DOCK_GAP - DRAWER_BOTTOM_MARGIN
+    dock_reserve = DOCK_RESERVED_HEIGHT + DRAWER_DOCK_GAP if dock_visible else 0
+    y = bottom - height - dock_reserve - DRAWER_BOTTOM_MARGIN
     return COMMON.Rect(workarea.x, max(workarea.y, y), workarea.width, height)
 
 
@@ -132,7 +133,7 @@ def write_drawer_state(opened):
     try:
         DRAWER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         if opened:
-            DRAWER_STATE_PATH.write_text("1\n", encoding="ascii")
+            DRAWER_STATE_PATH.write_text(str(os.getpid()) + "\n", encoding="ascii")
         else:
             DRAWER_STATE_PATH.unlink(missing_ok=True)
     except OSError:
@@ -527,7 +528,7 @@ class DrawerController:
         apply_dock_immersive_state(True)
         self.apps = discover_apps()
         self.refresh()
-        geometry = drawer_geometry(self._workarea())
+        geometry = drawer_geometry(self._workarea(), dock_visible=False)
         transition = drawer_transition(reduced_motion_enabled())
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:

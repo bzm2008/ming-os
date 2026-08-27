@@ -82,7 +82,8 @@ def write_core_desktops(root):
         "ming-files.desktop": "/usr/local/bin/ming-files",
         "ming-terminal.desktop": "/usr/local/bin/ming-terminal",
         "ming-firefox.desktop": "/usr/local/bin/ming-firefox",
-        "spark-store.desktop": "/usr/local/bin/ming-spark-store",
+        "ming-store.desktop": "/usr/local/bin/ming-store",
+        "ming-toolbox.desktop": "/usr/local/bin/ming-toolbox",
         "xiahai-xiaoming.desktop": "/opt/xiahai-xiaoming/xiahai-xiaoming",
     }
     applications = root / "usr/share/applications"
@@ -138,7 +139,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
     def test_downloaded_debs_have_a_default_mime_handler_not_just_a_context_menu(self):
         self.assertIn("ming-package-installer.desktop", DESKTOP)
         self.assertIn("MimeType=application/vnd.debian.binary-package;", DESKTOP)
-        self.assertIn("Exec=/usr/local/bin/ming-package-install-gui %f", DESKTOP)
+        self.assertIn("Exec=/usr/local/bin/ming-store --local-deb %f", DESKTOP)
         self.assertIn(
             'config["Default Applications"]["application/vnd.debian.binary-package"]',
             DESKTOP,
@@ -200,7 +201,7 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('run_required_step install_required_desktop_runtime', main)
         self.assertIn('run_required_step install_fcitx5', main)
         self.assertIn('run_required_step install_firefox_esr', main)
-        self.assertIn('run_required_step install_app_store', main)
+        self.assertNotIn('run_required_step install_app_store', main)
 
     def test_every_required_install_function_propagates_mandatory_command_failures(self):
         expected_guards = {
@@ -257,25 +258,11 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn('exec "${SCRIPT_DIR}/build_onion_os.sh" --resume', RESUME)
         self.assertIn("Acquire::Retries=5", BUILD)
 
-    def test_spark_store_preflights_and_installs_aria2_dependency(self):
-        app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
-        helper = APPS.split("install_spark_store_dependencies() {", 1)[1].split("\n}\n\ninstall_app_store()", 1)[0]
-        spark_install = helper + app_store
-        self.assertNotIn("Spark Store 依赖 aria2 不可安装", app_store)
-        self.assertIn("install_spark_store_dependencies || return 1", app_store)
-        self.assertIn("apt-get -y -o Dpkg::Use-Pty=0 install", spark_install)
-        self.assertIn("apt-get update", spark_install)
-        self.assertIn("Spark Store 依赖安装失败", spark_install)
-        self.assertIn("apt-cache policy aria2", spark_install)
-        self.assertIn("aria2", spark_install)
-        self.assertLess(
-            helper.index("apt-get -y -o Dpkg::Use-Pty=0 install"),
-            helper.index("apt-cache policy aria2"),
-        )
-        self.assertLess(
-            app_store.index("install_spark_store_dependencies"),
-            app_store.index('apt-get -y -o Dpkg::Use-Pty=0 install'),
-        )
+    def test_ming_store_runtime_is_deployed_without_spark_or_apm_dependencies(self):
+        for asset in ("ming-store.py", "ming-store-core.py", "ming-store-control.py"):
+            self.assertIn(asset, DESKTOP)
+        for retired in ("install_spark_store_dependencies", "ming-spark-aria2c", "ming-spark-backend-status"):
+            self.assertNotIn(retired, APPS)
 
     def test_build_gate_checks_typelibs_commands_and_ming_runtime(self):
         function = BUILD.split("validate_required_desktop_runtime() {", 1)[1].split("\n}", 1)[0]
@@ -307,7 +294,8 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             "ming-files.desktop",
             "ming-terminal.desktop",
             "ming-firefox.desktop",
-            "spark-store.desktop",
+            "ming-store.desktop",
+            "ming-toolbox.desktop",
             "xiahai-xiaoming.desktop",
         ]:
             self.assertIn(desktop, function)
@@ -329,21 +317,17 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("missing Firefox ESR browser backend", result.stderr)
 
-    def test_spark_wrapper_requires_an_executable_install_fallback(self):
+    def test_ming_store_desktop_requires_an_executable_backend(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             write_core_desktops(root)
             write_executable(root, "usr/bin/firefox-esr")
+            (root / "usr/local/bin/ming-store").unlink()
             result = run_backend_validator(root)
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("Spark Store repair fallback", result.stderr)
+            self.assertIn("unresolved Exec target in ming-store.desktop", result.stderr)
 
-            write_executable(root, "usr/local/bin/ming-package-install-gui")
-            write_executable(
-                root,
-                "usr/local/bin/ming-spark-store",
-                "#!/bin/sh\nexec /usr/local/bin/ming-package-install-gui /usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb\n",
-            )
+            write_executable(root, "usr/local/bin/ming-store")
             result = run_backend_validator(root)
             self.assertEqual(0, result.returncode, result.stderr)
 

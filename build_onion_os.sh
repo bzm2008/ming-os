@@ -437,6 +437,10 @@ capture_build_identity() {
     resolve_git_invocation
     assert_clean_source_tree
     BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
+    if ! git_build cat-file -e "${BUILD_SOURCE_COMMIT}^{commit}"; then
+        log_error "当前源码提交无法解析为 Git commit 对象，拒绝构建。"
+        return 1
+    fi
     BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     BUILD_ID="2641-rc4-${BUILD_SOURCE_COMMIT:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
     export BUILD_SOURCE_COMMIT BUILD_TIME_UTC BUILD_ID
@@ -445,6 +449,10 @@ capture_build_identity() {
 verify_build_identity() {
     local current_commit
     current_commit="$(git_build rev-parse HEAD)"
+    if ! git_build cat-file -e "${BUILD_SOURCE_COMMIT}^{commit}"; then
+        log_error "构建记录的源码提交对象已不可解析，拒绝继续。"
+        return 1
+    fi
     if [[ "${current_commit}" != "${BUILD_SOURCE_COMMIT}" ]]; then
         log_error "源码在构建期间发生变化，拒绝生成无法追溯的 ISO。"
         return 1
@@ -1567,18 +1575,6 @@ validate_isolinux_fallback() {
 validate_required_desktop_runtime() {
     log_info "Validating required Ming desktop runtime..."
 
-    local spark_notifier="/usr/lib/systemd/system/spark-update-notifier.service"
-    if [[ -e "${CHROOT_DIR}${spark_notifier}" ]]; then
-        if [[ -x "${CHROOT_DIR}${spark_notifier}" ]]; then
-            log_error "${spark_notifier} must not be executable"
-            return 1
-        fi
-        if ! chroot_exec /usr/bin/systemd-analyze verify "${spark_notifier}"; then
-            log_error "systemd-analyze verify failed for ${spark_notifier}"
-            return 1
-        fi
-    fi
-
     if ! chroot_exec python3 -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); from gi.repository import Gtk, Adw, Gio"; then
         log_error "GTK4/libadwaita/Gio typelibs are unavailable in the target system"
         return 1
@@ -1690,7 +1686,7 @@ validate_required_desktop_runtime() {
         return 1
     fi
     if ! chroot_exec /usr/local/sbin/ming-time-sync status --json \
-        | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if value.get("state") in {"synchronized", "waiting", "error"} else 1)'; then
+        | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if value.get("state") in {"synced", "waiting_network", "service_inactive", "dbus_unavailable", "failed"} else 1)'; then
         log_error "Ming time-sync JSON runtime check failed"
         return 1
     fi
@@ -1738,7 +1734,8 @@ desktop_names = [
     "ming-files.desktop",
     "ming-terminal.desktop",
     "ming-firefox.desktop",
-    "spark-store.desktop",
+    "ming-store.desktop",
+    "ming-toolbox.desktop",
 ]
 if os.environ.get("MING_SKIP_XIAHAI") != "1":
     desktop_names.append("xiahai-xiaoming.desktop")
@@ -1780,23 +1777,6 @@ firefox_backends = [
 ]
 if not any(path.is_file() and os.access(path, os.X_OK) for path in firefox_backends):
     errors.append("missing Firefox ESR browser backend behind ming-firefox wrapper")
-
-spark_backends = [
-    root / "usr/bin/spark-store",
-    root / "opt/spark-store/bin/spark-store",
-]
-if not any(path.is_file() and os.access(path, os.X_OK) for path in spark_backends):
-    spark_wrapper = root / "usr/local/bin/ming-spark-store"
-    spark_gui = root / "usr/local/bin/ming-package-install-gui"
-    wrapper_text = spark_wrapper.read_text(encoding="utf-8", errors="replace") if spark_wrapper.is_file() else ""
-    has_repair_fallback = (
-        desktop_commands.get("spark-store.desktop") == "/usr/local/bin/ming-spark-store"
-        and spark_gui.is_file()
-        and os.access(spark_gui, os.X_OK)
-        and "exec /usr/local/bin/ming-package-install-gui" in wrapper_text
-    )
-    if not has_repair_fallback:
-        errors.append("Spark Store repair fallback is missing or not executable")
 
 if errors:
     print("\n".join(errors), file=sys.stderr)
@@ -2069,15 +2049,16 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-# RC4 ships the approved Ming Mint compact profile.  Keep the 26.4 legacy
-# profile as a read-only compatibility shape so older upgrades remain valid,
-# but require one complete profile rather than mixing values from both.
-dock_profiles = [
-    ["Alignment=3", "Offset=0", "IconSize=40", "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming"],
-    ["Alignment=3", "Offset=12", "IconSize=32", "ZoomEnabled=true", "ZoomPercent=125", "HideMode=0", "Theme=Ming-Mint"],
-]
-if not any(all(marker in plank_settings for marker in profile) for profile in dock_profiles):
-    errors.append("Plank settings do not match an approved Ming Dock profile")
+# One responsive Dock profile owns all installed and Live sessions. Runtime
+# sizing selects 32/36/40 px from the screen short edge without changing the
+# centered geometry, 12 px gap, Ming theme or hover animation.
+for marker in [
+    "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=12",
+    "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming",
+    "ming-store.dockitem",
+]:
+    if marker not in plank_settings:
+        errors.append(f"responsive Plank settings missing {marker}")
 if plank_settings.count("ming-app-library.dockitem") != 1:
     errors.append("Plank settings must contain exactly one application drawer item")
 if "ming-disk-hub.dockitem" in plank_settings:
@@ -2136,39 +2117,56 @@ for path, marker in [
 
 package_installer = require_file(
     "usr/local/sbin/ming-package-installer", "sync_opt_app_proxies")
-spark_package_control = require_file(
-    "usr/local/sbin/ming-spark-package-control", "MING_SPARK_PACKAGE_PATTERN")
-for marker in ["administrator_ready", "validate_packages", "validate_deb_paths",
-               "aptss", "ssinstall", "apm_backend_ready"]:
-    if marker not in spark_package_control:
-        errors.append(f"ming-spark-package-control missing boundary marker {marker}")
-spark_backend_status = require_file(
-    "usr/local/bin/ming-spark-backend-status", "APM_MIN_VERSION=1.2.2")
-for marker in ["dpkg --compare-versions", "ming.spark.backends.v1", "APM 后端版本过低"]:
-    if marker not in spark_backend_status:
-        errors.append(f"ming-spark-backend-status missing marker {marker}")
+store_core = require_file(
+    "usr/local/lib/ming-os/ming-store-core.py", "ming.store.catalog.v1")
 require_file(
-    "usr/share/polkit-1/actions/org.ming.spark.package-control.policy",
-    "/usr/local/sbin/ming-spark-package-control")
-validate_generated_executable("usr/local/sbin/ming-spark-package-control", "bash")
-validate_generated_executable("usr/local/bin/ming-spark-backend-status", "bash")
+    "usr/local/lib/ming-os/ming-store-core.py", "ming.store.transaction.v1")
+store_control = require_file(
+    "usr/local/sbin/ming-store-control", "REQUEST_ID")
+for marker in ["REQUEST_ID", "PROTECTED_PACKAGES", "Acquire::Retries=3",
+               "--no-auto-remove", "installed_state", "refresh_warning"]:
+    if marker not in store_control and marker not in store_core:
+        errors.append(f"Ming Store transaction boundary missing {marker}")
+store_policy = require_file(
+    "usr/share/polkit-1/actions/org.mingos.store.manage.policy",
+    "/usr/local/sbin/ming-store-control")
+for marker in ["<allow_any>no</allow_any>", "<allow_inactive>no</allow_inactive>"]:
+    if marker not in store_policy:
+        errors.append(f"Ming Store Polkit policy missing {marker}")
+validate_generated_executable("usr/local/sbin/ming-store-control", "python")
+for source_id in ["ming-official", "debian-apt", "vendor-official"]:
+    catalog_path = root / "usr/share/ming-os/store/catalog" / f"{source_id}.json"
+    if not catalog_path.is_file():
+        errors.append(f"missing Ming Store catalog: {source_id}")
+        continue
+    try:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        errors.append(f"invalid Ming Store catalog {source_id}: {error}")
+        continue
+    if catalog.get("schema") != "ming.store.catalog.v1":
+        errors.append(f"Ming Store catalog schema mismatch: {source_id}")
 launch_broker = require_file("usr/local/bin/ming-launch", "verify_desktop_proxy")
 for marker in ["manifest-v1.json", "manifest_sha256", "source_sha256", "proxy_sha256"]:
     if marker not in package_installer or marker not in launch_broker:
         errors.append(f"managed /opt/apps proxy contract missing {marker}")
 
-spark_asset = root / "usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
-spark_expected_sha256 = "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
-if not spark_asset.is_file() or spark_asset.stat().st_size == 0:
-    errors.append("missing or empty verified Spark Store asset")
-else:
-    spark_hasher = hashlib.sha256()
-    with spark_asset.open("rb") as spark_handle:
-        for spark_chunk in iter(lambda: spark_handle.read(1024 * 1024), b""):
-            spark_hasher.update(spark_chunk)
-    spark_actual_sha256 = spark_hasher.hexdigest().upper()
-    if spark_actual_sha256 != spark_expected_sha256:
-        errors.append("verified Spark Store asset SHA256 mismatch")
+for residue in [
+    "usr/bin/spark-store", "opt/spark-store", "opt/durapps/spark-store",
+    "usr/bin/apm", "usr/bin/bookworm-run", "usr/bin/trixie-run",
+    "usr/local/bin/ming-spark-store", "usr/local/sbin/ming-spark-package-control",
+    "usr/local/bin/ming-spark-backend-status", "usr/local/libexec/ming-spark-aria2c",
+    "etc/apt/preferences.d/90-ming-spark-store",
+    "usr/share/polkit-1/actions/org.ming.spark.package-control.policy",
+    "usr/share/polkit-1/actions/store.spark-app.spark-store.policy",
+    "usr/share/polkit-1/actions/store.spark-app.ssinstall.policy",
+    "usr/lib/systemd/system/spark-update-notifier.service",
+    "etc/systemd/system/spark-store-refresh.service",
+    "usr/share/applications/spark-store.desktop",
+    "usr/share/applications/ming-install-spark-store.desktop",
+    "usr/share/ming-os/vendor/spark-store",
+]:
+    require_absent(residue, "Spark/APM residue")
 
 if os.environ.get("MING_SKIP_XIAHAI") != "1":
     xiahai_binary = require_file(
@@ -2307,7 +2305,8 @@ for helper in [
     "usr/local/bin/ming-input-healthcheck",
     "usr/local/bin/ming-phone-desktop-watchdog",
     "usr/local/bin/ming-firefox",
-    "usr/local/bin/ming-spark-store",
+    "usr/local/bin/ming-store",
+    "usr/local/sbin/ming-store-control",
     "usr/local/bin/ming-authorized-action",
     "usr/local/bin/ming-audio-session",
     "usr/local/sbin/ming-package-installer",

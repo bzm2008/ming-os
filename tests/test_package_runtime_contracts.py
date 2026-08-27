@@ -11,6 +11,8 @@ APPIMAGE = (ROOT / "assets" / "ming-appimage-installer.py").read_text(encoding="
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 PACKAGE = (ROOT / "assets" / "ming-package-installer.py").read_text(encoding="utf-8")
+STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
+STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 GIT_BASH = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
 
 
@@ -29,11 +31,12 @@ class PackageRuntimeContracts(unittest.TestCase):
     def test_thunar_accepts_both_appimage_filename_cases(self):
         self.assertIn("<patterns>*.AppImage;*.appimage</patterns>", DESKTOP)
 
-    def test_spark_desktop_copy_uses_the_shared_launch_broker(self):
+    def test_local_deb_desktop_handler_uses_the_controlled_store_page(self):
         self.assertIn(
-            "Exec=/usr/local/bin/ming-launch --desktop-file /usr/share/applications/spark-store.desktop --source desktop",
-            APPS,
+            "Exec=/usr/local/bin/ming-store --local-deb %f",
+            DESKTOP,
         )
+        self.assertIn("application/vnd.debian.binary-package", DESKTOP)
 
     def test_app_library_launches_apps_only_through_the_shared_broker(self):
         library = DESKTOP.split(
@@ -47,7 +50,7 @@ class PackageRuntimeContracts(unittest.TestCase):
 
     def test_package_install_uses_the_shared_desktop_refresh_hook(self):
         self.assertIn("ming-refresh-desktop-state", PACKAGE)
-        self.assertIn("ming-refresh-desktop-state", APPS)
+        self.assertIn("ming-refresh-desktop-state", DESKTOP)
 
     def test_privileged_desktop_refresh_drops_to_user_without_literal_patch_tokens(self):
         refresh = DESKTOP.split(
@@ -69,66 +72,35 @@ class PackageRuntimeContracts(unittest.TestCase):
         self.assertIn("exit 1", unresolved)
         self.assertNotIn("exit 0", unresolved)
 
-    def test_spark_wrapper_does_not_accept_a_short_lived_process_as_ready(self):
-        self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for wrapper regression")
-        marker = "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'\n"
-        wrapper = APPS.split(marker, 1)[1].split("\nMINGSPARK\n", 1)[0]
-        with tempfile.TemporaryDirectory(prefix="ming-spark-wrapper-") as directory:
-            root = pathlib.Path(directory)
-            fake = root / "spark-store"
-            fake.write_text("#!/usr/bin/env bash\nsleep 0.2\nexit 0\n", encoding="utf-8")
-            fake.chmod(0o755)
-            wrapper = wrapper.replace(
-                "for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do",
-                'for candidate in "${MING_TEST_SPARK_BIN}"; do',
-            )
-            script = root / "ming-spark-store"
-            script.write_text(wrapper, encoding="utf-8", newline="\n")
-            result = subprocess.run(
-                [str(GIT_BASH), str(script).replace("\\", "/")],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=20,
-                env={
-                    **os.environ,
-                    "HOME": str(root),
-                    "MING_TEST_SPARK_BIN": str(fake).replace("\\", "/"),
-                },
-            )
-        self.assertNotEqual(0, result.returncode)
+    def test_store_does_not_accept_a_download_as_install_success(self):
+        execute = STORE_CONTROL.split("    def _execute_request", 1)[1].split(
+            "    def execute", 1
+        )[0]
+        install = execute.split('if action in ("install", "update"):', 1)[1].split(
+            'elif action == "remove":', 1
+        )[0]
+        self.assertIn("apt-get", install)
+        self.assertIn('self._journal(request, "readback")', install)
+        self.assertIn("state = self._installed(package)", install)
+        self.assertIn("readback_failed", install)
 
-    def test_spark_wrapper_does_not_accept_a_process_that_exits_after_one_second(self):
-        self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for wrapper regression")
-        marker = "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'\n"
-        wrapper = APPS.split(marker, 1)[1].split("\nMINGSPARK\n", 1)[0]
-        with tempfile.TemporaryDirectory(prefix="ming-spark-wrapper-1s-") as directory:
-            root = pathlib.Path(directory)
-            fake = root / "spark-store"
-            fake.write_text("#!/usr/bin/env bash\nsleep 1.2\nexit 0\n", encoding="utf-8")
-            fake.chmod(0o755)
-            wrapper = wrapper.replace(
-                "for candidate in /usr/bin/spark-store /opt/spark-store/bin/spark-store; do",
-                'for candidate in "${MING_TEST_SPARK_BIN}"; do',
-            )
-            script = root / "ming-spark-store"
-            script.write_text(wrapper, encoding="utf-8", newline="\n")
-            result = subprocess.run(
-                [str(GIT_BASH), str(script).replace("\\", "/")],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=20,
-                env={
-                    **os.environ,
-                    "HOME": str(root),
-                    "MING_TEST_SPARK_BIN": str(fake).replace("\\", "/"),
-                },
-            )
-        self.assertNotEqual(0, result.returncode)
+    def test_store_remove_reads_back_absence_and_keeps_dependencies(self):
+        execute = STORE_CONTROL.split("    def _execute_request", 1)[1].split(
+            "    def execute", 1
+        )[0]
+        remove = execute.split('elif action == "remove":', 1)[1].split("        else:", 1)[0]
+        self.assertIn('"remove", "--no-auto-remove", package', remove)
+        self.assertIn("state = self._installed(package)", remove)
+        self.assertIn('if state["installed"]:', remove)
 
-    def test_spark_wrapper_requires_a_stable_owned_process_or_window(self):
-        marker = "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'\n"
-        wrapper = APPS.split(marker, 1)[1].split("\nMINGSPARK\n", 1)[0]
-        self.assertIn("stable_checks >= 8", wrapper)
-        self.assertIn("timeout --foreground 2s wmctrl", wrapper)
-        self.assertNotIn("pgrep -f '[/](spark-store)( |$)'", wrapper)
+    def test_store_request_contains_no_command_or_arbitrary_url(self):
+        transaction = STORE.split("    def create_transaction", 1)[1].split(
+            "    @staticmethod\n    def live_mode", 1
+        )[0]
+        self.assertIn('"provider": source_id', transaction)
+        self.assertIn('"app_id": app_id', transaction)
+        self.assertNotIn('"command"', transaction)
+        self.assertNotIn('"url"', transaction)
 
     def test_package_gui_explains_refresh_warning_after_successful_install(self):
         self.assertIn("installed_with_refresh_warning", DESKTOP)
@@ -139,7 +111,7 @@ class PackageRuntimeContracts(unittest.TestCase):
         opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"
         self.assertIn(opener, DESKTOP)
         bridge = DESKTOP.split(opener, 1)[1].split("\nMINGAUTHORIZE", 1)[0]
-        for route in ("package", "spark", "broadcom", "radio"):
+        for route in ("package", "store", "android", "wine", "broadcom", "radio"):
             self.assertIn(route + ")", bridge)
         self.assertIn("Error creating textual authentication agent", bridge)
         self.assertIn("/dev/tty", bridge)
@@ -152,18 +124,18 @@ class PackageRuntimeContracts(unittest.TestCase):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         self.assertIn('"usr/local/bin/ming-authorized-action"', build)
 
-    def test_package_and_spark_callers_use_the_ming_authorization_bridge(self):
+    def test_package_and_store_callers_use_the_ming_authorization_bridge(self):
         package_gui = DESKTOP.split(
             "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
         )[1].split("\nMINGPACKAGEGUI", 1)[0]
         self.assertIn("ming-authorized-action package install", package_gui)
         self.assertNotIn("pkexec /usr/local/sbin/ming-package-installer", package_gui)
 
-        spark_caller = APPS.split(
-            "cat > \"$spark_shell_caller\" << 'MINGSPARKCALLER'", 1
-        )[1].split("\nMINGSPARKCALLER", 1)[0]
-        self.assertIn("ming-authorized-action spark", spark_caller)
-        self.assertNotIn("exec pkexec /usr/local/sbin/ming-spark-package-control", spark_caller)
+        self.assertIn(
+            '"/usr/local/bin/ming-authorized-action", "store", action',
+            STORE,
+        )
+        self.assertNotIn("pkexec", STORE)
 
     def test_authorization_bridge_translates_headless_pkexec_failure(self):
         self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for authorization regression")
@@ -187,6 +159,7 @@ class PackageRuntimeContracts(unittest.TestCase):
             bridge = bridge.replace(
                 "/usr/local/sbin/ming-broadcom-driver", str(driver).replace("\\", "/")
             )
+            bridge = bridge.replace('if [[ "$(id -u)" -ne 0 ]]; then', 'if false; then', 1)
             script = root / "ming-authorized-action"
             script.write_text(bridge, encoding="utf-8", newline="\n")
             result = subprocess.run(

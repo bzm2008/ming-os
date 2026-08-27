@@ -9,32 +9,26 @@ DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
+STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 
 
-class SparkAuthorizationContracts(unittest.TestCase):
-    def test_both_vendor_actions_use_the_ming_package_control_helper(self):
-        policies = re.findall(
-            r"cat > /usr/share/polkit-1/actions/(?:store\.spark-app\.[^ ]+)\.policy.*?\n(.*?)\n[A-Z]+POLICY",
-            APPS,
-            re.S,
-        )
-        self.assertGreaterEqual(len(policies), 2)
-        for policy in policies:
-            self.assertIn("org.freedesktop.policykit.exec.path", policy)
-            self.assertIn(
-                "/usr/local/sbin/ming-spark-package-control",
-                policy,
-            )
-            self.assertNotIn("<allow_any>yes</allow_any>", policy)
-
-    def test_vendor_pass_auth_never_executes_arbitrary_pkexec_arguments(self):
-        pass_auth = APPS.split(
-            "cat > /opt/durapps/spark-store/bin/store-helper/pass-auth.sh << 'MINGSPARKPASSAUTH'",
+class StoreAuthorizationContracts(unittest.TestCase):
+    def test_store_policy_uses_one_scoped_helper_and_disables_nonactive_callers(self):
+        policy = DESKTOP.split(
+            "cat > /usr/share/polkit-1/actions/org.mingos.store.manage.policy << 'MINGSTOREPOLICY'",
             1,
-        )[1].split("MINGSPARKPASSAUTH", 1)[0]
-        self.assertNotIn('exec pkexec "$@"', pass_auth)
-        self.assertIn("ming-authorized-action spark", pass_auth)
-        self.assertNotIn("exec /usr/local/sbin/ming-spark-package-control", pass_auth)
+        )[1].split("MINGSTOREPOLICY", 1)[0]
+        self.assertIn("/usr/local/sbin/ming-store-control", policy)
+        self.assertIn("<allow_any>no</allow_any>", policy)
+        self.assertIn("<allow_inactive>no</allow_inactive>", policy)
+        self.assertIn("<allow_active>auth_admin_keep</allow_active>", policy)
+
+    def test_store_ui_passes_only_action_and_request_id_to_authorization(self):
+        self.assertIn('"/usr/local/bin/ming-authorized-action", "store", action', STORE)
+        self.assertIn("REQUEST_ID.fullmatch(request_id)", STORE_CONTROL)
+        self.assertNotIn("shell=True", STORE + STORE_CONTROL)
+        self.assertNotIn("eval ", STORE + STORE_CONTROL)
 
 
 class WifiDialogContracts(unittest.TestCase):

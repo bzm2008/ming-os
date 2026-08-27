@@ -57,7 +57,8 @@ class XiahaiIntegrationContracts(unittest.TestCase):
     def test_xiahai_payload_permissions_are_repaired_for_execution(self):
         installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming", installer)
-        self.assertIn("chmod 0755 /opt/xiahai-xiaoming/chrome-sandbox", installer)
+        self.assertIn("chown root:root /opt/xiahai-xiaoming/chrome-sandbox", installer)
+        self.assertIn("chmod 4755 /opt/xiahai-xiaoming/chrome-sandbox", installer)
 
     def test_xiahai_desktop_metadata_is_normalized_before_validation(self):
         installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]

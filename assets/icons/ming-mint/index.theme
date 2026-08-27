@@ -2,7 +2,7 @@
 Name=Ming Mint
 Comment=Flat transparent Ming OS application icons
 Directories=24x24/apps,32x32/apps,48x48/apps,scalable/apps
-Inherits=hicolor
+Inherits=Adwaita,Papirus,hicolor
 
 [24x24/apps]
 Size=24

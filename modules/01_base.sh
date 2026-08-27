@@ -31,11 +31,17 @@ configure_apt_sources() {
     # 403 must not make the installed system unable to receive patch updates.
     local debian_mirror="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"
     local security_mirror="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"
-    cat > /etc/apt/sources.list << APTSRC
+    install -d -m 0755 /etc/apt/sources.list.d
+    cat > /etc/apt/sources.list.d/90-ming-mirror.list << APTSRC
+# Managed by Ming OS. Use ming-apt-source-select to change this block.
 deb ${debian_mirror} trixie main contrib non-free non-free-firmware
 deb ${debian_mirror} trixie-updates main contrib non-free non-free-firmware
 deb ${security_mirror} trixie-security main contrib non-free non-free-firmware
 APTSRC
+    cat > /etc/apt/sources.list << 'APTSRCROOT'
+# Debian base repositories are managed in sources.list.d/90-ming-mirror.list.
+# User-added repositories in this file are never rewritten by Ming tools.
+APTSRCROOT
 
     cat > /etc/apt/apt.conf.d/99ming-network << 'APTNETWORK'
 Acquire::Retries "5";
@@ -66,6 +72,7 @@ suite="${MING_APT_SUITE:-trixie}"
 state_dir=/var/lib/ming-os
 state_file="${state_dir}/apt-source-state.json"
 source_file=/etc/apt/sources.list.d/90-ming-mirror.list
+legacy_source=/etc/apt/sources.list
 official=https://deb.debian.org/debian
 security=https://security.debian.org/debian-security
 timeout_seconds="${MING_APT_MIRROR_TIMEOUT:-4}"
@@ -76,6 +83,35 @@ candidates=(
 )
 
 mkdir -p "${state_dir}" /etc/apt/sources.list.d
+backup="${state_dir}/apt-source-backup.$$"
+install -d -m 0700 "${backup}"
+cp -a "${source_file}" "${backup}/90-ming-mirror.list" 2>/dev/null || true
+cp -a "${legacy_source}" "${backup}/sources.list" 2>/dev/null || true
+
+rollback() {
+    if [[ -e "${backup}/90-ming-mirror.list" ]]; then
+        cp -a "${backup}/90-ming-mirror.list" "${source_file}"
+    else
+        rm -f "${source_file}"
+    fi
+    if [[ -e "${backup}/sources.list" ]]; then
+        cp -a "${backup}/sources.list" "${legacy_source}"
+    fi
+    rm -rf "${backup}"
+}
+
+# RC3 and early RC4 wrote exactly three Debian lines to sources.list without
+# a marker. Migrate only that known template; leave every customised file
+# untouched so Ming never takes ownership of a user's repository choices.
+if [[ -f "${legacy_source}" ]] \
+   && [[ "$(grep -Ec '^[[:space:]]*deb[[:space:]]+https://(deb|security)[.]debian[.]org/' "${legacy_source}" 2>/dev/null || true)" == 3 ]] \
+   && [[ "$(grep -Ev '^[[:space:]]*(#.*)?$|^[[:space:]]*deb[[:space:]]+https://(deb|security)[.]debian[.]org/' "${legacy_source}" 2>/dev/null | wc -l)" == 0 ]]; then
+    cat > "${legacy_source}" << 'LEGACYMIGRATED'
+# Debian base repositories are managed in sources.list.d/90-ming-mirror.list.
+# User-added repositories in this file are never rewritten by Ming tools.
+LEGACYMIGRATED
+fi
+
 best=""
 best_ms=999999
 for candidate in "${candidates[@]}"; do
@@ -103,12 +139,20 @@ debian="${best%%|*}"
 security_url="${best##*|}"
 tmp="${source_file}.tmp.$$"
 cat > "${tmp}" << EOF
+# Managed by Ming OS. Use ming-apt-source-select to change this block.
 deb ${debian} ${suite} main contrib non-free non-free-firmware
 deb ${debian} ${suite}-updates main contrib non-free non-free-firmware
 deb ${security_url} ${suite}-security main contrib non-free non-free-firmware
 EOF
 if ! mv -f "${tmp}" "${source_file}"; then
     rm -f "${tmp}"
+    rollback
+    exit 1
+fi
+if ! apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15 \
+        -o Acquire::https::Timeout=15 >/tmp/ming-apt-source-select.log 2>&1; then
+    rollback
+    echo "镜像验证失败，已 rollback 到原软件源。" >&2
     exit 1
 fi
 python3 - "${state_file}" "${debian}" "${security_url}" "${best_ms}" <<'PY'
@@ -121,6 +165,7 @@ with open(path, "w", encoding="utf-8") as stream:
                "selected_at": datetime.now(timezone.utc).isoformat()}, stream)
     stream.write("\n")
 PY
+rm -rf "${backup}"
 printf '%s\n' "${debian}"
 MINGAPTSOURCE
     chmod 0755 /usr/local/sbin/ming-apt-source-select
@@ -1360,20 +1405,30 @@ read_timedatectl() {
 }
 
 print_status_json() {
-    local synchronized service network state
-    synchronized="$(read_timedatectl 5 show -p NTPSynchronized --value)"
+    local synchronized service network state timedate_error timedate_rc
+    timedate_error="$(timeout --foreground 5s timedatectl show \
+        -p NTPSynchronized --value 2>&1)"
+    timedate_rc=$?
+    synchronized="${timedate_error}"
     service="$(timeout --foreground 5s systemctl is-active systemd-timesyncd 2>/dev/null || true)"
     network="$(timeout --foreground 5s nm-online -q -t 4 >/dev/null 2>&1 && printf online || printf offline)"
-    case "${synchronized,,}" in
-        yes|true|1) state=synchronized ;;
-        *)
-            if [[ "${service}" == active || "${service}" == activating ]]; then
-                state=waiting
-            else
-                state=error
-            fi
-            ;;
-    esac
+    if (( timedate_rc != 0 )); then
+        if grep -Eqi 'dbus|system has not been booted|failed to connect to bus' \
+                <<<"${timedate_error}"; then
+            state=dbus_unavailable
+        else
+            state=failed
+        fi
+        synchronized=""
+    elif [[ "${synchronized,,}" =~ ^(yes|true|1)$ ]]; then
+        state=synced
+    elif [[ "${network}" != online ]]; then
+        state=waiting_network
+    elif [[ "${service}" != active && "${service}" != activating ]]; then
+        state=service_inactive
+    else
+        state=waiting_network
+    fi
     python3 - "${state}" "${synchronized}" "${service:-unknown}" "${network}" <<'PY'
 import json
 import sys
@@ -3142,16 +3197,26 @@ rm -f \
 for installer_entry in \
     "${target}"/home/*/.config/autostart/calamares-live.desktop \
     "${target}"/home/*/Desktop/calamares.desktop \
+    "${target}"/home/*/Desktop/calamares-install-debian.desktop \
     "${target}"/home/*/Desktop/install-debian.desktop \
     "${target}"/home/*/Desktop/"Install Debian.desktop" \
     "${target}"/home/*/Desktop/"Install Ming OS.desktop" \
     "${target}"/home/*/Desktop/"安装 Debian.desktop" \
+    "${target}"/home/*/桌面/calamares.desktop \
+    "${target}"/home/*/桌面/calamares-install-debian.desktop \
+    "${target}"/home/*/桌面/"Install Ming OS.desktop" \
+    "${target}"/home/*/桌面/"安装 Debian.desktop" \
     "${target}"/etc/skel/.config/autostart/calamares-live.desktop \
     "${target}"/etc/skel/Desktop/calamares.desktop \
+    "${target}"/etc/skel/Desktop/calamares-install-debian.desktop \
     "${target}"/etc/skel/Desktop/install-debian.desktop \
     "${target}"/etc/skel/Desktop/"Install Debian.desktop" \
     "${target}"/etc/skel/Desktop/"Install Ming OS.desktop" \
-    "${target}"/etc/skel/Desktop/"安装 Debian.desktop"; do
+    "${target}"/etc/skel/Desktop/"安装 Debian.desktop" \
+    "${target}"/etc/skel/桌面/calamares.desktop \
+    "${target}"/etc/skel/桌面/calamares-install-debian.desktop \
+    "${target}"/etc/skel/桌面/"Install Ming OS.desktop" \
+    "${target}"/etc/skel/桌面/"安装 Debian.desktop"; do
     [[ -e "${installer_entry}" ]] && rm -f "${installer_entry}" 2>/dev/null || true
 done
 
@@ -4943,14 +5008,6 @@ configure_boot_speed() {
     for svc in tracker-miner-fs-3.service tracker-extract-3.service tracker-writeback-3.service \
                tracker-miner-fs.service tracker-extract.service; do
         systemctl mask "${svc}" 2>/dev/null || true
-    done
-
-    # 应用商店后台刷新：延迟 90s，不阻塞第一屏
-    for svc in spark-store-refresh.service; do
-        if [[ -f "/usr/lib/systemd/system/${svc}" ]] || [[ -f "/etc/systemd/system/${svc}" ]]; then
-            mkdir -p "/etc/systemd/system/${svc}.d"
-            printf '[Service]\nExecStartPre=/bin/sleep 90\n' > "/etc/systemd/system/${svc}.d/delay.conf"
-        fi
     done
 
     # OTA 后台检查：延迟 120s

@@ -240,7 +240,7 @@ install_ming_shell_components() {
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-spark-wine-package.py ming-android-runtime.py ming-toolbox.py; do
+    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -282,10 +282,15 @@ MINGPACKAGEINSTALLER
     install -m 0755 "${asset_dir}/ming-appimage-installer.py" /usr/local/bin/ming-appimage-installer
     install -m 0755 "${asset_dir}/ming-wine-installer.py" /usr/local/bin/ming-wine-installer
     install -m 0755 "${asset_dir}/ming-wine-installer.py" "${lib_dir}/ming-wine-installer.py"
-    install -m 0755 "${asset_dir}/ming-spark-wine-package.py" /usr/local/bin/ming-spark-wine-package
     install -m 0755 "${asset_dir}/ming-android-runtime.py" /usr/local/bin/ming-android-runtime
     install -m 0755 "${asset_dir}/ming-android-runtime.py" "${lib_dir}/ming-android-runtime.py"
     install -m 0755 "${asset_dir}/ming-toolbox.py" /usr/local/bin/ming-toolbox
+    install -m 0755 "${asset_dir}/ming-store.py" /usr/local/bin/ming-store
+    install -m 0644 "${asset_dir}/ming-store-core.py" "${lib_dir}/ming-store-core.py"
+    install -m 0755 "${asset_dir}/ming-store-control.py" /usr/local/sbin/ming-store-control
+    install -d -m 0755 /usr/share/ming-os/store/catalog
+    install -m 0644 "${asset_dir}"/ming-store-catalog/*.json \
+        /usr/share/ming-os/store/catalog/
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
     # All GUI-triggered privileged operations cross one narrow, auditable
@@ -312,9 +317,14 @@ case "${route}" in
         }
         command=(/usr/local/sbin/ming-package-installer install "${package_file}")
         ;;
-    spark)
-        [[ "$#" -ge 1 ]] || { echo "星火应用请求缺少操作。" >&2; exit 2; }
-        command=(/usr/local/sbin/ming-spark-package-control "$@")
+    store)
+        [[ "$#" -eq 2 \
+            && ( "$1" == install || "$1" == update || "$1" == remove || "$1" == refresh ) \
+            && "$2" =~ ^[a-f0-9]{32}$ ]] || {
+            echo "Ming 应用商店请求无效。" >&2
+            exit 2
+        }
+        command=(/usr/local/sbin/ming-store-control "$1" "$2")
         ;;
     broadcom)
         [[ "$#" -eq 1 && ( "$1" == install || "$1" == restore ) ]] || {
@@ -356,6 +366,14 @@ if [[ ! -x "${command[0]}" ]]; then
     exit 127
 fi
 
+if [[ "$(id -u)" -ne 0 ]]; then
+    polkit_agent_pattern='lxpolkit|polkit-gnome-authentication-agent'
+    if ! pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1; then
+        echo "系统授权弹窗尚未就绪。请完成账户设置，注销并重新登录后再试。" >&2
+        exit 5
+    fi
+fi
+
 # Vendor hooks may already be running as root (for example from a package
 # maintainer action).  Do not nest pkexec in that case; desktop users still
 # cross the normal Polkit boundary below.
@@ -386,6 +404,26 @@ fi
 exit "${rc}"
 MINGAUTHORIZE
     chmod 0755 /usr/local/bin/ming-authorized-action
+
+    cat > /usr/share/polkit-1/actions/org.mingos.store.manage.policy << 'MINGSTOREPOLICY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Ming OS</vendor>
+  <action id="org.mingos.store.manage">
+    <description>Install, update or remove verified software with Ming Store</description>
+    <message>需要管理员授权才能更改系统软件。</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-store-control</annotate>
+  </action>
+</policyconfig>
+MINGSTOREPOLICY
+    chmod 0644 /usr/share/polkit-1/actions/org.mingos.store.manage.policy
 
     cat > /usr/local/sbin/ming-android-runtime << 'MINGANDROIDROOT'
 #!/usr/bin/env bash
@@ -525,6 +563,40 @@ MINGTOOLBOXDESKTOP
         "/home/${MING_USER}/.local/share/applications/"
     chown "${MING_USER}:${MING_USER}" \
         "/home/${MING_USER}/.local/share/applications/ming-toolbox.desktop"
+
+    cat > /usr/share/applications/ming-store.desktop << 'MINGSTOREDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Ming 应用商店
+Name[zh_CN]=Ming 应用商店
+Comment=Search, install, update and remove verified software
+Comment[zh_CN]=搜索、安装、更新和卸载可信软件
+Exec=/usr/local/bin/ming-store
+Icon=ming-store
+Terminal=false
+Categories=System;PackageManager;
+StartupNotify=true
+MINGSTOREDESKTOP
+    cp /usr/share/applications/ming-store.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+
+    cat > /usr/share/applications/ming-store-local-deb.desktop << 'MINGSTOREDEBDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=使用 Ming 应用商店查看 DEB
+Name[zh_CN]=使用 Ming 应用商店查看 DEB
+Exec=/usr/local/bin/ming-store --local-deb %f
+Icon=ming-store
+Terminal=false
+MimeType=application/vnd.debian.binary-package;
+NoDisplay=true
+StartupNotify=true
+MINGSTOREDEBDESKTOP
+    cp /usr/share/applications/ming-store-local-deb.desktop \
+        "/home/${MING_USER}/.local/share/applications/"
+    chown "${MING_USER}:${MING_USER}" \
+        "/home/${MING_USER}/.local/share/applications/ming-store.desktop" \
+        "/home/${MING_USER}/.local/share/applications/ming-store-local-deb.desktop"
 
     cat > /usr/share/applications/ming-wine-installer.desktop << 'MINGWINEINSTALLDESKTOP'
 [Desktop Entry]
@@ -821,7 +893,7 @@ Name=安装 DEB 软件包
 Name[zh_CN]=安装 DEB 软件包
 Comment=验证并安装本地 Debian 软件包
 Comment[zh_CN]=验证并安装本地 Debian 软件包
-Exec=/usr/local/bin/ming-package-install-gui %f
+Exec=/usr/local/bin/ming-store --local-deb %f
 Icon=package-x-generic
 Terminal=false
 MimeType=application/vnd.debian.binary-package;
@@ -972,7 +1044,7 @@ remove_handler("Default Applications", "application/x-executable", "ming-appimag
 remove_handler("Added Associations", "application/x-executable", "ming-appimage-installer.desktop")
 config["Default Applications"]["inode/directory"] = "ming-files.desktop"
 config["Default Applications"]["application/x-gnome-saved-search"] = "ming-files.desktop"
-config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-package-installer.desktop"
+config["Default Applications"]["application/vnd.debian.binary-package"] = "ming-store-local-deb.desktop"
 config["Default Applications"]["application/x-appimage"] = "ming-appimage-installer.desktop"
 config["Default Applications"]["application/x-ms-dos-executable"] = "ming-wine-installer.desktop"
 config["Default Applications"]["application/x-msi"] = "ming-wine-installer.desktop"
@@ -1366,7 +1438,7 @@ STOREICON32
 STOREICON48
 
     # 应用商店图标 (48x48)
-    cat > "${icon_base}/48x48/apps/ming-app-store.svg" << STOREICON
+    cat > "${icon_base}/48x48/apps/ming-store.svg" << STOREICON
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
@@ -1524,7 +1596,7 @@ APPLIBICON
             [files]="ming-files"
             [terminal]="ming-terminal"
             [update]="ming-update-icon"
-            [store]="ming-app-store spark-store"
+            [store]="ming-store"
             [app-library]="ming-app-library"
             [wechat-mgr]="ming-wechat-manager wechat"
         )
@@ -1595,7 +1667,7 @@ TILESVG
         [control]="ming-control-center"
         [settings]="ming-settings"
         [security]="ming-security"
-        [store]="ming-app-store"
+        [store]="ming-store"
         [terminal]="ming-terminal"
         [update]="ming-update-icon"
     )
@@ -1784,7 +1856,7 @@ configure_ming_mint_dock_profile() {
         sed -i 's/^IconSize=.*/IconSize=40/' "${settings}"
         sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
         sed -i 's/^ZoomPercent=.*/ZoomPercent=148/' "${settings}"
-        sed -i 's/^Offset=.*/Offset=0/' "${settings}"
+        sed -i 's/^Offset=.*/Offset=12/' "${settings}"
         sed -i 's/^Theme=.*/Theme=Ming/' "${settings}"
     fi
     cat > "/usr/local/sbin/ming-mint-dock-profile" << 'MINGMINTDOCK'
@@ -1795,7 +1867,7 @@ settings="${HOME}/.config/plank/dock1/settings"
 sed -i -e 's/^IconSize=.*/IconSize=40/' \
        -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
        -e 's/^ZoomPercent=.*/ZoomPercent=148/' \
-       -e 's/^Offset=.*/Offset=0/' \
+       -e 's/^Offset=.*/Offset=12/' \
        -e 's/^Theme=.*/Theme=Ming/' "${settings}"
 MINGMINTDOCK
     chmod 0755 /usr/local/sbin/ming-mint-dock-profile
@@ -1811,7 +1883,7 @@ configure_ming_mint_desktop_icons() {
         [ming-terminal.desktop]=ming-terminal
         [ming-app-library.desktop]=ming-app-library
         [ming-update.desktop]=ming-update
-        [spark-store.desktop]=ming-store
+        [ming-store.desktop]=ming-store
         [xiahai-xiaoming.desktop]=ming-xiahai
     )
     local desktop_file icon
@@ -2690,15 +2762,15 @@ configure_plank_dock() {
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2640-legacy-centered
+# MingDockProfile=2641-responsive-centered
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
 Alignment=3
 #居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
-Offset=0
+Offset=12
 #图标大小（ming-scale 会按分辨率覆盖）
 IconSize=40
 #悬停放大开关
@@ -2757,9 +2829,6 @@ _plank_launcher() {
             ming-firefox)
                 [[ -f "${target_path}" ]] || target_path=/usr/share/applications/firefox-esr.desktop
                 ;;
-            spark-store)
-                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/ming-install-spark-store.desktop
-                ;;
         esac
         [[ -f "${target_path}" ]] || {
             echo "WARN: Dock target missing: ${target}" >&2
@@ -2799,7 +2868,7 @@ DRAWERDOCKITEM
 for launcher in \
     "ming-firefox:ming-firefox.desktop" \
     "ming-files:ming-files.desktop" \
-    "spark-store:spark-store.desktop" \
+    "ming-store:ming-store.desktop" \
     "ming-settings:ming-settings.desktop" \
     "ming-terminal:ming-terminal.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
@@ -2876,7 +2945,7 @@ APPS = [
     ('ming-app-library.desktop', 'ming-app-library', '应用库'),
     ('ming-files.desktop', 'files-icon', '文件'),
     ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
-    ('spark-store.desktop', 'spark-store', 'Spark'),
+    ('ming-store.desktop', 'ming-store', 'Ming 应用商店'),
     ('xiahai-xiaoming.desktop', 'xiahai-xiaoming', '小明 AI 助手'),
     ('ming-terminal.desktop', 'ming-terminal', '终端'),
 ]
@@ -3831,11 +3900,11 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2640-legacy-centered
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
+# MingDockProfile=2641-responsive-centered
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
-Offset=0
+Offset=12
 IconSize=40
 ZoomEnabled=true
 ZoomPercent=148
@@ -3898,12 +3967,15 @@ apply_plank_runtime_preferences() {
     zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
-    local screen_width
-    screen_width="$(xrandr --current 2>/dev/null | sed -n 's/.*current \([0-9][0-9]*\) x .*/\1/p' | head -n1)"
-    [[ "${screen_width}" =~ ^[0-9]+$ ]] || screen_width=1366
-    if (( screen_width <= 1152 )); then
+    local screen_width screen_height short_side
+    read -r screen_width screen_height < <(xrandr --current 2>/dev/null |
+        sed -n 's/.*current \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1 \2/p' | head -n1)
+    [[ "${screen_width:-}" =~ ^[0-9]+$ ]] || screen_width=1366
+    [[ "${screen_height:-}" =~ ^[0-9]+$ ]] || screen_height=768
+    (( screen_width < screen_height )) && short_side=${screen_width} || short_side=${screen_height}
+    if (( short_side <= 720 )); then
         icon_size=32
-    elif (( screen_width <= 1600 )); then
+    elif (( short_side <= 900 )); then
         icon_size=36
     else
         icon_size=40
@@ -3911,7 +3983,7 @@ apply_plank_runtime_preferences() {
     zoom_enabled=true
     zoom_percent=148
     offset=12
-    log "responsive Dock geometry: width=${screen_width}px icon_size=${icon_size}px offset=${offset}px zoom=${zoom_percent}%"
+    log "responsive Dock geometry: ${screen_width}x${screen_height} short=${short_side}px icon_size=${icon_size}px offset=${offset}px zoom=${zoom_percent}%"
     if [[ -f "${settings}" ]]; then
         sed -i -e "s/^IconSize=.*/IconSize=${icon_size}/" \
                -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
@@ -3947,11 +4019,11 @@ apply_plank_runtime_preferences() {
     fi
 }
 
-migrate_legacy_dock_profile() {
+migrate_responsive_dock_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2640-legacy-centered$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-responsive-centered$' "${settings}" 2>/dev/null && return 0
 
-    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;spark-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem'
+    local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
         sed -i "s|^DockItems=.*|DockItems=${dock_items}|" "${settings}" 2>/dev/null || true
     else
@@ -3978,9 +4050,9 @@ migrate_legacy_dock_profile() {
         printf 'Alignment=3\n' >>"${settings}"
     fi
     if grep -q '^Offset=' "${settings}"; then
-        sed -i "s/^Offset=.*/Offset=0/" "${settings}" 2>/dev/null || true
+        sed -i "s/^Offset=.*/Offset=12/" "${settings}" 2>/dev/null || true
     else
-        printf 'Offset=0\n' >>"${settings}"
+        printf 'Offset=12\n' >>"${settings}"
     fi
     if grep -q '^ItemsAlignment=' "${settings}"; then
         sed -i "s/^ItemsAlignment=.*/ItemsAlignment=3/" "${settings}" 2>/dev/null || true
@@ -3999,10 +4071,11 @@ migrate_legacy_dock_profile() {
     sed -i '/^# MingDockProfile=2641-macos-compact-glass-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-2$/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2640-legacy-centered\n' >>"${settings}"
+    sed -i '/^# MingDockProfile=/d' "${settings}" 2>/dev/null || true
+    printf '# MingDockProfile=2641-responsive-centered\n' >>"${settings}"
     find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
-    log "migrated Dock to the 26.4.0 legacy profile"
+    log "migrated Dock to the responsive RC4 profile"
 }
 
 ensure_plank_settings() {
@@ -4020,7 +4093,7 @@ ensure_plank_settings() {
         log "restored complete Plank settings profile"
     fi
     MING_PLANK_RELOAD_REQUIRED=0
-    migrate_legacy_dock_profile "${settings}"
+    migrate_responsive_dock_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
         sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
     else
@@ -4143,14 +4216,23 @@ repair_plank_stacking() {
     x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || return 1
 }
 
-avoid_covering_windows() {
-    local window_id
+reserve_bottom_workarea() {
+    local window_id geometry screen x y width height sx sy sw sh reserve
     window_id="$(plank_window_id)"
     valid_window_id "${window_id}" || return 0
-    if command -v xprop >/dev/null 2>&1; then
-        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT >/dev/null 2>&1 || true
-        x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT_PARTIAL >/dev/null 2>&1 || true
-    fi
+    command -v xprop >/dev/null 2>&1 || return 0
+    geometry="$(window_geometry "${window_id}")"
+    screen="$(screen_geometry)"
+    read -r x y width height <<<"${geometry}"
+    read -r sx sy sw sh <<<"${screen}"
+    [[ "${height:-}" =~ ^[0-9]+$ && "${sw:-}" =~ ^[0-9]+$ ]] || return 1
+    reserve=$((height + 12))
+    x11_call xprop -id "${window_id}" -f _NET_WM_STRUT 32c \
+        -set _NET_WM_STRUT "0, 0, 0, ${reserve}" >/dev/null 2>&1 || true
+    x11_call xprop -id "${window_id}" -f _NET_WM_STRUT_PARTIAL 32c \
+        -set _NET_WM_STRUT_PARTIAL \
+        "0, 0, 0, ${reserve}, 0, 0, 0, 0, 0, 0, 0, $((sw - 1))" \
+        >/dev/null 2>&1 || true
     repair_plank_stacking || log "could not keep Dock sticky across workspaces"
 }
 
@@ -4165,8 +4247,8 @@ diagnose_and_promote_stacking() {
     if ! window_has_property "${window_id}" '_NET_WM_STATE_ABOVE'; then
         [[ "${stacking_promotion_attempted_for}" == "${window_id}" ]] && return 0
         stacking_promotion_attempted_for="${window_id}"
-        log "not-above: ABOVE state is absent; reserving Dock workarea without forcing topmost"
-        avoid_covering_windows
+        log "not-above: ABOVE state is absent; preserving normal Dock workarea"
+        reserve_bottom_workarea
     fi
     return 0
 }
@@ -4202,7 +4284,7 @@ start_plank() {
     local reason
     reason="$(plank_health_reason)"
     if [[ "${reason}" == "healthy" ]]; then
-        avoid_covering_windows
+        reserve_bottom_workarea
         diagnose_and_promote_stacking
         return 0
     fi
@@ -4218,7 +4300,7 @@ start_plank() {
     for _ready_try in $(seq 1 32); do
         reason="$(plank_health_reason)"
         if [[ "${reason}" == "healthy" ]]; then
-            avoid_covering_windows
+            reserve_bottom_workarea
             diagnose_and_promote_stacking
             log "Plank recovery succeeded"
             return 0
@@ -4344,7 +4426,8 @@ lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
 picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
 drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
-dock_immersive_state=normal
+dock_immersive_state=unknown
+dock_immersive_window_id=""
 touch "${health_log}" 2>/dev/null || true
 
 # Image builds may provide a system-wide default.  An explicitly exported
@@ -4484,8 +4567,18 @@ valid_window_id() {
 
 dock_window_id() {
     command -v wmctrl >/dev/null 2>&1 || return 1
-    x11_call wmctrl -lx 2>/dev/null |
-        awk 'tolower($3) ~ /plank/ { print $1; exit }'
+    local candidate
+    while read -r candidate; do
+        valid_window_id "${candidate}" || continue
+        if command -v xprop >/dev/null 2>&1 \
+           && x11_call xprop -id "${candidate}" 2>/dev/null \
+                | grep -q '_NET_WM_WINDOW_TYPE_DOCK'; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done < <(x11_call wmctrl -lx 2>/dev/null |
+        awk 'tolower($3) ~ /plank/ { print $1 }')
+    return 1
 }
 
 window_has_ewmh_state() {
@@ -4496,46 +4589,141 @@ window_has_ewmh_state() {
         grep -q "${state}"
 }
 
-active_fullscreen_window() {
+active_window_id() {
     local active
     command -v xprop >/dev/null 2>&1 || return 1
     active="$(x11_call xprop -root _NET_ACTIVE_WINDOW 2>/dev/null |
         sed -n 's/.*\(0x[0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' | head -n1)"
     valid_window_id "${active}" || return 1
-    window_has_ewmh_state "${active}" '_NET_WM_STATE_FULLSCREEN'
+    printf '%s\n' "${active}"
 }
 
-drawer_window_visible() {
-    [[ -e "${drawer_state_file}" ]] && return 0
+transient_fullscreen_parent() {
+    local child="$1" parent="" depth
+    for depth in 1 2 3 4; do
+        parent="$(x11_call xprop -id "${child}" _NET_WM_TRANSIENT_FOR 2>/dev/null |
+            sed -n 's/.*\(0x[0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' | head -n1)"
+        valid_window_id "${parent}" || return 1
+        [[ "${parent}" != "${child}" ]] || return 1
+        window_has_ewmh_state "${parent}" '_NET_WM_STATE_FULLSCREEN' && return 0
+        child="${parent}"
+    done
+    return 1
+}
+
+current_workspace_fullscreen_window() {
+    local current_workspace="" window_id="" window_workspace="" window_state=""
+    command -v xprop >/dev/null 2>&1 || return 1
+    current_workspace="$(x11_call xprop -root _NET_CURRENT_DESKTOP 2>/dev/null |
+        sed -n 's/.*= *\([0-9][0-9]*\).*/\1/p' | head -n1)"
+    [[ "${current_workspace}" =~ ^[0-9]+$ ]] || return 1
+
+    while read -r window_id; do
+        valid_window_id "${window_id}" || continue
+        window_workspace="$(x11_call xprop -id "${window_id}" _NET_WM_DESKTOP 2>/dev/null |
+            sed -n 's/.*= *\([^ ,][^ ,]*\).*/\1/p' | head -n1)"
+        [[ "${window_workspace}" == "${current_workspace}" \
+           || "${window_workspace}" == "4294967295" \
+           || "${window_workspace}" == "0xffffffff" ]] || continue
+        window_state="$(x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null || true)"
+        [[ "${window_state}" == *'_NET_WM_STATE_FULLSCREEN'* ]] || continue
+        [[ "${window_state}" == *'_NET_WM_STATE_HIDDEN'* ]] && continue
+        return 0
+    done < <(x11_call xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null |
+        grep -oE '0[xX][0-9a-fA-F]+' || true)
+    return 1
+}
+
+active_fullscreen_window() {
+    local active
+    active="$(active_window_id 2>/dev/null || true)"
+    if valid_window_id "${active}"; then
+        window_has_ewmh_state "${active}" '_NET_WM_STATE_FULLSCREEN' && return 0
+        transient_fullscreen_parent "${active}" && return 0
+    fi
+    current_workspace_fullscreen_window
+}
+
+drawer_window_present() {
     command -v wmctrl >/dev/null 2>&1 || return 1
     x11_call wmctrl -lx 2>/dev/null |
         awk 'tolower($3) ~ /ming.?app.?drawer/ {found=1} END {exit !found}'
+}
+
+drawer_window_visible() {
+    local drawer_pid="" state_age=0 now=0 modified=0
+    drawer_window_present && return 0
+    [[ -r "${drawer_state_file}" ]] || return 1
+    read -r drawer_pid <"${drawer_state_file}" || drawer_pid=""
+    if [[ ! "${drawer_pid}" =~ ^[0-9]+$ ]] \
+       || ! kill -0 "${drawer_pid}" 2>/dev/null; then
+        rm -f "${drawer_state_file}" 2>/dev/null || true
+        return 1
+    fi
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    now="$(date +%s 2>/dev/null || printf '0')"
+    modified="$(stat -c %Y "${drawer_state_file}" 2>/dev/null || printf '0')"
+    [[ "${now}" =~ ^[0-9]+$ && "${modified}" =~ ^[0-9]+$ ]] \
+        && state_age=$((now - modified))
+    if (( state_age <= 2 )); then
+        return 0
+    fi
+    rm -f "${drawer_state_file}" 2>/dev/null || true
+    return 1
 }
 
 immersive_surface_active() {
     active_fullscreen_window || drawer_window_visible
 }
 
+reserve_bottom_workarea() {
+    local window_id geometry dimensions height screen_width reserve
+    window_id="$(dock_window_id 2>/dev/null || true)"
+    valid_window_id "${window_id}" || return 0
+    command -v xprop >/dev/null 2>&1 || return 0
+    geometry="$(x11_call wmctrl -lGx 2>/dev/null |
+        awk -v id="${window_id}" '$1 == id {print $6; exit}')"
+    dimensions="$(x11_call xrandr --current 2>/dev/null |
+        sed -n 's/.*current \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1 \2/p' |
+        head -n1)"
+    read -r screen_width _screen_height <<<"${dimensions}"
+    height="${geometry:-0}"
+    [[ "${height}" =~ ^[0-9]+$ && "${screen_width:-}" =~ ^[0-9]+$ ]] || return 0
+    reserve=$((height + 12))
+    x11_call xprop -id "${window_id}" -f _NET_WM_STRUT 32c \
+        -set _NET_WM_STRUT "0, 0, 0, ${reserve}" >/dev/null 2>&1 || true
+    x11_call xprop -id "${window_id}" -f _NET_WM_STRUT_PARTIAL 32c \
+        -set _NET_WM_STRUT_PARTIAL \
+        "0, 0, 0, ${reserve}, 0, 0, 0, 0, 0, 0, 0, $((screen_width - 1))" \
+        >/dev/null 2>&1 || true
+}
+
 apply_dock_immersive_state() {
     local desired=normal window_id
     immersive_surface_active && desired=immersive
-    [[ "${desired}" == "${dock_immersive_state}" ]] && return 0
     window_id="$(dock_window_id 2>/dev/null || true)"
-    valid_window_id "${window_id}" || {
-        dock_immersive_state="${desired}"
+    valid_window_id "${window_id}" || return 0
+    if [[ "${desired}" == normal \
+       && "${desired}" == "${dock_immersive_state}" \
+       && "${window_id}" == "${dock_immersive_window_id}" ]]; then
         return 0
-    }
+    fi
     if [[ "${desired}" == immersive ]]; then
-        x11_call wmctrl -i -r "${window_id}" -b add,hidden,below >/dev/null 2>&1 || true
+        if [[ "${desired}" != "${dock_immersive_state}" \
+           || "${window_id}" != "${dock_immersive_window_id}" ]]; then
+            x11_call wmctrl -i -r "${window_id}" -b add,hidden,below >/dev/null 2>&1 || true
+            log 'Dock lowered below fullscreen or application drawer'
+        fi
         x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT >/dev/null 2>&1 || true
         x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT_PARTIAL >/dev/null 2>&1 || true
-        log 'Dock lowered below fullscreen or application drawer'
     else
         x11_call wmctrl -i -r "${window_id}" -b remove,hidden,below >/dev/null 2>&1 || true
         x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || true
+        reserve_bottom_workarea
         log 'Dock restored after fullscreen or application drawer'
     fi
     dock_immersive_state="${desired}"
+    dock_immersive_window_id="${window_id}"
 }
 
 run_bounded() {
@@ -5772,13 +5960,10 @@ case "${1:-}" in
         info "界面显示已重新整理：壁纸、主题、Dock 和缩放会在几秒内刷新。"
         ;;
     repair-store)
-        if confirm "将修复或重新安装星火应用商店。这个过程需要联网。" "修复商店"; then
-            spark_deb="/usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb"
-            if /usr/local/bin/ming-package-install-gui "${spark_deb}" >/tmp/ming-spark.log 2>&1; then
-                info "星火应用商店已就绪。"
-            else
-                warn "商店修复没有完成。请先连接网络，再点一次“修复应用商店”。"
-            fi
+        if /usr/local/bin/ming-store --status >/tmp/ming-store-status.json 2>&1; then
+            info "Ming 应用商店组件正常。若软件列表未刷新，请在商店中点击“重试刷新”。"
+        else
+            warn "Ming 应用商店组件不完整，请通过系统更新修复。"
         fi
         ;;
     organize-desktop)
@@ -5844,8 +6029,8 @@ TASKS = [
     ('微信省内存启动', 'wechat', '适合 2GB 内存和群组较多账号', 'ming-helper wechat-light'),
     ('清理微信缓存', 'edit-clear', '释放微信缓存占用的磁盘和内存压力', 'ming-helper clean-wechat'),
     ('网页版微信', 'web-browser', '机器太卡时用浏览器聊天', 'ming-helper wechat-web'),
-    ('打开应用商店', 'ming-app-store', '按需安装常用软件', 'spark-store'),
-    ('修复应用商店', 'ming-app-store', '商店打不开时点这里', 'ming-helper repair-store'),
+    ('打开应用商店', 'ming-store', '按需安装可信软件', 'ming-store'),
+    ('检查应用商店', 'ming-store', '检查商店组件和软件来源', 'ming-helper repair-store'),
     ('应用库', 'ming-app-library', '搜索并打开所有已安装应用', 'ming-app-library'),
     ('整理桌面应用', 'application-x-executable', '把新软件自动放进桌面文件夹', 'ming-helper organize-desktop'),
     ('查看内存策略', 'utilities-system-monitor', '了解系统为低内存做了什么', 'ming-helper memory'),
@@ -6454,7 +6639,7 @@ This document is the current website and AI handoff source for Ming OS. Use `26.
 
 ## Positioning
 
-Ming OS 26.4.1 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It focuses on daily usability: local app installation, Spark Store launch behavior, Wi-Fi/Ethernet controls, audio, brightness, Bluetooth diagnostics, time sync, Live installation, and safe OTA upgrades from the 26.3 and 26.4 families.
+Ming OS 26.4.1 is a Debian 13 / Trixie based Chinese desktop system for older PCs and users who prefer buttons over terminal commands. It focuses on daily usability: verified software installation through Ming Store, Wi-Fi/Ethernet controls, audio, brightness, Bluetooth diagnostics, time sync, Live installation, and safe OTA upgrades from the 26.3 and 26.4 families.
 
 This is the version to use when producing:
 
@@ -6568,7 +6753,7 @@ Suggested structure:
 - Hero: title `Ming OS 26.4.1`; subtitle `给老旧电脑和中文用户的按钮化 Linux 桌面`; buttons `下载 ISO`, `查看 GitHub`, `检查 OTA`.
 - Trust strip: SHA256, size, release date, OTA ready status.
 - Three cards: `启动更稳`, `不用记命令`, `像手机一样整理应用`.
-- Feature section: optional WeChat/WPS installers, Spark Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
+- Feature section: optional WeChat/WPS installers, Ming Store, Ming Settings, Ming App Library, All Disks, OTA updates, Ming installer.
 - Download section: show official full ISO and GitHub split download instructions.
 - Compatibility section: Rufus ISO/DD, Ventoy/Live, BIOS/UEFI, VirtualBox.
 
@@ -8977,7 +9162,7 @@ show-commands=true
 show-recent=true
 recent-items-max=6
 show-category-names=true
-favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,spark-store.desktop,xiahai-xiaoming.desktop,ming-terminal.desktop
+favorites=ming-control-center.desktop,ming-files.desktop,ming-firefox.desktop,ming-store.desktop,xiahai-xiaoming.desktop,ming-terminal.desktop
 command-settings=ming-control-center
 command-lockscreen=ming-lock
 command-switchuser=dm-tool switch-to-greeter

@@ -1,0 +1,71 @@
+{
+  "schema": "ming.store.catalog.v1",
+  "source": {
+    "id": "vendor-official",
+    "name": "软件厂商官方来源",
+    "priority": 3,
+    "trust": "pinned-sha256"
+  },
+  "applications": [
+    {
+      "app_id": "wechat",
+      "name": "微信",
+      "package_name": "wechat",
+      "version": null,
+      "architectures": ["amd64"],
+      "install_method": "vendor-deb",
+      "dependencies": [],
+      "license": "厂商许可协议",
+      "vendor_homepage": "https://linux.weixin.qq.com/",
+      "identity": {"type": "sha256", "sha256": null},
+      "enabled": false,
+      "disabled_reason": "identity_not_pinned",
+      "protected": false
+    },
+    {
+      "app_id": "wps",
+      "name": "WPS Office",
+      "package_name": "wps-office",
+      "version": null,
+      "architectures": ["amd64"],
+      "install_method": "vendor-deb",
+      "dependencies": [],
+      "license": "厂商许可协议",
+      "vendor_homepage": "https://linux.wps.cn/",
+      "identity": {"type": "sha256", "sha256": null},
+      "enabled": false,
+      "disabled_reason": "identity_not_pinned",
+      "protected": false
+    },
+    {
+      "app_id": "qq",
+      "name": "QQ",
+      "package_name": "linuxqq",
+      "version": null,
+      "architectures": ["amd64"],
+      "install_method": "vendor-deb",
+      "dependencies": [],
+      "license": "厂商许可协议",
+      "vendor_homepage": "https://im.qq.com/linuxqq/index.shtml",
+      "identity": {"type": "sha256", "sha256": null},
+      "enabled": false,
+      "disabled_reason": "identity_not_pinned",
+      "protected": false
+    },
+    {
+      "app_id": "dingtalk",
+      "name": "钉钉",
+      "package_name": "com.alibabainc.dingtalk",
+      "version": null,
+      "architectures": ["amd64"],
+      "install_method": "vendor-deb",
+      "dependencies": [],
+      "license": "厂商许可协议",
+      "vendor_homepage": "https://www.dingtalk.com/",
+      "identity": {"type": "sha256", "sha256": null},
+      "enabled": false,
+      "disabled_reason": "identity_not_pinned",
+      "protected": false
+    }
+  ]
+}

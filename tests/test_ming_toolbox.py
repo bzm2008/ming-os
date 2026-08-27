@@ -71,13 +71,13 @@ class MingToolboxContracts(unittest.TestCase):
         self.assertIn("ming-toolbox", self.desktop_source)
         self.assertIn("Ming 工具箱", self.desktop_source)
 
-    def test_spark_routes_local_windows_files_to_toolbox(self):
-        self.assertIn("ming-toolbox --install-windows", self.apps_source)
-        self.assertIn(".exe", self.apps_source)
-        self.assertIn(".msi", self.apps_source)
-        self.assertIn("ming-spark-windows-install", self.apps_source)
-        self.assertIn('wine-install', self.apps_source)
-        self.assertNotIn("eval ", self.apps_source)
+    def test_windows_files_route_directly_to_toolbox_without_spark(self):
+        self.assertIn("ming-toolbox --install-windows %f", self.desktop_source)
+        self.assertIn("application/x-ms-dos-executable", self.desktop_source)
+        self.assertIn("application/x-msi", self.desktop_source)
+        self.assertNotIn("ming-spark-windows-install", self.apps_source)
+        self.assertNotIn("ming-spark-windows-install", self.desktop_source)
+        self.assertNotIn("eval ", self.desktop_source)
 
 
 if __name__ == "__main__":

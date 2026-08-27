@@ -1350,7 +1350,8 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
-        self.assertIn("Offset=0", self.desktop)
+        self.assertIn("Offset=12", self.desktop)
+        self.assertIn("MingDockProfile=2641-responsive-centered", self.desktop)
         self.assertIn('gsettings set "${plank_schema}" alignment center', self.desktop)
         self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.desktop)
         self.assertIn("UrgentBounceTime=420", self.desktop)
@@ -1559,14 +1560,15 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("logout", helper)
         self.assertNotIn("sudo ", helper)
 
-    def test_spark_requires_visible_process_or_window_before_success(self):
-        self.assertIn("wait_for_spark_ready", self.apps)
-        self.assertIn('kill -0 "${spark_pid}"', self.apps)
-        self.assertNotIn("pgrep -f '[/](spark-store)( |$)'", self.apps)
-        self.assertIn("wmctrl -lx", self.apps)
-        self.assertIn("Spark Store startup failed rc=", self.apps)
-        self.assertIn('[[ "${rc}" -ne 0 ]] || rc=1', self.apps)
-        self.assertNotIn("Spark Store launcher daemonized successfully", self.apps)
+    def test_store_requires_package_readback_before_success(self):
+        control = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
+        execute = control.split("    def _execute_request", 1)[1].split(
+            "    def execute", 1
+        )[0]
+        self.assertIn("state = self._installed(package)", execute)
+        self.assertIn("readback_failed", execute)
+        self.assertLess(execute.index('self._journal(request, "readback")'),
+                        execute.rindex('self._journal(request, "succeeded")'))
 
     def test_settings_and_app_library_fit_the_monitor_workarea(self):
         self.assertIn("responsive_window_size", self.settings)
@@ -1588,16 +1590,15 @@ class DesktopPolishContractTests(unittest.TestCase):
                          self.ota.index("auto_shutdown_update()")]
         self.assertIn("manifest=$(find_cached_manifest)", major)
 
-    def test_edge_and_spark_have_vm_safe_wrappers(self):
+    def test_firefox_has_a_vm_safe_wrapper_without_retired_spark_runtime(self):
         for marker in [
             "homepage=/usr/share/ming-os/homepage/index.html",
             'if [[ "$#" -eq 0 ]]',
-            "ming-spark-store",
-            "MING_SPARK_LOG",
-            "--ozone-platform=x11",
-            "--disable-gpu",
+            "firefox_args=(--new-instance)",
         ]:
             self.assertIn(marker, self.apps)
+        self.assertNotIn("ming-spark-store", self.apps)
+        self.assertNotIn("MING_SPARK_LOG", self.apps)
 
     def test_firefox_is_excluded_from_compositor_borders(self):
         self.assertGreaterEqual(self.desktop.count("class_g = 'Firefox'"), 3)

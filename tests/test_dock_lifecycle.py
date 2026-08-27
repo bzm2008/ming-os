@@ -105,22 +105,24 @@ class DockLifecycleContracts(unittest.TestCase):
             self.assertIn(marker, self.watchdog)
         self.assertIn("ming-refresh-dock-launchers", settings)
 
-    def test_legacy_dock_defaults_and_low_memory_zoom_policy_stay_consistent(self):
+    def test_responsive_dock_defaults_and_build_gate_stay_consistent(self):
         self.assertIn("IconSize=40", self.plank_settings)
         self.assertIn("ZoomEnabled=true", self.plank_settings)
         self.assertIn("ZoomPercent=148", self.plank_settings)
-        self.assertIn("MingDockProfile=2640-legacy-centered", self.plank_settings)
+        self.assertIn("MingDockProfile=2641-responsive-centered", self.plank_settings)
         self.assertIn("Alignment=3", self.plank_settings)
-        self.assertIn("Offset=0", self.plank_settings)
+        self.assertIn("Offset=12", self.plank_settings)
         self.assertIn("ZoomPercent=148", self.watchdog)
-        self.assertIn('sed -i "s/^ZoomEnabled=.*/ZoomEnabled=false/"', self.source)
-        self.assertIn('sed -i "s/^ZoomPercent=.*/ZoomPercent=100/"', self.source)
-        self.assertIn("dock_zoom=false", self.source)
+        for marker in ("short_side <= 720", "icon_size=32", "short_side <= 900", "icon_size=36", "icon_size=40"):
+            self.assertIn(marker, self.watchdog)
+        self.assertIn("offset=12", self.watchdog)
         self.assertIn('"ZoomPercent=148"', self.build)
+        self.assertIn('"MingDockProfile=2641-responsive-centered"', self.build)
+        self.assertIn('"Offset=12"', self.build)
         self.assertIn('"LaunchBounceTime=150"', self.build)
         self.assertIn('"ItemMoveTime=130"', self.build)
 
-    def test_legacy_dock_profile_is_applied_at_runtime(self):
+    def test_responsive_dock_profile_is_applied_at_runtime(self):
         for marker in (
             "IconSize=40",
             "TopPadding=6",
@@ -130,14 +132,15 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("command -v gsettings", self.watchdog)
         self.assertIn("net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/", self.watchdog)
         self.assertIn('gsettings set "${plank_schema}"', self.watchdog)
+        self.assertIn("offset=12", self.watchdog)
         self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.watchdog)
         self.assertIn("dconf write /net/launchpad/plank/docks/dock1/offset", self.watchdog)
         self.assertNotIn("apply_dock_bottom_margin", self.watchdog)
 
-    def test_macos_dock_forces_center_alignment_without_window_dragging(self):
+    def test_responsive_dock_forces_center_alignment_without_window_dragging(self):
         for marker in (
             "Alignment=3",
-            "Offset=0",
+            "Offset=12",
             "ItemsAlignment=3",
             'gsettings set "${plank_schema}" alignment center',
             'gsettings set "${plank_schema}" items-alignment center',
@@ -147,10 +150,10 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertNotIn("xdotool getactivewindow windowmove", self.watchdog)
         self.assertNotIn('wmctrl -i -r "${window_id}" -e', self.watchdog)
 
-    def test_legacy_profile_forces_theme_on_existing_live_user_settings(self):
+    def test_responsive_profile_forces_theme_on_existing_live_user_settings(self):
         self.assertIn("Theme=Ming", self.plank_settings)
         migrate = re.search(
-            r"migrate_legacy_dock_profile\(\) \{(.*?)\n\}",
+            r"migrate_responsive_dock_profile\(\) \{(.*?)\n\}",
             self.watchdog,
             re.S,
         ).group(1)
@@ -159,7 +162,7 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("FillStartColor=255;;255;;255;;226", self.source)
         self.assertIn("FillEndColor=242;;250;;247;;238", self.source)
 
-    def test_default_plank_theme_is_also_legacy(self):
+    def test_default_plank_theme_keeps_the_approved_ming_visuals(self):
         theme_setup = self.source[
             self.source.index("# Ming 26.4.0 / 26.3.2 经典底部 Dock 主题"):
             self.source.index("cat > /usr/local/bin/ming-dock", self.source.index("# Ming 26.4.0 / 26.3.2 经典底部 Dock 主题"))
@@ -191,7 +194,7 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertLess(start.index("apply_low_resource_plank_profile"), start.index("apply_plank_runtime_preferences"))
         self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("nohup plank"))
 
-    def test_legacy_theme_matches_2640_geometry_and_low_cost(self):
+    def test_ming_theme_keeps_compact_geometry_and_low_cost(self):
         for marker in (
             "TopRoundness=14",
             "BottomRoundness=0",
@@ -208,7 +211,7 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, self.source)
 
-    def test_legacy_theme_uses_plank_color_and_dock_sections(self):
+    def test_ming_theme_uses_plank_color_and_dock_sections(self):
         theme = self.source.split('cat > "${theme_dir}/dock.theme" << \'PLANKTHEME\'', 1)[1].split(
             "\nPLANKTHEME", 1
         )[0]
@@ -234,25 +237,25 @@ class DockLifecycleContracts(unittest.TestCase):
         ):
             self.assertIn(marker, dock_theme)
 
-    def test_legacy_profile_migrates_existing_frosted_users_once(self):
+    def test_responsive_profile_migrates_existing_frosted_users_once(self):
         for marker in (
-            "MingDockProfile=2640-legacy-centered",
-            "migrate_legacy_dock_profile",
+            "MingDockProfile=2641-responsive-centered",
+            "migrate_responsive_dock_profile",
             "DockItems=ming-settings.dockitem;;ming-app-library.dockitem",
             "s/^IconSize=.*/IconSize=40/",
             "s/^ZoomPercent=.*/ZoomPercent=148/",
-            "s/^Offset=.*/Offset=0/",
+            "s/^Offset=.*/Offset=12/",
         ):
             self.assertIn(marker, self.watchdog)
         self.assertIn("2641-glass-rail-2", self.watchdog)
         self.assertIn("2641-glass-rail-1", self.watchdog)
         self.assertIn("2641-macos-compact-glass-1", self.watchdog)
         self.assertIn("2641-macos-frosted-centered-1", self.watchdog)
-        self.assertIn("migrate_legacy_dock_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
+        self.assertIn("migrate_responsive_dock_profile", self.watchdog.split("ensure_plank_settings() {", 1)[1])
 
-    def test_plank_restarts_once_after_legacy_theme_migration(self):
+    def test_plank_restarts_once_after_responsive_profile_migration(self):
         migrate = re.search(
-            r"migrate_legacy_dock_profile\(\) \{(.*?)\n\}",
+            r"migrate_responsive_dock_profile\(\) \{(.*?)\n\}",
             self.watchdog,
             re.S,
         ).group(1)
@@ -263,12 +266,12 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertLess(start.index("apply_plank_runtime_preferences"), start.index("plank_health_reason"))
         self.assertLess(start.index("MING_PLANK_RELOAD_REQUIRED"), start.index("plank_health_reason"))
 
-    def test_dock_does_not_promote_itself_above_normal_windows(self):
+    def test_dock_reserves_normal_workarea_without_forcing_above(self):
         self.assertNotIn("dock+above", self.watchdog)
         self.assertNotIn("plank above", self.watchdog.lower())
-        self.assertIn("avoid_covering_windows", self.watchdog)
-        self.assertNotIn("reserve_bottom_workarea", self.watchdog)
-        self.assertIn("-remove _NET_WM_STRUT", self.watchdog)
+        self.assertIn("reserve_bottom_workarea", self.watchdog)
+        self.assertIn("_NET_WM_STRUT_PARTIAL", self.watchdog)
+        self.assertIn("-remove _NET_WM_STRUT", self.source)
 
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(
@@ -401,9 +404,11 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertNotIn("exec /usr/local/bin/ming-oobe-account", self.oobe)
 
     def test_generated_runtime_scripts_are_valid_bash(self):
+        git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+        shell = str(git_bash) if git_bash.is_file() else "bash"
         for script in (self.watchdog, self.healthcheck, self.session_healthcheck, self.oobe):
             result = subprocess.run(
-                ["bash", "-n"], input=script.replace("\r", "").encode("utf-8")
+                [shell, "-n"], input=script.replace("\r", "").encode("utf-8")
             )
             self.assertEqual(0, result.returncode)
 

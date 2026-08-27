@@ -25,6 +25,7 @@ def appearance_config_path():
 
 
 METRIC_MODES = ("memory", "cpu", "network")
+WIDGET_STATE_SCHEMA_VERSION = 2
 COMPACT_BATTERY_REFRESH_SECONDS = 60
 STATUS_SUMMARY_REFRESH_SECONDS = 45
 STATUS_RESOURCE_REFRESH_SECONDS = 30
@@ -52,13 +53,21 @@ def normalize_metric_mode(value):
 def load_widget_state(path=None):
     """Load compact state and the resource metric mode with safe defaults."""
     target = Path(path) if path else widget_state_path()
+    default = {
+        "schema_version": WIDGET_STATE_SCHEMA_VERSION,
+        "collapsed": True,
+        "metric_mode": "memory",
+    }
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"collapsed": False, "metric_mode": "memory"}
-    if not isinstance(data, dict) or not isinstance(data.get("collapsed"), bool):
-        return {"collapsed": False, "metric_mode": "memory"}
+        return default
+    if (not isinstance(data, dict)
+            or data.get("schema_version") != WIDGET_STATE_SCHEMA_VERSION
+            or not isinstance(data.get("collapsed"), bool)):
+        return default
     return {
+        "schema_version": WIDGET_STATE_SCHEMA_VERSION,
         "collapsed": data["collapsed"],
         "metric_mode": normalize_metric_mode(data.get("metric_mode")),
     }
@@ -73,6 +82,7 @@ def save_widget_state(collapsed, path=None, metric_mode="memory"):
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump({
+                "schema_version": WIDGET_STATE_SCHEMA_VERSION,
                 "collapsed": bool(collapsed),
                 "metric_mode": normalize_metric_mode(metric_mode),
             }, handle, ensure_ascii=False, sort_keys=True)
@@ -292,7 +302,8 @@ CORE_NAMES = {
     "ming-files.desktop",
     "ming-terminal.desktop",
     "ming-firefox.desktop",
-    "spark-store.desktop",
+    "ming-store.desktop",
+    "ming-toolbox.desktop",
     "xiahai-xiaoming.desktop",
     "Install Ming OS.desktop",
 }
@@ -300,14 +311,14 @@ DESKTOP_ORDER = {name: idx for idx, name in enumerate([
     "ming-settings.desktop",
     "ming-files.desktop",
     "ming-firefox.desktop",
-    "spark-store.desktop",
+    "ming-store.desktop",
+    "ming-toolbox.desktop",
     "xiahai-xiaoming.desktop",
     "Install Ming OS.desktop",
     "ming-terminal.desktop",
 ])}
 CORE_FALLBACKS = {
     "ming-firefox.desktop": ["firefox-esr.desktop", "firefox.desktop"],
-    "spark-store.desktop": ["ming-install-spark-store.desktop"],
 }
 CANONICAL_LAUNCHERS = {
     "ming-settings.desktop": "settings",
@@ -2113,7 +2124,7 @@ def window_is_ready(item):
     }
     aliases = {
         "ming-firefox": "firefox",
-        "spark-store": "spark-store",
+        "ming-store": "ming-store",
         "ming-files": "thunar",
         "ming-terminal": "xfce4-terminal",
         "ming-settings": "ming-settings",
@@ -3625,7 +3636,7 @@ class PhoneDesktop(Gtk.Window):
         self.render()
         self.watch_appearance_theme()
         GLib.timeout_add_seconds(2, self.mark_ready)
-        # Package installers and Spark trigger refresh_desktop immediately.  This
+        # Ming Store and package installers trigger refresh_desktop immediately. This
         # timer is only a bounded fallback for changes made outside Ming tools.
         GLib.timeout_add_seconds(15, self.refresh_if_apps_changed)
 

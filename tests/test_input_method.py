@@ -209,16 +209,17 @@ class MingInputMethodContractTests(unittest.TestCase):
                 "MING_RIME_FAIL": "1" if rime_fails else "0",
             }
             if os.name == "nt":
-                if not shutil.which("wsl.exe"):
+                git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+                if not git_bash.is_file():
                     self.skipTest("Bash runtime is unavailable on this Windows host")
 
-                def wsl_path(path):
+                def msys_path(path):
                     windows_path = str(path).replace("\\", "/")
                     self.assertRegex(windows_path, r"^[A-Za-z]:/")
-                    return "/mnt/%s/%s" % (windows_path[0].lower(), windows_path[3:])
+                    return "/%s/%s" % (windows_path[0].lower(), windows_path[3:])
 
-                wsl_env = {
-                    key: wsl_path(value)
+                bash_env = {
+                    key: msys_path(value)
                     for key, value in env.items()
                     if key
                     in {
@@ -230,23 +231,20 @@ class MingInputMethodContractTests(unittest.TestCase):
                         "MING_FCITX_STATE",
                     }
                 }
-                wsl_env["PATH"] = wsl_path(bin_dir) + ":/usr/bin:/bin"
-                wsl_env["MING_RIME_FAIL"] = env["MING_RIME_FAIL"]
+                bash_env["PATH"] = msys_path(bin_dir) + ":/usr/bin:/bin"
+                bash_env["MING_RIME_FAIL"] = env["MING_RIME_FAIL"]
+                process_env = os.environ.copy()
+                process_env.update(bash_env)
                 result = subprocess.run(
                     [
-                        "wsl.exe",
-                        "-d",
-                        "Ubuntu",
-                        "--",
-                        "env",
-                        *[f"{key}={value}" for key, value in wsl_env.items()],
-                        "bash",
-                        wsl_path(script),
+                        str(git_bash),
+                        msys_path(script),
                         *args,
                     ],
                     text=True,
                     capture_output=True,
                     check=False,
+                    env=process_env,
                 )
             else:
                 result = subprocess.run(

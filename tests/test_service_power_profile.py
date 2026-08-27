@@ -103,10 +103,11 @@ class ServiceProfileContracts(unittest.TestCase):
         for key in ("vm.swappiness=", "vm.vfs_cache_pressure=", "vm.page-cluster="):
             self.assertNotIn(key, static)
 
-    def test_spark_is_not_installed_or_refreshed_by_a_login_timer(self):
+    def test_store_is_not_installed_or_refreshed_by_a_login_timer(self):
         self.assertNotIn("ming-appstore-ready.service", APPS)
         self.assertNotIn("ming-appstore-ready.timer", APPS)
         self.assertNotIn("OnBootSec=90s", APPS)
+        self.assertNotIn("ming-spark-store", APPS)
 
     def test_modem_manager_is_disabled_by_default_but_has_explicit_opt_in(self):
         network = BASE.split("configure_network() {", 1)[1].split(

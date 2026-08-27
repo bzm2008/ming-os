@@ -581,16 +581,24 @@ def time_sync_snapshot():
     """Return the time helper's structured state without changing timezone."""
     rc, output, error = run([TIME_SYNC_HELPER, "status", "--json"], timeout=12)
     if rc != 0:
-        return {"state": "error", "error": error or output or "校时服务没有返回状态。"}
+        return {"state": "failed", "error": error or output or "校时服务没有返回状态。"}
     try:
         status = json.loads(output)
     except (TypeError, ValueError):
-        return {"state": "error", "error": "校时服务返回了无效状态。"}
+        return {"state": "failed", "error": "校时服务返回了无效状态。"}
     if not isinstance(status, dict):
-        return {"state": "error", "error": "校时服务返回了无效状态。"}
+        return {"state": "failed", "error": "校时服务返回了无效状态。"}
     state = status.get("state")
-    if state not in {"synchronized", "waiting", "error"}:
-        status["state"] = "error"
+    legacy_states = {
+        "synchronized": "synced",
+        "waiting": "waiting_network",
+        "error": "failed",
+    }
+    status["state"] = legacy_states.get(state, state)
+    if status["state"] not in {
+            "synced", "waiting_network", "service_inactive",
+            "dbus_unavailable", "failed"}:
+        status["state"] = "failed"
         status.setdefault("error", "校时服务返回了未知状态。")
     return status
 
@@ -759,6 +767,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.split = Adw.NavigationSplitView()
         self.split.set_collapsed(window_width < 760)
         self.set_content(self.split)
+        self.connect("notify::width", self.on_window_width_changed)
 
         # 左侧：分类列表
         sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -833,6 +842,7 @@ class MingSettings(Adw.ApplicationWindow):
             0,
         )
         self.nav_list.select_row(self.nav_list.get_row_at_index(initial_index))
+        GLib.idle_add(self.update_responsive_layout)
 
     def install_css(self):
         self.style_manager = Adw.StyleManager.get_default()
@@ -1077,13 +1087,38 @@ class MingSettings(Adw.ApplicationWindow):
         title = row.page_title
         if title not in self.page_built:
             placeholder = self.content_stack.get_child_by_name(title)
-            page_widget = self.page_builders[title]()
+            try:
+                page_widget = self.page_builders[title]()
+            except Exception as exc:
+                write_feedback_detail_log(
+                    "settings page builder failed (%s): %s" % (title, exc))
+                page_widget = self.build_page_error_placeholder(title)
             if placeholder:
                 self.content_stack.remove(placeholder)
             self.content_stack.add_named(page_widget, title)
             self.page_built.add(title)
         self.content_stack.set_visible_child_name(title)
         self.content_title.set_title(title)
+
+    def build_page_error_placeholder(self, title):
+        sc, box = self.page_scroller()
+        status = Adw.StatusPage()
+        status.set_icon_name("dialog-warning-symbolic")
+        status.set_title("此设置页面暂时无法显示")
+        status.set_description("%s 页面加载失败。请切换到其他页面后重试。" % title)
+        box.append(status)
+        return sc
+
+    def on_window_width_changed(self, *_args):
+        self.update_responsive_layout()
+
+    def update_responsive_layout(self):
+        width = self.get_width()
+        if width <= 0:
+            width = self.get_default_size()[0]
+        self.split.set_collapsed(width < 760)
+        self.nav_list.set_size_request(188 if width < 900 else 212, -1)
+        return False
 
     def navigate_to_page(self, title):
         """Open one existing settings page without duplicating its controls."""
@@ -1110,12 +1145,11 @@ class MingSettings(Adw.ApplicationWindow):
         sc = Gtk.ScrolledWindow()
         sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sc.set_vexpand(True)
-        clamp = Adw.Clamp(maximum_size=760, tightening_threshold=560)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_hexpand(True)
         box.set_margin_top(22); box.set_margin_bottom(28)
         box.set_margin_start(18); box.set_margin_end(18)
-        clamp.set_child(box)
-        sc.set_child(clamp)
+        sc.set_child(box)
         return sc, box
 
     def toast(self, text, severity=None):
@@ -1687,19 +1721,27 @@ class MingSettings(Adw.ApplicationWindow):
         return sc
 
     def apply_time_sync_status(self, status):
-        state = (status or {}).get("state", "error")
+        state = (status or {}).get("state", "failed")
         for css_class in ("ming-time-sync-ok", "ming-time-sync-waiting", "ming-time-sync-error"):
             self.time_sync_row.remove_css_class(css_class)
-        if state == "synchronized":
+        if state == "synced":
             self.time_sync_row.set_title("已自动校时")
             self.time_sync_row.set_subtitle("时间已通过网络同步。时区保持为您当前的选择。")
             self.time_sync_row.add_css_class("ming-time-sync-ok")
-        elif state == "waiting":
+        elif state == "waiting_network":
             self.time_sync_row.set_title("等待网络校时")
             network = (status or {}).get("network")
             self.time_sync_row.set_subtitle(
                 "网络连接后会自动重试。" if network != "online" else "网络已连接，正在等待校时服务响应。")
             self.time_sync_row.add_css_class("ming-time-sync-waiting")
+        elif state == "service_inactive":
+            self.time_sync_row.set_title("校时服务尚未启动")
+            self.time_sync_row.set_subtitle("可点击立即重试，系统会重新启动网络校时服务。")
+            self.time_sync_row.add_css_class("ming-time-sync-waiting")
+        elif state == "dbus_unavailable":
+            self.time_sync_row.set_title("系统通信服务暂不可用")
+            self.time_sync_row.set_subtitle("系统通信服务恢复后会自动重试校时；也可以重新登录后再试。")
+            self.time_sync_row.add_css_class("ming-time-sync-error")
         else:
             self.time_sync_row.set_title("校时服务异常")
             self.time_sync_row.set_subtitle(
@@ -1716,7 +1758,7 @@ class MingSettings(Adw.ApplicationWindow):
             if self.network_page.get_root() is not self:
                 return False
             self.time_sync_retry_btn.set_sensitive(True)
-            snapshot = status or {"state": "error", "error": error or "无法读取校时状态。"}
+            snapshot = status or {"state": "failed", "error": error or "无法读取校时状态。"}
             self.apply_time_sync_status(snapshot)
             return False
 
@@ -1733,7 +1775,7 @@ class MingSettings(Adw.ApplicationWindow):
             if rc != 0:
                 self.time_sync_retry_btn.set_sensitive(True)
                 self.apply_time_sync_status({
-                    "state": "error", "error": error or "校时服务未能启动。"})
+                    "state": "failed", "error": error or "校时服务未能启动。"})
                 return False
             self.refresh_time_sync_status()
             return False
@@ -2352,6 +2394,11 @@ class MingSettings(Adw.ApplicationWindow):
         restore = Gtk.Button(label="恢复默认壁纸")
         restore.connect("clicked", lambda _button: self.apply_appearance(["--wallpaper", "default"]))
         appearance.add(self.button_row("壁纸", "恢复当前 26.4.0 兼容的默认壁纸。", restore))
+        choose_wallpaper = Gtk.Button(label="选择本地图片")
+        choose_wallpaper.connect("clicked", self.on_choose_wallpaper)
+        appearance.add(self.button_row(
+            "自定义壁纸", "支持静态 PNG、JPG 和 JPEG 图片，应用后会读取确认。",
+            choose_wallpaper))
 
         pointer = Adw.PreferencesGroup(
             title="鼠标与触控板", description="直接读取并应用设备支持的 libinput 设置；虚拟机没有指针设备时会明确提示。")
@@ -2419,6 +2466,69 @@ class MingSettings(Adw.ApplicationWindow):
             return False
         run_capture_async(self.appearance_command("apply", *arguments, "--json"),
                           timeout=15, on_done=done)
+
+    @staticmethod
+    def wallpaper_file_filter():
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name("PNG 或 JPEG 图片")
+        for pattern in ("*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG", "*.JPEG"):
+            image_filter.add_pattern(pattern)
+        return image_filter
+
+    def on_choose_wallpaper(self, _button):
+        image_filter = self.wallpaper_file_filter()
+        if hasattr(Gtk, "FileDialog"):
+            dialog = Gtk.FileDialog(title="选择壁纸")
+            filters = Gio.ListStore.new(Gtk.FileFilter)
+            filters.append(image_filter)
+            dialog.set_filters(filters)
+            dialog.open(self, None, self.on_wallpaper_file_dialog_done)
+            return
+        dialog = Gtk.FileChooserNative.new(
+            "选择壁纸", self, Gtk.FileChooserAction.OPEN, "选择", "取消")
+        dialog.add_filter(image_filter)
+        dialog.connect("response", self.on_wallpaper_file_chooser_response)
+        dialog.show()
+
+    def on_wallpaper_file_dialog_done(self, dialog, result):
+        try:
+            selected = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        self.import_custom_wallpaper(selected.get_path() if selected else "")
+
+    def on_wallpaper_file_chooser_response(self, dialog, response):
+        selected = dialog.get_file() if response == Gtk.ResponseType.ACCEPT else None
+        dialog.destroy()
+        if selected:
+            self.import_custom_wallpaper(selected.get_path())
+
+    def import_custom_wallpaper(self, path):
+        path = str(path or "")
+        if (not os.path.isfile(path)
+                or os.path.splitext(path)[1].lower() not in WALLPAPER_IMAGE_SUFFIXES):
+            self.toast("请选择可读取的 PNG、JPG 或 JPEG 图片。", "warning")
+            return
+        self.appearance_loading = True
+
+        def done(rc, output, error):
+            if rc != 0:
+                self.toast(error or output or "自定义壁纸未能应用。", "warning")
+            else:
+                try:
+                    readback = json.loads(output)
+                except (TypeError, ValueError):
+                    readback = {}
+                if not isinstance(readback, dict) or not readback.get("wallpaper"):
+                    self.toast("壁纸已导入，但状态读回失败。", "warning")
+                else:
+                    self.toast("自定义壁纸已应用。", "info")
+            self.refresh_appearance_status()
+            return False
+
+        run_capture_async(
+            self.appearance_command("import-wallpaper", path, "--json"),
+            timeout=20, on_done=done)
 
     def refresh_pointer_status(self):
         generation = self.pointer_probe_state.begin()

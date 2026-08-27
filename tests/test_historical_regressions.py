@@ -1,8 +1,5 @@
 import pathlib
 import re
-import os
-import subprocess
-import tempfile
 import unittest
 
 
@@ -11,74 +8,61 @@ APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
+FINALIZE = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
+STORE_CORE = (ROOT / "assets" / "ming-store-core.py").read_text(encoding="utf-8")
+STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 
 
 class HistoricalRegressionContracts(unittest.TestCase):
-    def test_spark_pass_auth_always_uses_authorization_bridge(self):
-        caller = APPS.split(
-            "cat > /opt/durapps/spark-store/bin/store-helper/pass-auth.sh << 'MINGSPARKPASSAUTH'",
-            1,
-        )[1].split("MINGSPARKPASSAUTH", 1)[0]
-        self.assertIn("ming-authorized-action spark", caller)
-        self.assertNotIn("exec /usr/local/sbin/ming-spark-package-control", caller)
+    def test_store_operations_always_use_the_authorization_bridge(self):
+        self.assertIn(
+            '"/usr/local/bin/ming-authorized-action", "store", action',
+            STORE,
+        )
+        bridge = DESKTOP.split(
+            "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'", 1
+        )[1].split("MINGAUTHORIZE", 1)[0]
+        self.assertIn("store)", bridge)
+        self.assertIn('command=(/usr/local/sbin/ming-store-control "$1" "$2")', bridge)
+        self.assertNotIn("eval ", bridge)
 
-    def test_spark_refresh_preserves_the_graphical_session_environment(self):
-        control = APPS.split(
-            "cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'",
-            1,
-        )[1].split("MINGSPARKCONTROL", 1)[0]
-        refresh = control.split("refresh_desktop() {", 1)[1].split("\n}\n\nverify_packages_installed", 1)[0]
-        self.assertIn('runuser -u "$target_user" -- env', refresh)
-        self.assertIn('DBUS_SESSION_BUS_ADDRESS=', refresh)
+    def test_store_refresh_preserves_the_graphical_session_environment(self):
+        refresh = STORE_CONTROL.split("    def _refresh_desktop", 1)[1].split(
+            "    @staticmethod", 1
+        )[0]
+        self.assertIn('"runuser", "-u", user_name, "--", "env"', refresh)
+        self.assertIn('"XDG_RUNTIME_DIR=" + str(runtime)', refresh)
 
-    def test_spark_installs_a_scoped_aria2_download_proxy(self):
-        self.assertIn("ming-spark-aria2c", APPS)
-        self.assertIn("failure_class", APPS)
-        self.assertIn("MING_SPARK_ARIA2C", APPS)
-        self.assertIn("mirror_count", APPS)
+    def test_store_downloader_is_https_only_retriable_and_hash_verified(self):
+        downloader = STORE_CORE.split("class SecureDownloader", 1)[1].split(
+            "def default_catalog", 1
+        )[0]
+        self.assertIn("attempts=3", downloader)
+        self.assertIn('parsed.scheme != "https"', downloader)
+        self.assertIn("hashlib.sha256", downloader)
+        self.assertIn("IntegrityError", downloader)
+        self.assertIn("Range", downloader)
 
-    def test_spark_download_proxy_is_used_by_vendor_download_path(self):
-        self.assertIn("MING_SPARK_ARIA2C", APPS)
-        self.assertIn("/usr/local/libexec/ming-spark-aria2c", APPS)
-        self.assertIn("PATH=", APPS)
+    def test_store_root_helper_resolves_provider_instead_of_accepting_a_url(self):
+        execute = STORE_CONTROL.split("    def _execute_request", 1)[1].split(
+            "    def execute", 1
+        )[0]
+        self.assertIn("provider = self._provider(request)", execute)
+        self.assertIn("resolved = provider.resolve(request.app_id)", execute)
+        self.assertNotIn("request.url", execute)
+        self.assertNotIn("shell=True", execute)
 
-    def test_spark_download_proxy_retries_and_records_failure_class(self):
-        marker = "cat > /usr/local/libexec/ming-spark-aria2c << 'MINGSPARKARIA2C'"
-        wrapper = APPS.split(marker, 1)[1].split("MINGSPARKARIA2C", 1)[0]
-        git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
-        self.assertTrue(git_bash.is_file())
-        with tempfile.TemporaryDirectory(prefix="ming-spark-aria2c-test-") as tempdir:
-            root = pathlib.Path(tempdir)
-            fake = root / "aria2c"
-            fake.write_text(
-                "#!/usr/bin/env bash\n"
-                "echo 'TLS handshake failed' >&2\n"
-                "exit 22\n",
-                encoding="utf-8",
-            )
-            fake.chmod(0o755)
-            log = root / "download.jsonl"
-            script = root / "ming-spark-aria2c"
-            script.write_text(
-                wrapper.replace("real=/usr/bin/aria2c", f"real={str(fake).replace(chr(92), '/')}")
-                .replace("log=/var/log/ming-spark-download.jsonl", f"log={str(log).replace(chr(92), '/') }"),
-                encoding="utf-8",
-                newline="\n",
-            )
-            script.chmod(0o755)
-            result = subprocess.run(
-                [str(git_bash), str(script).replace("\\", "/"), "https://mirror.example/app.deb"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=20,
-                env={**os.environ, "PATH": str(root) + os.pathsep + os.environ.get("PATH", "")},
-            )
-            self.assertNotEqual(0, result.returncode)
-            record = log.read_text(encoding="utf-8").strip()
-            self.assertIn('"attempts": 2', record)
-            self.assertIn('"failure_class": "tls"', record)
+    def test_spark_upgrade_cleanup_keeps_historical_installed_apps(self):
+        cleanup = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn("apt-get remove --no-auto-remove", cleanup)
+        self.assertNotRegex(cleanup, r"apt-get\s+(?:-\S+\s+)*autoremove")
+        self.assertNotRegex(cleanup, r"(?m)^[ \t]*(?:rm|find)\b[^\n]*/opt/apps")
+        self.assertIn("do not touch /opt/apps", cleanup.lower())
+        self.assertIn('require_absent(residue, "Spark/APM residue")', BUILD)
 
     def test_collapsed_widget_hides_and_zeroes_expanded_content(self):
         state = PHONE.split("def apply_collapsed_state", 1)[1].split(
@@ -112,11 +96,12 @@ class HistoricalRegressionContracts(unittest.TestCase):
         self.assertNotIn("zoom_percent=125\n", watchdog)
         self.assertNotIn('theme="Ming-Mint"', watchdog)
 
-    def test_dock_build_profile_starts_with_legacy_ming_geometry(self):
+    def test_dock_build_profile_starts_with_responsive_ming_geometry(self):
         profile = DESKTOP.split("configure_ming_mint_dock_profile() {", 1)[1].split(
             "configure_ming_mint_desktop_icons()", 1)[0]
         self.assertIn("IconSize=40", profile)
         self.assertIn("ZoomPercent=148", profile)
+        self.assertIn("Offset=12", profile)
         self.assertIn("Theme=Ming", profile)
         self.assertNotIn("Theme=Ming-Mint", profile)
 

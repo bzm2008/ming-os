@@ -1,8 +1,5 @@
-import hashlib
 import json
 import pathlib
-import subprocess
-import tempfile
 import unittest
 
 
@@ -10,6 +7,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+FINALIZE = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
+STORE_CORE = (ROOT / "assets" / "ming-store-core.py").read_text(encoding="utf-8")
+STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 
 
 def heredoc(source, declaration, marker):
@@ -54,158 +55,95 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             wechat.index("audio-repair-call"),
         )
 
-    def test_spark_repair_uses_the_verified_local_deb_and_refreshes_launchers(self):
-        installer = heredoc(
-            APPS,
-            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
-            "SPARKINSTALL",
-        )
-        self.assertIn("ming-package-installer install", installer)
-        self.assertIn("ming-phone-desktop --sync", installer)
-        self.assertIn("sha256sum -c", installer)
-        self.assertIn("/usr/share/ming-os/vendor/spark-store", installer)
-        self.assertIn("target_user=", installer)
-        self.assertIn("getent passwd", installer)
-        self.assertNotIn("gitee.com/api", installer)
-        self.assertNotIn("wget", installer)
-        self.assertNotIn("curl", installer)
+    def test_ming_store_assets_are_deployed_and_catalogs_are_machine_readable(self):
+        for asset in ("ming-store.py", "ming-store-core.py", "ming-store-control.py"):
+            self.assertIn(asset, DESKTOP)
+        for source_id in ("ming-official", "debian-apt", "vendor-official"):
+            catalog = json.loads((
+                ROOT / "assets" / "ming-store-catalog" / (source_id + ".json")
+            ).read_text(encoding="utf-8"))
+            self.assertEqual("ming.store.catalog.v1", catalog["schema"])
+            self.assertEqual(source_id, catalog["source"]["id"])
 
-    def test_spark_system_launcher_is_trusted_for_the_launch_broker(self):
-        finalize = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
-        receipt = finalize[finalize.index("seed_trusted_desktop_receipts"):
-                           finalize.index("# Keep the shipped desktop intentional")]
-        self.assertIn('"spark-store.desktop"', receipt)
+    def test_ming_store_system_launcher_is_trusted_for_the_launch_broker(self):
+        receipt = FINALIZE[FINALIZE.index("seed_trusted_desktop_receipts"):
+                           FINALIZE.index("# Keep the shipped desktop intentional")]
+        self.assertIn('"ming-store.desktop"', receipt)
 
-    def test_spark_desktop_and_dock_use_the_same_verified_launch_path(self):
-        self.assertIn("Exec=/usr/local/bin/ming-spark-store", APPS)
-        self.assertIn('"spark-store:spark-store.desktop"', DESKTOP)
+    def test_ming_store_desktop_and_dock_use_the_same_verified_launch_path(self):
+        self.assertIn("Exec=/usr/local/bin/ming-store", DESKTOP)
+        self.assertIn('"ming-store:ming-store.desktop"', DESKTOP)
         self.assertIn("exec_line=\"/usr/local/bin/ming-launch --desktop-file", DESKTOP)
 
-    def test_spark_wrapper_requires_process_or_window_readiness_before_success(self):
-        wrapper = heredoc(APPS, "cat > /usr/local/bin/ming-spark-store << 'MINGSPARK'", "MINGSPARK")
-        self.assertIn("wait_for_spark_ready", wrapper)
-        self.assertIn("spark_window_visible", wrapper)
-        self.assertIn("[[ \"${rc}\" -ne 0 ]] || rc=1", wrapper)
-        self.assertNotIn("daemonized successfully", wrapper)
+    def test_store_transaction_requires_install_readback_before_success(self):
+        execute = STORE_CONTROL.split("    def _execute_request", 1)[1].split(
+            "    def execute", 1
+        )[0]
+        self.assertIn('self._journal(request, "readback")', execute)
+        self.assertIn("state = self._installed(package)", execute)
+        self.assertIn('state["version"] != version', execute)
+        self.assertIn('self._journal(request, "succeeded")', execute)
+        self.assertLess(execute.index('self._journal(request, "readback")'),
+                        execute.rindex('self._journal(request, "succeeded")'))
 
-    def test_spark_is_a_verified_build_asset_and_runtime_repair_never_downloads_it(self):
-        app_store = APPS.split("install_app_store() {", 1)[1].split("\n}", 1)[0]
-        installer = heredoc(
-            APPS,
-            "cat > /usr/local/bin/ming-install-spark-store << 'SPARKINSTALL'",
-            "SPARKINSTALL",
-        )
-        expected_sha256 = "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55"
-        self.assertIn("spark-store_5.2.1.0_amd64.deb", app_store)
-        self.assertIn(expected_sha256, app_store)
-        self.assertIn("sha256sum -c", app_store)
-        self.assertIn("/usr/share/ming-os/vendor/spark-store", installer)
-        self.assertIn(expected_sha256, installer)
-        self.assertNotIn("gitee.com/api", installer)
-        self.assertNotIn("wget", installer)
-        self.assertNotIn("curl", installer)
-        self.assertIn(
-            "Exec=/usr/local/bin/ming-package-install-gui /usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb",
-            APPS,
-        )
+    def test_vendor_catalog_stays_disabled_until_version_url_and_hash_are_pinned(self):
+        catalog = json.loads((
+            ROOT / "assets" / "ming-store-catalog" / "vendor-official.json"
+        ).read_text(encoding="utf-8"))
+        for item in catalog["applications"]:
+            self.assertFalse(item["enabled"])
+            self.assertEqual("identity_not_pinned", item["disabled_reason"])
+        resolve = STORE_CORE.split("class VendorOfficialProvider", 1)[1].split(
+            "class DebianAptProvider", 1
+        )[0]
+        self.assertIn('url.startswith("https://")', resolve)
+        self.assertIn("SHA256.fullmatch", resolve)
 
-    def test_spark_bundle_has_a_machine_readable_source_receipt_and_expected_hash(self):
-        bundle = ROOT / "assets" / "vendor" / "spark-store" / "spark-store_5.2.1.0_amd64.deb"
-        receipt = ROOT / "assets" / "vendor" / "spark-store" / "receipt.json"
-        self.assertTrue(bundle.is_file())
-        self.assertTrue(receipt.is_file())
-        metadata = json.loads(receipt.read_text(encoding="utf-8"))
-        self.assertEqual("5.2.1.0", metadata["version"])
-        self.assertEqual("spark-store_5.2.1.0_amd64.deb", metadata["asset"])
-        self.assertEqual(
-            "https://gitee.com/spark-store-project/spark-store/releases/download/5.2.1.0/spark-store_5.2.1.0_amd64.deb",
-            metadata["source_url"],
+    def test_store_privileged_actions_use_the_ming_allowlisted_helper(self):
+        self.assertIn("org.mingos.store.manage", DESKTOP)
+        self.assertIn("/usr/local/sbin/ming-store-control", DESKTOP)
+        bridge = heredoc(
+            DESKTOP,
+            "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'",
+            "MINGAUTHORIZE",
         )
-        self.assertEqual(
-            "88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55",
-            hashlib.sha256(bundle.read_bytes()).hexdigest().upper(),
-        )
+        self.assertIn("store)", bridge)
+        self.assertNotIn("eval ", bridge)
+        self.assertNotIn("sh -c", bridge)
 
-    def test_spark_privileged_actions_use_the_ming_allowlisted_helper(self):
-        self.assertIn("ming-spark-package-control", APPS)
-        self.assertIn("org.ming.spark.package-control", APPS)
-        self.assertIn("auth_admin_keep", APPS)
-        self.assertIn("MING_SPARK_PACKAGE_PATTERN", APPS)
-        self.assertNotIn("eval ", heredoc(
-            APPS,
-            "cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'",
-            "MINGSPARKCONTROL",
-        ))
-
-    def test_spark_vendor_root_policies_are_replaced_with_ming_policy(self):
-        install = APPS.split("install_app_store() {", 1)[1].split(
-            "\n# ======================== 附加实用工具", 1)[0]
-        self.assertIn("store.spark-app.spark-store.policy", install)
-        self.assertIn("store.spark-app.ssinstall.policy", install)
-        self.assertIn("ming-spark-package-control", install)
-        self.assertNotIn("<allow_active>yes</allow_active>", install)
-
-    def test_apm_backend_is_disabled_when_upstream_version_is_too_old(self):
-        status = heredoc(
-            APPS,
-            "cat > /usr/local/bin/ming-spark-backend-status << 'MINGSPARKSTATUS'",
-            "MINGSPARKSTATUS",
+    def test_store_polkit_policy_disables_any_and_inactive_callers(self):
+        policy = heredoc(
+            DESKTOP,
+            "cat > /usr/share/polkit-1/actions/org.mingos.store.manage.policy << 'MINGSTOREPOLICY'",
+            "MINGSTOREPOLICY",
         )
-        self.assertIn("APM_MIN_VERSION=1.2.2", status)
-        self.assertIn("dpkg --compare-versions", status)
-        self.assertIn("APM 后端版本过低", status)
-        self.assertIn("--json", status)
+        self.assertIn("<allow_any>no</allow_any>", policy)
+        self.assertIn("<allow_inactive>no</allow_inactive>", policy)
+        self.assertIn("<allow_active>auth_admin_keep</allow_active>", policy)
 
-    def test_spark_control_rejects_shell_metacharacters_and_unknown_actions(self):
-        control = heredoc(
-            APPS,
-            "cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'",
-            "MINGSPARKCONTROL",
-        )
-        self.assertRegex(control, r"\[A-Za-z0-9\]\[A-Za-z0-9.+-\]\{0,127\}")
-        self.assertIn("install|remove|refresh|status", control)
-        for token in ("eval ", "bash -c", "sh -c"):
-            self.assertNotIn(token, control)
+    def test_store_control_rejects_unknown_actions_and_arbitrary_arguments(self):
+        self.assertIn('ALLOWED_ACTIONS = ("install", "update", "remove", "refresh")', STORE_CONTROL)
+        self.assertIn("REQUEST_ID.fullmatch(request_id)", STORE_CONTROL)
+        self.assertIn("parser.add_argument(\"request_id\")", STORE_CONTROL)
+        for token in ("eval ", "shell=True", "bash -c", "sh -c"):
+            self.assertNotIn(token, STORE_CONTROL)
 
-    def test_apm_actions_require_the_ace_runtime_as_well_as_apm(self):
-        control = heredoc(
-            APPS,
-            "cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'",
-            "MINGSPARKCONTROL",
-        )
-        apm_branch = control.split("    apm)", 1)[1].split("    *)", 1)[0]
-        self.assertIn("ace_backend_ready", control)
-        self.assertIn("ace_backend_ready", apm_branch)
-        self.assertIn("APM/ACE 后端未就绪", apm_branch)
+    def test_retired_spark_apm_and_ace_are_not_deployed(self):
+        for marker in (
+            "ming-spark-package-control", "ming-spark-backend-status",
+            "ming-spark-aria2c", "MINGSPARKPASSAUTH",
+        ):
+            self.assertNotIn(marker, APPS)
+        self.assertIn('require_absent(residue, "Spark/APM residue")', BUILD)
 
-    def test_apm_root_helper_allows_only_mutating_package_actions(self):
-        control = heredoc(
-            APPS,
-            "cat > /usr/local/sbin/ming-spark-package-control << 'MINGSPARKCONTROL'",
-            "MINGSPARKCONTROL",
-        )
-        apm_branch = control.split("    apm)", 1)[1].split("    *)", 1)[0]
-        self.assertIn("install|remove|ssinstall", apm_branch)
-        for action in ("start", "launch", "list", "search", "show"):
-            self.assertNotIn(action, apm_branch)
-        caller = heredoc(
-            APPS,
-            "cat > \"$spark_shell_caller\" << 'MINGSPARKCALLER'",
-            "MINGSPARKCALLER",
-        )
-        self.assertIn("list|search|show|start|launch", caller)
-        self.assertIn('exec /usr/bin/apm "$subaction" "$@"', caller)
-
-    def test_spark_pass_auth_never_executes_an_arbitrary_vendor_command(self):
-        pass_auth = heredoc(
-            APPS,
-            "cat > /opt/durapps/spark-store/bin/store-helper/pass-auth.sh << 'MINGSPARKPASSAUTH'",
-            "MINGSPARKPASSAUTH",
-        )
-        self.assertIn("/opt/spark-store/bin/extras/shell-caller.sh", pass_auth)
-        self.assertIn("/opt/spark-store/extras/shell-caller.sh", pass_auth)
-        self.assertNotIn('exec "$@"', pass_auth)
-        self.assertNotIn('exec pkexec "$@"', pass_auth)
+    def test_spark_upgrade_cleanup_does_not_remove_historical_apps_or_data(self):
+        cleanup = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn("apt-get remove --no-auto-remove", cleanup)
+        self.assertNotRegex(cleanup, r"(?m)^[ \t]*(?:rm|find)\b[^\n]*/opt/apps")
+        self.assertIn("do not touch /opt/apps", cleanup.lower())
+        self.assertNotRegex(cleanup, r"apt-get\s+(?:-\S+\s+)*autoremove")
 
     def test_official_wechat_download_uses_the_same_verified_local_deb_path(self):
         installer = heredoc(
@@ -248,10 +186,10 @@ class MultimediaRuntimeContracts(unittest.TestCase):
     def test_ming_helper_install_actions_do_not_use_sudo_fallbacks(self):
         helper = heredoc(DESKTOP, "cat > /usr/local/bin/ming-helper << 'MINGHELPER'", "MINGHELPER")
         self.assertIn("/usr/local/bin/ming-install-wechat", helper)
-        self.assertIn("/usr/local/bin/ming-package-install-gui", helper)
-        self.assertIn("spark-store_5.2.1.0_amd64.deb", helper)
+        self.assertIn("/usr/local/bin/ming-store --status", helper)
+        self.assertIn("repair-store", helper)
         self.assertNotIn("sudo /usr/local/bin/ming-install-wechat", helper)
-        self.assertNotIn("sudo /usr/local/bin/ming-install-spark-store", helper)
+        self.assertNotIn("ming-install-spark-store", helper)
 
     def test_wechat_launcher_uses_only_dpkg_owned_strict_desktop_entries(self):
         wrapper = heredoc(APPS, "cat > /usr/local/bin/ming-wechat << 'WECHATWRAP'", "WECHATWRAP")
@@ -268,16 +206,14 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertNotIn("command -v wechat", wrapper)
         self.assertNotIn("command -v weixin", wrapper)
 
-    def test_build_gate_requires_audio_and_local_package_helpers(self):
+    def test_build_gate_requires_audio_local_package_and_store_helpers(self):
         validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("usr/local/bin/ming-audio-session", validator)
         self.assertIn("usr/local/sbin/ming-package-installer", validator)
-        self.assertIn("usr/share/ming-os/vendor/spark-store/spark-store_5.2.1.0_amd64.deb", validator)
-        self.assertIn("88AE82CE4E487FF0E1F7172CC089BDC50332D5ABF8183DDAE4B9E6650CAC2D55", validator)
-        self.assertNotIn("spark_asset.read_bytes()", validator)
-        self.assertIn("usr/local/sbin/ming-spark-package-control", validator)
-        self.assertIn("usr/local/bin/ming-spark-backend-status", validator)
-        self.assertIn("org.ming.spark.package-control.policy", validator)
+        self.assertIn("usr/local/lib/ming-os/ming-store-core.py", validator)
+        self.assertIn("usr/local/sbin/ming-store-control", validator)
+        self.assertIn("org.mingos.store.manage.policy", validator)
+        self.assertIn('require_absent(residue, "Spark/APM residue")', validator)
 
 
 if __name__ == "__main__":

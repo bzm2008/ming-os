@@ -13,6 +13,8 @@ SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 APPEARANCE = (ROOT / "assets" / "ming-appearance-control.py").read_text(encoding="utf-8")
 PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
+STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 
 
 def heredoc(source, opener, marker):
@@ -20,15 +22,17 @@ def heredoc(source, opener, marker):
 
 
 class Rc3DockContracts(unittest.TestCase):
-    def test_dock_uses_legacy_2640_geometry_and_does_not_reserve_fullscreen_workarea(self):
+    def test_dock_uses_responsive_rc4_geometry_and_releases_fullscreen_workarea(self):
         settings = DESKTOP.split("cat > \"${plank_dir}/settings\" << 'PLANKSETTINGS'", 1)[1].split(
             "PLANKSETTINGS", 1
         )[0]
         self.assertIn("IconSize=40", settings)
         self.assertIn("ZoomPercent=148", settings)
-        self.assertIn("MingDockProfile=2640-legacy-centered", settings)
+        self.assertIn("MingDockProfile=2641-responsive-centered", settings)
+        self.assertIn("Offset=12", settings)
         self.assertNotIn("VisualBottomGap=18", settings)
-        self.assertNotIn("reserve_bottom_workarea", DESKTOP)
+        self.assertIn("reserve_bottom_workarea", DESKTOP)
+        self.assertIn("-remove _NET_WM_STRUT_PARTIAL", DESKTOP)
 
     def test_bios_cold_boot_cannot_restore_retired_custom_dock(self):
         health = heredoc(
@@ -340,28 +344,22 @@ class Rc3PicomReadabilityContracts(unittest.TestCase):
             self.assertRegex(profile, r"dock\s*=\s*\{[^}]*opacity\s*=\s*0\.92;")
 
 
-class Rc3SparkContracts(unittest.TestCase):
-    def test_live_spark_install_has_explicit_installed_system_message(self):
-        self.assertIn("Live 模式", APPS)
-        self.assertIn("请先安装 Ming OS", APPS)
+class Rc4StoreContracts(unittest.TestCase):
+    def test_live_store_install_has_explicit_installed_system_message(self):
+        self.assertIn("Live 模式只能浏览", STORE)
+        self.assertIn("请先安装系统并完成账户设置", STORE)
 
-    def test_spark_install_reads_back_package_state_and_refreshes_result(self):
-        self.assertIn("dpkg-query", APPS)
-        self.assertIn("installed", APPS)
-        self.assertIn("refresh", APPS)
+    def test_store_install_reads_back_exact_package_version(self):
+        install = STORE_CONTROL.split('if action in ("install", "update"):', 1)[1].split(
+            'elif action == "remove":', 1
+        )[0]
+        self.assertIn("dpkg-query", STORE_CONTROL)
+        self.assertIn("state = self._installed(package)", install)
+        self.assertIn('state["version"] != version', install)
 
-    def test_apm_install_uses_apm_readback_without_host_dpkg_query(self):
-        start = APPS.index("    apm)\n")
-        branch = APPS[start:APPS.index("\n    *)\n", start)]
-        install = branch.split('/usr/bin/apm "$subaction" "$@"', 1)[1]
-        self.assertIn("verify_apm_installed", branch)
-        self.assertIn('/usr/bin/apm list --installed', APPS)
-        self.assertIn("sed 's/\\x1b\\[[0-9;]*m//g'", APPS)
-        self.assertIn("printf '%s\\n'", APPS)
-        self.assertNotIn("sed 's/\\\\x1b\\\\[[0-9;]*m//g'", APPS)
-        self.assertNotIn("printf '%s\\\\n'", APPS)
-        self.assertNotIn("verify_packages_installed", branch)
-        self.assertNotIn("dpkg-query", install)
+    def test_spark_apm_and_ace_runtime_are_retired(self):
+        for marker in ("ming-spark-store", "ming-spark-package-control", "ming-spark-backend-status"):
+            self.assertNotIn(marker, APPS)
 
 
 class Rc3StatusWidgetContracts(unittest.TestCase):

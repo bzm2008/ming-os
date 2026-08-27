@@ -1,0 +1,10 @@
+{
+  "schema": "ming.store.catalog.v1",
+  "source": {
+    "id": "ming-official",
+    "name": "Ming 官方软件",
+    "priority": 1,
+    "trust": "minisign-required"
+  },
+  "applications": []
+}

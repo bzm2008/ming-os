@@ -28,7 +28,8 @@ readonly DESKTOP_LAUNCHERS=(
     "ming-settings.desktop"
     "ming-files.desktop"
     "ming-firefox.desktop"
-    "spark-store.desktop"
+    "ming-store.desktop"
+    "ming-toolbox.desktop"
     "xiahai-xiaoming.desktop"
     "ming-terminal.desktop"
     "Install Ming OS.desktop"
@@ -61,7 +62,7 @@ seed_trusted_desktop_receipts() {
     install -d -m 0755 "${receipt_dir}"
     for launcher in \
         "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
-        "ming-firefox.desktop" "ming-terminal.desktop" "spark-store.desktop" "xiahai-xiaoming.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "ming-store.desktop" "ming-toolbox.desktop" "xiahai-xiaoming.desktop" \
         "Install Ming OS.desktop"; do
         source="/usr/share/applications/${launcher}"
         [[ -f "${source}" ]] || continue
@@ -116,8 +117,8 @@ copy_default_launcher() {
             [[ -f "${source}" ]] || source="/usr/share/applications/firefox-esr.desktop"
             [[ -f "${source}" ]] || source="/usr/share/applications/firefox.desktop"
             ;;
-        spark-store.desktop)
-            [[ -f "${source}" ]] || source="/usr/share/applications/ming-install-spark-store.desktop"
+        ming-toolbox.desktop)
+            [[ -f "${source}" ]] || source="/usr/share/applications/ming-toolbox.desktop"
             ;;
     esac
 
@@ -165,7 +166,9 @@ constrain_default_desktop() {
           "/etc/skel/.config/ming-os/desktop-generated-manifest.json" 2>/dev/null || true
 
     reset_desktop_dir "${USER_HOME}/Desktop" "${MING_USER}:${MING_USER}"
+    reset_desktop_dir "${USER_HOME}/桌面" "${MING_USER}:${MING_USER}"
     reset_desktop_dir "/etc/skel/Desktop" "root:root"
+    reset_desktop_dir "/etc/skel/桌面" "root:root"
 }
 
 repair_default_user_ownership() {
@@ -209,29 +212,38 @@ X-GNOME-Autostart-enabled=false
 PANELDISABLED
 }
 
-normalize_spark_update_notifier_unit() {
-    local unit="/usr/lib/systemd/system/spark-update-notifier.service"
-    [[ -f "${unit}" ]] || return 0
-
-    cat > "${unit}" << 'SPARKNOTIFIERUNIT'
-[Unit]
-Description=Spark Store update notifier
-After=apt-daily.service network.target network-online.target systemd-networkd.service NetworkManager.service connman.service
-StartLimitIntervalSec=1h
-StartLimitBurst=3
-
-[Service]
-Type=simple
-RemainAfterExit=yes
-ExecStart=/opt/durapps/spark-store/bin/update-upgrade/ss-update-notifier.sh
-Restart=on-failure
-RestartSec=15
-
-[Install]
-WantedBy=multi-user.target
-SPARKNOTIFIERUNIT
-    chown root:root "${unit}"
-    chmod 0644 "${unit}"
+retire_legacy_store_runtime() {
+    local package installed=()
+    systemctl disable --now spark-update-notifier.service \
+        spark-store-refresh.service 2>/dev/null || true
+    for package in spark-store apm cn.flamescion.bookworm-compatibility-mode; do
+        if dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null \
+            | grep -q '^ii '; then
+            installed+=("${package}")
+        fi
+    done
+    if (( ${#installed[@]} > 0 )); then
+        apt-get remove --no-auto-remove -y "${installed[@]}" || {
+            echo "[07_finalize][WARN] 旧应用商店组件暂未完全移除，将在下次升级重试" >&2
+        }
+    fi
+    rm -f /usr/share/polkit-1/actions/org.ming.spark.package-control.policy \
+        /usr/share/polkit-1/actions/store.spark-app.*.policy \
+        /usr/local/sbin/ming-spark-package-control \
+        /usr/local/bin/ming-spark-store \
+        /usr/local/bin/ming-spark-backend-status \
+        /usr/local/libexec/ming-spark-aria2c \
+        /etc/apt/preferences.d/90-ming-spark-store \
+        /usr/lib/systemd/system/spark-update-notifier.service \
+        /etc/systemd/system/spark-store-refresh.service 2>/dev/null || true
+    rm -f /usr/share/applications/spark-store.desktop \
+        /usr/share/applications/ming-install-spark-store.desktop 2>/dev/null || true
+    find /home /etc/skel -xdev -type f \
+        \( -name 'spark-store.desktop' -o -name 'spark-store.dockitem' \) \
+        -delete 2>/dev/null || true
+    # Do not run autoremove and do not touch /opt/apps or user application
+    # data: software installed through the old store remains installed.
+    systemctl daemon-reload 2>/dev/null || true
 }
 
 # ======================== 同步用户配置到 /etc/skel ========================
@@ -325,7 +337,7 @@ main() {
     seed_trusted_desktop_receipts
     verify_other_os_detector || return 1
     disable_phone_panel_restore
-    normalize_spark_update_notifier_unit
+    retire_legacy_store_runtime
     seed_skel
     constrain_default_desktop
     repair_default_user_ownership

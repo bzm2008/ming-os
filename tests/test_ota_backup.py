@@ -14,6 +14,22 @@ BASE_MODULE = ROOT / "modules" / "01_base.sh"
 
 
 class OtaBackupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.name != "nt":
+            return
+        try:
+            probe = subprocess.run(
+                ["wsl.exe", "-d", "Ubuntu", "--", "sh", "-c", "test -r /etc/passwd"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise unittest.SkipTest("A working Linux runtime is unavailable")
+        if probe.returncode != 0:
+            raise unittest.SkipTest("A working Linux runtime is unavailable")
+
     @staticmethod
     def shell_path(value):
         value = str(value)
@@ -381,12 +397,17 @@ class OtaModuleContracts(unittest.TestCase):
         def shell_path(path):
             value = str(path)
             if os.name == "nt":
-                return f"/mnt/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
+                return f"/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
             return value
 
-        runner = ["wsl.exe"] if os.name == "nt" else []
+        runner = []
+        if os.name == "nt":
+            git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
+            if not git_bash.is_file():
+                self.skipTest("Git Bash is unavailable")
+            runner = [str(git_bash)]
         module_check = subprocess.run(
-            [*runner, "bash", "-n", shell_path(OTA_MODULE)],
+            [*runner, "-n", shell_path(OTA_MODULE)],
             text=True,
             capture_output=True,
             check=False,
@@ -400,14 +421,14 @@ class OtaModuleContracts(unittest.TestCase):
             cli_path = pathlib.Path(handle.name)
         try:
             cli_check = subprocess.run(
-                [*runner, "bash", "-n", shell_path(cli_path)],
+                [*runner, "-n", shell_path(cli_path)],
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(cli_check.returncode, 0, cli_check.stderr)
             help_check = subprocess.run(
-                [*runner, "env", "-u", "HOME", "bash", shell_path(cli_path), "help"],
+                [*runner, "-c", 'unset HOME; exec bash "$1" help', "ming-test", shell_path(cli_path)],
                 text=True,
                 encoding="utf-8",
                 errors="replace",
