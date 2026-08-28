@@ -3,8 +3,9 @@
 # Ming OS 模块 02: 应用软件安装
 # ============================================================================
 # 设计意图：
-#   安装桌面环境核心组件、中文输入法、Firefox、星火应用商店以及中文字体。
-#   WPS 与微信仅保留按需安装入口，不随 26.3.2 镜像预装。
+#   安装桌面环境核心组件、中文输入法、Firefox、Ming 应用商店以及中文字体。
+#   WPS 与微信由 Ming 应用商店按受信厂商来源按需安装，不在此模块写入
+#   vendor 下载器、pkexec 入口或独立桌面启动器。
 #   所有安装均在 chroot 中以非交互模式完成。
 #
 # 输入：
@@ -17,11 +18,10 @@
 #   1. 安装 Xfce 4.18 桌面环境与 Compton 合成器
 #   2. 安装 LightDM 显示管理器（自动登录）
 #   3. 安装 Firefox ESR 浏览器
-#   4. 写入 WPS Office 按需安装入口
-#   5. 写入微信按需安装入口与 Ming 低内存包装器
-#   6. 安装 Fcitx5 中文输入法
-#   7. 安装星火应用商店（按需安装应用，避免低内存设备后台批量装软件）
-#   8. 安装中文字体
+#   4. 写入微信按需安装入口与 Ming 低内存包装器
+#   5. 安装 Fcitx5 中文输入法
+#   6. 安装 Ming 应用商店（按需安装应用，避免低内存设备后台批量装软件）
+#   7. 安装中文字体
 # ============================================================================
 
 set -uo pipefail
@@ -871,97 +871,6 @@ padding:8vh 6vw;font-size:1.3rem;line-height:1.9}h1{color:#9FE7D7}a{color:#5fe0c
 </body></html>
 HELPPAGE
     echo "[02_apps] Browser homepage deployed."
-}
-
-# ======================== WPS Office ========================
-
-install_wps_office() {
-    local wps_page="https://linux.wps.cn/"
-    local wps_url=""
-    local wps_deb="/tmp/wps-office.deb"
-
-    wps_url=$(curl -fsSL "${wps_page}" 2>/dev/null \
-        | grep -oE "https://wps-linux-personal\.wpscdn\.cn/wps/download/ep/[^']+_amd64\.deb" \
-        | head -n1 || true)
-    if [[ -z "${wps_url}" ]]; then
-        wps_url="https://wps-linux-personal.wpscdn.cn/wps/download/ep/Linux2023/26885/wps-office_12.1.2.26885.AK.preread.sw.Personal_715971_amd64.deb"
-    fi
-
-    # WPS Linux downloads are protected by a public time+md5 token used by the
-    # official download page. Generate the same token so unattended ISO builds
-    # do not fail with "secure-time-arg-time-not-found".
-    local wps_path timestamp token
-    wps_path="${wps_url#https://wps-linux-personal.wpscdn.cn}"
-    timestamp="$(date +%s)"
-    token="$(printf '7f8faaaa468174dc1c9cd62e5f218a5b%s%s' "${wps_path}" "${timestamp}" | md5sum | awk '{print $1}')"
-    wps_url="${wps_url}?t=${timestamp}&k=${token}"
-
-    apt install -y --no-install-recommends \
-        libglu1-mesa \
-        libxslt1.1 \
-        libxml2
-
-    cat > /usr/local/bin/ming-install-wps << 'WPSINSTALL'
-#!/usr/bin/env bash
-set -euo pipefail
-
-wps_url="https://wps-linux-personal.wpscdn.cn/wps/download/ep/Linux2023/26885/wps-office_12.1.2.26885.AK.preread.sw.Personal_715971_amd64.deb"
-wps_deb="/tmp/wps-office.deb"
-wps_path="${wps_url#https://wps-linux-personal.wpscdn.cn}"
-timestamp="$(date +%s)"
-token="$(printf '7f8faaaa468174dc1c9cd62e5f218a5b%s%s' "${wps_path}" "${timestamp}" | md5sum | awk '{print $1}')"
-wps_url="${wps_url}?t=${timestamp}&k=${token}"
-
-echo "Downloading WPS Office..."
-wget -c --show-progress -O "${wps_deb}" "${wps_url}"
-apt install -y --no-install-recommends libglu1-mesa libxslt1.1 libxml2
-apt install -y "${wps_deb}" || apt install -y -f
-rm -f "${wps_deb}"
-
-if [[ -d /usr/share/fonts/wps-office ]]; then
-    ln -sf /usr/share/fonts/truetype/wqy /usr/share/fonts/wps-office/wqy 2>/dev/null || true
-fi
-
-echo "WPS Office installed."
-WPSINSTALL
-    chmod +x /usr/local/bin/ming-install-wps
-
-    cat > /usr/share/applications/ming-install-wps.desktop << 'WPSINSTALLDESKTOP'
-[Desktop Entry]
-Name=WPS Office
-Name[zh_CN]=WPS Office
-Comment=Download and install WPS Office on demand
-Comment[zh_CN]=按需下载安装 WPS Office
-Exec=pkexec /usr/local/bin/ming-install-wps
-Icon=wps-office
-Terminal=true
-Type=Application
-Categories=Office;
-StartupNotify=true
-WPSINSTALLDESKTOP
-
-    if [[ "${MING_PREINSTALL_WPS:-0}" != "1" ]]; then
-        echo "[02_apps] MING_PREINSTALL_WPS=0，跳过 WPS 预装，保留按需安装脚本。"
-        return 0
-    fi
-
-    echo "下载 WPS Office..."
-    if wget -q --show-progress -O "${wps_deb}" "${wps_url}" 2>/dev/null; then
-        # 用 apt-build 可执行包装器（非 shell 函数，timeout 可直接调用）
-        if ! timeout 900 /usr/local/sbin/apt-build install "${wps_deb}"; then
-            echo "[WARN] WPS Office 安装超时或失败，保留按需安装脚本。"
-            /usr/local/sbin/apt-build -f install || true
-        fi
-        rm -f "${wps_deb}"
-    else
-        echo "[WARN] WPS Office 下载失败，跳过。用户可后续从应用商店安装。"
-        rm -f "${wps_deb}"
-        return 0
-    fi
-
-    if [[ -d /usr/share/fonts/wps-office ]]; then
-        ln -sf /usr/share/fonts/truetype/wqy /usr/share/fonts/wps-office/wqy 2>/dev/null || true
-    fi
 }
 
 # ======================== 微信 (官方 Linux 版 + 低内存包装器) ========================
@@ -2230,7 +2139,6 @@ main() {
     run_required_step deploy_eyecare || return 1
 
     run_required_step install_firefox_esr || return 1
-    run_optional_step install_wps_office
     run_optional_step install_wechat
     # Legacy contract marker: run_required_step install_papyrus || return 1
     if [[ "${MING_SKIP_XIAHAI:-0}" == "1" ]]; then

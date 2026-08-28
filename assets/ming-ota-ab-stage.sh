@@ -6,6 +6,7 @@ TRANSACTION="${MING_OTA_AB_TRANSACTION:-/home/.ming-ota/ab-transaction.json}"
 MOUNT_ROOT="${MING_OTA_AB_MOUNT_ROOT:-/run/ming-ota-inactive}"
 ISO=""
 VERSION=""
+BUILD_ID=""
 CHECKSUM=""
 ISO_MOUNT=""
 TRUSTED_STAGING_ROOT="${MING_OTA_AB_TRUSTED_STAGING_ROOT:-/var/lib/ming-update/ab-staging}"
@@ -26,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --iso) [[ $# -ge 2 ]] || fail "--iso requires a path"; ISO="$2"; shift 2 ;;
         --version) [[ $# -ge 2 ]] || fail "--version requires a value"; VERSION="$2"; shift 2 ;;
+        --build-id) [[ $# -ge 2 ]] || fail "--build-id requires a value"; BUILD_ID="$2"; shift 2 ;;
         --checksum) [[ $# -ge 2 ]] || fail "--checksum requires a value"; CHECKSUM="$2"; shift 2 ;;
         *) fail "unknown argument: $1" ;;
     esac
@@ -35,6 +37,7 @@ done
 [[ -f "${ISO}" && ! -L "${ISO}" ]] || fail "ISO is missing or unsafe"
 [[ "${CHECKSUM}" =~ ^[A-Fa-f0-9]{64}$ ]] || fail "checksum is invalid"
 [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+){1,3}([A-Za-z0-9._-]*)?$ ]] || fail "version is invalid"
+[[ "${BUILD_ID}" =~ ^[0-9]+(\.[0-9]+){0,3}-rc[0-9]+-[A-Fa-f0-9]{7,40}-[0-9]{8}T[0-9]{6}Z$ ]] || fail "build id is invalid"
 command -v grub-reboot >/dev/null 2>&1 || fail "grub-reboot is unavailable"
 command -v grub-editenv >/dev/null 2>&1 || fail "grub-editenv is unavailable"
 ISO="$(readlink -f -- "${ISO}")" || fail "cannot resolve trusted ISO staging path"
@@ -119,9 +122,15 @@ ISO_MOUNT=""
 
 # Transaction command: ming-ota-ab begin
 ming-ota-ab --layout "${LAYOUT}" --transaction "${TRANSACTION}" begin \
-    --target "${target}" --version "${VERSION}" --checksum "${CHECKSUM}" >/dev/null
+    --target "${target}" --version "${VERSION}" --build-id "${BUILD_ID}" --checksum "${CHECKSUM}" >/dev/null
 grub-reboot "${target_entry}" || fail "grub-reboot failed for target slot"
-grub_env="$(grub-editenv list 2>/dev/null)" || fail "grub-editenv readback failed"
+grub_env="$(grub-editenv list 2>/dev/null)" || {
+    grub-editenv unset next_entry >/dev/null 2>&1 || true
+    fail "grub-editenv readback failed"
+}
 grep -Fqx "next_entry=${target_entry}" <<<"${grub_env}" \
-    || fail "GRUB next_entry readback failed"
+    || {
+        grub-editenv unset next_entry >/dev/null 2>&1 || true
+        fail "GRUB next_entry readback failed"
+    }
 printf 'staged slot %s; previous slot %s remains the default\n' "${target}" "${active}"

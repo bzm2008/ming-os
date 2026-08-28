@@ -93,6 +93,78 @@ class WineInstallerTests(unittest.TestCase):
             events = [json.loads(line) for line in installer.log_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual("install", events[-1]["action"])
 
+    def test_managed_install_uses_catalog_app_id_and_declared_launch_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "downloaded-artifact.exe"
+            source.write_bytes(b"MZ managed")
+            managed_id = "notepad-plus-plus-wine"
+            declared_target = "drive_c/Program Files/Notepad++/notepad++.exe"
+
+            def runner(command, timeout=20, env=None):
+                if len(command) > 1 and command[0] == "wine" and str(command[1]).lower().endswith(".exe"):
+                    target = pathlib.Path(env["WINEPREFIX"]) / declared_target
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"MZ app")
+                return 0, "", ""
+
+            installer = MODULE.WineInstaller(home=root / "home", runner=runner)
+            result = installer.install_managed(
+                source, managed_id, declared_target, "Notepad++（Wine）")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(managed_id, result["app_id"])
+            metadata_path = root / "home/.local/share/ming-wine/apps" / managed_id / "metadata.json"
+            self.assertTrue(metadata_path.is_file())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(managed_id, metadata["app_id"])
+            self.assertTrue(metadata["launch_target"].replace("\\", "/").endswith("Notepad++/notepad++.exe"))
+            self.assertFalse((root / "home/.local/share/ming-wine/apps/downloaded-artifact").exists())
+
+    def test_managed_install_rejects_missing_declared_launch_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "downloaded-artifact.exe"
+            source.write_bytes(b"MZ managed")
+
+            installer = MODULE.WineInstaller(
+                home=root / "home", runner=lambda *args, **kwargs: (0, "", ""))
+            result = installer.install_managed(
+                source, "managed-app", "drive_c/Program Files/Missing/app.exe", "Managed App")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("installed_needs_launcher", result["state"])
+            metadata = json.loads(
+                (root / "home/.local/share/ming-wine/apps/managed-app/metadata.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual("managed-app", metadata["app_id"])
+
+    def test_managed_install_persists_refresh_warning_in_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "downloaded-artifact.exe"
+            source.write_bytes(b"MZ managed")
+            declared_target = "drive_c/Program Files/Managed/managed.exe"
+
+            def runner(command, timeout=20, env=None):
+                if len(command) > 1 and command[0] == "wine" and str(command[1]).lower().endswith(".exe"):
+                    target = pathlib.Path(env["WINEPREFIX"]) / declared_target
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"MZ app")
+                return 0, "", ""
+
+            installer = MODULE.WineInstaller(home=root / "home", runner=runner)
+            installer._refresh_desktop = lambda: False
+            result = installer.install_managed(
+                source, "managed-app", declared_target, "Managed App")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("installed_with_refresh_warning", result["state"])
+            metadata = json.loads(
+                (root / "home/.local/share/ming-wine/apps/managed-app/metadata.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual("installed_with_refresh_warning", metadata["state"])
+
     def test_install_rejects_symlink_and_shell_like_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -132,6 +204,100 @@ class WineInstallerTests(unittest.TestCase):
             result = installer.install(source)
             self.assertEqual("win32", result["architecture"])
             self.assertEqual("win32", result["metadata"]["architecture"])
+
+    def test_managed_32_bit_install_fails_before_creating_prefix_without_wine32(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "legacy.exe"
+            payload = bytearray(b"MZ" + b"\0" * 0x3c)
+            payload[0x3c:0x3c + 4] = (0x40).to_bytes(4, "little")
+            payload.extend(b"\0" * (0x40 - len(payload)))
+            payload.extend(b"PE\0\0" + (0x14C).to_bytes(2, "little"))
+            source.write_bytes(payload)
+            installer = MODULE.WineInstaller(
+                home=root / "home", runner=lambda *_args, **_kwargs: (0, "", ""),
+                executable=lambda name: "/usr/bin/" + name if name == "wineboot" else None,
+            )
+
+            result = installer.install_managed(
+                source, "legacy-managed", "drive_c/Legacy/legacy.exe", "Legacy")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("runtime_32_unavailable", result["state"])
+            self.assertFalse((root / "home/.local/share/ming-wine/apps/legacy-managed").exists())
+
+    def test_managed_install_rejects_symlinked_application_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "managed.exe"
+            source.write_bytes(b"MZ managed")
+            apps_root = root / "home/.local/share/ming-wine/apps"
+            apps_root.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            app_dir = apps_root / "managed-app"
+            try:
+                app_dir.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+
+            installer = MODULE.WineInstaller(
+                home=root / "home", runner=lambda *_args, **_kwargs: (0, "", ""))
+            result = installer.install_managed(
+                source, "managed-app", "drive_c/Managed/managed.exe", "Managed")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("path_security_failed", result["state"])
+            self.assertFalse((outside / "metadata.json").exists())
+
+    def test_local_install_rejects_symlinked_application_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "home"
+            source = root / "managed.exe"
+            source.write_bytes(b"MZ managed")
+            installer = MODULE.WineInstaller(
+                home=home, runner=lambda *_args, **_kwargs: (0, "", ""))
+            apps_root = home / ".local/share/ming-wine/apps"
+            apps_root.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            app_dir = apps_root / installer.app_id(source)
+            try:
+                app_dir.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+
+            result = installer.install(source)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("path_security_failed", result["state"])
+            self.assertFalse((outside / "source").exists())
+            self.assertFalse((outside / "prefix").exists())
+
+    def test_local_install_rejects_symlinked_prefix_before_wine_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "home"
+            source = root / "managed.exe"
+            source.write_bytes(b"MZ managed")
+            installer = MODULE.WineInstaller(
+                home=home, runner=lambda *_args, **_kwargs: (0, "", ""))
+            app_dir = installer.app_dir_for(source)
+            (app_dir / "source").mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            try:
+                (app_dir / "prefix").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+
+            result = installer.install(source)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("path_security_failed", result["state"])
+            self.assertFalse((outside / "drive_c").exists())
+
 
     def test_uninstall_removes_only_the_application_prefix_and_desktop_entry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -243,6 +409,54 @@ class WineInstallerTests(unittest.TestCase):
             result = MODULE.WineInstaller(home=root).launch("demo")
             self.assertFalse(result["ok"])
             self.assertEqual("launch_target_invalid", result["state"])
+
+    def test_launch_rejects_symlinked_intermediate_prefix_component(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            app_dir = root / ".local/share/ming-wine/apps/demo"
+            prefix = app_dir / "prefix"
+            prefix.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            try:
+                (prefix / "drive_c").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+            target = prefix / "drive_c/Program Files/Demo/demo.exe"
+            (outside / "Program Files/Demo").mkdir(parents=True)
+            (outside / "Program Files/Demo/demo.exe").write_bytes(b"MZ")
+            (app_dir / "metadata.json").write_text(json.dumps({
+                "app_id": "demo", "state": "installed", "launch_target": str(target),
+                "architecture": "win64",
+            }), encoding="utf-8")
+
+            result = MODULE.WineInstaller(home=root).launch("demo")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("launch_target_invalid", result["state"])
+
+    def test_launch_rejects_symlinked_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            app_dir = root / ".local/share/ming-wine/apps/demo"
+            prefix = app_dir / "prefix"
+            target = prefix / "drive_c/Program Files/Demo/demo.exe"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"MZ")
+            outside = root / "metadata.json"
+            outside.write_text(json.dumps({
+                "app_id": "demo", "state": "installed", "launch_target": str(target),
+                "architecture": "win64",
+            }), encoding="utf-8")
+            try:
+                (app_dir / "metadata.json").symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+
+            result = MODULE.WineInstaller(home=root).launch("demo")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("not_installed", result["state"])
 
     def test_lab_options_apply_only_to_selected_application(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -36,6 +36,7 @@ readonly DEBIAN_MIRROR="${MING_DEBIAN_MIRROR:-https://deb.debian.org/debian/}"
 readonly DEBIAN_SECURITY_MIRROR="${MING_DEBIAN_SECURITY_MIRROR:-https://security.debian.org/debian-security}"
 readonly DEBIAN_SUITE="trixie"
 readonly DEBIAN_ARCHIVE_KEYRING="${MING_DEBIAN_ARCHIVE_KEYRING:-/usr/share/keyrings/debian-archive-keyring.gpg}"
+readonly SPARK_ARCHIVE_KEYRING="/etc/ming-os/store/spark-archive-keyring.gpg"
 readonly ARCH="amd64"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
@@ -56,6 +57,7 @@ readonly MING_USER="user"
 readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
 readonly MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI:-0}"
+readonly MING_OTA_RELEASE_PUBLIC_KEY_SOURCE="${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE:-}"
 readonly MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"
 readonly MING_CLEAN_ISO_WORKDIR="${MING_CLEAN_ISO_WORKDIR:-0}"
 readonly PROFILE_RELEASE="release"
@@ -66,6 +68,7 @@ export MING_SKIP_XIAHAI
 BUILD_SOURCE_COMMIT=""
 BUILD_TIME_UTC=""
 BUILD_ID=""
+XIAHAI_ASSET_SHA256=""
 MING_BUILD_PROFILE="${MING_BUILD_PROFILE:-release}"
 MING_BUILD_RESUME=0
 MING_BUILD_FRESH=0
@@ -179,6 +182,16 @@ parse_build_args() {
 configure_build_profile() {
     case "${MING_BUILD_PROFILE}" in
         "${PROFILE_RELEASE}")
+            if [[ "${MING_SKIP_XIAHAI}" == "1" ]]; then
+                log_error "release profile requires the verified Xiahai Xiaoming asset; use fast-test for an internal build without it"
+                return 2
+            fi
+            if [[ -z "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ||
+                  ! -s "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ||
+                  -L "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ]]; then
+                log_error "release profile requires MING_OTA_RELEASE_PUBLIC_KEY_SOURCE pointing to a verified OTA Minisign public key"
+                return 2
+            fi
             MING_BUILD_COMPRESSION="xz"
             MING_SQUASHFS_ARGS=(-comp xz -Xbcj x86 -b 1M -no-xattrs -no-progress)
             ;;
@@ -225,6 +238,10 @@ build_inputs_sha256() {
             sha256sum "${input_file}"
         done < <(find "${MODULES_DIR}" "${CONFIG_DIR}" "${SCRIPT_DIR}/assets" \
             -type f -print0 | sort -z)
+        printf 'xiahai-source=%s\0' \
+            "$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"
+        printf 'ota-release-key=%s\0' \
+            "$(file_sha256_or_missing "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}")"
         sha256sum "${SCRIPT_DIR}/build_onion_os.sh" \
             "${SCRIPT_DIR}/resume_build.sh" "${BUILD_STATE_HELPER}"
     } | sha256sum | awk '{print $1}'
@@ -273,7 +290,7 @@ initialize_build_state() {
         --build-suffix "${MING_OS_BUILD_SUFFIX}"
         --iso-volume-id "${ISO_VOLUME_ID}"
         --skip-xiahai "${MING_SKIP_XIAHAI}"
-        --xiahai-sha256 "$(file_sha256_or_missing "${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb")"
+        --xiahai-sha256 "$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"
         --keyring-sha256 "$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")"
         --apt-snapshot-sha256 "pending"
         --tools-fingerprint "$(tools_fingerprint)"
@@ -602,7 +619,8 @@ validate_apt_cache_manifest() {
         return 0
     fi
     if ! python3 - "${manifest}" "${DEBIAN_SUITE}" "${ARCH}" \
-        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" <<'PY'
+        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" \
+        "$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")" <<'PY'
 import json
 import pathlib
 import sys
@@ -618,12 +636,18 @@ raise SystemExit(
         and payload.get("arch") == sys.argv[3]
         and payload.get("mirror") == sys.argv[4]
         and payload.get("security_mirror") == sys.argv[5]
+        and payload.get("keyring_sha256") == sys.argv[6]
     )
     else 1
 )
 PY
     then
-        log_warn "APT cache invalid for this suite/arch; clearing only partial downloads"
+        log_warn "APT cache invalid: cache identity mismatch; discarding cached package archives and partial downloads"
+        # A .deb cached for another suite, architecture or mirror must never
+        # be reused merely because its filename still matches an apt request.
+        # Keep the directory itself so debootstrap can repopulate it atomically.
+        find "${APT_ARCHIVES_CACHE}" -type f \
+            \( -name '*.deb' -o -name '*.deb.*' \) -delete
         rm -rf "${APT_ARCHIVES_CACHE}/partial"
     fi
 }
@@ -634,7 +658,8 @@ write_apt_cache_manifest() {
     local partial="${APT_ARCHIVES_CACHE}/cache-manifest.json.partial"
     rm -f "${partial}"
     python3 - "${partial}" "${DEBIAN_SUITE}" "${ARCH}" \
-        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" <<'PY'
+        "${DEBIAN_MIRROR}" "${DEBIAN_SECURITY_MIRROR}" \
+        "$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")" <<'PY'
 import json
 import pathlib
 import sys
@@ -646,7 +671,8 @@ pathlib.Path(sys.argv[1]).write_text(
             "arch": sys.argv[3],
             "mirror": sys.argv[4],
             "security_mirror": sys.argv[5],
-            "cache_schema": 1,
+            "keyring_sha256": sys.argv[6],
+            "cache_schema": 2,
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -767,20 +793,21 @@ prepare_chroot_scripts() {
     # Xiahai is a user-supplied binary input.  Copy it into the build asset
     # tree only when explicitly provided, then let dpkg-deb validate it inside
     # the rootfs.  A corrupt attachment must stop before any ISO is produced.
-    local xiahai_asset="${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb"
-    if [[ -n "${MING_XIAHAI_DEB_SOURCE:-}" && -s "${MING_XIAHAI_DEB_SOURCE}" ]]; then
-        mkdir -p "$(dirname "${xiahai_asset}")"
-        cp -f "${MING_XIAHAI_DEB_SOURCE}" "${xiahai_asset}"
+    local xiahai_asset_path="${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb"
+    local xiahai_asset="${MING_XIAHAI_DEB_SOURCE:-${xiahai_asset_path}}"
+    if [[ ! -s "${xiahai_asset}" || -L "${xiahai_asset}" ]]; then
+        if [[ "${MING_SKIP_XIAHAI}" == "1" ]]; then
+            XIAHAI_ASSET_SHA256="missing"
+        else
+            log_error "Xiahai Xiaoming build input is missing or is a symlink: ${xiahai_asset}"
+            return 1
+        fi
     fi
     if [[ "${MING_SKIP_XIAHAI}" == "1" ]]; then
         log_warn "MING_SKIP_XIAHAI=1: omitting Xiahai Xiaoming from this internal RC build"
-        rm -f "${xiahai_asset}"
         install -d -m 0755 "${CHROOT_DIR}/etc/ming-os"
         : > "${CHROOT_DIR}/etc/ming-os/skip-xiahai"
-    elif [[ ! -s "${xiahai_asset}" ]]; then
-        log_error "missing required build asset: ${xiahai_asset}"
-        log_error "set MING_XIAHAI_DEB_SOURCE to a complete, dpkg-deb-readable package"
-        return 1
+        XIAHAI_ASSET_SHA256="missing"
     else
         rm -f "${CHROOT_DIR}/etc/ming-os/skip-xiahai"
     fi
@@ -806,6 +833,7 @@ prepare_chroot_scripts() {
             log_error "Xiahai Xiaoming package SHA256 is not the approved repaired asset"
             return 1
         fi
+        XIAHAI_ASSET_SHA256="${xiahai_sha}"
     fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
@@ -815,6 +843,24 @@ prepare_chroot_scripts() {
     if [[ -d "${SCRIPT_DIR}/assets" ]]; then
         mkdir -p "${CHROOT_DIR}/tmp/ming-build/assets"
         cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || true
+    fi
+    if [[ -n "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ]]; then
+        if [[ ! -s "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ||
+              -L "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ]]; then
+            log_error "OTA Minisign public key source is missing or a symlink"
+            return 1
+        fi
+        if ! grep -Eq '^RW[A-Za-z0-9+/=]{40,}$' "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}"; then
+            log_error "OTA Minisign public key source has an invalid format"
+            return 1
+        fi
+        install -m 0644 "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" \
+            "${CHROOT_DIR}/tmp/ming-build/assets/ota-release.minisign.pub"
+    fi
+    if [[ "${MING_SKIP_XIAHAI}" != "1" && "${xiahai_asset}" != "${xiahai_asset_path}" ]]; then
+        install -d -m 0755 "${CHROOT_DIR}/tmp/ming-build/assets/vendor/xiahai-xiaoming"
+        install -m 0644 "${xiahai_asset}" \
+            "${CHROOT_DIR}/tmp/ming-build/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb"
     fi
 
     # 部署可执行的 apt-build wrapper，供模块脚本里 timeout 直接调用。
@@ -1622,12 +1668,19 @@ validate_required_desktop_runtime() {
         lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
         i965-va-driver intel-media-va-driver libgl1-mesa-dri mesa-va-drivers mesa-vdpau-drivers \
         mesa-vulkan-drivers mesa-utils lm-sensors firmware-amd-graphics amd64-microcode vainfo \
-        fcitx5-rime librime-data rime-data-luna-pinyin; do
+        fcitx5-rime librime-data rime-data-luna-pinyin minisign; do
         if ! chroot_exec dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
             log_error "required desktop runtime package is not installed: ${package}"
             return 1
         fi
     done
+    if [[ "${MING_BUILD_PROFILE}" == "release" ]]; then
+        if [[ ! -s "${CHROOT_DIR}/etc/ming-update/ota-release.minisign.pub" ||
+              -L "${CHROOT_DIR}/etc/ming-update/ota-release.minisign.pub" ]]; then
+            log_error "release rootfs is missing the OTA Minisign public key"
+            return 1
+        fi
+    fi
 
     # Debian Trixie ships the Xorg modesetting DDX from xserver-xorg-core;
     # older releases exposed it as a separate xserver-xorg-video-modesetting
@@ -1794,7 +1847,7 @@ PY
 validate_r4_compatibility() {
     log_info "Validating Ming OS r4 legacy hardware and Settings Hub integration..."
     validate_required_desktop_runtime || return 1
-    python3 - "${CHROOT_DIR}" <<'PY'
+    MING_BUILD_PROFILE="${MING_BUILD_PROFILE}" python3 - "${CHROOT_DIR}" <<'PY'
 from pathlib import Path
 import os
 import re
@@ -1804,9 +1857,12 @@ import struct
 import sys
 import tempfile
 import hashlib
+import subprocess
 import zlib
+import importlib.util
 
 root = Path(sys.argv[1])
+build_profile = os.environ.get("MING_BUILD_PROFILE", "dev")
 errors = []
 
 build_identity_path = root / "etc/ming-os-build.json"
@@ -1824,9 +1880,69 @@ try:
 except (OSError, ValueError, TypeError) as error:
     errors.append(f"invalid etc/ming-os-build.json: {error}")
 
+def _rootfs_path(relative_path):
+    """Return a normalized path that is lexically contained by the target rootfs."""
+    candidate = Path(os.path.normpath(str(root / str(relative_path))))
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+def rootfs_resolved_path(relative_path, depth=0):
+    """Resolve target-rootfs symlinks without consulting the host root."""
+    path = _rootfs_path(relative_path)
+    if path is None:
+        return None
+    if depth >= 8:
+        return path
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return path
+    except OSError:
+        return path
+    if not stat.S_ISLNK(info.st_mode):
+        return path
+    try:
+        target = os.readlink(path)
+    except OSError:
+        return path
+    target_path = Path(target)
+    # Rootfs links always use POSIX targets, even when a source-level gate is
+    # exercised on a Windows development host.
+    if str(target).startswith("/"):
+        absolute_target = str(target_path).lstrip("/")
+        next_path = root / absolute_target
+    else:
+        next_path = path.parent / target_path
+    next_path = Path(os.path.normpath(str(next_path)))
+    try:
+        next_relative = next_path.relative_to(root)
+    except ValueError:
+        return None
+    return rootfs_resolved_path(str(next_relative), depth + 1)
+
+def _rootfs_lstat(relative_path):
+    path = rootfs_resolved_path(relative_path)
+    if path is None:
+        errors.append(f"{relative_path} resolves outside target rootfs")
+        return None, None
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return path, None
+    except OSError as error:
+        errors.append(f"cannot inspect {relative_path}: {error}")
+        return path, None
+    if stat.S_ISLNK(info.st_mode):
+        errors.append(f"{relative_path} contains an unresolved or looping symlink")
+        return path, None
+    return path, info
+
 def require_file(relative_path, marker=None):
-    path = root / relative_path
-    if not path.is_file() or path.stat().st_size == 0:
+    path, info = _rootfs_lstat(relative_path)
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_size == 0:
         errors.append(f"missing or empty {relative_path}")
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -1834,37 +1950,91 @@ def require_file(relative_path, marker=None):
         errors.append(f"{relative_path} missing marker {marker!r}")
     return text
 
-def rootfs_resolved_path(relative_path, depth=0):
-    path = root / relative_path
-    if path.exists() or depth >= 8:
-        return path
+def verify_openpgp_keyring(relative_path, expected_sha256, expected_fingerprint, label):
+    original = _rootfs_path(relative_path)
+    if original is None:
+        errors.append(f"{label} trusted keyring is outside target rootfs")
+        return False
     try:
-        target = os.readlink(path)
+        original_info = original.lstat()
     except OSError:
-        return path
-    target_path = Path(target)
-    if target_path.is_absolute():
-        return rootfs_resolved_path(str(target_path).lstrip("/"), depth + 1)
+        original_info = None
+    if original_info is None or stat.S_ISLNK(original_info.st_mode):
+        errors.append(f"{label} trusted keyring is missing or unsafe")
+        return False
+    path, info = _rootfs_lstat(relative_path)
+    if info is None or not stat.S_ISREG(info.st_mode):
+        errors.append(f"{label} trusted keyring is missing or unsafe")
+        return False
     try:
-        next_relative = str((path.parent / target_path).relative_to(root))
-    except ValueError:
-        return path.parent / target_path
-    return rootfs_resolved_path(next_relative, depth + 1)
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest().upper()
+    except OSError as error:
+        errors.append(f"{label} trusted keyring cannot be read: {error}")
+        return False
+    if actual_sha256 != expected_sha256:
+        errors.append(f"{label} trusted keyring SHA256 mismatch")
+        return False
+    try:
+        result = subprocess.run(
+            ["gpg", "--batch", "--show-keys", "--with-colons", "--fingerprint", str(path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        errors.append(f"{label} trusted keyring fingerprint check failed: {error}")
+        return False
+    primary_fingerprints = []
+    previous_type = None
+    for line in result.stdout.splitlines():
+        fields = line.split(":")
+        record_type = fields[0] if fields else ""
+        if record_type == "fpr" and previous_type == "pub" and len(fields) > 9:
+            primary_fingerprints.append(fields[9].upper())
+        previous_type = record_type
+    if result.returncode != 0 or expected_fingerprint not in primary_fingerprints:
+        errors.append(f"{label} trusted keyring fingerprint mismatch")
+        return False
+    return True
+
+if build_profile == "release":
+    ota_release_key_path = root / "etc/ming-update/ota-release.minisign.pub"
+    if ota_release_key_path.is_symlink():
+        errors.append("OTA release Minisign public key must not be a symlink")
+    ota_release_key = require_file(
+        "etc/ming-update/ota-release.minisign.pub", "untrusted comment:"
+    )
+    if ota_release_key and not re.search(r"^RW[A-Za-z0-9+/=]{40,}$", ota_release_key, re.MULTILINE):
+        errors.append("OTA release Minisign public key has an invalid format")
 
 def require_path(relative_path):
-    path = rootfs_resolved_path(relative_path)
-    if not path.exists() or (path.is_file() and path.stat().st_size == 0):
+    _path, info = _rootfs_lstat(relative_path)
+    if info is None or (stat.S_ISREG(info.st_mode) and info.st_size == 0):
         errors.append(f"missing or empty {relative_path}")
 
 def require_absent(relative_path, reason):
-    path = root / relative_path
-    if path.exists():
+    path = _rootfs_path(relative_path)
+    if path is None:
+        errors.append(f"{relative_path} resolves outside target rootfs: {reason}")
+        return
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        errors.append(f"cannot inspect forbidden path {relative_path}: {error}")
+        return
+    # lstat deliberately treats dangling links as present, so forbidden
+    # residues cannot hide behind a broken symlink.
+    if path.exists() or path.is_symlink():
         errors.append(f"{relative_path} must not be preinstalled: {reason}")
 
 def validate_generated_executable(relative_path, language):
     """Reject a missing, non-executable, or syntactically invalid shipped helper."""
-    path = root / relative_path
-    if not path.is_file() or path.stat().st_size == 0:
+    path, info = _rootfs_lstat(relative_path)
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_size == 0:
         errors.append(f"missing or empty generated helper {relative_path}")
         return
     if not os.access(path, os.X_OK):
@@ -2049,11 +2219,26 @@ for legacy_entry in (dock_autostart, phone_autostart):
         errors.append("legacy desktop autostart must not launch a second session loop")
 
 plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
+# The retired GTK3 Dock filename may exist only as an upgrade shim.  The
+# shipped shim must be inert so an old environment variable cannot create a
+# second launcher surface.
+legacy_dock = require_file("usr/local/bin/ming-dock", "exit 0")
+if "import gi" in legacy_dock or "Gtk.Window" in legacy_dock:
+    errors.append("retired ming-dock must be an inert compatibility shim")
+legacy_status = require_file("usr/local/bin/ming-status-center", "ming-status-widget-toggle")
+legacy_library = require_file("usr/local/bin/ming-app-library", "ming-app-drawer")
+if "import gi" in legacy_status or "Gtk." in legacy_status:
+    errors.append("retired ming-status-center must delegate to the Ming widget")
+if "import gi" in legacy_library or "Gtk." in legacy_library:
+    errors.append("retired ming-app-library must delegate to the Ming drawer")
 # One responsive Dock profile owns all installed and Live sessions. Runtime
 # sizing selects 32/36/40 px from the screen short edge without changing the
 # centered geometry, 12 px gap, Ming theme or hover animation.
 for marker in [
-    "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=12",
+    # RC3's Offset=12 shifted the centered Dock; the shipped profile must use
+    # the active value "Offset=0" (the legacy marker "Offset=12" is rejected).
+    # zero offset and reserve the 12px bottom margin through the strut helper.
+    "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=0",
     "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming",
     "ming-store.dockitem",
 ]:
@@ -2121,10 +2306,33 @@ store_core = require_file(
     "usr/local/lib/ming-os/ming-store-core.py", "ming.store.catalog.v1")
 require_file(
     "usr/local/lib/ming-os/ming-store-core.py", "ming.store.transaction.v1")
+require_file(
+    "usr/local/lib/ming-os/ming-store-core.py", "WineOfficialProvider")
 store_control = require_file(
     "usr/local/sbin/ming-store-control", "REQUEST_ID")
+android_runtime = require_file(
+    "usr/local/bin/ming-android-runtime", "class AndroidRuntime")
+validate_generated_executable("usr/local/bin/ming-android-runtime", "python")
+android_root_helper = require_file(
+    "usr/local/sbin/ming-android-runtime", "install-deps")
+for marker in [
+    "install-deps", "start-container", "stop-container", "repair",
+    "repo.waydro.id", "ming-waydroid.gpg",
+    "71FE05D735C812E15FE229BF10106B02B62561BE8AA5280D63A58E25A5C0C5E2",
+    "Pin-Priority: -1", "dpkg-query -W",
+]:
+    if marker not in android_root_helper:
+        errors.append(f"Android root helper missing allowlisted action {marker}")
+android_policy = require_file(
+    "usr/share/polkit-1/actions/org.ming.android.runtime.policy",
+    "/usr/local/sbin/ming-android-runtime")
+for marker in ["<allow_any>no</allow_any>", "<allow_inactive>no</allow_inactive>"]:
+    if marker not in android_policy:
+        errors.append(f"Android Polkit policy missing {marker}")
 for marker in ["REQUEST_ID", "PROTECTED_PACKAGES", "Acquire::Retries=3",
-               "--no-auto-remove", "installed_state", "refresh_warning"]:
+               "--no-auto-remove", "installed_state", "refresh_warning",
+               "toolbox_required", "installation_disabled", "--status-fd=1",
+               "resources.json", "resolved_architecture"]:
     if marker not in store_control and marker not in store_core:
         errors.append(f"Ming Store transaction boundary missing {marker}")
 store_policy = require_file(
@@ -2134,7 +2342,9 @@ for marker in ["<allow_any>no</allow_any>", "<allow_inactive>no</allow_inactive>
     if marker not in store_policy:
         errors.append(f"Ming Store Polkit policy missing {marker}")
 validate_generated_executable("usr/local/sbin/ming-store-control", "python")
-for source_id in ["ming-official", "debian-apt", "vendor-official"]:
+# Wine manifest entries are display-only until a fixed official artifact,
+# SHA256 and Minisign identity are present; installation is handed to Toolbox.
+for source_id in ["ming-official", "debian-apt", "vendor-official", "wine-official"]:
     catalog_path = root / "usr/share/ming-os/store/catalog" / f"{source_id}.json"
     if not catalog_path.is_file():
         errors.append(f"missing Ming Store catalog: {source_id}")
@@ -2146,6 +2356,75 @@ for source_id in ["ming-official", "debian-apt", "vendor-official"]:
         continue
     if catalog.get("schema") != "ming.store.catalog.v1":
         errors.append(f"Ming Store catalog schema mismatch: {source_id}")
+    if source_id == "wine-official" and catalog.get("source", {}).get("trust") != "minisign":
+        errors.append("Wine manifest must declare Minisign trust")
+spark_config_path = root / "usr/share/ming-os/store/catalog/spark-public.json"
+spark_config = {}
+spark_keyring_valid = verify_openpgp_keyring(
+    "etc/ming-os/store/spark-archive-keyring.gpg",
+    "49DFC2D391822E0E50AC9D79B94FF2B5A4EBEBFF9939CEA056733FEF01B9BAA4",
+    "9D9AA859F75024B1A1ECE16E0E41D354A29A440C",
+    "Spark",
+)
+verify_openpgp_keyring(
+    "usr/share/keyrings/ming-waydroid.gpg",
+    "71FE05D735C812E15FE229BF10106B02B62561BE8AA5280D63A58E25A5C0C5E2",
+    "7CE0331F71E0A238BB1002D70E406D181DCEE19C",
+    "Waydroid",
+)
+if not spark_config_path.is_file() or spark_config_path.stat().st_size == 0:
+    errors.append("missing Ming Store Spark public provider configuration")
+else:
+    try:
+        spark_config = json.loads(spark_config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        errors.append(f"invalid Spark public provider configuration: {error}")
+if spark_config:
+    if spark_config.get("schema") != "ming.store.spark-public.v1":
+        errors.append("Spark public provider configuration schema mismatch")
+    if spark_config.get("provider") != "spark-public":
+        errors.append("Spark public provider configuration identity mismatch")
+    if spark_config.get("key_fingerprint") != "9D9AA859F75024B1A1ECE16E0E41D354A29A440C":
+        errors.append("Spark public provider key fingerprint mismatch")
+    if not isinstance(spark_config.get("installation_enabled"), bool):
+        errors.append("Spark public provider installation_enabled policy must be boolean")
+    if spark_config.get("installation_enabled"):
+        keyring_value = str(spark_config.get("keyring") or "")
+        if (keyring_value != "/etc/ming-os/store/spark-archive-keyring.gpg"
+                or not spark_keyring_valid):
+            errors.append("Spark installation cannot be enabled without a valid trusted archive keyring")
+    else:
+        errors.append("Spark public provider installation must be enabled in a trusted-key image")
+store_core_path = root / "usr/local/lib/ming-os/ming-store-core.py"
+if store_core_path.is_file():
+    try:
+        spec = importlib.util.spec_from_file_location("ming_store_core_build_gate", store_core_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as error:
+        errors.append(f"Ming Store core import failed: {error}")
+    else:
+        # Count the metadata shipped in this rootfs, rather than relying on a
+        # synthetic JSON fixture or a test-only AppStream document.  The store
+        # may display curated entries, but a release image must contain a real
+        # AppStream inventory of at least 1000 installable desktop apps.
+        MIN_ROOTFS_APPSTREAM_APPS = 1000
+        appstream_inventory = module.scan_appstream_rootfs(root)
+        try:
+            module.validate_appstream_rootfs(
+                root, minimum=MIN_ROOTFS_APPSTREAM_APPS, inventory=appstream_inventory)
+        except Exception as error:
+            errors.append(f"rootfs AppStream metadata gate failed: {error}")
+        try:
+            provider = module.WineOfficialProvider(
+                catalog_root=root / "usr/share/ming-os/store/catalog",
+                public_key_path=root / "etc/ming-os/store/ming-wine-catalog.minisign.pub",
+            )
+            provider.refresh_catalog()
+        except Exception as error:
+            errors.append(f"Wine manifest validation failed: {error}")
+else:
+    errors.append("missing Ming Store core for Wine manifest validation")
 launch_broker = require_file("usr/local/bin/ming-launch", "verify_desktop_proxy")
 for marker in ["manifest-v1.json", "manifest_sha256", "source_sha256", "proxy_sha256"]:
     if marker not in package_installer or marker not in launch_broker:
@@ -2164,6 +2443,9 @@ for residue in [
     "etc/systemd/system/spark-store-refresh.service",
     "usr/share/applications/spark-store.desktop",
     "usr/share/applications/ming-install-spark-store.desktop",
+    "usr/local/bin/ming-install-wps",
+    "usr/share/applications/ming-install-wps.desktop",
+    "usr/share/applications/wps-office.desktop",
     "usr/share/ming-os/vendor/spark-store",
 ]:
     require_absent(residue, "Spark/APM residue")
@@ -3191,25 +3473,42 @@ stage_iso() {
 stage_publish_artifacts() {
     log_step "阶段: 发布校验和与构建元数据"
     derive_iso_context
-    local iso_sha256 iso_size
+    local iso_sha256 iso_size xiahai_sha256 ota_key_present xiahai_hash_source
     iso_sha256="$(sha256sum "${OUTPUT_DIR}/${ISO_NAME}" | awk '{print $1}')"
     iso_size="$(stat -c '%s' "${OUTPUT_DIR}/${ISO_NAME}")"
+    xiahai_hash_source="${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}"
+    xiahai_sha256="$(file_sha256_or_missing "${xiahai_hash_source}")"
+    ota_key_present=false
+    if [[ -s "${CHROOT_DIR}/etc/ming-update/ota-release.minisign.pub" &&
+          ! -L "${CHROOT_DIR}/etc/ming-update/ota-release.minisign.pub" ]]; then
+        ota_key_present=true
+    fi
     printf '%s  %s\n' "${iso_sha256}" "${ISO_NAME}" > "${OUTPUT_DIR}/SHA256SUMS.partial"
     mv -f "${OUTPUT_DIR}/SHA256SUMS.partial" "${OUTPUT_DIR}/SHA256SUMS"
     printf '%s  %s\n' "${iso_sha256}" "${ISO_NAME}" > "${OUTPUT_DIR}/${ISO_NAME}.sha256.partial"
     mv -f "${OUTPUT_DIR}/${ISO_NAME}.sha256.partial" "${OUTPUT_DIR}/${ISO_NAME}.sha256"
     python3 - "${BUILD_SIDECAR}.partial" "${MING_OS_VERSION}" "${BUILD_ID}" \
         "${BUILD_SOURCE_COMMIT}" "${BUILD_TIME_UTC}" "${iso_sha256}" \
-        "${iso_size}" "${MING_BUILD_PROFILE}" "${MING_BUILD_COMPRESSION}" <<'PY'
+        "${iso_size}" "${MING_BUILD_PROFILE}" "${MING_BUILD_COMPRESSION}" \
+        "${MING_SKIP_XIAHAI}" "${xiahai_sha256}" "${ota_key_present}" <<'PY'
 import json
 import pathlib
 import sys
+skip_xiahai = sys.argv[10] == "1"
+xiahai_sha256 = sys.argv[11]
+ota_key_present = sys.argv[12] == "true"
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "version": sys.argv[2], "build_id": sys.argv[3],
     "source_commit": sys.argv[4], "build_time_utc": sys.argv[5],
     "iso_sha256": sys.argv[6], "iso_size": int(sys.argv[7]),
     "profile": sys.argv[8], "compression": sys.argv[9],
-    "release_eligible": sys.argv[8] == "release",
+    "xiahai_sha256": xiahai_sha256,
+    "xiahai_included": not skip_xiahai and xiahai_sha256 != "missing",
+    "ota_release_key_present": ota_key_present,
+    "release_eligible": (
+        sys.argv[8] == "release" and not skip_xiahai
+        and xiahai_sha256 != "missing" and ota_key_present
+    ),
 }, ensure_ascii=True, sort_keys=True) + "\n", encoding="ascii")
 PY
     mv -f "${BUILD_SIDECAR}.partial" "${BUILD_SIDECAR}"

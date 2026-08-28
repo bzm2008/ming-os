@@ -12,6 +12,7 @@ import pathlib
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -33,7 +34,16 @@ SOURCES = {
     "ming-official": "Ming 官方",
     "debian-apt": "Debian / Ming 仓库",
     "vendor-official": "厂商官方",
+    "wine-official": "Ming Wine 兼容目录",
+    "spark-public": "星火公开目录",
 }
+STORE_SECTIONS = ("spark", "sources")
+STORE_SECTION_LABELS = {"spark": "星火应用", "sources": "源应用"}
+SECTION_PROVIDERS = {
+    "spark": ("spark-public",),
+    "sources": ("ming-official", "debian-apt", "vendor-official", "wine-official"),
+}
+WINE_HANDOFF_COMMAND = ("/usr/local/bin/ming-toolbox", "--install-wine")
 MING_MINT_CSS = """
 window.ming-store { background: #f5faf8; color: #17332c; }
 .ming-store-sidebar { background: #e8f3ef; padding: 8px; }
@@ -52,7 +62,19 @@ TRANSACTION_PHASE_LABELS = {
     "succeeded": "操作已完成",
     "refresh_warning": "软件操作完成，但桌面入口刷新失败",
     "failed": "操作未完成",
+    "toolbox_handoff_pending": "已请求工具箱处理，等待安装结果确认",
+    "toolbox_handoff_timeout": "工具箱未在限定时间内返回安装结果",
+    "toolbox_result_invalid": "工具箱返回的安装结果无效",
 }
+
+WINE_HANDOFF_SCHEMA = "ming.store.wine-handoff.v1"
+WINE_HANDOFF_RESULT_SCHEMA = "ming.store.wine-handoff-result.v1"
+WINE_HANDOFF_TERMINAL_STATES = frozenset({
+    "installed", "installed_with_refresh_warning", "installed_needs_launcher",
+    "download_failed", "install_failed", "runtime_unavailable",
+    "runtime_32_unavailable", "validation_failed", "staging_failed",
+    "source_conflict", "provider_unavailable", "failed", "unavailable",
+})
 
 
 def layout_mode(width):
@@ -61,6 +83,13 @@ def layout_mode(width):
 
 def operation_presentation(result):
     state = str(result.get("state") or "failed")
+    if state in ("toolbox_handoff", "toolbox_handoff_pending"):
+        return {
+            "tone": "pending", "retry_label": "重新打开工具箱",
+            "retry_action": str(result.get("action") or "install"),
+            "message": str(result.get("message") or
+                           "已请求 Ming 工具箱处理，安装结果尚未确认。"),
+        }
     if state == "refresh_warning" or "refresh_warning" in state:
         return {
             "tone": "warning", "retry_label": "重试刷新",
@@ -141,12 +170,238 @@ def gtk_dependency_status(importer=None):
 class StoreController:
     def __init__(
             self, catalog=None, deb_inspector=None, command_runner=None,
-            version_comparator=None):
+            version_comparator=None, process_spawner=None, handoff_root=None,
+            handoff_timeout=960, handoff_poll_interval=0.25,
+            desktop_refresher=None):
         self.core = _load_core()
         self.catalog = catalog if catalog is not None else self.core.default_catalog()
         self.deb_inspector = deb_inspector or self._inspect_deb
         self.command_runner = command_runner or subprocess.run
+        self.process_spawner = process_spawner or subprocess.Popen
         self.version_comparator = version_comparator or self._version_is_newer
+        self.last_refresh_status = []
+        if handoff_root is None:
+            state_home = os.environ.get("XDG_STATE_HOME")
+            state_home = pathlib.Path(state_home) if state_home else pathlib.Path.home() / ".local/state"
+            handoff_root = state_home / "ming-os/store/wine-handoffs"
+        self.handoff_root = pathlib.Path(handoff_root)
+        try:
+            self.handoff_timeout = max(0.0, float(handoff_timeout))
+        except (TypeError, ValueError):
+            self.handoff_timeout = 960.0
+        try:
+            self.handoff_poll_interval = max(0.01, float(handoff_poll_interval))
+        except (TypeError, ValueError):
+            self.handoff_poll_interval = 0.25
+        self.desktop_refresher = desktop_refresher or self._refresh_desktop_entries
+        self._handoff_threads = {}
+        self._handoff_lock = threading.Lock()
+
+    def _ensure_handoff_root(self):
+        """Create a private receipt directory and reject link replacement."""
+        self.handoff_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            info = self.handoff_root.lstat()
+        except OSError as exc:
+            raise OSError("Wine 交接结果目录不可用。") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("Wine 交接结果目录不安全。")
+        self.handoff_root.chmod(0o700)
+        return self.handoff_root
+
+    @staticmethod
+    def _validate_handoff_id(request_id):
+        value = str(request_id or "")
+        if not SAFE_REQUEST_ID.fullmatch(value):
+            raise ValueError("Wine 交接 request_id 无效。")
+        return value
+
+    def _handoff_path(self, request_id):
+        return self._ensure_handoff_root() / (self._validate_handoff_id(request_id) + ".json")
+
+    def _handoff_request_path(self, request_id):
+        return self._ensure_handoff_root() / (self._validate_handoff_id(request_id) + ".request.json")
+
+    def _write_wine_handoff_request(self, request_id, action, app_id, expected_version):
+        """Publish only a bounded identity record for the unprivileged Toolbox."""
+        request_id = self._validate_handoff_id(request_id)
+        if not SAFE_REQUEST_ID.fullmatch(request_id):
+            raise ValueError("Wine 交接 request_id 无效。")
+        if not self.core.SAFE_ID.fullmatch(str(app_id)):
+            raise ValueError("Wine 应用 ID 无效。")
+        payload = {
+            "schema": WINE_HANDOFF_SCHEMA,
+            "request_id": request_id,
+            "uid": int(getattr(os, "getuid", lambda: 1000)()),
+            "action": str(action),
+            "provider": "wine-official",
+            "app_id": str(app_id),
+            "expected_version": str(expected_version or ""),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        target = self._handoff_request_path(request_id)
+        temporary = target.with_name("." + target.name + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(target)
+        target.chmod(0o600)
+        return payload
+
+    def read_wine_handoff_result(self, request_id, app_id=None):
+        """Read and validate one Toolbox receipt; return None while pending."""
+        path = self._handoff_path(request_id)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError("无法读取 Wine 安装结果。") from exc
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_size > 256 * 1024):
+            raise ValueError("Wine 安装结果文件不安全。")
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValueError("Wine 安装结果格式无效。") from exc
+        if not isinstance(result, dict):
+            raise ValueError("Wine 安装结果格式无效。")
+        if (result.get("schema") != WINE_HANDOFF_RESULT_SCHEMA
+                or result.get("request_id") != self._validate_handoff_id(request_id)
+                or result.get("provider") != "wine-official"
+                or not isinstance(result.get("ok"), bool)
+                or str(result.get("state") or "") not in WINE_HANDOFF_TERMINAL_STATES):
+            raise ValueError("Wine 安装结果身份或状态无效。")
+        if app_id is not None and result.get("app_id") != str(app_id):
+            raise ValueError("Wine 安装结果与请求身份不匹配。")
+        return result
+
+    @staticmethod
+    def _command_return_code(value):
+        if isinstance(value, tuple):
+            try:
+                return int(value[0])
+            except (IndexError, TypeError, ValueError):
+                return 1
+        return int(getattr(value, "returncode", 1))
+
+    def _refresh_desktop_entries(self):
+        try:
+            completed = self.command_runner(
+                ("/usr/local/bin/ming-refresh-desktop-state",),
+                capture_output=True, text=True, timeout=60, check=False, shell=False,
+            )
+        except TypeError:
+            # Small test doubles and the legacy runner accept only command/timeout.
+            try:
+                completed = self.command_runner(
+                    ("/usr/local/bin/ming-refresh-desktop-state",), timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return False
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return self._command_return_code(completed) == 0
+
+    def _record_wine_handoff_result(self, result):
+        try:
+            self.core.TransactionJournal(self.result_journal_path()).write(result)
+        except (OSError, AttributeError, TypeError, ValueError):
+            pass
+
+    def _finalize_wine_handoff(self, request, result):
+        """Require installer readback, then refresh catalog and desktop state."""
+        final = dict(result)
+        final.update({
+            "request_id": request["request_id"],
+            "action": request["action"],
+            "provider": "wine-official",
+            "app_id": request["app_id"],
+        })
+        if not result.get("ok") or str(result.get("state")) not in {
+                "installed", "installed_with_refresh_warning"}:
+            return final
+        try:
+            provider = self.catalog.registry.get("wine-official")
+            refresh = getattr(provider, "refresh_catalog", None)
+            if callable(refresh):
+                refresh()
+            state = provider.installed_state(request["app_id"])
+        except (KeyError, OSError, RuntimeError, ValueError, AttributeError) as exc:
+            final.update({
+                "ok": False, "state": "readback_failed",
+                "message": "Wine 安装完成但状态读回失败：%s" % exc,
+            })
+            return final
+        if not isinstance(state, dict) or not state.get("installed"):
+            final.update({
+                "ok": False, "state": "readback_failed",
+                "message": "Wine 安装完成但未确认应用状态。",
+            })
+            return final
+        final["installed_state"] = state
+        desktop_ok = bool(result.get("refresh_ok", True))
+        try:
+            desktop_ok = bool(self.desktop_refresher()) and desktop_ok
+        except (OSError, RuntimeError, TypeError, ValueError):
+            desktop_ok = False
+        final["refresh_ok"] = desktop_ok
+        if not desktop_ok:
+            final.update({
+                "ok": False, "state": "refresh_warning",
+                "message": "软件已安装，但桌面入口刷新失败。",
+            })
+        else:
+            final.update({"ok": True, "state": "succeeded", "message": "Wine 应用已安装并完成状态确认。"})
+        return final
+
+    def _monitor_wine_handoff(self, request, progress_callback):
+        request_id = request["request_id"]
+        deadline = time.monotonic() + self.handoff_timeout
+        final = None
+        while time.monotonic() <= deadline:
+            try:
+                receipt = self.read_wine_handoff_result(request_id, request["app_id"])
+            except ValueError as exc:
+                final = {
+                    "ok": False, "state": "toolbox_result_invalid",
+                    "request_id": request_id, "action": request["action"],
+                    "provider": "wine-official", "app_id": request["app_id"],
+                    "message": str(exc),
+                }
+                break
+            if receipt is not None:
+                final = self._finalize_wine_handoff(request, receipt)
+                break
+            time.sleep(self.handoff_poll_interval)
+        if final is None:
+            final = {
+                "ok": False, "state": "toolbox_handoff_timeout",
+                "request_id": request_id, "action": request["action"],
+                "provider": "wine-official", "app_id": request["app_id"],
+                "message": "Ming 工具箱未在限定时间内返回安装结果，请查看工具箱日志后重试。",
+            }
+        self._record_wine_handoff_result(final)
+        with self._handoff_lock:
+            self._handoff_threads.pop(request_id, None)
+        if progress_callback is not None:
+            progress_callback({
+                "state": final.get("state", "failed"),
+                "label": TRANSACTION_PHASE_LABELS.get(final.get("state"), final.get("state")),
+                "result": final,
+            })
+
+    def _start_wine_handoff_monitor(self, request, progress_callback):
+        request_id = request["request_id"]
+        with self._handoff_lock:
+            current = self._handoff_threads.get(request_id)
+            if current is not None and current.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._monitor_wine_handoff,
+                args=(request, progress_callback),
+                name="ming-store-wine-handoff", daemon=True,
+            )
+            self._handoff_threads[request_id] = thread
+            thread.start()
 
     @staticmethod
     def _version_is_newer(installed, candidate):
@@ -166,9 +421,76 @@ class StoreController:
             raise ValueError("软件来源无效。")
         return self.catalog.search(str(query or "").strip(), source_id=source_id)
 
-    def inventory(self, query="", source_id=None):
+    @staticmethod
+    def providers_for_section(section):
+        try:
+            return tuple(SECTION_PROVIDERS[str(section)])
+        except KeyError as exc:
+            raise ValueError("商店栏目无效。") from exc
+
+    def search_section(self, query="", section="sources", source_id=None):
+        allowed = self.providers_for_section(section)
+        if source_id in (None, "", "all"):
+            source_ids = allowed
+        else:
+            if source_id not in allowed:
+                raise ValueError("软件来源不属于当前栏目。")
+            source_ids = (source_id,)
+        result = []
+        seen = set()
+        for current in source_ids:
+            for item in self.catalog.search(str(query or "").strip(), source_id=current):
+                identity = (current, item.get("package_name") or item.get("app_id"))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                result.append(item)
+        return result
+
+    def refresh_section(self, section):
+        statuses = []
+        for source_id in self.providers_for_section(section):
+            provider = self.catalog.registry.get(source_id)
+            refresh = getattr(provider, "refresh_catalog", None)
+            if refresh is None:
+                continue
+            try:
+                items = refresh()
+                provider_state = str(getattr(provider, "catalog_state", "ready"))
+                using_cache = provider_state in {"stale", "browse-only"}
+                if using_cache:
+                    message = (
+                        "来源暂不可用，正在使用缓存目录。"
+                        if provider_state == "stale" else
+                        "来源暂不可用，当前仅提供公开目录浏览。"
+                    )
+                    statuses.append({
+                        "source_id": source_id, "ok": False, "count": len(items),
+                        "using_cache": True, "message": message,
+                    })
+                else:
+                    statuses.append({
+                        "source_id": source_id, "ok": True, "count": len(items),
+                        "using_cache": False, "message": "",
+                    })
+            except Exception as exc:
+                provider_state = str(getattr(provider, "catalog_state", "unavailable"))
+                using_cache = provider_state in {"stale", "browse-only"}
+                statuses.append({
+                    "source_id": source_id, "ok": False, "error": str(exc),
+                    "using_cache": using_cache,
+                    "message": (
+                        "来源暂不可用，正在使用缓存目录。" if using_cache
+                        else "来源暂不可用，请稍后重试。"
+                    ),
+                })
+        self.last_refresh_status = statuses
+        return statuses
+
+    def inventory(self, query="", source_id=None, section=None):
         inventory = []
-        for item in self.search(query, source_id):
+        matches = self.search_section(query, section, source_id) if section else self.search(query, source_id)
+        for item in matches:
             current = dict(item)
             try:
                 state = self.catalog.installed_state(
@@ -182,17 +504,48 @@ class StoreController:
             inventory.append(current)
         return inventory
 
-    def categories(self):
+    def inventory_page(self, query="", source_id=None, limit=80, offset=0, section=None):
+        """Read a bounded page without losing the full-catalog search index."""
+        try:
+            page_size = max(1, min(int(limit), 200))
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            page_size, start = 80, 0
+        matches = self.search_section(query, section, source_id) if section else self.search(query, source_id)
+        selected = matches[start:start + page_size]
+        inventory = []
+        for item in selected:
+            current = dict(item)
+            try:
+                state = self.catalog.installed_state(
+                    current["source_id"], current["app_id"])
+            except (KeyError, RuntimeError, ValueError):
+                state = {
+                    "installed": False, "version": None,
+                    "architecture": None, "state": "status_unavailable",
+                }
+            current["_installed_state"] = state
+            inventory.append(current)
+        return {
+            "items": inventory,
+            "total": len(matches),
+            "offset": start,
+            "limit": page_size,
+            "has_more": start + len(selected) < len(matches),
+        }
+
+    def categories(self, section=None):
         grouped = {}
-        for item in self.search(""):
+        items = self.search_section("", section) if section else self.search("")
+        for item in items:
             categories = item.get("categories") or ["其他"]
             for category in categories:
                 grouped.setdefault(str(category), []).append(item)
         return grouped
 
-    def installed_apps(self):
+    def installed_apps(self, section=None):
         result = []
-        for item in self.inventory(""):
+        for item in self.inventory("", section=section):
             state = item["_installed_state"]
             if not state.get("installed"):
                 continue
@@ -202,9 +555,9 @@ class StoreController:
             result.append(current)
         return result
 
-    def available_updates(self):
+    def available_updates(self, section=None):
         updates = []
-        for item in self.installed_apps():
+        for item in self.installed_apps(section=section):
             if not item.get("enabled", True):
                 continue
             try:
@@ -415,6 +768,55 @@ class StoreController:
             }
             self._report_progress(progress_callback, "failed", result=result)
             return result
+        if source_id == "wine-official" and action in ("install", "update"):
+            try:
+                item = self.catalog.registry.get(source_id).resolve(app_id)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                result = {
+                    "ok": False, "state": "provider_unavailable",
+                    "action": action, "provider": source_id, "app_id": app_id,
+                    "message": str(exc),
+                }
+                self._report_progress(progress_callback, "failed", result=result)
+                return result
+            request_id = secrets.token_hex(16)
+            expected_version = item.get("resolved_version") or item.get("version")
+            try:
+                self._write_wine_handoff_request(
+                    request_id, action, item["app_id"], expected_version)
+            except (OSError, ValueError, TypeError) as exc:
+                result = {
+                    "ok": False, "state": "toolbox_unavailable", "action": action,
+                    "provider": source_id, "app_id": app_id,
+                    "message": "无法建立安全的工具箱交接请求：%s" % exc,
+                }
+                self._report_progress(progress_callback, "failed", result=result)
+                return result
+            command = self.wine_handoff_command(item["app_id"], request_id=request_id)
+            try:
+                self.process_spawner(command, shell=False)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                result = {
+                    "ok": False, "state": "toolbox_unavailable", "action": action,
+                    "provider": source_id, "app_id": app_id,
+                    "message": "Ming 工具箱无法打开：%s" % exc,
+                }
+            else:
+                result = {
+                    "ok": False, "state": "toolbox_handoff_pending", "action": action,
+                    "provider": source_id, "app_id": app_id,
+                    "request_id": request_id,
+                    "result_path": str(self._handoff_path(request_id)),
+                    "message": "已请求 Ming 工具箱下载、校验并安装，安装结果尚未确认，正在等待最终结果。",
+                }
+            self._report_progress(progress_callback, result["state"], result=result)
+            if result.get("state") == "toolbox_handoff_pending":
+                self._start_wine_handoff_monitor({
+                    "request_id": request_id, "action": action,
+                    "provider": source_id, "app_id": item["app_id"],
+                    "expected_version": expected_version,
+                }, progress_callback)
+            return result
         try:
             payload = self.create_transaction(action, source_id, app_id)
             command = self.authorization_command(action, payload["request_id"])
@@ -532,6 +934,17 @@ class StoreController:
             str(request_id),
         ]
 
+    @staticmethod
+    def wine_handoff_command(app_id, request_id=None):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", str(app_id)):
+            raise ValueError("Wine 应用 ID 无效。")
+        command = WINE_HANDOFF_COMMAND + (str(app_id),)
+        if request_id is not None:
+            if not SAFE_REQUEST_ID.fullmatch(str(request_id)):
+                raise ValueError("Wine 交接 request_id 无效。")
+            command += ("--store-request", str(request_id))
+        return command
+
 
 def _build_window(application, controller, initial_query="", local_deb=None):
     from gi.repository import Adw, GLib, Gtk
@@ -548,12 +961,23 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     search = Gtk.SearchEntry(placeholder_text="搜索软件")
     search.set_text(initial_query)
     source = Gtk.DropDown.new_from_strings(list(SOURCES.values()))
+    section_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+    section_spark = Gtk.ToggleButton(label=STORE_SECTION_LABELS["spark"])
+    section_sources = Gtk.ToggleButton(label=STORE_SECTION_LABELS["sources"])
+    section_sources.set_group(section_spark)
+    section_spark.set_active(True)
+    section_box.append(section_spark)
+    section_box.append(section_sources)
+    refresh_catalog = Gtk.Button(label="刷新目录")
+    refresh_catalog.set_tooltip_text("重新读取当前栏目的软件目录")
     controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
     for margin in ("start", "end", "top", "bottom"):
         getattr(controls, "set_margin_" + margin)(8 if margin in ("top", "bottom") else 12)
     search.set_hexpand(True)
+    controls.append(section_box)
     controls.append(search)
     controls.append(source)
+    controls.append(refresh_catalog)
 
     split = Adw.OverlaySplitView()
     split.set_collapsed(False)
@@ -569,6 +993,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     scroller = Gtk.ScrolledWindow(child=results, hexpand=True, vexpand=True)
     split.set_content(scroller)
     current_page = {"name": "home"}
+    current_section = {"name": "spark"}
     page_generation = {"value": 0}
 
     breakpoint = Adw.Breakpoint.new(
@@ -669,8 +1094,17 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             button.set_tooltip_text("Live 模式只能浏览，请先安装系统并完成账户设置。")
         elif not item.get("enabled", True):
             button.set_sensitive(False)
-            button.set_label("身份待确认")
-            button.set_tooltip_text("厂商版本和 SHA256 尚未固定，暂不上架。")
+            button.set_label("暂不可安装")
+            button.set_tooltip_text(str(item.get("disabled_reason") or "来源身份尚未固定，暂不上架。"))
+        elif item.get("source_id") == "wine-official":
+            if installed.get("installed"):
+                button.set_sensitive(False)
+                button.set_label("请在工具箱卸载")
+                button.set_tooltip_text("Wine 应用由 Ming 工具箱管理其独立兼容环境。")
+            else:
+                button.set_label("在工具箱安装")
+                button.set_tooltip_text("下载、校验和安装将在 Ming 工具箱中完成。")
+                button.connect("clicked", run_item_action, row, button, item)
         else:
             button.connect("clicked", run_item_action, row, button, item)
         row.add_suffix(button)
@@ -712,21 +1146,49 @@ def _build_window(application, controller, initial_query="", local_deb=None):
 
     def selected_source():
         selected = source.get_selected()
+        if current_section["name"] == "spark":
+            return "spark-public"
         return list(SOURCES)[selected] if selected < len(SOURCES) else "all"
 
     def show_home():
         query = search.get_text()
         source_id = selected_source()
+        section = current_section["name"]
+
+        def load_home_page():
+            if section == "spark":
+                provider = controller.catalog.registry.get("spark-public")
+                if getattr(provider, "catalog_state", "unavailable") != "ready":
+                    controller.refresh_section(section)
+            page = controller.inventory_page(query, source_id, limit=80, section=section)
+            return page if page["items"] else []
+
+        def render_home_page(page):
+            statuses = controller.last_refresh_status
+            warnings = [status for status in statuses if not status.get("ok")]
+            if warnings:
+                add_message("来源暂不可用", warnings[0].get(
+                    "message", "正在使用缓存目录，请稍后重试。"))
+            if isinstance(page, dict):
+                for item in page["items"]:
+                    add_software_row(item)
+                if page.get("has_more"):
+                    add_message(
+                        "目录较大",
+                        "已显示 %d/%d 个软件；请输入关键词继续搜索。" % (
+                            len(page["items"]), page["total"]),
+                    )
+
         load_page_async(
-            lambda: controller.inventory(query, source_id),
-            lambda items: [add_software_row(item) for item in items],
+            load_home_page,
+            render_home_page,
             "没有找到软件", "请更换关键词或来源。",
         )
 
     def show_categories():
         page_generation["value"] += 1
         clear_results()
-        grouped = controller.categories()
+        grouped = controller.categories(section=current_section["name"])
         if not grouped:
             add_message("暂无分类", "软件目录当前为空。")
         for category, items in sorted(grouped.items()):
@@ -736,7 +1198,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             def open_category(_button, selected_category=category):
                 load_page_async(
                     lambda: [
-                        item for item in controller.inventory("")
+                        item for item in controller.inventory("", section=current_section["name"])
                         if selected_category in (item.get("categories") or ["其他"])
                     ],
                     lambda selected_items: [add_software_row(item) for item in selected_items],
@@ -748,14 +1210,14 @@ def _build_window(application, controller, initial_query="", local_deb=None):
 
     def show_installed():
         load_page_async(
-            controller.installed_apps,
+            lambda: controller.installed_apps(section=current_section["name"]),
             lambda items: [add_software_row(item, forced_action="remove") for item in items],
             "暂无已安装软件", "从首页选择软件即可安装。",
         )
 
     def show_updates():
         load_page_async(
-            controller.available_updates,
+            lambda: controller.available_updates(section=current_section["name"]),
             lambda items: [add_software_row(item, forced_action="update") for item in items],
             "暂无可用更新", "已安装软件当前没有可验证的新版本。",
         )
@@ -904,8 +1366,24 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             show_page(getattr(row, "page_name", "home"))
 
     sidebar.connect("row-selected", on_navigation)
+    def on_section_changed(button, section_name):
+        if not button.get_active():
+            return
+        current_section["name"] = section_name
+        source.set_visible(section_name == "sources")
+        show_page(current_page["name"])
+
+    section_spark.connect("toggled", on_section_changed, "spark")
+    section_sources.connect("toggled", on_section_changed, "sources")
     search.connect("search-changed", lambda *_args: show_home() if current_page["name"] == "home" else None)
     source.connect("notify::selected", lambda *_args: show_home() if current_page["name"] == "home" else None)
+    def refresh_current_catalog(_button):
+        refresh_catalog.set_sensitive(False)
+        def worker():
+            controller.refresh_section(current_section["name"])
+            GLib.idle_add(lambda: (refresh_catalog.set_sensitive(True), show_page(current_page["name"]), False)[-1])
+        threading.Thread(target=worker, name="ming-store-catalog-refresh", daemon=True).start()
+    refresh_catalog.connect("clicked", refresh_current_catalog)
 
     content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     content.append(controls)
@@ -914,6 +1392,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     toolbar.add_top_bar(header)
     toolbar.set_content(content)
     window.set_content(toolbar)
+    source.set_visible(False)
     if local_deb:
         load_local_deb_async(local_deb)
     else:

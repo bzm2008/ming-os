@@ -79,6 +79,7 @@ timeout_seconds="${MING_APT_MIRROR_TIMEOUT:-4}"
 candidates=(
     "${official}|${security}"
     "https://mirrors.aliyun.com/debian|https://mirrors.aliyun.com/debian-security"
+    "https://mirrors.tuna.tsinghua.edu.cn/debian|https://mirrors.tuna.tsinghua.edu.cn/debian-security"
     "https://mirrors.ustc.edu.cn/debian|https://mirrors.ustc.edu.cn/debian-security"
 )
 
@@ -208,6 +209,8 @@ install_base_packages() {
         at-spi2-core \
         sudo \
         apt-utils \
+        appstream \
+        appstream-data \
         gnupg2 \
         ca-certificates \
         curl \
@@ -304,6 +307,14 @@ install_base_packages() {
         amd64-microcode \
         mokutil \
         thermald
+
+    # Build the local AppStream index when the package is available.  The store
+    # can still use its curated fallback if a mirror has no metadata.
+    if command -v appstreamcli >/dev/null 2>&1; then
+        appstreamcli refresh-cache --force >/var/log/ming-appstream-refresh.log 2>&1 \
+            || appstreamcli refresh --force >>/var/log/ming-appstream-refresh.log 2>&1 \
+            || true
+    fi
 
     # These contrib installers download firmware from GitHub in postinst and can
     # hang an otherwise reproducible ISO build. Clean leftovers from resumed

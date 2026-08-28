@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import inspect
 import json
 import pathlib
 import tempfile
@@ -36,12 +37,19 @@ class MingStoreCatalogTests(unittest.TestCase):
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted(CATALOG_ROOT.glob("*.json"))
         ]
-        self.assertEqual(3, len(documents))
+        catalog_documents = [
+            document for document in documents
+            if document.get("schema") == "ming.store.catalog.v1"
+        ]
+        self.assertEqual(4, len(catalog_documents))
         self.assertEqual(
-            {"ming-official", "debian-apt", "vendor-official"},
-            {document["source"]["id"] for document in documents},
+            {"ming-official", "debian-apt", "vendor-official", "wine-official"},
+            {document["source"]["id"] for document in catalog_documents},
         )
-        self.assertTrue(all(document["schema"] == "ming.store.catalog.v1" for document in documents))
+        self.assertEqual(
+            [document["schema"] for document in documents if document.get("provider") == "spark-public"],
+            ["ming.store.spark-public.v1"],
+        )
 
     def test_official_catalog_is_intentionally_empty(self):
         provider = self.core.MingOfficialProvider(catalog_root=CATALOG_ROOT)
@@ -258,6 +266,41 @@ class MingStoreTransactionTests(unittest.TestCase):
         self.assertNotIn("session-private", text)
         self.assertEqual("[REDACTED]", json.loads(text)["password"])
 
+    def test_jsonl_journal_rejects_a_symlink_log_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            outside = root / "outside.log"
+            outside.write_text("keep\n", encoding="utf-8")
+            path = root / "store.jsonl"
+            try:
+                path.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable")
+            with self.assertRaises(OSError):
+                self.core.TransactionJournal(path).write({"state": "failed"})
+            self.assertEqual("keep\n", outside.read_text(encoding="utf-8"))
+
+    def test_jsonl_journal_checks_log_path_without_following_links(self):
+        source = inspect.getsource(self.core.TransactionJournal.write)
+        self.assertIn("O_NOFOLLOW", source)
+        self.assertIn("os.fstat", source)
+        self.assertIn("stat.S_ISREG", source)
+
+    def test_jsonl_journal_rejects_a_symlinked_parent_before_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            alias = root / "alias"
+            try:
+                alias.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable")
+            path = alias / "nested" / "store.jsonl"
+            with self.assertRaises(OSError):
+                self.core.TransactionJournal(path).write({"state": "failed"})
+            self.assertFalse((outside / "nested").exists())
+
 
 @unittest.skipUnless(CORE_PATH.is_file(), "Ming Store core is not implemented yet")
 class MingStoreDownloadTests(unittest.TestCase):
@@ -368,6 +411,34 @@ class MingStoreDownloadTests(unittest.TestCase):
                     hashlib.sha256(payload).hexdigest(),
                 )
 
+    def test_spark_metadata_fetch_rejects_https_redirect_to_untrusted_host(self):
+        payload = b"package"
+        provider = self.core.SparkPublicProvider()
+        response = self.Response(
+            payload, final_url="https://evil.example.invalid/app.json"
+        )
+        with mock.patch.object(self.core.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(self.core.DownloadRejected):
+                provider._default_fetcher(
+                    "https://cdn.d.store.deepinos.org.cn/store/tools/applist.json"
+                )
+
+    def test_download_rejects_https_redirect_to_untrusted_host_when_allowlist_is_set(self):
+        payload = b"package"
+        downloader = self.core.SecureDownloader(
+            opener=lambda request, timeout=30: self.Response(
+                payload, final_url="https://evil.example.invalid/app.deb"
+            ),
+            allowed_hosts={"download.example.invalid"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(self.core.DownloadRejected):
+                downloader.download(
+                    "https://download.example.invalid/app.deb",
+                    pathlib.Path(directory) / "app.deb",
+                    hashlib.sha256(payload).hexdigest(),
+                )
+
     def test_download_rejects_a_preexisting_partial_symlink(self):
         payload = b"package"
         downloader = self.core.SecureDownloader(
@@ -390,6 +461,59 @@ class MingStoreDownloadTests(unittest.TestCase):
                     hashlib.sha256(payload).hexdigest(),
                 )
             self.assertEqual(b"do not overwrite", outside.read_bytes())
+
+    def test_download_rejects_a_symlinked_destination_parent(self):
+        payload = b"package"
+        downloader = self.core.SecureDownloader(
+            opener=lambda request, timeout=30: self.Response(payload)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            alias = root / "alias"
+            try:
+                alias.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable")
+            destination = alias / "app.deb"
+            with self.assertRaises(self.core.DownloadRejected):
+                downloader.download(
+                    "https://download.example.invalid/app.deb",
+                    destination,
+                    hashlib.sha256(payload).hexdigest(),
+                )
+            self.assertFalse((outside / "app.deb").exists())
+
+    def test_download_aborts_before_writing_past_the_size_limit(self):
+        payload = b"0123456789"
+        downloader = self.core.SecureDownloader(
+            opener=lambda request, timeout=30: self.Response(payload),
+            max_bytes=5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / "app.deb"
+            with self.assertRaises(self.core.DownloadRejected):
+                downloader.download(
+                    "https://download.example.invalid/app.deb",
+                    destination,
+                    hashlib.sha256(payload).hexdigest(),
+                )
+            self.assertFalse(destination.exists())
+            partial = destination.with_suffix(".deb.part")
+            self.assertFalse(partial.exists())
+
+    def test_download_hashes_in_chunks_without_read_bytes(self):
+        source = inspect.getsource(self.core.SecureDownloader.download)
+        self.assertNotIn("partial.read_bytes()", source)
+        self.assertIn("digest.update(chunk)", source)
+
+    def test_download_opens_partial_files_without_following_symlinks(self):
+        source = CORE_PATH.read_text(encoding="utf-8").split(
+            "class SecureDownloader", 1)[1].split("def default_catalog", 1)[0]
+        self.assertIn("O_NOFOLLOW", source)
+        self.assertIn("os.fstat", source)
+        self.assertIn("stat.S_ISREG", source)
 
 
 class MingStoreUiPresenceTests(unittest.TestCase):
@@ -537,7 +661,8 @@ class MingStoreUiLogicTests(unittest.TestCase):
             {
                 "resolving", "downloading", "verifying", "awaiting_authorization",
                 "installing", "readback", "refreshing", "succeeded",
-                "refresh_warning", "failed",
+                "refresh_warning", "failed", "toolbox_handoff_pending",
+                "toolbox_handoff_timeout", "toolbox_result_invalid",
             },
             set(self.ui.TRANSACTION_PHASE_LABELS),
         )

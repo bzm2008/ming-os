@@ -40,7 +40,7 @@ class PackageRuntimeContracts(unittest.TestCase):
 
     def test_app_library_launches_apps_only_through_the_shared_broker(self):
         library = DESKTOP.split(
-            "cat > /usr/local/bin/ming-app-library << 'APPLIB'", 1
+            "cat > /tmp/ming-app-library-legacy << 'APPLIB'", 1
         )[1].split("\nAPPLIB", 1)[0]
         library = library.split("    def launch(self, app):", 1)[1]
         self.assertIn("ming-launch", library)

@@ -16,6 +16,9 @@ LAYOUT_PATH = pathlib.Path("/etc/ming-update/slots.json")
 TRANSACTION_PATH = pathlib.Path("/home/.ming-ota/ab-transaction.json")
 UUID_RE = re.compile(r"^[A-Fa-f0-9][A-Fa-f0-9-]{3,127}$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:[A-Za-z0-9._-]*)?$")
+BUILD_ID_RE = re.compile(
+    r"^[0-9]+(?:\.[0-9]+){0,3}-rc[0-9]+-[A-Fa-f0-9]{7,40}-[0-9]{8}T[0-9]{6}Z$"
+)
 GRUB_SUBMENU = "Ming OS 高级启动"
 
 
@@ -111,7 +114,7 @@ def layout_status(layout, root_uuid, home_uuid, boot_uuid):
     }
 
 
-def begin_transaction(layout, active_slot, target_slot, version, checksum):
+def begin_transaction(layout, active_slot, target_slot, version, checksum, build_id=""):
     checked = validate_layout(layout)
     if active_slot not in ("A", "B") or target_slot not in ("A", "B"):
         raise ContractError("transaction slot is invalid")
@@ -121,6 +124,8 @@ def begin_transaction(layout, active_slot, target_slot, version, checksum):
         raise ContractError("target version is invalid")
     if not re.fullmatch(r"[A-Fa-f0-9]{64}", checksum or ""):
         raise ContractError("target checksum is invalid")
+    if build_id and not BUILD_ID_RE.fullmatch(build_id):
+        raise ContractError("target build id is invalid")
     return {
         "schema": 1,
         "status": "pending",
@@ -129,26 +134,34 @@ def begin_transaction(layout, active_slot, target_slot, version, checksum):
         "previous_entry": checked["slots"][active_slot]["grub_entry"],
         "target_entry": checked["slots"][target_slot]["grub_entry"],
         "version": version,
+        "build_id": build_id or "",
         "checksum": checksum.lower(),
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
 
-def observe_boot(transaction, current_slot, healthy):
+def observe_boot(transaction, current_slot, healthy, current_build_id=""):
     if not isinstance(transaction, dict) or transaction.get("status") not in ("pending", "rollback_required"):
         raise ContractError("no pending A/B transaction")
     previous = transaction.get("previous_slot")
     target = transaction.get("target_slot")
     if current_slot == previous:
         result = {**transaction, "status": "rolled_back", "boot_target": previous}
-    elif transaction.get("status") == "rollback_required":
-        result = {**transaction, "status": "rollback_required", "boot_target": previous}
     elif current_slot != target:
         raise ContractError("current slot is outside the pending transaction")
-    elif healthy:
-        result = {**transaction, "status": "confirmed", "boot_target": target}
-    else:
+    elif transaction.get("status") == "rollback_required":
         result = {**transaction, "status": "rollback_required", "boot_target": previous}
+    else:
+        if not transaction.get("build_id"):
+            raise ContractError("target transaction build id is missing")
+        if not current_build_id:
+            raise ContractError("current build id is missing")
+        if current_build_id != transaction["build_id"]:
+            raise ContractError("current build id does not match target transaction")
+        if healthy:
+            result = {**transaction, "status": "confirmed", "boot_target": target}
+        else:
+            result = {**transaction, "status": "rollback_required", "boot_target": previous}
     result["observed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return result
 
@@ -336,7 +349,7 @@ def command_begin(args):
         raise ContractError("requested target is not the detected inactive slot")
     transaction = begin_transaction(
         _load_regular(args.layout), status["active_slot"], args.target,
-        args.version, args.checksum,
+        args.version, args.checksum, args.build_id,
     )
     _write_atomic(args.transaction, transaction)
     print(json.dumps(transaction, ensure_ascii=True))
@@ -345,7 +358,16 @@ def command_begin(args):
 def command_observe(args):
     status = current_status(args.layout)
     transaction = _load_regular(args.transaction)
-    result = observe_boot(transaction, status["active_slot"], args.health == "healthy")
+    current_build_id = args.build_id
+    if not current_build_id:
+        try:
+            payload = _load_regular("/etc/ming-os-build.json")
+            current_build_id = str(payload.get("build_id") or "")
+        except (ContractError, OSError, json.JSONDecodeError):
+            current_build_id = ""
+    result = observe_boot(
+        transaction, status["active_slot"], args.health == "healthy", current_build_id
+    )
     _write_atomic(args.transaction, result)
     print(json.dumps(result, ensure_ascii=True))
 
@@ -372,9 +394,11 @@ def build_parser():
     begin.add_argument("--target", required=True, choices=("A", "B"))
     begin.add_argument("--version", required=True)
     begin.add_argument("--checksum", required=True)
+    begin.add_argument("--build-id", default="")
     begin.set_defaults(handler=command_begin)
     observe = commands.add_parser("observe-boot")
     observe.add_argument("--health", required=True, choices=("healthy", "failed"))
+    observe.add_argument("--build-id", default="")
     observe.set_defaults(handler=command_observe)
     prepare = commands.add_parser("prepare-root")
     prepare.add_argument("--root", required=True)

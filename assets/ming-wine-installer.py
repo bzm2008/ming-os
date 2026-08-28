@@ -94,6 +94,45 @@ class WineInstaller:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         return "%s-%s" % (value[:47], digest)
 
+    def _ensure_private_directory(self, path, create=True):
+        """Create/check a user-owned private path without following links."""
+        path = pathlib.Path(path)
+        try:
+            relative = path.relative_to(self.home)
+        except ValueError as exc:
+            raise OSError("Wine 应用目录必须位于当前用户目录内。") from exc
+        try:
+            base_info = self.home.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise OSError("当前用户目录不存在。")
+            self.home.mkdir(parents=True, exist_ok=True)
+            base_info = self.home.lstat()
+        if stat.S_ISLNK(base_info.st_mode) or not stat.S_ISDIR(base_info.st_mode):
+            raise OSError("当前用户目录不是安全目录。")
+        current_uid = None
+        if hasattr(os, "geteuid"):
+            try:
+                current_uid = int(self.uid_getter())
+            except (TypeError, ValueError, OSError):
+                current_uid = None
+        current = self.home
+        for component in relative.parts:
+            current = current / component
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                if not create:
+                    raise OSError("Wine 应用目录不存在。")
+                current.mkdir(mode=0o700)
+                info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise OSError("Wine 应用目录不能是符号链接或普通文件。")
+            if current_uid is not None and int(getattr(info, "st_uid", current_uid)) != current_uid:
+                raise OSError("Wine 应用目录不属于当前用户。")
+            current.chmod(0o700)
+        return path
+
     def app_dir_for(self, application):
         return self.root / self.app_id(application)
 
@@ -155,8 +194,10 @@ class WineInstaller:
     def _stage_source(self, source):
         app_dir = self.app_dir_for(source)
         source_dir = app_dir / "source"
-        source_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        source_dir.chmod(0o700)
+        # Do not let an existing link in the per-app tree redirect staging
+        # files outside the user's private Wine state directory.
+        self._ensure_private_directory(app_dir, create=True)
+        self._ensure_private_directory(source_dir, create=True)
         staged = source_dir / ("installer" + pathlib.Path(source).suffix.lower())
         temporary = source_dir / (".installer.%s.tmp" % os.getpid())
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -249,8 +290,10 @@ class WineInstaller:
         app_id = self.app_id(application)
         desktop = self.desktop_for(application)
         target_desktop = self.target_desktop_dir / ("ming-wine-target-%s.desktop" % app_id)
-        desktop.parent.mkdir(parents=True, exist_ok=True)
-        target_desktop.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_private_directory(desktop.parent, create=True)
+        self._ensure_private_directory(target_desktop.parent, create=True)
+        self._ensure_private_file(desktop)
+        self._ensure_private_file(target_desktop)
         target_desktop.write_text(
             "[Desktop Entry]\n"
             "Type=Application\n"
@@ -281,6 +324,25 @@ class WineInstaller:
         )
         desktop.chmod(0o644)
         return desktop
+
+    def _ensure_private_file(self, path):
+        """Reject link/device replacement for a user-owned generated file."""
+        path = pathlib.Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return path
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("Wine 生成文件不能是符号链接或特殊文件。")
+        current_uid = None
+        if hasattr(os, "geteuid"):
+            try:
+                current_uid = int(self.uid_getter())
+            except (TypeError, ValueError, OSError):
+                current_uid = None
+        if current_uid is not None and int(getattr(info, "st_uid", current_uid)) != current_uid:
+            raise OSError("Wine 生成文件不属于当前用户。")
+        return path
 
     @staticmethod
     def _snapshot_executables(prefix):
@@ -340,9 +402,14 @@ class WineInstaller:
         try:
             staged_path, source_sha256 = self._stage_source(path)
         except OSError as exc:
-            error = "无法把安装文件复制到受保护的临时目录：%s" % self._redact(exc)
-            self._log("install", "staging_failed", path, error)
-            return {"ok": False, "state": "staging_failed", "error": error}
+            state = "path_security_failed" if "Wine 应用目录" in str(exc) else "staging_failed"
+            error = (
+                "Wine 应用目录不安全，已停止安装：%s" % self._redact(exc)
+                if state == "path_security_failed"
+                else "无法把安装文件复制到受保护的临时目录：%s" % self._redact(exc)
+            )
+            self._log("install", state, path, error)
+            return {"ok": False, "state": state, "error": error}
         existing = self._load_metadata(path)
         if existing and existing.get("source_sha256") != source_sha256:
             error = "同一路径上的安装文件内容已变化；为保护现有 Wine 应用，请先卸载旧应用或使用新文件名。"
@@ -353,9 +420,15 @@ class WineInstaller:
             error = "检测到 32 位 Windows 应用，但 Wine 32 位组件未安装。请在 Ming 工具箱中启用 32 位兼容。"
             self._log("install", "runtime_32_unavailable", path, error)
             return {"ok": False, "state": "runtime_32_unavailable", "architecture": architecture, "error": error}
-        prefix = self.prefix_for(path)
-        prefix.mkdir(parents=True, exist_ok=True, mode=0o700)
         kind = path.suffix.lower().lstrip(".")
+        prefix = self.prefix_for(path)
+        try:
+            self._ensure_private_directory(prefix, create=True)
+        except OSError as exc:
+            error = "Wine 应用目录不安全，已停止安装：%s" % self._redact(exc)
+            self._log("install", "path_security_failed", path, error)
+            return {"ok": False, "state": "path_security_failed", "kind": kind,
+                    "error": error}
         command = ("wine", "msiexec", "/i", str(staged_path)) if kind == "msi" else ("wine", str(staged_path))
         env = dict(os.environ, WINEPREFIX=str(prefix), WINEARCH=architecture)
         before = self._snapshot_executables(prefix)
@@ -410,25 +483,233 @@ class WineInstaller:
             "output": (output or "").strip(), "refresh_ok": refreshed,
         }
 
-    def _load_metadata(self, application):
+    def install_managed(self, source, managed_id, launch_target, display_name=None,
+                        version=None, artifact_sha256=None):
+        """Install a catalog-owned artifact under its stable application ID.
+
+        The catalog supplies a relative executable path; unlike local imports,
+        the installer must never guess a launch target from whatever executable
+        happens to be largest in the prefix.
+        """
+        if not APP_ID_PATTERN.fullmatch(str(managed_id)):
+            return {"ok": False, "state": "validation_failed", "error": "应用 ID 无效。"}
+        target_value = str(launch_target or "")
+        target_path = pathlib.PurePosixPath(target_value)
+        if (not target_value or target_path.is_absolute()
+                or any(part in ("", ".", "..") for part in target_path.parts)
+                or target_path.suffix.lower() != ".exe"):
+            return {"ok": False, "state": "validation_failed", "error": "Wine 启动文件路径无效。"}
+        path, error = self._validate_source(source)
+        if error:
+            self._log("install", "validation_failed", detail=error)
+            return {"ok": False, "state": "validation_failed", "error": error}
+        runtime = self.detect_runtime()
+        if not runtime["ok"]:
+            return runtime
+        architecture = self.detect_architecture(path)
+        if architecture == "win32" and not self.executable("wine32"):
+            error = "该安装包需要 32 位 Wine 组件，请先在 Ming 工具箱中安装 32 位支持。"
+            self._log("install", "runtime_32_unavailable", path, error)
+            return {
+                "ok": False, "state": "runtime_32_unavailable",
+                "architecture": architecture, "error": error,
+            }
         try:
-            data = json.loads(self.metadata_for(application).read_text(encoding="utf-8"))
+            app_dir = self._ensure_private_directory(
+                self.root / str(managed_id), create=True)
+        except OSError as exc:
+            error = "Wine 应用目录不安全，已停止安装：%s" % self._redact(exc)
+            self._log("install", "path_security_failed", str(managed_id), error)
+            return {"ok": False, "state": "path_security_failed", "error": error}
+        try:
+            staged_path, source_sha256 = self._stage_source_for_id(path, str(managed_id))
+        except OSError as exc:
+            state = "path_security_failed" if "Wine 应用目录" in str(exc) else "staging_failed"
+            error = (
+                "Wine 应用目录不安全，已停止安装：%s" % self._redact(exc)
+                if state == "path_security_failed"
+                else "无法把安装文件复制到受保护的临时目录：%s" % self._redact(exc)
+            )
+            self._log("install", state, path, error)
+            return {"ok": False, "state": state, "error": error}
+        if artifact_sha256 and str(artifact_sha256).lower() != source_sha256:
+            error = "Wine 安装包 SHA256 校验失败。"
+            self._log("install", "integrity_failed", path, error)
+            return {"ok": False, "state": "integrity_failed", "error": error}
+        staged_architecture = self.detect_architecture(staged_path)
+        if staged_architecture != architecture:
+            error = "安装文件在安全复制期间发生变化，已停止安装。"
+            self._log("install", "source_changed", path, error)
+            return {"ok": False, "state": "source_changed", "error": error}
+        architecture = staged_architecture
+        if architecture == "win32" and not self.executable("wine32"):
+            error = "该安装包需要 32 位 Wine 组件，请先在 Ming 工具箱中安装 32 位支持。"
+            self._log("install", "runtime_32_unavailable", path, error)
+            return {
+                "ok": False, "state": "runtime_32_unavailable",
+                "architecture": architecture, "error": error,
+            }
+        try:
+            prefix = self._ensure_private_directory(app_dir / "prefix", create=True)
+        except OSError as exc:
+            error = "Wine 应用目录不安全，已停止安装：%s" % self._redact(exc)
+            self._log("install", "path_security_failed", str(managed_id), error)
+            return {"ok": False, "state": "path_security_failed", "error": error}
+        kind = path.suffix.lower().lstrip(".")
+        command = ("wine", "msiexec", "/i", str(staged_path)) if kind == "msi" else ("wine", str(staged_path))
+        env = dict(os.environ, WINEPREFIX=str(prefix), WINEARCH=architecture)
+        metadata = {
+            "schema": "ming.wine.app.v1", "app_id": str(managed_id),
+            "name": str(display_name or path.stem), "version": version,
+            "state": "installing", "kind": kind, "source": str(path),
+            "staged_source": str(staged_path), "source_sha256": source_sha256,
+            "prefix": str(prefix), "launch_target": "", "architecture": architecture,
+            "catalog_app_id": str(managed_id),
+            "lab": {"dxvk": False, "proton": False, "game_mode": False},
+        }
+        self._write_metadata_by_id(str(managed_id), metadata)
+        try:
+            rc, output, stderr = self.runner(command, timeout=900, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            metadata.update(state="install_failed", error=self._redact(exc))
+            self._write_metadata_by_id(str(managed_id), metadata)
+            return {"ok": False, "state": "install_failed", "app_id": str(managed_id), "error": self._redact(exc)}
+        if rc != 0:
+            metadata.update(state="install_failed", error=self._redact(stderr or "Wine 安装失败。"))
+            self._write_metadata_by_id(str(managed_id), metadata)
+            return {"ok": False, "state": "install_failed", "app_id": str(managed_id), "error": metadata["error"]}
+        resolved_target = (prefix / pathlib.Path(*target_path.parts)).resolve()
+        try:
+            resolved_prefix = prefix.resolve()
+            inside_prefix = resolved_prefix == resolved_target or resolved_prefix in resolved_target.parents
+        except OSError:
+            inside_prefix = False
+        if (not inside_prefix or resolved_target.is_symlink() or not resolved_target.is_file()):
+            error = "安装已完成，但目录中没有清单指定的可启动程序。"
+            metadata.update(state="installed_needs_launcher", error=error)
+            self._write_metadata_by_id(str(managed_id), metadata)
+            return {"ok": False, "state": "installed_needs_launcher", "app_id": str(managed_id), "metadata": metadata, "error": error}
+        desktop = self._write_desktop_by_id(str(managed_id), str(display_name or path.stem), resolved_target)
+        metadata.update(state="installed", launch_target=str(resolved_target), desktop_file=str(desktop))
+        metadata.pop("error", None)
+        self._write_metadata_by_id(str(managed_id), metadata)
+        refreshed = self._refresh_desktop()
+        state = "installed" if refreshed else "installed_with_refresh_warning"
+        if not refreshed:
+            # Preserve the warning across restarts so the store and Toolbox do
+            # not silently turn a verified install into a false clean state.
+            metadata["state"] = state
+            metadata["refresh_warning"] = True
+            self._write_metadata_by_id(str(managed_id), metadata)
+        self._log("install", state, str(managed_id))
+        return {"ok": True, "state": state, "app_id": str(managed_id), "metadata": metadata,
+                "prefix": str(prefix), "desktop_file": str(desktop), "refresh_ok": refreshed,
+                "output": (output or "").strip()}
+
+    def _stage_source_for_id(self, source, managed_id):
+        app_dir = self._ensure_private_directory(self.root / managed_id, create=True)
+        source_dir = self._ensure_private_directory(app_dir / "source", create=True)
+        staged = source_dir / ("installer" + pathlib.Path(source).suffix.lower())
+        temporary = source_dir / (".installer.%s.tmp" % os.getpid())
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        digest = hashlib.sha256(); total = 0
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("安装源不再是普通文件。")
+            with os.fdopen(descriptor, "rb", closefd=True) as source_handle:
+                descriptor = -1
+                with temporary.open("wb") as target_handle:
+                    for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+                        total += len(chunk)
+                        if total > MAX_WINDOWS_PACKAGE_BYTES:
+                            raise OSError("安装文件超过允许大小。")
+                        digest.update(chunk); target_handle.write(chunk)
+                    target_handle.flush(); os.fsync(target_handle.fileno())
+            temporary.chmod(0o600); os.replace(temporary, staged); staged.chmod(0o600)
+            return staged, digest.hexdigest()
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
+    def _write_metadata_by_id(self, managed_id, payload):
+        app_dir = self._ensure_private_directory(self.root / managed_id, create=False)
+        _atomic_json(app_dir / "metadata.json", payload)
+
+    def _write_desktop_by_id(self, managed_id, name, launch_target):
+        desktop = self.desktop_dir / ("ming-wine-%s.desktop" % managed_id)
+        target_desktop = self.target_desktop_dir / ("ming-wine-target-%s.desktop" % managed_id)
+        self._ensure_private_directory(desktop.parent, create=True)
+        self._ensure_private_directory(target_desktop.parent, create=True)
+        self._ensure_private_file(desktop)
+        self._ensure_private_file(target_desktop)
+        target_desktop.write_text(
+            "[Desktop Entry]\nType=Application\nName=%s\nExec=/usr/local/bin/ming-wine-installer run %s\nIcon=application-x-ms-dos-executable\nTerminal=false\nStartupWMClass=%s\nX-Ming-Managed=true\n"
+            % (_desktop_escape(name), managed_id, _desktop_escape(name)), encoding="utf-8")
+        target_desktop.chmod(0o644)
+        desktop.write_text(
+            "[Desktop Entry]\nType=Application\nName=%s\nComment=通过 Ming Wine 兼容层启动\nExec=/usr/local/bin/ming-launch --desktop-file %s --source desktop\nIcon=application-x-ms-dos-executable\nTerminal=false\nCategories=Utility;\nStartupNotify=true\nX-Ming-Wine-App=%s\nX-Ming-Managed=true\n"
+            % (_desktop_escape(name), str(target_desktop), managed_id), encoding="utf-8")
+        desktop.chmod(0o644)
+        return desktop
+
+    def _load_metadata(self, application):
+        app_dir = self.app_dir_for(application)
+        try:
+            self._ensure_private_directory(app_dir, create=False)
+            metadata_path = app_dir / "metadata.json"
+            info = metadata_path.lstat()
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                    or info.st_size > 256 * 1024):
+                return None
+        except (OSError, ValueError):
+            return None
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) and data.get("app_id") == self.app_id(application) else None
 
     def _validated_launch_target(self, application, metadata):
-        prefix = self.prefix_for(application).resolve()
-        target = pathlib.Path(str(metadata.get("launch_target") or ""))
+        prefix = self.prefix_for(application)
         try:
-            resolved = target.resolve(strict=True)
-        except (OSError, RuntimeError):
+            self._ensure_private_directory(prefix, create=False)
+            prefix_absolute = prefix.absolute()
+            target = pathlib.Path(str(metadata.get("launch_target") or ""))
+            if not target.is_absolute():
+                return None
+            target_absolute = target.absolute()
+            relative = target_absolute.relative_to(prefix_absolute)
+        except (OSError, RuntimeError, ValueError):
             return None
-        if resolved.suffix.lower() != ".exe" or resolved.is_symlink():
+        if (not relative.parts or any(part in ("", ".", "..") for part in relative.parts)
+                or relative.suffix.lower() != ".exe"):
             return None
-        if prefix != resolved and prefix not in resolved.parents:
-            return None
-        return resolved
+        current = prefix_absolute
+        uid = None
+        if hasattr(os, "geteuid"):
+            try:
+                uid = int(self.uid_getter())
+            except (TypeError, ValueError, OSError):
+                uid = None
+        for index, component in enumerate(relative.parts):
+            current = current / component
+            try:
+                info = current.lstat()
+            except OSError:
+                return None
+            is_last = index == len(relative.parts) - 1
+            if stat.S_ISLNK(info.st_mode):
+                return None
+            if is_last:
+                if not stat.S_ISREG(info.st_mode):
+                    return None
+            elif not stat.S_ISDIR(info.st_mode):
+                return None
+            if uid is not None and int(getattr(info, "st_uid", uid)) != uid:
+                return None
+        return current
 
     def _lab_state(self, application):
         path = (
@@ -525,6 +806,13 @@ class WineInstaller:
         desktop = self.desktop_for(application)
         metadata = self._load_metadata(application) or {}
         launch_target = pathlib.Path(str(metadata.get("launch_target") or ""))
+        try:
+            self._ensure_private_directory(app_dir, create=False)
+            self._ensure_private_directory(prefix, create=False)
+        except OSError as exc:
+            self._log("uninstall", "path_security_failed", application, exc)
+            return {"ok": False, "state": "path_security_failed",
+                    "error": "Wine 应用目录不安全，已停止卸载。"}
         if not app_dir.is_dir() or not prefix.is_dir():
             return {"ok": False, "state": "not_installed", "prefix": str(prefix), "error": "找不到该应用的 Wine 前缀。"}
         try:
@@ -541,8 +829,8 @@ class WineInstaller:
             self._log("uninstall", "uninstall_cancelled_or_incomplete", application, error)
             return {"ok": False, "state": "uninstall_cancelled_or_incomplete", "error": error}
         try:
-            resolved_root = self.root.resolve()
-            resolved_app = app_dir.resolve()
+            resolved_root = self._ensure_private_directory(self.root, create=False)
+            resolved_app = self._ensure_private_directory(app_dir, create=False)
             if resolved_app.parent != resolved_root:
                 raise OSError("拒绝清理 Wine 应用目录以外的路径。")
             shutil.rmtree(resolved_app)
@@ -563,12 +851,31 @@ class WineInstaller:
 
     def list_apps(self):
         items = []
-        for metadata_path in sorted(self.root.glob("*/metadata.json")) if self.root.is_dir() else ():
+        try:
+            self._ensure_private_directory(self.root, create=False)
+            candidates = sorted(self.root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return items
+        for app_dir in candidates:
+            try:
+                info = app_dir.lstat()
+                if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                        or not APP_ID_PATTERN.fullmatch(app_dir.name)):
+                    continue
+                self._ensure_private_directory(app_dir, create=False)
+                metadata_path = app_dir / "metadata.json"
+                metadata_info = metadata_path.lstat()
+                if (stat.S_ISLNK(metadata_info.st_mode)
+                        or not stat.S_ISREG(metadata_info.st_mode)
+                        or metadata_info.st_size > 256 * 1024):
+                    continue
+            except OSError:
+                continue
             try:
                 data = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if isinstance(data, dict) and data.get("app_id"):
+            if isinstance(data, dict) and data.get("app_id") == app_dir.name:
                 items.append(data)
         return items
 

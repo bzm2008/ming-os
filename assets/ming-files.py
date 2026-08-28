@@ -184,6 +184,7 @@ if GTK_AVAILABLE:
             self.list_view.set_single_click_activate(False)
             self.list_view.connect("activate", self._on_item_activated)
             list_scroll = Gtk.ScrolledWindow(child=self.list_view)
+            self._attach_background_gestures(list_scroll)
             self.view_stack.add_named(list_scroll, "list")
             self.grid_view = Gtk.GridView(
                 model=self.selection, factory=self._make_grid_factory()
@@ -193,6 +194,7 @@ if GTK_AVAILABLE:
             self.grid_view.set_single_click_activate(False)
             self.grid_view.connect("activate", self._on_item_activated)
             grid_scroll = Gtk.ScrolledWindow(child=self.grid_view)
+            self._attach_background_gestures(grid_scroll)
             self.view_stack.add_named(grid_scroll, "grid")
             self.view_stack.set_visible_child_name("list")
             content.append(self.view_stack)
@@ -354,6 +356,23 @@ if GTK_AVAILABLE:
             long_press = Gtk.GestureLongPress()
             long_press.connect(
                 "pressed", lambda _gesture, x, y: self._show_item_menu(widget, x, y)
+            )
+            widget.add_controller(long_press)
+
+        def _attach_background_gestures(self, widget):
+            """Offer file operations when the pointer is over an empty area."""
+            click = Gtk.GestureClick(button=3)
+            click.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            click.connect(
+                "pressed",
+                lambda _gesture, _count, x, y: self._show_background_menu(widget, x, y),
+            )
+            widget.add_controller(click)
+            long_press = Gtk.GestureLongPress()
+            long_press.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            long_press.connect(
+                "pressed",
+                lambda _gesture, x, y: self._show_background_menu(widget, x, y),
             )
             widget.add_controller(long_press)
 
@@ -713,6 +732,38 @@ if GTK_AVAILABLE:
             popover.popup()
             self.current_popover = popover
 
+        def _show_background_menu(self, widget, x, y):
+            """Show actions for the current directory rather than an item."""
+            if self.model.current_uri == MODEL.TRASH_URI:
+                return
+            popover = Gtk.Popover()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(8)
+            box.set_margin_end(8)
+            actions = [
+                ("新建空白文件", self._new_file_dialog),
+                ("新建文件夹", self._new_folder_dialog),
+            ]
+            if self.clipboard_uri:
+                actions.append(("粘贴", self._paste_clipboard))
+            actions.append(("刷新", self.reload))
+            for label, callback in actions:
+                button = Gtk.Button(label=label)
+                button.connect(
+                    "clicked",
+                    lambda _button, action=callback: (popover.popdown(), action()),
+                )
+                box.append(button)
+            popover.set_child(box)
+            popover.set_parent(widget)
+            popover.set_pointing_to(
+                Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1)
+            )
+            popover.popup()
+            self.current_popover = popover
+
         def _open_with(self, item):
             file = Gio.File.new_for_uri(item.uri)
             dialog = Gtk.AppChooserDialog(
@@ -767,6 +818,28 @@ if GTK_AVAILABLE:
                 if response_id == Gtk.ResponseType.OK:
                     self.perform_operation(
                         "create_folder", self.model.current_uri, entry.get_text()
+                    )
+                dialog.destroy()
+
+            dialog.connect("response", response)
+            dialog.present()
+
+        def _new_file_dialog(self):
+            dialog = Gtk.Dialog(title="新建空白文件", transient_for=self, modal=True)
+            dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+            dialog.add_button("创建", Gtk.ResponseType.OK)
+            entry = Gtk.Entry(text="新建文件.txt", activates_default=True)
+            entry.set_margin_top(18)
+            entry.set_margin_bottom(18)
+            entry.set_margin_start(18)
+            entry.set_margin_end(18)
+            dialog.get_content_area().append(entry)
+            dialog.set_default_response(Gtk.ResponseType.OK)
+
+            def response(_dialog, response_id):
+                if response_id == Gtk.ResponseType.OK:
+                    self.perform_operation(
+                        "create_file", self.model.current_uri, entry.get_text()
                     )
                 dialog.destroy()
 

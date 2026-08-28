@@ -60,6 +60,45 @@ CANONICAL_PREFERENCE = {
     "agent": "xiahai-xiaoming.desktop",
 }
 
+# Xfce remains an implementation dependency, not a second user-facing shell.
+# Keep only the fallback launchers that are collapsed into a Ming core entry;
+# utility/settings surfaces otherwise leak the old visual language into the
+# drawer on upgraded systems.
+VISIBLE_XFCE_FALLBACKS = frozenset({
+    "xfce4-settings-manager.desktop",
+    "xfce4-terminal.desktop",
+    "thunar.desktop",
+})
+LEGACY_XFCE_LAUNCHERS = frozenset({
+    "xfce4-appfinder.desktop",
+    "xfce4-taskmanager.desktop",
+    "xfce4-power-manager-settings.desktop",
+    "xfce4-power-manager.desktop",
+    "xfce4-about.desktop",
+    "xfce4-mouse-settings.desktop",
+    "xfce4-keyboard-settings.desktop",
+    "xfce4-display-settings.desktop",
+    "xfce4-appearance-settings.desktop",
+    "xfce4-settings-editor.desktop",
+    "xfce4-notifyd-config.desktop",
+    "xfce4-screensaver-preferences.desktop",
+    "xfce4-session-logout.desktop",
+    "xfce4-run.desktop",
+    "xfdesktop-settings.desktop",
+    "xfce4-mime-settings.desktop",
+    "exo-preferred-applications.desktop",
+})
+
+
+def is_legacy_system_entry(path):
+    """Return whether a desktop file belongs to a retired Xfce utility UI."""
+    basename = pathlib.Path(path).name.casefold()
+    if basename in {item.casefold() for item in VISIBLE_XFCE_FALLBACKS}:
+        return False
+    return basename in {item.casefold() for item in LEGACY_XFCE_LAUNCHERS} or (
+        basename.startswith("xfce4-") and basename.endswith(".desktop")
+    )
+
 
 def _load_common():
     path = pathlib.Path(__file__).with_name("ming-shell-common.py")
@@ -262,6 +301,9 @@ def discover_apps(paths=None):
         for path in candidates:
             if path.name in seen:
                 continue
+            if is_legacy_system_entry(path):
+                seen.add(path.name)
+                continue
             seen.add(path.name)
             try:
                 entry = COMMON.diagnose_desktop_file(path)
@@ -313,10 +355,18 @@ class DrawerController:
         self._animation_source = 0
         self._animation_geometry = None
 
-    def _workarea(self):
+    def _workarea(self, immersive=False):
         display = self.Gdk.Display.get_default()
         monitor = display.get_primary_monitor() or display.get_monitor(0)
         area = monitor.get_workarea()
+        if immersive:
+            # Plank's strut can survive briefly after it is hidden.  Use the
+            # monitor's physical bottom edge for the drawer while retaining
+            # the workarea's top boundary and horizontal placement.
+            geometry = monitor.get_geometry()
+            bottom = geometry.y + geometry.height
+            return {"x": area.x, "y": area.y, "width": area.width,
+                    "height": max(1, bottom - area.y)}
         return {"x": area.x, "y": area.y, "width": area.width, "height": area.height}
 
     def _build_window(self):
@@ -417,6 +467,9 @@ class DrawerController:
         return False
 
     def refresh(self):
+        # Rebuild the catalog before applying search/category filters so apps
+        # installed after the drawer process started appear immediately.
+        self.apps = discover_apps()
         for child in self.grid.get_children():
             self.grid.remove(child)
         visible = filter_apps(self.apps, self.search.get_text(), self.category, self.recent.load())
@@ -528,7 +581,7 @@ class DrawerController:
         apply_dock_immersive_state(True)
         self.apps = discover_apps()
         self.refresh()
-        geometry = drawer_geometry(self._workarea(), dock_visible=False)
+        geometry = drawer_geometry(self._workarea(immersive=True), dock_visible=False)
         transition = drawer_transition(reduced_motion_enabled())
         self.window.resize(int(geometry.width), int(geometry.height))
         if transition["duration_ms"] == 0:

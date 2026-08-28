@@ -263,6 +263,16 @@ class LocationModelBehaviorTests(unittest.TestCase):
         self.assertTrue(deleted.success, deleted.error)
         self.assertFalse(folder.exists())
 
+    def test_create_file_is_safe_and_changes_real_directory(self):
+        created = self.model.create_file(self.root.as_uri(), "New File.txt")
+        self.assertTrue(created.success, created.error)
+        self.assertTrue((self.root / "New File.txt").is_file())
+
+        invalid = self.model.create_file(self.root.as_uri(), "../escape.txt")
+        self.assertFalse(invalid.success)
+        self.assertEqual("invalid-argument", invalid.error.code)
+        self.assertFalse((self.root.parent / "escape.txt").exists())
+
     def test_state_migration_is_versioned_and_rejects_invalid_values(self):
         migrated = self.api.migrate_location_state(
             {

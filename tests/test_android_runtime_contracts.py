@@ -1,7 +1,9 @@
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,6 +15,33 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AndroidRuntimeContracts(unittest.TestCase):
+    def test_lab_state_store_serializes_config_updates_with_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            store = MODULE.AndroidLabStateStore(root, lock_timeout=0.01)
+            store.set("com.example.demo", "debug_logs", False)
+            held = store._thread_lock("com.example.demo")
+            held.acquire()
+            try:
+                with self.assertRaises(MODULE.AndroidStorageError):
+                    store.set("com.example.demo", "debug_logs", True)
+            finally:
+                held.release()
+
+    def test_lab_state_store_rejects_symlinked_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            state = root / "state"
+            try:
+                state.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+            store = MODULE.AndroidLabStateStore(state)
+            with self.assertRaises(MODULE.AndroidStorageError):
+                store.set("com.example.demo", "debug_logs", True)
+
     def test_fixed_authorized_actions_and_no_shell_or_network_adb(self):
         self.assertEqual(
             {"install-deps", "start-container", "stop-container", "repair"},
@@ -80,9 +109,13 @@ class AndroidRuntimeContracts(unittest.TestCase):
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
+            app_dir.parent.chmod(0o700)
+            app_dir.parent.parent.chmod(0o700)
+            app_dir.chmod(0o700)
             (app_dir / "metadata.json").write_text(
                 '{"package":"org.example.demo","state":"installed"}', encoding="utf-8"
             )
+            (app_dir / "metadata.json").chmod(0o600)
             runtime = MODULE.AndroidRuntime(
                 home=root,
                 spawner=lambda command, **_kwargs: calls.append(tuple(command)) or Process(),

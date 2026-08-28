@@ -1,0 +1,12 @@
+{
+  "schema": "ming.store.spark-public.v1",
+  "provider": "spark-public",
+  "display_name": "Spark public catalog",
+  "base_url": "https://cdn.d.store.deepinos.org.cn",
+  "upstream_project": "https://github.com/spark-store-project/spark-store",
+  "upstream_license": "GPL-3.0-or-later",
+  "api": "public-applist-and-signed-apt-index",
+  "keyring": "/etc/ming-os/store/spark-archive-keyring.gpg",
+  "key_fingerprint": "9D9AA859F75024B1A1ECE16E0E41D354A29A440C",
+  "installation_enabled": true
+}

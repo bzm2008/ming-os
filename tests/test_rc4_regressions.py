@@ -125,7 +125,13 @@ class DiagnosticsAndRc4Contracts(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             iconv = bin_dir / "iconv"
-            iconv.write_text("#!/usr/bin/env bash\ncat\n", encoding="utf-8", newline="\n")
+            # Consume the source argument; a bare `cat` would wait forever on
+            # stdin when the shell helper invokes iconv in a pipeline-free
+            # validation step.
+            iconv.write_text(
+                "#!/usr/bin/env bash\ncat \"${@: -1}\"\n",
+                encoding="utf-8", newline="\n",
+            )
             iconv.chmod(0o755)
             source = root / "source.txt"
             source.write_text(

@@ -58,7 +58,7 @@ class MultimediaRuntimeContracts(unittest.TestCase):
     def test_ming_store_assets_are_deployed_and_catalogs_are_machine_readable(self):
         for asset in ("ming-store.py", "ming-store-core.py", "ming-store-control.py"):
             self.assertIn(asset, DESKTOP)
-        for source_id in ("ming-official", "debian-apt", "vendor-official"):
+        for source_id in ("ming-official", "debian-apt", "vendor-official", "wine-official"):
             catalog = json.loads((
                 ROOT / "assets" / "ming-store-catalog" / (source_id + ".json")
             ).read_text(encoding="utf-8"))

@@ -178,6 +178,58 @@ class BuildScriptContractTests(unittest.TestCase):
         )[0]
         self.assertIn('payload.get("mirror")', validation)
         self.assertIn('payload.get("security_mirror")', validation)
+        self.assertIn('payload.get("keyring_sha256")', validation)
+        self.assertIn('"keyring_sha256": sys.argv[6]', BUILD)
+
+    def test_apt_cache_identity_mismatch_removes_reusable_deb_archives(self):
+        validation = BUILD.split("validate_apt_cache_manifest() {", 1)[1].split(
+            "write_apt_cache_manifest() {", 1
+        )[0]
+        self.assertIn('find "${APT_ARCHIVES_CACHE}"', validation)
+        self.assertIn("-name '*.deb'", validation)
+        self.assertIn("cache identity", validation.lower())
+
+    def test_release_image_contains_ota_minisign_tool_and_public_key_gate(self):
+        install = (ROOT / "modules" / "06_ota_update.sh").read_text(encoding="utf-8")
+        dependencies = install.split("install_ota_dependencies() {", 1)[1].split(
+            "deploy_ota_backup_engine() {", 1
+        )[0]
+        self.assertIn("minisign", dependencies)
+        self.assertIn("deploy_ota_release_trust", install)
+        self.assertIn("ota-release.minisign.pub", BUILD)
+        self.assertIn('"etc/ming-update/ota-release.minisign.pub"', BUILD)
+
+    def test_release_profile_rejects_skipping_xiahai_and_sidecar_records_it(self):
+        profile = BUILD.split("configure_build_profile() {", 1)[1].split(
+            "acquire_build_lock() {", 1
+        )[0]
+        self.assertIn("MING_SKIP_XIAHAI", profile)
+        self.assertIn("release", profile)
+        self.assertIn("release_eligible", BUILD)
+        self.assertIn("skip_xiahai", BUILD)
+
+    def test_rootfs_gate_resolves_symlinks_without_escaping_target(self):
+        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split(
+            "\n# ========================", 1
+        )[0]
+        for marker in (
+            "def _rootfs_path(relative_path):",
+            "path.lstat()",
+            "os.readlink(path)",
+            "resolves outside target rootfs",
+            "contains an unresolved or looping symlink",
+        ):
+            self.assertIn(marker, validator)
+
+    def test_rootfs_gate_detects_dangling_forbidden_symlink(self):
+        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split(
+            "\n# ========================", 1
+        )[0]
+        absent = validator.split("def require_absent(", 1)[1].split(
+            "def validate_generated_executable", 1
+        )[0]
+        self.assertIn("path.lstat()", absent)
+        self.assertIn("path.is_symlink()", absent)
 
 
 if __name__ == "__main__":

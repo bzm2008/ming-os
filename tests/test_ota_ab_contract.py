@@ -106,17 +106,53 @@ class OtaAbContractTests(unittest.TestCase):
                     )
 
     def test_pending_transaction_confirms_only_on_target_slot_after_health_passes(self):
+        build_id = "2641-rc4-550d0b83a3a2-20260826T103412Z"
         transaction = self.ab.begin_transaction(
-            layout(), active_slot="A", target_slot="B", version="26.4.1", checksum="a" * 64
+            layout(), active_slot="A", target_slot="B", version="26.4.1",
+            checksum="a" * 64, build_id=build_id,
         )
 
-        failed = self.ab.observe_boot(transaction, current_slot="B", healthy=False)
-        confirmed = self.ab.observe_boot(transaction, current_slot="B", healthy=True)
+        failed = self.ab.observe_boot(
+            transaction, current_slot="B", healthy=False, current_build_id=build_id
+        )
+        confirmed = self.ab.observe_boot(
+            transaction, current_slot="B", healthy=True, current_build_id=build_id
+        )
 
         self.assertEqual("rollback_required", failed["status"])
         self.assertEqual("A", failed["boot_target"])
         self.assertEqual("confirmed", confirmed["status"])
         self.assertEqual("B", confirmed["boot_target"])
+
+    def test_pending_transaction_binds_target_build_id_before_confirmation(self):
+        build_id = "2641-rc4-550d0b83a3a2-20260826T103412Z"
+        transaction = self.ab.begin_transaction(
+            layout(), active_slot="A", target_slot="B", version="26.4.1",
+            checksum="a" * 64, build_id=build_id,
+        )
+
+        self.assertEqual(build_id, transaction["build_id"])
+        with self.assertRaises(self.ab.ContractError):
+            self.ab.observe_boot(
+                transaction, current_slot="B", healthy=True,
+                current_build_id="2641-rc3-054c2a2355ed-20260824T095743Z",
+            )
+        confirmed = self.ab.observe_boot(
+            transaction, current_slot="B", healthy=True, current_build_id=build_id
+        )
+        self.assertEqual("confirmed", confirmed["status"])
+
+    def test_target_slot_cannot_confirm_a_legacy_transaction_without_build_id(self):
+        transaction = self.ab.begin_transaction(
+            layout(), active_slot="A", target_slot="B", version="26.4.1",
+            checksum="a" * 64,
+        )
+
+        with self.assertRaises(self.ab.ContractError):
+            self.ab.observe_boot(
+                transaction, current_slot="B", healthy=True,
+                current_build_id="2641-rc4-550d0b83a3a2-20260826T103412Z",
+            )
 
     def test_return_to_previous_slot_is_recorded_as_automatic_rollback(self):
         transaction = self.ab.begin_transaction(
@@ -129,10 +165,14 @@ class OtaAbContractTests(unittest.TestCase):
         self.assertEqual("A", observed["boot_target"])
 
     def test_failed_target_is_marked_rolled_back_only_after_previous_slot_boots(self):
+        build_id = "2641-rc4-550d0b83a3a2-20260826T103412Z"
         transaction = self.ab.begin_transaction(
-            layout(), active_slot="A", target_slot="B", version="26.4.1", checksum="a" * 64
+            layout(), active_slot="A", target_slot="B", version="26.4.1",
+            checksum="a" * 64, build_id=build_id,
         )
-        failed = self.ab.observe_boot(transaction, current_slot="B", healthy=False)
+        failed = self.ab.observe_boot(
+            transaction, current_slot="B", healthy=False, current_build_id=build_id
+        )
 
         rolled_back = self.ab.observe_boot(failed, current_slot="A", healthy=True)
 
@@ -211,6 +251,7 @@ class OtaAbContractTests(unittest.TestCase):
             "grub-reboot",
             "grub-editenv list",
             "next_entry=",
+            "--build-id",
             "ming-ota-ab begin",
             "prepare-root --root",
             "grub.cfg",
@@ -233,6 +274,8 @@ class OtaAbContractTests(unittest.TestCase):
         health = module.split("cat > /usr/local/sbin/ming-ota-ab-health << 'ABHEALTH'\n", 1)[1].split("\nABHEALTH\n", 1)[0]
         self.assertIn("display-manager.service", health)
         self.assertIn("rollback_required", health)
+        self.assertIn("/etc/ming-os-build.json", health)
+        self.assertIn("build_id", health)
 
     def test_boot_health_waits_for_display_manager_before_fail_closed_rollback(self):
         """A freshly staged slot must not roll back merely because LightDM is still starting."""

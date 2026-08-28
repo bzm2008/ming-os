@@ -108,6 +108,34 @@ def system_prefers_dark():
     return "prefer-dark" in (completed.stdout or "")
 
 
+def status_widget_overlay_geometry(pill_geometry, panel_size, screen_size):
+    """Return stable compact-pill and clamped expanded-panel geometry.
+
+    The pill is intentionally returned unchanged: expanding the controls must
+    never make the desktop reserve a taller overlay.  The panel is placed
+    below the pill when possible and flips above it if the bottom edge would
+    leave the screen.
+    """
+    pill = dict(pill_geometry or {})
+    screen_w = max(1, int((screen_size or {}).get("width", 1)))
+    screen_h = max(1, int((screen_size or {}).get("height", 1)))
+    panel_w = max(1, int((panel_size or {}).get("width", 1)))
+    panel_h = max(1, int((panel_size or {}).get("height", 1)))
+    pill_x = int(pill.get("x", 0))
+    pill_y = int(pill.get("y", 0))
+    pill_w = int(pill.get("width", 0))
+    pill_h = int(pill.get("height", 0))
+    panel_x = min(max(0, pill_x + pill_w - panel_w), max(0, screen_w - panel_w))
+    panel_y = pill_y + pill_h
+    if panel_y + panel_h > screen_h:
+        panel_y = pill_y - panel_h
+    panel_y = min(max(0, panel_y), max(0, screen_h - panel_h))
+    return {
+        "pill": pill,
+        "panel": {"x": panel_x, "y": panel_y, "width": panel_w, "height": panel_h},
+    }
+
+
 def load_appearance_theme(path=None):
     target = Path(path) if path else appearance_config_path()
     try:
@@ -252,6 +280,36 @@ class ResourceMetricSampler:
                     }
         return result
 
+    def sample_all(self):
+        """Collect the three preview metrics in one expanded-panel pass."""
+        return {mode: self.sample(mode) for mode in METRIC_MODES}
+
+
+DESKTOP_DIR = Path.home() / "Desktop"
+
+
+def _unique_desktop_path(stem, suffix=""):
+    """Return a collision-free path below the user's Desktop directory."""
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    candidate = DESKTOP_DIR / (stem + suffix)
+    index = 2
+    while candidate.exists() or candidate.is_symlink():
+        candidate = DESKTOP_DIR / (f"{stem} ({index})" + suffix)
+        index += 1
+    return candidate
+
+
+def create_blank_desktop_file():
+    path = _unique_desktop_path("新建文件", ".txt")
+    path.open("x", encoding="utf-8").close()
+    return path
+
+
+def create_desktop_folder():
+    path = _unique_desktop_path("新建文件夹")
+    path.mkdir()
+    return path
+
 
 import gi
 
@@ -287,7 +345,6 @@ DESKTOP_MANAGED_MARKER = "X-Ming-Managed"
 DESKTOP_MANAGED_MARKER_LINE = "X-Ming-Managed=true"
 DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
-DESKTOP_DIR = HOME / "Desktop"
 SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
 LOCAL_APPLICATION_DIR = Path("/usr/local/share/applications")
 APP_DIRS = [
@@ -509,6 +566,29 @@ window.ming-desktop {
 .status-compact-date { font-size: 10.5px; font-weight: 500; color: #2D695C; }
 .status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
 .status-compact-arrow { font-size: 15px; font-weight: 700; color: #2F8A7D; }
+.status-expanded-panel {
+  min-width: 330px;
+  padding: 11px;
+  border-radius: 14px;
+  background: #FFFFFF;
+  border: 1px solid rgba(47, 138, 125, 0.14);
+  box-shadow: 0 16px 34px rgba(21, 68, 56, 0.19);
+}
+.status-expanded-title {
+  color: #2F8A7D;
+  font-size: 12px;
+  font-weight: 700;
+}
+.status-resource-grid { margin: 1px 0 2px; }
+.status-resource-card {
+  min-width: 84px;
+  padding: 7px 6px;
+  border-radius: 8px;
+  background: #EDF7F2;
+  border: 1px solid rgba(47, 138, 125, 0.10);
+}
+.status-resource-name { color: #55766B; font-size: 10px; }
+.status-resource-value { color: #245C50; font-size: 14px; font-weight: 700; }
 .status-button {
   border-radius: 9px;
   padding: 4px 8px;
@@ -544,6 +624,14 @@ window.ming-desktop {
 .ming-desktop-dark .status-compact-arrow {
   color: #62C9B5;
 }
+.ming-desktop-dark .status-expanded-panel {
+  background: #202824;
+  border-color: rgba(159, 231, 215, 0.18);
+}
+.ming-desktop-dark .status-expanded-title { color: #62C9B5; }
+.ming-desktop-dark .status-resource-card { background: #29352F; }
+.ming-desktop-dark .status-resource-name { color: #A9BDB5; }
+.ming-desktop-dark .status-resource-value { color: #E7EEE9; }
 .status-scale trough {
   min-height: 7px;
   border-radius: 4px;
@@ -2445,6 +2533,7 @@ class StatusWidget(Gtk.Box):
         self.action_starts = {}
         self._height_animation = None
         self._height_animation_source = 0
+        self._collapse_hide_source = 0
         self._display_height = (
             STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
             else STATUS_WIDGET_EXPANDED_HEIGHT)
@@ -2470,11 +2559,6 @@ class StatusWidget(Gtk.Box):
             "network-wireless-symbolic", Gtk.IconSize.MENU)
         self.compact_wifi_icon.set_tooltip_text("Wi-Fi 状态")
         compact.pack_start(self.compact_wifi_icon, False, False, 0)
-        self.compact_network_label = Gtk.Label(label="网络 --")
-        self.compact_network_label.get_style_context().add_class("status-compact-date")
-        self.compact_network_label.set_no_show_all(True)
-        self.compact_network_label.set_visible(False)
-        compact.pack_start(self.compact_network_label, False, False, 0)
         self.compact_battery_separator = Gtk.Label(label="|")
         self.compact_battery_separator.set_no_show_all(True)
         self.compact_battery_separator.set_visible(False)
@@ -2530,6 +2614,13 @@ class StatusWidget(Gtk.Box):
         self.header_battery_label.set_visible(False)
         header_details.pack_start(self.header_battery_label, False, False, 0)
         header.pack_start(header_details, False, False, 0)
+        # Kept as a detail field for the expanded panel; network status is not
+        # rendered in the fixed compact pill.
+        self.compact_network_label = Gtk.Label(label="网络 --")
+        self.compact_network_label.get_style_context().add_class("status-compact-date")
+        self.compact_network_label.set_no_show_all(True)
+        self.compact_network_label.set_visible(False)
+        header_details.pack_start(self.compact_network_label, False, False, 0)
         self.collapse_button = Gtk.Button()
         self.collapse_button.get_style_context().add_class("status-button")
         collapse_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
@@ -2557,11 +2648,15 @@ class StatusWidget(Gtk.Box):
         self.action_commands[self.wifi_button] = ["ming-control-center", "--page", "network"]
         self.bluetooth_button = self.action_button("蓝牙 --", "ming-control-center")
         self.action_commands[self.bluetooth_button] = ["ming-control-center", "--page", "network"]
-        self.resource_button = self.action_button("内存 --", callback=self.on_resource_clicked)
+        # Keep a small resource-cycle command for keyboard users; the expanded
+        # panel itself renders all three metrics at once to match the preview.
+        self.resource_button = self.action_button("资源", callback=self.on_resource_clicked)
         self.notification_button = self.action_button("通知", callback=self.open_notifications)
         self.settings_button = self.action_button("设置", "ming-control-center")
         self.action_commands[self.settings_button] = ["ming-control-center", "--page", "advanced"]
         self.power_button = self.action_button("电源", callback=self.open_power_menu)
+        self.display_button = self.action_button(
+            "显示", ["ming-control-center", "--page", "display"])
         self.wifi_label = self.wifi_button.ming_label
         self.bluetooth_label = self.bluetooth_button.ming_label
         self.resource_label = self.resource_button.ming_label
@@ -2574,10 +2669,10 @@ class StatusWidget(Gtk.Box):
         self.power_label = self.power_button.ming_label
         actions.attach(self.wifi_button, 0, 0, 1, 1)
         actions.attach(self.bluetooth_button, 1, 0, 1, 1)
-        actions.attach(self.resource_button, 0, 1, 1, 1)
-        actions.attach(self.notification_button, 1, 1, 1, 1)
-        actions.attach(self.settings_button, 0, 2, 1, 1)
-        actions.attach(self.power_button, 1, 2, 1, 1)
+        actions.attach(self.notification_button, 2, 0, 1, 1)
+        actions.attach(self.settings_button, 0, 1, 1, 1)
+        actions.attach(self.display_button, 1, 1, 1, 1)
+        actions.attach(self.power_button, 2, 1, 1, 1)
 
         controls = Gtk.Grid()
         controls.set_column_spacing(8)
@@ -2600,35 +2695,71 @@ class StatusWidget(Gtk.Box):
         self.brightness_scale.connect("value-changed", self.on_brightness_changed)
         self.audio_button = self.action_button(
             "声音", ["ming-control-center", "--page", "advanced"])
-        self.display_button = self.action_button(
-            "显示", ["ming-control-center", "--page", "display"])
-        # These two buttons share a row with the labels.  Let the labels keep
-        # a readable allocation instead of allowing a generic action button
-        # to consume the entire third grid column.
+        # The sound shortcut shares a row with the volume label.  Keep the
+        # label readable instead of letting it consume the whole last column.
         self.audio_button.set_hexpand(False)
-        self.display_button.set_hexpand(False)
         controls.attach(self.volume_label, 0, 0, 2, 1)
         controls.attach(self.audio_button, 2, 0, 1, 1)
         controls.attach(self.volume_scale, 0, 1, 3, 1)
         controls.attach(self.brightness_label, 0, 2, 2, 1)
-        controls.attach(self.display_button, 2, 2, 1, 1)
         controls.attach(self.brightness_scale, 0, 3, 3, 1)
+
+        resource_grid = Gtk.Grid()
+        resource_grid.set_column_spacing(6)
+        resource_grid.set_row_spacing(0)
+        resource_grid.set_column_homogeneous(True)
+        self.resource_labels = {}
+        for column, (mode, label) in enumerate(
+                (("memory", "内存"), ("cpu", "CPU"), ("network", "网速"))):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            card.get_style_context().add_class("status-resource-card")
+            name = Gtk.Label(label=label)
+            name.set_halign(Gtk.Align.CENTER)
+            name.get_style_context().add_class("status-resource-name")
+            value = Gtk.Label(label="--")
+            value.set_halign(Gtk.Align.CENTER)
+            value.get_style_context().add_class("status-resource-value")
+            card.pack_start(name, False, False, 0)
+            card.pack_start(value, False, False, 0)
+            resource_grid.attach(card, column, 0, 1, 1)
+            self.resource_labels[mode] = value
 
         expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         expanded.set_valign(Gtk.Align.START)
         expanded.set_vexpand(False)
         expanded.set_margin_top(0)
         expanded.pack_start(header, False, False, 0)
-        expanded.pack_start(controls, False, False, 0)
+        expanded_title = Gtk.Label(label="快速控制 · 资源状态")
+        expanded_title.set_halign(Gtk.Align.START)
+        expanded_title.get_style_context().add_class("status-expanded-title")
+        expanded.pack_start(expanded_title, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
+        expanded.pack_start(resource_grid, False, False, 0)
+        expanded.pack_start(controls, False, False, 0)
         self.content_revealer = Gtk.Revealer()
         self.content_revealer.set_valign(Gtk.Align.START)
         self.content_revealer.set_vexpand(False)
         self.content_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.content_revealer.set_transition_duration(180)
         self.content_revealer.add(expanded)
+        expanded_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        expanded_panel.get_style_context().add_class("status-expanded-panel")
+        expanded_panel.set_valign(Gtk.Align.START)
+        expanded_panel.set_vexpand(False)
+        expanded_panel.add(self.content_revealer)
+        self.expanded_window = Gtk.Window(type=Gtk.WindowType.POPUP)
+        # Gtk.WindowTypeHint.POPUP_MENU is exposed through Gdk in GTK 3.
+        self.expanded_window.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
+        self.expanded_window.set_decorated(False)
+        self.expanded_window.set_resizable(False)
+        self.expanded_window.set_skip_taskbar_hint(True)
+        self.expanded_window.set_skip_pager_hint(True)
+        self.expanded_window.set_position(Gtk.WindowPosition.NONE)
+        self.expanded_window.add(expanded_panel)
         box.pack_start(self.compact_button, False, False, 0)
-        box.pack_start(self.content_revealer, False, False, 0)
+        # The expanded controls live in expanded_window, so this box keeps a
+        # fixed compact-pill allocation in every state.
+        # box.pack_start(self.content_revealer, False, False, 0)
         self.pack_start(box, False, False, 0)
         self.apply_collapsed_state(animate=False)
         self.refresh()
@@ -2663,7 +2794,9 @@ class StatusWidget(Gtk.Box):
         return False
 
     def preferred_height(self):
-        return int(self._display_height)
+        # The desktop only reserves the compact pill height.  Expanded
+        # controls are a separate transient window and do not move tiles.
+        return STATUS_WIDGET_COMPACT_HEIGHT
 
     def set_collapsed(self, collapsed):
         self.collapsed = bool(collapsed)
@@ -2673,6 +2806,8 @@ class StatusWidget(Gtk.Box):
         except OSError as exc:
             log("could not save status widget state: %s" % exc)
         self.apply_collapsed_state(animate=True)
+        if not self.collapsed:
+            self.refresh_resource_metric()
 
     def apply_collapsed_state(self, animate=False):
         style = self.widget_box.get_style_context()
@@ -2680,7 +2815,7 @@ class StatusWidget(Gtk.Box):
             style.add_class("status-widget-compact")
         else:
             style.remove_class("status-widget-compact")
-        self.compact_button.set_visible(self.collapsed)
+        self.compact_button.set_visible(True)
         expanded = self.content_revealer.get_child()
         if self.collapsed:
             # A Revealer can retain its child allocation for one frame after
@@ -2688,18 +2823,18 @@ class StatusWidget(Gtk.Box):
             # complete expanded subtree so no action buttons leak into the
             # compact pill area.
             self.content_revealer.set_reveal_child(False)
-            self.content_revealer.set_visible(False)
-            self.content_revealer.set_size_request(-1, 0)
-            if expanded is not None:
-                expanded.set_visible(False)
-                expanded.set_size_request(-1, 0)
+            if self._collapse_hide_source:
+                GLib.source_remove(self._collapse_hide_source)
+            self._collapse_hide_source = GLib.timeout_add(220, self._complete_collapse)
         else:
             self.content_revealer.set_visible(True)
-            self.content_revealer.set_reveal_child(True)
             self.content_revealer.set_size_request(-1, -1)
             if expanded is not None:
                 expanded.set_visible(True)
                 expanded.set_size_request(-1, -1)
+            self.position_expanded_window()
+            self.expanded_window.show_all()
+            self.content_revealer.set_reveal_child(True)
         target_height = (
             STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
             else STATUS_WIDGET_EXPANDED_HEIGHT)
@@ -2707,11 +2842,52 @@ class StatusWidget(Gtk.Box):
             self.animate_collapsed_state(target_height)
         else:
             self._height_animation = None
-            self._display_height = target_height
-            self.set_size_request(-1, target_height)
+            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
+            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
             desktop = self.get_toplevel()
             if hasattr(desktop, "place_overlays"):
                 desktop.place_overlays()
+
+    def _complete_collapse(self):
+        self._collapse_hide_source = 0
+        if not self.collapsed:
+            return False
+        expanded = self.content_revealer.get_child()
+        self.content_revealer.set_visible(False)
+        self.content_revealer.set_size_request(-1, 0)
+        if expanded is not None:
+            expanded.set_visible(False)
+            expanded.set_size_request(-1, 0)
+        self.expanded_window.hide()
+        return False
+
+    def position_expanded_window(self):
+        """Place the transient panel relative to the fixed compact pill."""
+        desktop = self.get_toplevel()
+        if not isinstance(desktop, Gtk.Window):
+            return False
+        try:
+            screen = desktop.get_screen()
+            screen_size = {"width": screen.get_width(), "height": screen.get_height()}
+            allocation = self.get_allocation()
+            origin_x, origin_y = getattr(desktop, "window_origin", (0, 0))
+            pill = {
+                "x": origin_x + int(allocation.x),
+                "y": origin_y + int(allocation.y),
+                "width": max(1, int(allocation.width)),
+                "height": STATUS_WIDGET_COMPACT_HEIGHT,
+            }
+            geometry = status_widget_overlay_geometry(
+                pill, {"width": 330, "height": STATUS_WIDGET_EXPANDED_HEIGHT}, screen_size)
+            if self.expanded_window.get_transient_for() is not desktop:
+                self.expanded_window.set_transient_for(desktop)
+            self.expanded_window.set_default_size(
+                geometry["panel"]["width"], geometry["panel"]["height"])
+            self.expanded_window.move(geometry["panel"]["x"], geometry["panel"]["y"])
+            return True
+        except Exception as exc:
+            log("could not position status widget popup: %s" % exc)
+            return False
 
     def on_resource_clicked(self, _button):
         current = normalize_metric_mode(self.metric_mode)
@@ -2729,14 +2905,16 @@ class StatusWidget(Gtk.Box):
             return True
         self.metric_refreshing = True
         generation = self.metric_generation
-        mode = self.metric_mode
 
         def collect():
             try:
-                result = self.metric_sampler.sample(mode)
+                results = self.metric_sampler.sample_all()
             except Exception as exc:
-                result = _metric_result(mode, reason="性能采样失败：%s" % exc)
-            GLib.idle_add(self.apply_resource_metric, generation, result)
+                results = {
+                    mode: _metric_result(mode, reason="性能采样失败：%s" % exc)
+                    for mode in METRIC_MODES
+                }
+            GLib.idle_add(self.apply_resource_metrics, generation, results)
 
         threading.Thread(target=collect, daemon=True).start()
         return True
@@ -2745,19 +2923,31 @@ class StatusWidget(Gtk.Box):
         return bool(self.refresh_resource_metric())
 
     def apply_resource_metric(self, generation, result):
+        return self.apply_resource_metrics(generation, {result.get("mode", self.metric_mode): result})
+
+    def apply_resource_metrics(self, generation, results):
         if generation != self.metric_generation or self.collapsed:
             self.metric_refreshing = False
             return False
         self.metric_refreshing = False
-        result = result or _metric_result(self.metric_mode, reason="不可用")
         labels = {"memory": "内存", "cpu": "CPU", "network": "网速"}
-        label = labels.get(result.get("mode"), "资源")
-        if result.get("available"):
-            self.resource_label.set_text("%s %s%s" % (
-                label, result.get("value"), result.get("unit", "")))
-            log("resource metric %s" % json.dumps(result, ensure_ascii=False, sort_keys=True))
+        for mode in METRIC_MODES:
+            result = (results or {}).get(mode) or _metric_result(mode, reason="不可用")
+            label = labels[mode]
+            value = ("%s%s" % (result.get("value"), result.get("unit", ""))
+                     if result.get("available") else
+                     ("采样中" if result.get("reason") else "不可用"))
+            metric_label = self.resource_labels.get(mode)
+            if metric_label is not None:
+                metric_label.set_text(value)
+            log("resource metric %s" % json.dumps(
+                dict(result, label=label), ensure_ascii=False, sort_keys=True))
+        # Preserve a readable legacy label for callers and accessibility tools.
+        memory = (results or {}).get("memory") or {}
+        if memory.get("available"):
+            self.resource_label.set_text("内存 %s%s" % (memory.get("value"), memory.get("unit", "")))
         else:
-            self.resource_label.set_text("%s %s" % (label, "采样中" if result.get("reason") else "不可用"))
+            self.resource_label.set_text("内存 %s" % ("采样中" if memory.get("reason") else "不可用"))
         return False
 
     def animate_collapsed_state(self, target_height):
@@ -2770,8 +2960,8 @@ class StatusWidget(Gtk.Box):
             pass
         if reduced_motion:
             self._height_animation = None
-            self._display_height = target_height
-            self.set_size_request(-1, target_height)
+            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
+            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
             desktop = self.get_toplevel()
             if hasattr(desktop, "place_overlays"):
                 desktop.place_overlays()
@@ -2792,13 +2982,14 @@ class StatusWidget(Gtk.Box):
             eased = COMMON.ease_out_cubic(progress)
             self._display_height = animation["start"] + (
                 animation["target"] - animation["start"]) * eased
-            self.set_size_request(-1, int(round(self._display_height)))
+            # Keep the desktop allocation fixed while the popup animates.
+            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
             desktop = self.get_toplevel()
             if hasattr(desktop, "place_overlays"):
                 desktop.place_overlays()
             if progress < 1.0:
                 return True
-            self._display_height = animation["target"]
+            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
             self._height_animation = None
             self._height_animation_source = 0
             return False
@@ -4046,9 +4237,14 @@ class PhoneDesktop(Gtk.Window):
 
     def show_desktop_context_menu(self, event):
         menu = Gtk.Menu()
+        # The canonical action is ``ming-app-drawer --toggle``; keep argv
+        # structured so paths and arguments are never shell-interpreted.
         actions = (
+            ("添加到桌面", lambda: subprocess.Popen(["ming-app-drawer", "--toggle"], shell=False)),
+            ("新建空白文件", self._create_blank_desktop_file),
+            ("新建文件夹", self._create_desktop_folder),
             ("刷新桌面", self.refresh_desktop),
-            ("打开应用抽屉", lambda: subprocess.Popen(["ming-app-library"])),
+            ("打开应用抽屉", lambda: subprocess.Popen(["ming-app-drawer", "--toggle"], shell=False)),
             ("Ming 设置", lambda: subprocess.Popen(["ming-control-center"])),
             ("终端", lambda: subprocess.Popen(["ming-terminal"])),
         )
@@ -4058,6 +4254,20 @@ class PhoneDesktop(Gtk.Window):
             menu.append(entry)
         menu.show_all()
         menu.popup_at_pointer(event)
+
+    def _create_blank_desktop_file(self):
+        try:
+            create_blank_desktop_file()
+        except (OSError, ValueError) as exc:
+            log(f"could not create desktop file: {exc}")
+        self.refresh_desktop()
+
+    def _create_desktop_folder(self):
+        try:
+            create_desktop_folder()
+        except (OSError, ValueError) as exc:
+            log(f"could not create desktop folder: {exc}")
+        self.refresh_desktop()
 
     def refresh_desktop(self):
         updated = sync_layout(self.get_screen().get_width())
@@ -4120,6 +4330,8 @@ class PhoneDesktop(Gtk.Window):
             self.fixed.put(self.status, x, y)
         else:
             self.fixed.move(self.status, x, y)
+        if not self.status.collapsed:
+            self.status.position_expanded_window()
         GLib.idle_add(self.status.verify_top_alignment)
         feedback_w = 340 if screen_w >= 900 else 250
         self.launch_feedback.set_size_request(feedback_w, 84)

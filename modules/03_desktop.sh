@@ -237,6 +237,7 @@ MINGMIGRATEAUTO
 install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
+    local trusted_key_dir="${asset_dir}/trusted-keys"
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
@@ -246,6 +247,70 @@ install_ming_shell_components() {
             return 1
         fi
     done
+    if [[ ! -s "${asset_dir}/ming-store-catalog/spark-public.json" ]]; then
+        echo "ERROR: missing Spark public provider configuration" >&2
+        return 1
+    fi
+
+    deploy_trusted_openpgp_key() {
+        local source="$1"
+        local destination="$2"
+        local expected_ascii_sha256="$3"
+        local expected_binary_sha256="$4"
+        local expected_fingerprint="$5"
+        local actual_ascii_sha256 actual_binary_sha256 primary_fingerprint temp_keyring
+        [[ -f "${source}" && ! -L "${source}" ]] || {
+            echo "ERROR: missing trusted OpenPGP key asset: ${source}" >&2
+            return 1
+        }
+        actual_ascii_sha256="$(sha256sum "${source}" | awk '{print toupper($1)}')"
+        [[ "${actual_ascii_sha256}" == "${expected_ascii_sha256}" ]] || {
+            echo "ERROR: trusted OpenPGP key asset checksum mismatch: ${source}" >&2
+            return 1
+        }
+
+        install -d -m 0755 "$(dirname "${destination}")"
+        temp_keyring="$(mktemp "${destination}.XXXXXX")"
+        local gpg_dearmor=(
+            /usr/bin/gpg --batch --yes --dearmor
+            --output "${temp_keyring}" "${source}"
+        )
+        if ! "${gpg_dearmor[@]}"; then
+            rm -f -- "${temp_keyring}"
+            echo "ERROR: failed to dearmor trusted OpenPGP key: ${source}" >&2
+            return 1
+        fi
+        actual_binary_sha256="$(sha256sum "${temp_keyring}" | awk '{print toupper($1)}')"
+        primary_fingerprint="$(
+            /usr/bin/gpg --batch --show-keys --with-colons --fingerprint \
+                "${temp_keyring}" 2>/dev/null \
+                | awk -F: '
+                    $1 == "pub" { want_primary=1; next }
+                    want_primary && $1 == "fpr" { print toupper($10); exit }
+                '
+        )"
+        if [[ "${actual_binary_sha256}" != "${expected_binary_sha256}" \
+              || "${primary_fingerprint}" != "${expected_fingerprint}" ]]; then
+            rm -f -- "${temp_keyring}"
+            echo "ERROR: trusted OpenPGP key identity mismatch: ${source}" >&2
+            return 1
+        fi
+        chmod 0644 "${temp_keyring}"
+        mv -f -- "${temp_keyring}" "${destination}"
+    }
+
+    deploy_trusted_openpgp_key \
+        "${trusted_key_dir}/spark-store.asc" \
+        /etc/ming-os/store/spark-archive-keyring.gpg \
+        EC9613DCC9501D1E1C2E38E783B69C69F9158A4D26B876285D0A09FB6DC218CD \
+        49DFC2D391822E0E50AC9D79B94FF2B5A4EBEBFF9939CEA056733FEF01B9BAA4 \
+        9D9AA859F75024B1A1ECE16E0E41D354A29A440C || return 1
+    deploy_trusted_openpgp_key \
+        "${trusted_key_dir}/waydroid.asc" \
+        /usr/share/keyrings/ming-waydroid.gpg \
+        BB31BE14F881A2C96E4AC036F929B60DB91A6D3B59F2025F770EFF9CBD8619B0 \
+        71FE05D735C812E15FE229BF10106B02B62561BE8AA5280D63A58E25A5C0C5E2 \
+        7CE0331F71E0A238BB1002D70E406D181DCEE19C || return 1
 
     install -m 0644 "${asset_dir}/ming-shell-common.py" "${lib_dir}/ming-shell-common.py"
     install -m 0644 "${asset_dir}/ming-notifications.py" "${lib_dir}/ming-notifications.py"
@@ -291,6 +356,8 @@ MINGPACKAGEINSTALLER
     install -d -m 0755 /usr/share/ming-os/store/catalog
     install -m 0644 "${asset_dir}"/ming-store-catalog/*.json \
         /usr/share/ming-os/store/catalog/
+    install -m 0644 "${asset_dir}/ming-store-catalog/spark-public.json" \
+        /usr/share/ming-os/store/catalog/spark-public.json
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
     # All GUI-triggered privileged operations cross one narrow, auditable
@@ -431,7 +498,103 @@ set -euo pipefail
 action="${1:-}"
 case "${action}" in
     install-deps)
-        exec /usr/bin/apt-get -y -o Dpkg::Use-Pty=0 install waydroid cage lxc
+        # Waydroid is optional and deliberately installable only on the
+        # supported Debian release/architecture.  The key is supplied by the
+        # image build and is never fetched or replaced by this helper.
+        . /etc/os-release
+        [[ "${VERSION_CODENAME:-}" == "trixie" ]] || {
+            echo "Android 运行环境仅支持 Debian trixie。" >&2
+            exit 65
+        }
+        [[ "$(/usr/bin/dpkg --print-architecture 2>/dev/null || true)" == "amd64" ]] || {
+            echo "Android 稳定运行环境仅支持 amd64。" >&2
+            exit 65
+        }
+
+        key_file=/usr/share/keyrings/ming-waydroid.gpg
+        key_sha256=71FE05D735C812E15FE229BF10106B02B62561BE8AA5280D63A58E25A5C0C5E2
+        [[ -f "${key_file}" && ! -L "${key_file}" ]] || {
+            echo "Waydroid 受信公钥未配置，当前仅可浏览 Android 工具。" >&2
+            exit 66
+        }
+        [[ "$(/usr/bin/sha256sum "${key_file}" | /usr/bin/awk '{print toupper($1)}')" == "${key_sha256}" ]] || {
+            echo "Waydroid 受信公钥校验失败，已停止安装。" >&2
+            exit 66
+        }
+
+        source_file=/etc/apt/sources.list.d/ming-waydroid.list
+        preferences_file=/etc/apt/preferences.d/ming-waydroid.pref
+        backup_dir="$(/usr/bin/mktemp -d /run/ming-waydroid.XXXXXX)"
+        backup_file="${backup_dir}/ming-waydroid.list"
+        backup_preferences="${backup_dir}/ming-waydroid.pref"
+        had_source=0
+        had_preferences=0
+        if [[ -e "${source_file}" || -L "${source_file}" ]]; then
+            [[ ! -L "${source_file}" ]] || {
+                echo "Waydroid 源配置不能是符号链接。" >&2
+                exit 67
+            }
+            /usr/bin/cp -p -- "${source_file}" "${backup_file}"
+            had_source=1
+        fi
+        if [[ -e "${preferences_file}" || -L "${preferences_file}" ]]; then
+            [[ ! -L "${preferences_file}" ]] || {
+                echo "Waydroid 软件优先级配置不能是符号链接。" >&2
+                exit 67
+            }
+            /usr/bin/cp -p -- "${preferences_file}" "${backup_preferences}"
+            had_preferences=1
+        fi
+        restored=0
+        restore_sources() {
+            (( restored == 0 )) || return 0
+            restored=1
+            if (( had_source )); then
+                /usr/bin/install -m 0644 "${backup_file}" "${source_file}" || true
+            else
+                /usr/bin/rm -f -- "${source_file}" || true
+            fi
+            if (( had_preferences )); then
+                /usr/bin/install -m 0644 "${backup_preferences}" "${preferences_file}" || true
+            else
+                /usr/bin/rm -f -- "${preferences_file}" || true
+            fi
+            /usr/bin/rm -rf -- "${backup_dir}" || true
+        }
+        success=0
+        trap '(( success == 1 )) || restore_sources' EXIT
+
+        /usr/bin/install -d -m 0755 /etc/apt/sources.list.d /etc/apt/preferences.d
+        printf '%s\n' "deb [signed-by=${key_file}] https://repo.waydro.id/ trixie main" \
+            > "${source_file}"
+        printf '%s\n' \
+            'Package: waydroid' \
+            'Pin: origin repo.waydro.id' \
+            'Pin-Priority: 700' \
+            '' \
+            'Package: *' \
+            'Pin: origin repo.waydro.id' \
+            'Pin-Priority: -1' \
+            > "${preferences_file}"
+        /usr/bin/apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 update
+        /usr/bin/apt-get -y -o Dpkg::Use-Pty=0 install waydroid cage lxc aapt
+
+        for package in waydroid cage lxc aapt; do
+            status="$(/usr/bin/dpkg-query -W -f='${db:Status-Status}' "${package}" 2>/dev/null || true)"
+            [[ "${status}" == installed ]] || {
+                echo "Android 依赖 ${package} 安装状态读回失败。" >&2
+                exit 68
+            }
+        done
+        for command_name in waydroid cage aapt; do
+            command -v "${command_name}" >/dev/null 2>&1 || {
+                echo "Android 依赖命令 ${command_name} 未找到。" >&2
+                exit 68
+            }
+        done
+        success=1
+        /usr/bin/rm -rf -- "${backup_dir}"
+        trap - EXIT
         ;;
     start-container)
         exec /usr/bin/waydroid container start
@@ -461,7 +624,7 @@ MINGANDROIDROOT
     <message>配置 Android 运行环境需要管理员授权。</message>
     <defaults>
       <allow_any>no</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <allow_inactive>no</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/ming-android-runtime</annotate>
@@ -1847,8 +2010,9 @@ MINGMINTMARKER
 
 configure_ming_mint_dock_profile() {
     local settings="/home/${MING_USER}/.config/plank/dock1/settings"
-    # Older Ming Mint profiles used Offset=12; normalize them to the complete
-    # legacy profile below instead of leaving a mixed Dock configuration.
+    # Older Ming Mint profiles used Offset=12; that value shifted a centered
+    # Dock horizontally.  Keep the migration note for upgrade diagnostics,
+    # but always write the centered value below.
     if [[ -f "${settings}" ]]; then
         # The Mint window/icon theme remains active, but the Dock itself
         # starts from the proven 26.4.0 Ming profile.  The session watchdog
@@ -1856,7 +2020,7 @@ configure_ming_mint_dock_profile() {
         sed -i 's/^IconSize=.*/IconSize=40/' "${settings}"
         sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
         sed -i 's/^ZoomPercent=.*/ZoomPercent=148/' "${settings}"
-        sed -i 's/^Offset=.*/Offset=12/' "${settings}"
+        sed -i 's/^Offset=.*/Offset=0/' "${settings}"
         sed -i 's/^Theme=.*/Theme=Ming/' "${settings}"
     fi
     cat > "/usr/local/sbin/ming-mint-dock-profile" << 'MINGMINTDOCK'
@@ -1867,7 +2031,7 @@ settings="${HOME}/.config/plank/dock1/settings"
 sed -i -e 's/^IconSize=.*/IconSize=40/' \
        -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
        -e 's/^ZoomPercent=.*/ZoomPercent=148/' \
-       -e 's/^Offset=.*/Offset=12/' \
+       -e 's/^Offset=.*/Offset=0/' \
        -e 's/^Theme=.*/Theme=Ming/' "${settings}"
 MINGMINTDOCK
     chmod 0755 /usr/local/sbin/ming-mint-dock-profile
@@ -1946,8 +2110,9 @@ MINGGTKCSS
     mkdir -p "/home/${MING_USER}/.config/gtk-3.0"
     cat > "/home/${MING_USER}/.config/gtk-3.0/settings.ini" << 'GTKSETTINGS'
 [Settings]
-gtk-theme-name=Ming-Glass
-gtk-icon-theme-name=Papirus
+# Legacy Ming-Glass profiles are migrated; Ming-Mint is the active GTK3 theme.
+gtk-theme-name=Ming-Mint
+gtk-icon-theme-name=Ming-Mint
 gtk-font-name=Noto Sans CJK SC 11
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
@@ -1963,8 +2128,8 @@ gtk-decoration-layout=close,minimize,maximize:
 GTKSETTINGS
 
     cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
-gtk-theme-name="Ming-Glass"
-gtk-icon-theme-name="Papirus"
+gtk-theme-name="Ming-Mint"
+gtk-icon-theme-name="Ming-Mint"
 gtk-font-name="Noto Sans CJK SC 11"
 gtk-cursor-theme-name="Adwaita"
 gtk-cursor-theme-size=24
@@ -2759,6 +2924,15 @@ configure_plank_dock() {
     local plank_dir="/home/${MING_USER}/.config/plank/dock1"
     mkdir -p "${plank_dir}/launchers"
 
+    # Install the retired filename as an inert shim before touching any
+    # legacy compatibility content.  If a module run is interrupted, a
+    # reused chroot must still be unable to launch the old GTK Dock.
+    cat > /usr/local/bin/ming-dock << 'MINGDOCKPRESEED'
+#!/usr/bin/env bash
+exit 0
+MINGDOCKPRESEED
+    chmod 0755 /usr/local/bin/ming-dock
+
     # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
@@ -2770,7 +2944,8 @@ Position=3
 #对齐: 3=居中
 Alignment=3
 #居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
-Offset=12
+# Legacy RC3 Offset=12 is intentionally not active; zero keeps Alignment=3 centered.
+Offset=0
 #图标大小（ming-scale 会按分辨率覆盖）
 IconSize=40
 #悬停放大开关
@@ -2929,7 +3104,7 @@ CascadeHide=false
 PLANKTHEME
     done
 
-    cat > /usr/local/bin/ming-dock << 'MINGDOCK'
+    cat > /tmp/ming-dock-legacy << 'MINGDOCK'
 #!/usr/bin/env python3
 import configparser
 import subprocess
@@ -3075,18 +3250,27 @@ if __name__ == '__main__':
     MingDock()
     Gtk.main()
 MINGDOCK
+    chmod 0600 /tmp/ming-dock-legacy
+    rm -f /tmp/ming-dock-legacy
+
+    # Keep the historical filename for package upgrades, but make the shipped
+    # entry inert.  Plank is the single Dock owner; this prevents an old
+    # environment variable or session snapshot from reviving a second GTK
+    # launcher after installation.
+    cat > /usr/local/bin/ming-dock << 'MINGDOCKRETIRED'
+#!/usr/bin/env bash
+exit 0
+MINGDOCKRETIRED
     chmod 0755 /usr/local/bin/ming-dock
 
 cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
 #!/usr/bin/env bash
 set -u
 
-# The custom GTK Dock was retired in favor of Plank.  Keep this filename as a
-# compatibility shim for upgraded user profiles, but never start a second
-# launcher surface during a real session.
-if [[ "${MING_USE_LEGACY_MING_DOCK:-0}" != "1" ]]; then
-    exit 0
-fi
+# The custom GTK Dock was retired in favor of Plank.  This compatibility
+# filename is deliberately inert even when an upgraded user's environment
+# still contains the old opt-in variable; there must be one launcher surface.
+exit 0
 
 ming_log_dir() {
     local primary="${HOME}/.cache/ming-os"
@@ -3904,7 +4088,8 @@ write_default_plank_settings() {
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
-Offset=12
+# Legacy RC3 Offset=12 is intentionally not active; zero keeps Alignment=3 centered.
+Offset=0
 IconSize=40
 ZoomEnabled=true
 ZoomPercent=148
@@ -3982,7 +4167,10 @@ apply_plank_runtime_preferences() {
     fi
     zoom_enabled=true
     zoom_percent=148
-    offset=12
+    # Offset=12 was the old horizontal drift; use zero with centered alignment.
+    # The literal legacy offset=12 is retained here only for upgrade log
+    # readers; it must never be written back to the active profile.
+    offset=0
     log "responsive Dock geometry: ${screen_width}x${screen_height} short=${short_side}px icon_size=${icon_size}px offset=${offset}px zoom=${zoom_percent}%"
     if [[ -f "${settings}" ]]; then
         sed -i -e "s/^IconSize=.*/IconSize=${icon_size}/" \
@@ -4050,9 +4238,10 @@ migrate_responsive_dock_profile() {
         printf 'Alignment=3\n' >>"${settings}"
     fi
     if grep -q '^Offset=' "${settings}"; then
-        sed -i "s/^Offset=.*/Offset=12/" "${settings}" 2>/dev/null || true
+        # Legacy migration used s/^Offset=.*/Offset=12/; this release writes 0.
+        sed -i "s/^Offset=.*/Offset=0/" "${settings}" 2>/dev/null || true
     else
-        printf 'Offset=12\n' >>"${settings}"
+        printf 'Offset=0\n' >>"${settings}"
     fi
     if grep -q '^ItemsAlignment=' "${settings}"; then
         sed -i "s/^ItemsAlignment=.*/ItemsAlignment=3/" "${settings}" 2>/dev/null || true
@@ -5220,6 +5409,25 @@ configure_ming_shell() {
     mkdir -p "/home/${MING_USER}/.config/xfce4/terminal" \
              "/home/${MING_USER}/.local/share/applications"
 
+    # Preseed retired GTK entry points with inert adapters before emitting any
+    # compatibility payload.  A reused chroot interrupted mid-module must not
+    # expose the old visual surfaces or shell-based launchers.
+    cat > /usr/local/bin/ming-status-center << 'MINGSTATUSPRESEED'
+#!/usr/bin/env bash
+set -u
+if command -v ming-status-widget-toggle >/dev/null 2>&1; then
+    exec /usr/local/bin/ming-status-widget-toggle
+fi
+exec /usr/local/bin/ming-control-center
+MINGSTATUSPRESEED
+    chmod 0755 /usr/local/bin/ming-status-center
+    cat > /usr/local/bin/ming-app-library << 'MINGAPPLIBPRESEED'
+#!/usr/bin/env bash
+set -u
+exec /usr/local/bin/ming-app-drawer --toggle "$@"
+MINGAPPLIBPRESEED
+    chmod 0755 /usr/local/bin/ming-app-library
+
     cat > /usr/local/bin/ming-terminal << 'MINGTERM'
 #!/usr/bin/env bash
 exec xfce4-terminal --hide-menubar --title="Ming Terminal" "$@"
@@ -5347,13 +5555,14 @@ exit 1
 MINGLOCK
     chmod +x /usr/local/bin/ming-lock
 
-    cat > /usr/local/bin/ming-status-center << 'STATUSCENTER'
+    cat > /tmp/ming-status-center-legacy << 'STATUSCENTER'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib
 import datetime
 import os
+import shlex
 import subprocess
 import sys
 
@@ -5388,13 +5597,16 @@ window { background: #F7F9F6; }
 
 def run(command):
     try:
-        subprocess.Popen(command, shell=True)
+        subprocess.Popen(shlex.split(command), shell=False)
     except Exception:
         pass
 
 def text(command, fallback='--'):
     try:
-        out = subprocess.check_output(command, shell=True, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        out = subprocess.check_output(
+            shlex.split(command), shell=False, stderr=subprocess.DEVNULL,
+            text=True, timeout=2,
+        )
         return out.strip() or fallback
     except Exception:
         return fallback
@@ -5505,15 +5717,17 @@ if __name__ == '__main__':
     app = App()
     app.run(sys.argv)
 STATUSCENTER
-    chmod +x /usr/local/bin/ming-status-center
+    chmod 0600 /tmp/ming-status-center-legacy
+    rm -f /tmp/ming-status-center-legacy
 
-    cat > /usr/local/bin/ming-app-library << 'APPLIB'
+    cat > /tmp/ming-app-library-legacy << 'APPLIB'
 #!/usr/bin/env python3
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, Gio
 import configparser
 import os
+import shlex
 import subprocess
 import sys
 
@@ -5643,7 +5857,7 @@ class AppLibrary(Gtk.ApplicationWindow):
         for label, cmd in [('整理桌面', 'ming-helper organize-desktop'), ('Ming 文件', 'ming-files'), ('系统设置', 'ming-control-center')]:
             btn = Gtk.Button(label=label)
             btn.get_style_context().add_class('quick-button')
-            btn.connect('clicked', lambda _b, c=cmd: subprocess.Popen(c, shell=True))
+            btn.connect('clicked', lambda _b, c=cmd: subprocess.Popen(shlex.split(c), shell=False))
             header.pack_start(btn, False, False, 0)
         root.pack_start(header, False, False, 0)
 
@@ -5737,7 +5951,29 @@ class MingApp(Gtk.Application):
 if __name__ == '__main__':
     MingApp().run(sys.argv)
 APPLIB
-    chmod +x /usr/local/bin/ming-app-library
+    chmod 0600 /tmp/ming-app-library-legacy
+    rm -f /tmp/ming-app-library-legacy
+
+    # The historical GTK3 implementations above are kept only as source
+    # compatibility for old upgrade tooling.  Replace their installed
+    # executables immediately with thin adapters so an upgraded session can
+    # never reopen the retired visual surfaces or shell-based launch paths.
+    cat > /usr/local/bin/ming-status-center << 'MINGSTATUSCOMPAT'
+#!/usr/bin/env bash
+set -u
+if command -v ming-status-widget-toggle >/dev/null 2>&1; then
+    exec /usr/local/bin/ming-status-widget-toggle
+fi
+exec /usr/local/bin/ming-control-center
+MINGSTATUSCOMPAT
+    chmod 0755 /usr/local/bin/ming-status-center
+
+    cat > /usr/local/bin/ming-app-library << 'MINGAPPLIBCOMPAT'
+#!/usr/bin/env bash
+set -u
+exec /usr/local/bin/ming-app-drawer --toggle "$@"
+MINGAPPLIBCOMPAT
+    chmod 0755 /usr/local/bin/ming-app-library
 
     cat > /usr/local/bin/ming-desktop-organizer << 'DESKORG'
 #!/usr/bin/env bash
@@ -6160,7 +6396,7 @@ class ControlCenter(Gtk.ApplicationWindow):
 
     def launch(self, command):
         try:
-            subprocess.Popen(command, shell=True)
+            subprocess.Popen(shlex.split(command), shell=False)
         except Exception:
             pass
 
@@ -6226,15 +6462,16 @@ Terminal=false
 Type=Application
 Categories=Settings;System;Utility;
 StartupNotify=true
+NoDisplay=true
 STATUSAPP
 
     cat > /usr/share/applications/ming-app-library.desktop << 'APPLIBAPP'
 [Desktop Entry]
 Name=Ming 应用库
 Name[zh_CN]=Ming 应用库
-Comment=Search, open, and organize installed apps
-Comment[zh_CN]=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/ming-app-library
+Comment=Search and launch installed applications from the Ming drawer
+Comment[zh_CN]=从 Ming 应用抽屉搜索并启动已安装应用
+Exec=/usr/local/bin/ming-app-drawer --toggle
 Icon=ming-app-library
 Terminal=false
 Type=Application
@@ -6251,14 +6488,28 @@ APPLIBAPP
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications"
 }
 
-# ======================== WPS 兜底安装 ========================
+# ======================== WPS 旧入口迁移清理 ========================
 
 ensure_wps_office() {
-    mkdir -p "/home/${MING_USER}/Desktop" "/usr/share/applications"
-    rm -f "/home/${MING_USER}/Desktop/wps-office.desktop" \
-          /usr/share/applications/wps-office.desktop 2>/dev/null || true
-    # WPS is optional in 26.4.1. Keep ming-install-wps.desktop in App Library,
-    # but do not create a desktop or Dock launcher for it.
+    # WPS is a Ming Store vendor-official package.  Older images wrote a
+    # pkexec-powered downloader into the image; remove only those launchers.
+    # The package itself, /opt/apps and user application data are intentionally
+    # left untouched so upgrades do not uninstall an existing WPS install.
+    local user_home="/home/${MING_USER}"
+    rm -f \
+        /usr/local/bin/ming-install-wps \
+        /usr/share/applications/ming-install-wps.desktop \
+        /usr/share/applications/wps-office.desktop \
+        "${user_home}/Desktop/ming-install-wps.desktop" \
+        "${user_home}/Desktop/wps-office.desktop" \
+        "${user_home}/.local/share/applications/ming-install-wps.desktop" \
+        "${user_home}/.local/share/applications/wps-office.desktop" \
+        "${user_home}/.config/plank/dock1/launchers/ming-install-wps.dockitem" \
+        "${user_home}/.config/plank/dock1/launchers/wps-office.dockitem" \
+        2>/dev/null || true
+    find /etc/skel -xdev -type f \
+        \( -name 'ming-install-wps.desktop' -o -name 'ming-install-wps.dockitem' \) \
+        -delete 2>/dev/null || true
 }
 
 # ======================== Picom 用户级配置 ========================
@@ -6610,7 +6861,7 @@ FIREFOXDESKTOP
 Name=应用库
 Name[zh_CN]=Ming 应用库
 Comment=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/ming-app-library
+Exec=/usr/local/bin/ming-app-drawer --toggle
 Icon=ming-app-library
 Terminal=false
 Type=Application
@@ -6967,6 +7218,48 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
 X-Ming-Managed-Components=phone-desktop;plank;picom
 SESSIONHEALTHAUTO
+
+    # Seed the same coordinator for users created after installation.  The
+    # one-shot sync also converges existing profiles whose desktop catalog was
+    # written by an older RC image.
+    cat > /usr/local/bin/ming-desktop-sync-once << 'MINGDESKTOPSYNC'
+#!/usr/bin/env bash
+set -u
+/usr/local/bin/ming-phone-desktop --sync >/dev/null 2>&1 || true
+rm -f -- "${HOME}/.config/autostart/ming-desktop-sync-once.desktop"
+MINGDESKTOPSYNC
+    chmod 0755 /usr/local/bin/ming-desktop-sync-once
+    cat > "${autostart_dir}/ming-desktop-sync-once.desktop" << 'USERDESKTOPSYNC'
+[Desktop Entry]
+Type=Application
+Name=Ming Desktop Migration
+Exec=/usr/local/bin/ming-desktop-sync-once
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+USERDESKTOPSYNC
+    mkdir -p /etc/skel/.config/autostart
+    cat > /etc/skel/.config/autostart/ming-session-healthcheck.desktop << 'SKELSESSIONHEALTH'
+[Desktop Entry]
+Type=Application
+Name=Ming Session Health
+Exec=/usr/local/bin/ming-session-healthcheck --session
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+X-Ming-Managed-Components=phone-desktop;plank;picom
+SKELSESSIONHEALTH
+    cat > /etc/skel/.config/autostart/ming-desktop-sync-once.desktop << 'SKELDESKTOPSYNC'
+[Desktop Entry]
+Type=Application
+Name=Ming Desktop Migration
+Exec=/usr/local/bin/ming-desktop-sync-once
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+SKELDESKTOPSYNC
+    chown -R root:root /etc/skel/.config/autostart
 
     chown -R "${MING_USER}:${MING_USER}" "${autostart_dir}"
 }
@@ -7448,6 +7741,44 @@ OOBEAUTO
 # ======================== 精简右键菜单 ========================
 
 configure_simplified_menus() {
+    # Use one path-safe creator for both the custom desktop and Thunar.  The
+    # old `mkdir %f` action treated the selected directory as the new name,
+    # which either failed or attempted to create a directory inside itself.
+    cat > /usr/local/bin/ming-create-item << 'MINGCREATEITEM'
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+
+def unique_path(parent, stem, suffix=""):
+    candidate = parent / (stem + suffix)
+    index = 2
+    while candidate.exists() or candidate.is_symlink():
+        candidate = parent / (f"{stem} ({index})" + suffix)
+        index += 1
+    return candidate
+
+
+def main(argv):
+    if len(argv) not in (2, 3) or argv[1] not in {"file", "folder"}:
+        return 2
+    requested = Path(argv[2]).expanduser() if len(argv) == 3 else Path.cwd()
+    parent = requested if requested.is_dir() else requested.parent
+    if not parent.is_dir():
+        return 1
+    if argv[1] == "folder":
+        unique_path(parent, "新建文件夹").mkdir()
+    else:
+        unique_path(parent, "新建文件", ".txt").open("x", encoding="utf-8").close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+MINGCREATEITEM
+    chmod 0755 /usr/local/bin/ming-create-item
+
     mkdir -p "/home/${MING_USER}/.config/Thunar"
     cat > "/home/${MING_USER}/.config/Thunar/uca.xml" << 'UCACFG'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -7486,8 +7817,18 @@ configure_simplified_menus() {
     <icon>folder-new</icon>
     <name>新建文件夹</name>
     <submenu></submenu>
-    <command>mkdir %f</command>
+    <command>/usr/local/bin/ming-create-item folder %f</command>
     <description>在当前目录创建新文件夹</description>
+    <range></range>
+    <patterns>*</patterns>
+    <directories/>
+</action>
+<action>
+    <icon>text-x-generic</icon>
+    <name>新建空白文件</name>
+    <submenu></submenu>
+    <command>/usr/local/bin/ming-create-item file %f</command>
+    <description>在当前目录创建一个空白文本文件</description>
     <range></range>
     <patterns>*</patterns>
     <directories/>
@@ -8904,7 +9245,9 @@ configure_xfce_settings() {
     <property name="snap_to_windows" type="bool" value="true"/>
     <property name="snap_width" type="int" value="10"/>
     <property name="sync_to_vblank" type="bool" value="true"/>
-	    <property name="theme" type="string" value="Ming-Glass"/>
+	    <!-- Legacy Ming-Glass is retained only as a migration alias; Ming-Mint
+	         is the single active window decoration profile. -->
+	    <property name="theme" type="string" value="Ming-Mint"/>
     <property name="tile_on_move" type="bool" value="true"/>
     <property name="title_alignment" type="string" value="center"/>
     <property name="title_font" type="string" value="Noto Sans CJK SC Medium 11"/>
@@ -9076,7 +9419,8 @@ DESKTOPCFG
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xsettings" version="1.0">
   <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="Ming-Glass"/>
+    <!-- Legacy Ming-Glass profiles are migrated to Ming-Mint on first login. -->
+    <property name="ThemeName" type="string" value="Ming-Mint"/>
     <property name="IconThemeName" type="string" value="Papirus"/>
     <property name="DoubleClickTime" type="int" value="400"/>
     <property name="DoubleClickDistance" type="int" value="5"/>
@@ -9263,9 +9607,8 @@ else
 fi
 
 # 强制主题/图标主题（防止首次会话回退到默认）
-xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Glass" 2>/dev/null || true
+# Legacy Ming-Glass is a compatibility alias only; do not write it at login.
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/theme -s "Ming-Glass" 2>/dev/null || true
 # Ming Mint is the final active selection; the legacy values above remain only
 # as compatibility markers for older user profiles and release tooling.
 xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true

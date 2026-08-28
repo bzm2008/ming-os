@@ -1,4 +1,5 @@
 import pathlib
+import json
 import re
 import unittest
 
@@ -57,6 +58,45 @@ class MingStoreDeploymentContracts(unittest.TestCase):
         self.assertNotIn("spark-store.desktop", DESKTOP)
         self.assertIn("spark-store.desktop", FINALIZE)
         self.assertIn("Spark/APM residue", BUILD)
+
+    def test_spark_public_provider_config_is_attributed_and_enabled_with_pinned_key(self):
+        config_path = ROOT / "assets" / "ming-store-catalog" / "spark-public.json"
+        self.assertTrue(config_path.is_file())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual("ming.store.spark-public.v1", config["schema"])
+        self.assertEqual("spark-public", config["provider"])
+        self.assertEqual("GPL-3.0-or-later", config["upstream_license"])
+        self.assertEqual(
+            "9D9AA859F75024B1A1ECE16E0E41D354A29A440C",
+            config["key_fingerprint"],
+        )
+        self.assertTrue(config["installation_enabled"])
+        self.assertNotIn("installation_disabled_reason", config)
+        self.assertIn("spark-public.json", DESKTOP)
+        self.assertIn("spark-public.json", BUILD)
+        self.assertIn("spark-archive-keyring.gpg", BUILD)
+        attribution = ROOT / "docs" / "ming-store-spark-public.md"
+        self.assertTrue(attribution.is_file())
+        self.assertIn("GPL-3.0", attribution.read_text(encoding="utf-8"))
+
+    def test_spark_public_key_fingerprint_is_exactly_the_40_hex_digit_identity(self):
+        config_path = ROOT / "assets" / "ming-store-catalog" / "spark-public.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertRegex(config["key_fingerprint"], r"^[0-9A-F]{40}$")
+        self.assertEqual(
+            "9D9AA859F75024B1A1ECE16E0E41D354A29A440C",
+            config["key_fingerprint"],
+        )
+        self.assertIn("9D9AA859F75024B1A1ECE16E0E41D354A29A440C", BUILD)
+
+    def test_build_gate_requires_exact_spark_key_identity_when_install_is_enabled(self):
+        config_path = ROOT / "assets" / "ming-store-catalog" / "spark-public.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertTrue(config["installation_enabled"])
+        self.assertIn("installation_enabled", BUILD)
+        self.assertIn("verify_openpgp_keyring", BUILD)
+        self.assertIn("49DFC2D391822E0E50AC9D79B94FF2B5A4EBEBFF9939CEA056733FEF01B9BAA4", BUILD)
+        self.assertNotIn("dcs-repo.gpg-key.asc", BUILD)
 
 
 class SparkRetirementContracts(unittest.TestCase):

@@ -245,7 +245,8 @@ class RequiredRuntimeDependencyContracts(unittest.TestCase):
         self.assertIn("deb ${debian_mirror} trixie main", BASE)
         self.assertIn("deb ${security_mirror} trixie-security main", BASE)
         self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BUILD)
-        self.assertNotIn("mirrors.tuna.tsinghua.edu.cn", BASE)
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn/debian", BASE)
+        self.assertIn("deb.debian.org/debian", BASE)
 
     def test_build_uses_reusable_debootstrap_cache_for_fast_rebuilds(self):
         self.assertIn('readonly APT_ARCHIVES_CACHE="${MING_APT_ARCHIVES_CACHE:-${LINUX_WORKDIR}/apt-archives}"', BUILD)

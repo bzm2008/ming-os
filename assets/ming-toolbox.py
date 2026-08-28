@@ -7,8 +7,10 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
+import threading
 
 
 SECTIONS = ("official", "toolbox", "lab")
@@ -128,6 +130,23 @@ def _load_wine_module():
     raise RuntimeError("Wine 管理组件缺失，请重新安装 Ming 工具箱。")
 
 
+def _load_store_core():
+    candidates = (
+        pathlib.Path(__file__).with_name("ming-store-core.py"),
+        pathlib.Path("/usr/local/lib/ming-os/ming-store-core.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("ming_store_core_for_toolbox", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise RuntimeError("Ming 应用商店核心组件缺失，请重新安装系统组件。")
+
+
 def _load_android_module():
     candidates = (
         pathlib.Path(__file__).with_name("ming-android-runtime.py"),
@@ -146,9 +165,207 @@ def _load_android_module():
 
 
 class ToolboxController:
-    def __init__(self, home=None, runner=None):
+    def __init__(self, home=None, runner=None, downloader=None, catalog_root=None,
+                 catalog_verifier=None):
         self.home = pathlib.Path(home or pathlib.Path.home())
         self.runner = runner or self._run
+        self.downloader = downloader
+        self.catalog_root = pathlib.Path(catalog_root) if catalog_root else None
+        self.catalog_verifier = catalog_verifier
+
+    @staticmethod
+    def _valid_handoff_id(request_id):
+        value = str(request_id or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", value):
+            raise ValueError("Wine 交接 request_id 无效。")
+        return value
+
+    @staticmethod
+    def _valid_wine_app_id(app_id):
+        value = str(app_id or "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", value):
+            raise ValueError("Wine 应用 ID 无效。")
+        return value
+
+    def _current_uid(self):
+        getter = getattr(os, "getuid", None)
+        if getter is None:
+            return None
+        try:
+            uid = int(getter())
+        except (TypeError, ValueError, OSError):
+            return None
+        return uid if uid >= 0 else None
+
+    def _ensure_private_directory(self, path, create=True):
+        """Create/check a user-owned directory without following links."""
+        path = pathlib.Path(path).absolute()
+        home = self.home.absolute()
+        try:
+            relative = path.relative_to(home)
+        except ValueError as exc:
+            raise OSError("Wine 交接结果目录必须位于当前用户目录内。") from exc
+        try:
+            home_info = home.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise OSError("当前用户目录不存在。")
+            home.mkdir(parents=True, exist_ok=True, mode=0o700)
+            home_info = home.lstat()
+        if stat.S_ISLNK(home_info.st_mode) or not stat.S_ISDIR(home_info.st_mode):
+            raise OSError("当前用户目录不是安全目录。")
+        uid = self._current_uid()
+        current = home
+        for component in relative.parts:
+            current = current / component
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                if not create:
+                    raise OSError("Wine 交接结果目录不存在。")
+                current.mkdir(mode=0o700)
+                info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise OSError("Wine 交接结果目录不安全。")
+            # Windows does not expose meaningful POSIX ownership for its
+            # temporary directories.  Keep the ownership boundary on Linux
+            # and other POSIX targets where st_uid is authoritative.
+            if (os.name == "posix" and uid is not None
+                    and int(getattr(info, "st_uid", uid)) != uid):
+                raise OSError("Wine 交接结果目录不属于当前用户。")
+            current.chmod(0o700)
+        return path
+
+    def _ensure_private_regular_file(self, path, max_bytes):
+        path = pathlib.Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError("Wine 交接文件不存在或已过期。") from exc
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_size > max_bytes):
+            raise ValueError("Wine 交接文件不安全。")
+        uid = self._current_uid()
+        if (os.name == "posix" and uid is not None
+                and int(getattr(info, "st_uid", uid)) != uid):
+            raise ValueError("Wine 交接文件不属于当前用户。")
+        return info
+
+    def _wine_handoff_root(self):
+        configured_state = os.environ.get("XDG_STATE_HOME")
+        if configured_state:
+            configured = pathlib.Path(configured_state).expanduser()
+            if not configured.is_absolute():
+                raise OSError("Wine 交接结果目录必须使用绝对路径。")
+            state_root = configured
+        else:
+            state_root = self.home / ".local/state"
+        self._ensure_private_directory(state_root, create=True)
+        root = state_root / "ming-os/store/wine-handoffs"
+        return self._ensure_private_directory(root, create=True)
+
+    def _read_wine_handoff_request(self, request_id, app_id):
+        """Validate the Store-created identity record before accepting a receipt key."""
+        request_id = self._valid_handoff_id(request_id)
+        app_id = self._valid_wine_app_id(app_id)
+        root = self._wine_handoff_root()
+        consumed = root / (request_id + ".request.json.consumed")
+        try:
+            self._ensure_private_regular_file(consumed, 64 * 1024)
+        except ValueError as exc:
+            if consumed.exists() or consumed.is_symlink():
+                raise ValueError("Wine 交接请求已被处理。") from exc
+        path = root / (request_id + ".request.json")
+        try:
+            self._ensure_private_regular_file(path, 64 * 1024)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError("Wine 交接请求格式无效。") from exc
+        expected = {
+            "schema", "request_id", "uid", "action", "provider", "app_id",
+            "expected_version", "created_at",
+        }
+        uid = payload.get("uid") if isinstance(payload, dict) else None
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            uid = -1
+        expected_version = payload.get("expected_version") if isinstance(payload, dict) else None
+        created_at = payload.get("created_at") if isinstance(payload, dict) else None
+        if (not isinstance(payload, dict) or set(payload) != expected
+                or payload.get("schema") != "ming.store.wine-handoff.v1"
+                or payload.get("request_id") != request_id
+                or payload.get("provider") != "wine-official"
+                or payload.get("app_id") != app_id
+                or payload.get("action") not in {"install", "update"}
+                or uid < 0 or uid != self._current_uid()
+                or not isinstance(expected_version, str) or len(expected_version) > 128
+                or any(character in expected_version for character in "\r\n\0;|&`$<>")
+                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(created_at or ""))):
+            raise ValueError("Wine 交接请求身份不匹配。")
+        return payload
+
+    def _claim_wine_handoff_request(self, request_id, app_id):
+        """Atomically consume a Store request so it cannot be replayed."""
+        payload = self._read_wine_handoff_request(request_id, app_id)
+        root = self._wine_handoff_root()
+        claimed = root / (request_id + ".request.json.consumed")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(str(claimed), flags, 0o600)
+        except FileExistsError as exc:
+            raise ValueError("Wine 交接请求已被处理。") from exc
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            claimed.chmod(0o600)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return payload
+
+    def write_wine_handoff_result(self, request_id, app_id, result):
+        """Atomically publish a bounded, user-owned result for Ming Store."""
+        request_id = self._valid_handoff_id(request_id)
+        app_id = self._valid_wine_app_id(app_id)
+        if not isinstance(result, dict):
+            raise ValueError("Wine 安装结果格式无效。")
+        state = str(result.get("state") or "failed")
+        allowed_states = {
+            "installed", "installed_with_refresh_warning", "installed_needs_launcher",
+            "download_failed", "install_failed", "runtime_unavailable",
+            "runtime_32_unavailable", "validation_failed", "staging_failed",
+            "source_conflict", "provider_unavailable", "failed", "unavailable",
+        }
+        if state not in allowed_states:
+            state = "failed"
+        payload = {
+            "schema": "ming.store.wine-handoff-result.v1",
+            "request_id": request_id,
+            "provider": "wine-official",
+            "app_id": app_id,
+            "ok": bool(result.get("ok")) and state in {"installed", "installed_with_refresh_warning"},
+            "state": state,
+            "message": str(result.get("error") or result.get("message") or "")[:1000],
+            "refresh_ok": bool(result.get("refresh_ok", False)),
+        }
+        for key in ("version", "architecture", "catalog_app_id", "verified_sha256"):
+            if result.get(key) is not None:
+                payload[key] = str(result[key])[:256]
+        root = self._wine_handoff_root()
+        target = root / (request_id + ".json")
+        temporary = root / ("." + request_id + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, target)
+        target.chmod(0o600)
+        return payload
 
     @staticmethod
     def _run(command, timeout=60):
@@ -163,6 +380,96 @@ class ToolboxController:
 
     def install_windows(self, source):
         return _load_wine_module().WineInstaller(home=self.home).install(source)
+
+    def install_wine_manifest(self, app_id, request_id=None):
+        """Download one fixed Wine artifact, then hand it to WineInstaller.
+
+        The catalog owns the URL, filename and digest.  No UI argument is
+        treated as a command or a path, and disabled/unpinned entries never
+        reach the downloader.
+        """
+        def finish(result):
+            if request_id is None:
+                return result
+            try:
+                self.write_wine_handoff_result(request_id, app_id, result)
+            except (OSError, TypeError, ValueError) as exc:
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result.update({
+                        "ok": False, "state": "failed",
+                        "error": "无法写入 Wine 安装结果：%s" % exc,
+                    })
+            return result
+
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", str(app_id)):
+            return finish({"ok": False, "state": "invalid_app_id", "error": "Wine 应用 ID 无效。"})
+        handoff = None
+        if request_id is not None:
+            try:
+                # A Store request is the authority for a handoff invocation.
+                # Claim it before resolving or downloading any catalog data so
+                # a copied request ID cannot be replayed.
+                handoff = self._claim_wine_handoff_request(request_id, str(app_id))
+            except (OSError, TypeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "state": "handoff_rejected",
+                    "error": str(exc) or "Wine 交接请求未通过身份校验。",
+                }
+        try:
+            core = _load_store_core()
+            root = self.catalog_root
+            if root is None:
+                root = pathlib.Path("/usr/share/ming-os/store/catalog")
+                if not root.is_dir():
+                    root = pathlib.Path(__file__).with_name("ming-store-catalog")
+            provider_kwargs = {"catalog_root": root, "home": self.home}
+            if self.catalog_verifier is not None:
+                provider_kwargs["verifier"] = self.catalog_verifier
+            provider = core.WineOfficialProvider(**provider_kwargs)
+            item = provider.resolve(str(app_id))
+            if handoff is not None:
+                expected_version = str(handoff.get("expected_version") or "")
+                catalog_version = str(item.get("version") or "")
+                if expected_version != catalog_version:
+                    return finish({
+                        "ok": False,
+                        "state": "handoff_rejected",
+                        "error": "Wine 交接请求版本与受信目录不一致。",
+                    })
+            artifact = item["artifact"]
+            cache = self.home / ".cache" / "ming-os" / "wine-downloads" / str(app_id)
+            cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cache.chmod(0o700)
+            destination = cache / artifact["filename"]
+            if destination.is_symlink():
+                destination.unlink()
+            downloader = self.downloader or core.SecureDownloader()
+            download = downloader.download(
+                artifact["url"], destination, artifact["sha256"])
+            if not download.get("ok"):
+                return finish({"ok": False, "state": "download_failed", "error": "Wine 安装包下载或校验失败。"})
+            result = _load_wine_module().WineInstaller(home=self.home).install_managed(
+                destination,
+                item["wine_app_id"],
+                item["artifact"]["executable"],
+                item.get("name") or app_id,
+                version=item.get("version"),
+                artifact_sha256=artifact["sha256"],
+            )
+            if not result.get("ok"):
+                result.setdefault("state", "install_failed")
+                result.setdefault("source", str(item.get("name") or app_id))
+                return finish(result)
+            result.update({
+                "source_id": "wine-official",
+                "catalog_app_id": str(app_id),
+                "verified_sha256": download.get("sha256"),
+            })
+            return finish(result)
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            return finish({"ok": False, "state": "provider_unavailable", "error": str(exc)})
 
     def list_windows_apps(self):
         return _load_wine_module().WineInstaller(home=self.home).list_apps()
@@ -300,7 +607,7 @@ def _show_dialog(title, message, error=False):
         print("%s: %s" % (title, message), file=sys.stderr if error else sys.stdout)
 
 
-def _gtk_main(section="toolbox", install_file=""):
+def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_id=""):
     try:
         import gi
         gi.require_version("Gtk", "4.0")
@@ -319,6 +626,7 @@ def _gtk_main(section="toolbox", install_file=""):
             self.set_default_size(820, 600)
             self.home = controller.home
             tabs = Adw.ViewStack()
+            self.tabs = tabs
             switcher = Adw.ViewSwitcher()
             switcher.set_stack(tabs)
             header = Adw.HeaderBar()
@@ -341,6 +649,49 @@ def _gtk_main(section="toolbox", install_file=""):
             tabs.set_visible_child_name(section if section in SECTIONS else "toolbox")
             if install_file:
                 self._install_file(install_file)
+            if wine_app_id:
+                self._install_wine_manifest(wine_app_id)
+
+        def handle_request(self, requested_section="toolbox", requested_file="", requested_wine="",
+                           requested_wine_request_id=""):
+            if requested_section in SECTIONS:
+                self.tabs.set_visible_child_name(requested_section)
+            if requested_file:
+                self._queue_install("windows", requested_file)
+            if requested_wine:
+                self._queue_install("wine", requested_wine, requested_wine_request_id)
+            self.present()
+
+        def _queue_install(self, kind, value, request_id=""):
+            """Run downloads/installers off the GTK thread and report on main."""
+            def worker():
+                try:
+                    if kind == "windows":
+                        result = controller.install_windows(value)
+                        title = "Windows 应用安装"
+                        success = "安装完成，已创建独立兼容环境和应用入口。"
+                        failure = "安装失败，请查看 Wine 日志。"
+                    else:
+                        result = controller.install_wine_manifest(value, request_id=request_id or None)
+                        title = "Wine 应用安装"
+                        success = "已完成下载校验，并创建独立 Wine 环境。"
+                        failure = "Wine 应用安装失败。"
+                    message = success if result.get("ok") else str(
+                        result.get("error") or failure)
+                    error = not bool(result.get("ok"))
+                except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                    title = "Ming 工具箱"
+                    message = str(exc)
+                    error = True
+
+                def finish():
+                    _show_dialog(title, message, error=error)
+                    return False
+
+                GLib.idle_add(finish)
+
+            threading.Thread(
+                target=worker, name="ming-toolbox-install", daemon=True).start()
 
         def _group(self, title, description=""):
             group = Adw.PreferencesGroup(title=title, description=description)
@@ -534,13 +885,10 @@ def _gtk_main(section="toolbox", install_file=""):
             dialog.destroy()
 
         def _install_file(self, path):
-            result = controller.install_windows(path)
-            _show_dialog(
-                "Windows 应用安装",
-                "安装完成，已创建独立兼容环境和应用入口。"
-                if result.get("ok") else str(result.get("error") or "安装失败，请查看 Wine 日志。"),
-                error=not bool(result.get("ok")),
-            )
+            self._queue_install("windows", path)
+
+        def _install_wine_manifest(self, app_id, request_id=""):
+            self._queue_install("wine", app_id, request_id)
 
         def _check_runtime(self, _button):
             result = controller.runtime_status()
@@ -606,15 +954,57 @@ def _gtk_main(section="toolbox", install_file=""):
         def _diagnostics(self, _button):
             _show_dialog("诊断报告", json.dumps(controller.system_check(), ensure_ascii=False, indent=2))
 
-    application = Adw.Application(application_id="org.ming.Toolbox", flags=Gio.ApplicationFlags.FLAGS_NONE)
-    application.connect("activate", lambda app: ToolboxWindow(app).present())
-    return application.run([])
+    application = Adw.Application(
+        application_id="org.ming.Toolbox",
+        flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+    )
+    window_holder = {"window": None}
+
+    def ensure_window(app):
+        if window_holder["window"] is None:
+            window_holder["window"] = ToolboxWindow(app)
+        return window_holder["window"]
+
+    def on_activate(app):
+        ensure_window(app).present()
+
+    def on_command_line(app, command_line):
+        parser = argparse.ArgumentParser(prog="ming-toolbox", add_help=False)
+        parser.add_argument("--section", choices=SECTIONS, default="toolbox")
+        parser.add_argument("--install-windows", default="")
+        parser.add_argument("--install-wine", default="")
+        parser.add_argument("--store-request", default="")
+        try:
+            args = parser.parse_args(list(command_line.get_arguments())[1:])
+            if args.install_wine and not re.fullmatch(
+                    r"[a-z0-9][a-z0-9._-]{0,63}", args.install_wine):
+                return 2
+            if args.store_request and not re.fullmatch(r"[a-f0-9]{32}", args.store_request):
+                return 2
+            ensure_window(app).handle_request(
+                args.section, args.install_windows, args.install_wine, args.store_request)
+            return 0
+        except SystemExit:
+            return 2
+
+    application.connect("activate", on_activate)
+    application.connect("command-line", on_command_line)
+    argv = ["ming-toolbox", "--section", section]
+    if install_file:
+        argv.extend(("--install-windows", install_file))
+    if wine_app_id:
+        argv.extend(("--install-wine", wine_app_id))
+    if wine_request_id:
+        argv.extend(("--store-request", wine_request_id))
+    return application.run(argv)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ming-toolbox")
     parser.add_argument("--section", choices=SECTIONS, default="toolbox")
     parser.add_argument("--install-windows")
+    parser.add_argument("--install-wine")
+    parser.add_argument("--store-request")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.json:
@@ -628,7 +1018,12 @@ def main(argv=None):
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
-    return _gtk_main(args.section, args.install_windows or "")
+    if args.store_request and not re.fullmatch(r"[a-f0-9]{32}", args.store_request):
+        parser.error("--store-request 无效")
+    return _gtk_main(
+        args.section, args.install_windows or "", args.install_wine or "",
+        args.store_request or "",
+    )
 
 
 if __name__ == "__main__":

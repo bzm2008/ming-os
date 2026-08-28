@@ -223,7 +223,10 @@ class AppDrawerCoreTests(unittest.TestCase):
     def test_drawer_show_geometry_does_not_reserve_a_hidden_dock(self):
         source = DRAWER_PATH.read_text(encoding="utf-8")
         show = source[source.index("    def show(self):"):source.index("    def hide(self):")]
-        self.assertIn("drawer_geometry(self._workarea(), dock_visible=False)", show)
+        self.assertIn(
+            "drawer_geometry(self._workarea(immersive=True), dock_visible=False)",
+            show,
+        )
 
     def test_drawer_uses_shared_ming_launch_proxy_without_direct_argv_fallback(self):
         source = DRAWER_PATH.read_text(encoding="utf-8")

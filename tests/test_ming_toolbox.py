@@ -79,6 +79,19 @@ class MingToolboxContracts(unittest.TestCase):
         self.assertNotIn("ming-spark-windows-install", self.desktop_source)
         self.assertNotIn("eval ", self.desktop_source)
 
+    def test_toolbox_uses_command_line_handling_for_existing_instance(self):
+        source = TOOLBOX.read_text(encoding="utf-8")
+        self.assertIn("Gio.ApplicationFlags.HANDLES_COMMAND_LINE", source)
+        self.assertIn('application.connect("command-line", on_command_line)', source)
+        self.assertIn("handle_request", source)
+
+    def test_long_running_install_requests_are_offloaded_from_gtk_thread(self):
+        source = TOOLBOX.read_text(encoding="utf-8")
+        self.assertIn("import threading", source)
+        self.assertIn("threading.Thread", source)
+        self.assertIn("GLib.idle_add", source)
+        self.assertIn("_queue_install", source)
+
 
 if __name__ == "__main__":
     unittest.main()

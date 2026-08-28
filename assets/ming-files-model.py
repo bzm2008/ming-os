@@ -142,6 +142,13 @@ class LocalFileBackend:
     """Portable local-filesystem adapter used only by model tests."""
 
     @staticmethod
+    def _validate_child_name(name):
+        name = str(name or "")
+        if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+            raise ValueError("file name must be one filename")
+        return name
+
+    @staticmethod
     def _path(uri):
         parsed = urlparse(uri)
         if parsed.scheme != "file":
@@ -303,13 +310,23 @@ class LocalFileBackend:
     def create_folder(self, parent_uri, name, token=None):
         token = token or CancellationToken()
         token.raise_if_cancelled()
-        if not name or name in {".", ".."} or "/" in name or "\\" in name:
-            raise ValueError("folder name must be one filename")
+        name = self._validate_child_name(name)
         parent = self._path(parent_uri)
         if not parent.is_dir():
             raise NotADirectoryError(parent)
         target = parent / name
         target.mkdir()
+        return target.as_uri()
+
+    def create_file(self, parent_uri, name, token=None):
+        token = token or CancellationToken()
+        token.raise_if_cancelled()
+        name = self._validate_child_name(name)
+        parent = self._path(parent_uri)
+        if not parent.is_dir():
+            raise NotADirectoryError(parent)
+        target = parent / name
+        target.open("x", encoding="utf-8").close()
         return target.as_uri()
 
     def delete(self, source_uri, token=None, progress=None):
@@ -585,10 +602,24 @@ class GioFileBackend:
     def create_folder(self, parent_uri, name, token=None):
         token = token or CancellationToken()
         token.raise_if_cancelled()
-        if not name or name in {".", ".."} or "/" in name or "\\" in name:
-            raise ValueError("folder name must be one filename")
+        name = LocalFileBackend._validate_child_name(name)
         target = self._file(parent_uri).get_child(name)
         target.make_directory(self._cancellable(token))
+        return target.get_uri()
+
+    def create_file(self, parent_uri, name, token=None):
+        token = token or CancellationToken()
+        token.raise_if_cancelled()
+        name = LocalFileBackend._validate_child_name(name)
+        target = self._file(parent_uri).get_child(name)
+        stream = target.create(
+            self.Gio.FileCreateFlags.NONE,
+            self._cancellable(token),
+        )
+        try:
+            stream.close(self._cancellable(token))
+        finally:
+            stream = None
         return target.get_uri()
 
     def delete(self, source_uri, token=None, progress=None):
@@ -895,6 +926,15 @@ class LocationModel:
             parent_uri,
             name,
             lambda active: self.backend.create_folder(parent_uri, name, active),
+            token,
+        )
+
+    def create_file(self, parent_uri, name, token=None):
+        return self._operation(
+            "create-file",
+            parent_uri,
+            name,
+            lambda active: self.backend.create_file(parent_uri, name, active),
             token,
         )
 

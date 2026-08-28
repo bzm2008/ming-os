@@ -15,7 +15,30 @@ install_ota_dependencies() {
     echo "Installing OTA update dependencies..."
     apt install -y --no-install-recommends \
         curl wget jq rsync python3 squashfs-tools zenity yad libnotify-bin \
-        pkexec polkitd lxpolkit
+        pkexec polkitd lxpolkit minisign
+}
+
+deploy_ota_release_trust() {
+    local source="/tmp/ming-build/assets/ota-release.minisign.pub"
+    local destination="/etc/ming-update/ota-release.minisign.pub"
+    install -d -o root -g root -m 0755 /etc/ming-update
+    if [[ ! -s "${source}" ]]; then
+        # Internal/test images may intentionally remain browse-only until the
+        # release public key is provisioned.  Never install a guessed key.
+        rm -f -- "${destination}"
+        echo "OTA release public key not provisioned; online OTA verification is disabled."
+        return 0
+    fi
+    [[ ! -L "${source}" && "$(stat -c '%u:%g' "${source}")" == "0:0" ]] || {
+        echo "OTA release public key source is not root-owned or is a symlink" >&2
+        return 1
+    }
+    # Minisign public keys have a comment line followed by a base64 key line.
+    grep -Eq '^RW[A-Za-z0-9+/=]{40,}$' "${source}" || {
+        echo "OTA release public key format is invalid" >&2
+        return 1
+    }
+    install -o root -g root -m 0644 "${source}" "${destination}"
 }
 
 deploy_ota_backup_engine() {
@@ -80,6 +103,7 @@ readonly USER_CONFIG_FILE="${USER_CONFIG_DIR}/config.json"
 readonly UPDATE_SERVER="https://ming.sca-hub.cn"
 readonly LEGACY_UPDATE_SERVER="https://ming.scallion.uno"
 readonly API_ENDPOINT="/api/onion-update"
+readonly DOWNLOAD_SERVER="https://downloads.sca-hub.cn"
 readonly BACKGROUND_AVAILABILITY_FILE="${CACHE_DIR}/background-availability.json"
 readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"
 
@@ -171,7 +195,7 @@ find_cached_manifest() {
     fi
     # Scheduled checks run as root; expose that root-owned, read-only cache to
     # the unprivileged Settings process as its authoritative background result.
-    if [[ -r "${CACHE_DIR}/update_info.json" ]]; then
+    if [[ -r "${CACHE_DIR}/update_info.json" ]] && ! manual_check_suppresses_root_cache; then
         printf '%s\n' "${CACHE_DIR}/update_info.json"
         return 0
     fi
@@ -184,6 +208,20 @@ find_cached_manifest() {
         done
     fi
     return 1
+}
+
+manual_check_suppresses_root_cache() {
+    local result available ready checked_at background_at
+    [[ ${EUID:-$(id -u)} -ne 0 ]] || return 1
+    result="${USER_CACHE_DIR}/check-result.json"
+    [[ -r "${result}" ]] || return 1
+    available="$(jq -r '.available // false' "${result}" 2>/dev/null || true)"
+    ready="$(jq -r '.ready // false' "${result}" 2>/dev/null || true)"
+    checked_at="$(jq -r '.checked_at_epoch // 0' "${result}" 2>/dev/null || true)"
+    background_at="$(jq -r '.checked_at_epoch // 0' "${BACKGROUND_AVAILABILITY_FILE}" 2>/dev/null || true)"
+    [[ "${available}" != "true" || "${ready}" != "true" ]] || return 1
+    [[ "${checked_at}" =~ ^[0-9]+$ && "${background_at}" =~ ^[0-9]+$ ]] || return 0
+    (( checked_at >= background_at ))
 }
 
 state_candidate_is_downloaded() {
@@ -733,6 +771,22 @@ api_url() {
         endpoint="${API_ENDPOINT}"
     fi
     channel=${channel:-stable}
+    if [[ "${server}" != "${UPDATE_SERVER}" ]]; then
+        log_error "OTA 服务器地址不受信任；只允许 Ming OS 官方 HTTPS 更新服务。"
+        return 1
+    fi
+    if [[ "${endpoint}" != "${API_ENDPOINT}" ]]; then
+        log_error "OTA 接口路径不受信任，拒绝连接。"
+        return 1
+    fi
+    if [[ ! "${version}" =~ ^[0-9]+(\.[0-9]+){1,3}[A-Za-z0-9._-]*$ ]]; then
+        log_error "当前系统版本格式无效，拒绝构造 OTA 请求。"
+        return 1
+    fi
+    if [[ ! "${channel}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]]; then
+        log_error "OTA 更新频道格式无效。"
+        return 1
+    fi
     printf '%s%s/check?version=%s&channel=%s\n' "${server}" "${endpoint}" "${version}" "${channel}"
 }
 
@@ -797,7 +851,8 @@ verify_signed_ota_manifest() {
     local manifest="$1" signature expected_trusted_comment
     signature="$(jq -r '.signature // .minisign_signature // empty' "${manifest}" 2>/dev/null || true)"
     expected_trusted_comment="$(jq -r '.trusted_comment // .minisign_trusted_comment // empty' "${manifest}" 2>/dev/null || true)"
-    if [[ ! -r "${OTA_RELEASE_PUBLIC_KEY}" ]]; then
+    if [[ ! -r "${OTA_RELEASE_PUBLIC_KEY}" || -L "${OTA_RELEASE_PUBLIC_KEY}" ||
+          ! -s "${OTA_RELEASE_PUBLIC_KEY}" ]]; then
         log_error "系统 OTA 发布公钥缺失，拒绝在线更新。Papyrus 公钥不能用于系统 OTA。"
         return 1
     fi
@@ -816,7 +871,9 @@ verify_signed_ota_manifest() {
     local tmp_manifest tmp_sig verified_json
     tmp_manifest="$(mktemp)"
     tmp_sig="$(mktemp)"
-    jq 'del(.signature, .minisign_signature, .trusted_comment, .minisign_trusted_comment)' \
+    # The trusted comment is part of the signed JSON payload.  Removing it
+    # here would let an attacker replace the release namespace after signing.
+    jq 'del(.signature, .minisign_signature)' \
         "${manifest}" > "${tmp_manifest}" || { rm -f "${tmp_manifest}" "${tmp_sig}"; return 1; }
     printf '%s\n' "${signature}" > "${tmp_sig}"
     if ! minisign -V -q -p "${OTA_RELEASE_PUBLIC_KEY}" -m "${tmp_manifest}" -x "${tmp_sig}"; then
@@ -825,7 +882,7 @@ verify_signed_ota_manifest() {
         return 1
     fi
     rm -f "${tmp_manifest}" "${tmp_sig}"
-    if [[ "${expected_trusted_comment}" != *"Ming OS OTA"* ]]; then
+    if [[ ! "${expected_trusted_comment}" =~ ^Ming[[:space:]]OS[[:space:]]OTA([[:space:]:/_-].*)?$ ]]; then
         log_error "系统 OTA 签名说明不匹配，拒绝复用非系统发布签名。"
         return 1
     fi
@@ -877,13 +934,10 @@ classify_ota_response() {
 }
 
 check_network() {
-    local server
-    server=$(get_config '.update_server')
-    server=${server:-${UPDATE_SERVER}}
-    case "${server}" in
-        "${LEGACY_UPDATE_SERVER}"|https://scallion.uno) server="${UPDATE_SERVER}" ;;
-    esac
-    curl -fsSL --connect-timeout 8 --max-time 15 "${server}" >/dev/null
+    local url
+    url="$(api_url)" || return 1
+    curl -fsSL --proto '=https' --tlsv1.2 \
+        --connect-timeout 8 --max-time 15 "${url}" >/dev/null
 }
 
 record_background_availability() {
@@ -949,6 +1003,44 @@ record_check_result() {
     mv -f "${tmp}" "${target}"
 }
 
+checked_manifest_digest_file() {
+    printf '%s\n' "$(cache_dir)/checked-manifest.sha256"
+}
+
+record_checked_manifest_digest() {
+    local manifest="$1" target digest tmp
+    [[ -f "${manifest}" && ! -L "${manifest}" ]] || return 1
+    digest="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+    [[ "${digest}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+    target="$(checked_manifest_digest_file)"
+    tmp="$(mktemp "${target}.XXXXXX")" || return 1
+    printf '%s\n' "${digest,,}" > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f -- "${tmp}" "${target}"
+}
+
+checked_manifest_is_current() {
+    local manifest="$1" target expected actual
+    target="$(checked_manifest_digest_file)"
+    [[ -f "${target}" && ! -L "${target}" && -r "${target}" ]] || return 1
+    expected="$(tr -d '[:space:]' < "${target}")"
+    [[ "${expected}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+    actual="$(sha256sum -- "${manifest}" | awk '{print $1}')"
+    [[ "${actual,,}" == "${expected,,}" ]]
+}
+
+invalidate_check_result() {
+    local cdir="$1" reason="$2"
+    rm -f -- "${cdir}/update_info.json"
+    rm -f -- "${cdir}/checked-manifest.sha256"
+    if [[ "${cdir}" == "${CACHE_DIR}" ]]; then
+        rm -f -- "${BACKGROUND_AVAILABILITY_FILE}"
+    fi
+    set_config '.last_check' "$(date -Iseconds)"
+    record_check_result false false "" "${reason}" ""
+    record_background_availability
+}
+
 check_update() {
     log_step "检查更新"
     init_config
@@ -957,20 +1049,23 @@ check_update() {
     # endpoint, response schema and system OTA Minisign signature all pass.
     maybe_migrate_update_server || true
 
-    local version response response_class url cdir manifest
+    local version response response_class url cdir manifest manifest_tmp
     cdir=$(cache_dir)
     manifest="${cdir}/update_info.json"
     version=$(current_version)
     log_info "当前版本：${version}"
 
     if ! check_network; then
+        invalidate_check_result "${cdir}" "无法连接更新服务器，旧更新结果已失效"
         log_error "无法连接到更新服务器。"
         return 1
     fi
 
     url=$(api_url)
     log_info "接口：${url}"
-    response=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 45 "${url}") || {
+    response=$(curl -fsSL --proto '=https' --tlsv1.2 \
+        --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 45 "${url}") || {
+        invalidate_check_result "${cdir}" "无法连接更新服务器，旧更新结果已失效"
         log_error "无法连接到更新服务器。"
         return 1
     }
@@ -979,14 +1074,12 @@ check_update() {
     case "${response_class}" in
         system_manifest) ;;
         untrusted_manifest)
-            rm -f "${manifest}"
-            set_config '.last_check' "$(date -Iseconds)"
-            record_check_result false false "" "服务器清单未通过系统 OTA 签名验证" ""
-            record_background_availability
+            invalidate_check_result "${cdir}" "服务器清单未通过系统 OTA 签名验证"
             log_error "服务器尚未发布可信的系统 OTA 清单，或清单暂未准备好。"
             return 1
             ;;
         *)
+            invalidate_check_result "${cdir}" "更新服务器返回了无效内容"
             log_error "更新服务器返回了非 JSON 内容，OTA 接口可能暂时不可用。"
             return 1
             ;;
@@ -996,10 +1089,8 @@ check_update() {
     response_manifest="$(mktemp)"
     printf '%s\n' "${response}" > "${response_manifest}"
     if ! verify_signed_ota_manifest "${response_manifest}"; then
-        rm -f "${response_manifest}" "${manifest}"
-        set_config '.last_check' "$(date -Iseconds)"
-        record_check_result false false "" "服务器清单未通过系统 OTA 签名验证" ""
-        record_background_availability
+        rm -f "${response_manifest}"
+        invalidate_check_result "${cdir}" "服务器清单未通过系统 OTA 签名验证"
         log_error "服务器尚未发布可信的系统 OTA 清单，或清单暂未准备好。"
         return 1
     fi
@@ -1008,6 +1099,7 @@ check_update() {
     local server_error ready has_update new_version new_build_id notes update_type
     server_error=$(printf '%s' "${response}" | jq -r '.error // ""')
     if [[ -n "${server_error}" ]]; then
+        invalidate_check_result "${cdir}" "更新服务器拒绝了本次检查"
         log_error "更新服务器错误：${server_error}"
         return 1
     fi
@@ -1020,15 +1112,13 @@ check_update() {
     update_type=$(printf '%s' "${response}" | jq -r '.update_type // "major"')
 
     if [[ "${has_update}" == "true" ]] && ! validate_update_route "${version}" "${new_version}" "$(current_build_id)" "${new_build_id}"; then
-        rm -f "${manifest}"
-        set_config '.last_check' "$(date -Iseconds)"
-        record_check_result false false "" "" ""
-        record_background_availability
+        invalidate_check_result "${cdir}" "服务器返回的版本不是严格前进版本"
         return 1
     fi
 
     if [[ "${has_update}" == "true" && "${ready}" != "true" ]]; then
         rm -f "${manifest}"
+        rm -f "${cdir}/checked-manifest.sha256"
         set_config '.last_check' "$(date -Iseconds)"
         record_check_result true false "${new_version}" "${notes}" "${update_type}"
         record_background_availability
@@ -1039,6 +1129,7 @@ check_update() {
 
     if [[ "${has_update}" != "true" ]]; then
         rm -f "${manifest}"
+        rm -f "${cdir}/checked-manifest.sha256"
         set_config '.last_check' "$(date -Iseconds)"
         record_check_result false false "" "" ""
         record_background_availability
@@ -1046,13 +1137,31 @@ check_update() {
         return 0
     fi
 
-    printf '%s\n' "${response}" > "${manifest}"
+    manifest_tmp="$(mktemp "${cdir}/.update-info.XXXXXX")" || {
+        invalidate_check_result "${cdir}" "无法安全写入更新清单"
+        log_error "无法安全保存更新清单，已取消 OTA。"
+        return 1
+    }
+    if ! printf '%s\n' "${response}" > "${manifest_tmp}"; then
+        rm -f -- "${manifest_tmp}"
+        invalidate_check_result "${cdir}" "无法安全写入更新清单"
+        log_error "无法安全保存更新清单，已取消 OTA。"
+        return 1
+    fi
+    chmod 0644 "${manifest_tmp}"
+    mv -f -- "${manifest_tmp}" "${manifest}"
     if [[ "${update_type}" == "major" ]] && dual_boot_major_ota_blocked; then
+        rm -f "${cdir}/checked-manifest.sha256"
         record_check_result true true "${new_version}" "${notes}" "${update_type}"
         log_error "此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"
         return 1
     fi
     chmod 644 "${manifest}"
+    if ! record_checked_manifest_digest "${manifest}"; then
+        invalidate_check_result "${cdir}" "无法记录已验证的更新清单指纹"
+        log_error "无法绑定已验证的更新清单，已取消 OTA。"
+        return 1
+    fi
     set_config '.last_check' "$(date -Iseconds)"
     record_check_result true true "${new_version}" "${notes}" "${update_type}"
     record_background_availability
@@ -1074,8 +1183,26 @@ download_update() {
     manifest="$(find_cached_manifest 2>/dev/null || true)"
     sfile=$(state_file)
 
-    if [[ -z "${manifest}" || ! -f "${manifest}" ]]; then
+    if [[ -z "${manifest}" || ! -f "${manifest}" || -L "${manifest}" ]]; then
         log_error "没有缓存的更新信息。请先运行：ming-update check"
+        return 1
+    fi
+
+    # Starting a new download invalidates any older "downloaded" receipt.
+    # A partial .tmp file may remain for wget -c, but it is never installable.
+    rm -f -- "${sfile}"
+    if ! validate_ota_discovery_schema "${manifest}" || \
+       ! verify_signed_ota_manifest "${manifest}"; then
+        log_error "缓存的 OTA 清单结构或签名无效，请重新检查更新。"
+        return 1
+    fi
+
+    local available ready update_type
+    available="$(jq -r '.has_update // .update_available // .available // false' "${manifest}")"
+    ready="$(jq -r '.ready // true' "${manifest}")"
+    update_type="$(jq -r '.update_type // "major"' "${manifest}")"
+    if [[ "${available}" != "true" || "${ready}" != "true" || "${update_type}" != "major" ]]; then
+        log_error "缓存清单不是可下载的 major 更新。"
         return 1
     fi
 
@@ -1102,6 +1229,12 @@ download_update() {
         log_error "更新信息里没有下载地址。"
         return 1
     fi
+    if [[ ( "${url}" != "${UPDATE_SERVER}/"* &&
+           "${url}" != "${DOWNLOAD_SERVER}/"* ) || "${url}" == *"@"* || \
+          "${url}" == *"#"* || "${url}" == *$'\r'* || "${url}" == *$'\n'* ]]; then
+        log_error "OTA 下载地址不是受信任的 Ming OS HTTPS 地址。"
+        return 1
+    fi
     if [[ ! "${checksum}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
         log_error "major update manifest requires a valid SHA256"
         return 1
@@ -1121,29 +1254,42 @@ download_update() {
     [[ "${retries}" =~ ^[0-9]+$ ]] || retries=3
 
     log_info "正在下载 ${version}：${url}"
-    wget -c --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress -O "${tmp_file}" "${url}"
-    mv "${tmp_file}" "${iso_file}"
+    rm -f -- "${iso_file}"
+    if ! wget -c --https-only --secure-protocol=TLSv1_2 \
+        --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress \
+        -O "${tmp_file}" "${url}"; then
+        log_error "OTA 下载中断；已保留临时文件供下次断点续传，但不会标记为已下载。"
+        return 1
+    fi
 
     if [[ "${expected_size}" =~ ^[0-9]+$ && "${expected_size}" -gt 0 ]]; then
         local actual_size
-        actual_size=$(stat -c '%s' "${iso_file}")
+        actual_size=$(stat -c '%s' "${tmp_file}")
         if [[ "${actual_size}" -ne "${expected_size}" ]]; then
-            rm -f "${iso_file}"
+            rm -f "${tmp_file}" "${iso_file}"
             log_error "下载大小不一致。期望 ${expected_size}，实际 ${actual_size}。"
             return 1
         fi
     fi
 
     local actual_checksum
-    actual_checksum=$(sha256sum "${iso_file}" | awk '{print $1}')
+    actual_checksum=$(sha256sum "${tmp_file}" | awk '{print $1}')
     if [[ "${actual_checksum}" != "${checksum,,}" ]]; then
-        rm -f "${iso_file}"
+        rm -f "${tmp_file}" "${iso_file}"
         log_error "SHA256 校验失败。期望 ${checksum}，实际 ${actual_checksum}。"
         return 1
     fi
     log_info "SHA256 校验通过。"
 
-    cat > "${sfile}" << STATEJSON
+    mv -f -- "${tmp_file}" "${iso_file}"
+
+    local state_tmp
+    state_tmp="$(mktemp "${sfile}.XXXXXX")" || {
+        log_error "无法安全保存 OTA 下载状态。"
+        rm -f -- "${iso_file}"
+        return 1
+    }
+    if ! cat > "${state_tmp}" << STATEJSON
 {
   "status": "downloaded",
   "version": "${version}",
@@ -1154,7 +1300,14 @@ download_update() {
   "download_time": "$(date -Iseconds)"
 }
 STATEJSON
-    chmod 644 "${sfile}"
+    then
+        rm -f -- "${state_tmp}"
+        log_error "无法安全保存 OTA 下载状态。"
+        rm -f -- "${iso_file}"
+        return 1
+    fi
+    chmod 0644 "${state_tmp}"
+    mv -f -- "${state_tmp}" "${sfile}"
     log_info "更新已下载：${iso_file}"
 }
 
@@ -1299,6 +1452,9 @@ configure_ota_next_boot() {
     fi
     env_output="$(grub-editenv list 2>/dev/null || true)"
     if ! grep -Fqx "next_entry=${entry}" <<< "${env_output}"; then
+        # A successful grub-reboot followed by an unreadable/stale environment
+        # must not leave a one-shot boot entry that can surprise the next boot.
+        grub-editenv unset next_entry >/dev/null 2>&1 || true
         log_error "GRUB next_entry 回读失败，拒绝自动重启进入 OTA。"
         return 1
     fi
@@ -1385,11 +1541,13 @@ clear_applied_update_cache() {
     local selected_manifest="${1:-}" selected_result=""
     rm -f -- \
         "${CACHE_DIR}/update_info.json" \
+        "${CACHE_DIR}/checked-manifest.sha256" \
         "${CACHE_DIR}/check-result.json" \
         "${BACKGROUND_AVAILABILITY_FILE}"
     if [[ -n "${selected_manifest}" ]] && selected_manifest_path_is_safe "${selected_manifest}"; then
         selected_result="${selected_manifest%/update_info.json}/check-result.json"
-        rm -f -- "${selected_manifest}" "${selected_result}"
+        rm -f -- "${selected_manifest}" "${selected_result}" \
+            "${selected_manifest%/update_info.json}/checked-manifest.sha256"
     fi
 }
 
@@ -1566,6 +1724,11 @@ configure_update() {
     channel=${channel:-stable}
     auto_check=${auto_check:-true}
     auto_download=${auto_download:-false}
+
+    if [[ "${server}" != "${UPDATE_SERVER}" ]]; then
+        log_error "只允许使用 Ming OS 官方 HTTPS OTA 服务。"
+        return 1
+    fi
 
     cat > "${cfg}" << CONFIGJSON
 {
@@ -1880,7 +2043,7 @@ prepare_authoritative_ab_iso() {
 }
 
 major_install_to_inactive_slot() {
-    local sfile source_iso checksum version status trusted
+    local sfile source_iso checksum version build_id status trusted
     major_ota_allowed || return 1
     sfile="$(find_download_state_file)" || {
         log_error "未找到已下载的 major 更新。"
@@ -1895,8 +2058,10 @@ major_install_to_inactive_slot() {
     source_iso="$(jq -r '.iso_path' <<<"${trusted}")"
     checksum="$(jq -r '.checksum' <<<"${trusted}")"
     version="$(jq -r '.version' <<<"${trusted}")"
+    build_id="$(jq -r '.build_id' <<<"${trusted}")"
     /usr/local/sbin/ming-ota-ab-stage \
-        --iso "${source_iso}" --version "${version}" --checksum "${checksum}" || return 1
+        --iso "${source_iso}" --version "${version}" --build-id "${build_id}" \
+        --checksum "${checksum}" || return 1
     update_state_fields "${sfile}" \
         '. + {status: "staged", home_preservation: {strategy: "ab_slot", prepared: true},
               staged_time: $time}' --arg time "$(date -Iseconds)"
@@ -2129,6 +2294,16 @@ apply_update() {
     manifest="${CACHE_DIR}/update_info.json"
     if [[ ! -f "${manifest}" || -L "${manifest}" ]]; then
         log_error "没有已确认的更新。请先运行：ming-update check"
+        return 1
+    fi
+    if [[ "${already_checked}" == "true" ]]; then
+        if ! checked_manifest_is_current "${manifest}"; then
+            log_error "检查后的 OTA 清单已变化或缺少绑定指纹，拒绝继续更新。"
+            return 1
+        fi
+    fi
+    if ! validate_ota_manifest_schema "${manifest}" || ! verify_signed_ota_manifest "${manifest}"; then
+        log_error "待应用的 OTA 清单结构或签名无效，拒绝继续更新。"
         return 1
     fi
     manifest_sha256="$(sha256sum -- "${manifest}" | awk '{print $1}')"
@@ -2415,6 +2590,16 @@ case "${target_entry}" in
     *) rollback_ab_boot "target A/B slot identity is invalid"; exit 1 ;;
 esac
 
+target_build_id="$(jq -r '.build_id // empty' "${transaction}" 2>/dev/null || true)"
+current_build_id="$(jq -r '.build_id // empty' /etc/ming-os-build.json 2>/dev/null || true)"
+if [[ "${current}" == "${target}" ]]; then
+    if [[ -z "${target_build_id}" || -z "${current_build_id}" ||
+          "${current_build_id}" != "${target_build_id}" ]]; then
+        rollback_ab_boot "当前系统 build_id 与 OTA 事务不匹配"
+        exit 1
+    fi
+fi
+
 if [[ "${current}" == "${previous}" ]]; then
     ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
         observe-boot --health healthy >/dev/null || {
@@ -2452,7 +2637,7 @@ fi
 
 if [[ "${healthy}" == true ]] && save_target_grub_entry; then
     if ! ming-ota-ab --layout "${layout}" --transaction "${transaction}" \
-        observe-boot --health healthy >/dev/null; then
+        observe-boot --health healthy --build-id "${current_build_id}" >/dev/null; then
         rollback_ab_boot "A/B health confirmation state write failed"
         exit 1
     fi
@@ -2587,6 +2772,7 @@ RELEASEFILE
 main() {
     echo "=====> [06_ota_update] Deploying OTA update system <====="
     install_ota_dependencies
+    deploy_ota_release_trust
     deploy_ota_backup_engine
     deploy_ota_ab_engine
     deploy_ota_cli

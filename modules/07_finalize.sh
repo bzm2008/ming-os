@@ -281,13 +281,18 @@ retire_legacy_store_runtime() {
         /usr/local/bin/ming-spark-store \
         /usr/local/bin/ming-spark-backend-status \
         /usr/local/libexec/ming-spark-aria2c \
+        /usr/local/bin/ming-install-wps \
         /etc/apt/preferences.d/90-ming-spark-store \
         /usr/lib/systemd/system/spark-update-notifier.service \
         /etc/systemd/system/spark-store-refresh.service 2>/dev/null || true
     rm -f /usr/share/applications/spark-store.desktop \
-        /usr/share/applications/ming-install-spark-store.desktop 2>/dev/null || true
+        /usr/share/applications/ming-install-spark-store.desktop \
+        /usr/share/applications/ming-install-wps.desktop \
+        /usr/share/applications/wps-office.desktop 2>/dev/null || true
     find /home /etc/skel -xdev -type f \
-        \( -name 'spark-store.desktop' -o -name 'spark-store.dockitem' \) \
+        \( -name 'spark-store.desktop' -o -name 'spark-store.dockitem' \
+           -o -name 'ming-install-wps.desktop' -o -name 'ming-install-wps.dockitem' \
+           -o -name 'wps-office.desktop' -o -name 'wps-office.dockitem' \) \
         -delete 2>/dev/null || true
     # Do not run autoremove and do not touch /opt/apps or user application
     # data: software installed through the old store remains installed.

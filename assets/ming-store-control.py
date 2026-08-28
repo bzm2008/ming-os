@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import hashlib
 import importlib.util
 import json
 import os
@@ -18,7 +19,9 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
 from contextlib import contextmanager
 
 try:
@@ -76,7 +79,8 @@ class StoreControl:
             claim_base=pathlib.Path("/run/ming-store-control"),
             journal_path=pathlib.Path("/var/log/ming-store-transactions.jsonl"),
             live_paths=None, cmdline_path=pathlib.Path("/proc/cmdline"),
-            euid_getter=None, account_lookup=None):
+            euid_getter=None, account_lookup=None, downloader=None,
+            artifact_root=pathlib.Path("/var/cache/ming-os/store")):
         self.environ = dict(os.environ if environ is None else environ)
         self.runner = runner or default_runner
         self.catalog_root = pathlib.Path(
@@ -90,6 +94,11 @@ class StoreControl:
         self.account_lookup = account_lookup or (
             pwd.getpwuid if pwd is not None else None)
         self.core = _load_core()
+        self.downloader = downloader or self.core.SecureDownloader(
+            max_bytes=8 * 1024 * 1024 * 1024,
+            allowed_hosts=getattr(self.core, "SPARK_ALLOWED_HOSTS", ()),
+        )
+        self.artifact_root = pathlib.Path(artifact_root)
 
     def _call(self, command, timeout=300):
         try:
@@ -144,37 +153,70 @@ class StoreControl:
             / (request_id + ".json")
         )
 
+    def _claimed_request_path(self, uid, request_id):
+        """Return the root-owned staging name used to consume a request.
+
+        The request is moved here before it is parsed.  This removes the
+        user-writable request pathname from the transaction before any
+        package operation starts, so a later cleanup cannot unlink a file
+        that a caller replaced in the meantime.
+        """
+        return self.claim_base / (str(uid) + "-" + request_id + ".request")
+
     def _load_request(self, uid, action, request_id):
         if action not in ALLOWED_ACTIONS or not REQUEST_ID.fullmatch(request_id):
             raise StoreControlError("invalid_request", "商店请求格式无效。", 2)
         path = self._request_path(uid, request_id)
+        claimed = self._claimed_request_path(uid, request_id)
         try:
-            nofollow = os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0
-            descriptor = os.open(path, os.O_RDONLY | nofollow)
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
-                    raise StoreControlError("invalid_request", "商店请求文件不可信。", 2)
-                if stat.S_IMODE(info.st_mode) & 0o077:
-                    raise StoreControlError("invalid_request", "商店请求权限过宽。", 2)
-                if info.st_size > 16 * 1024:
-                    raise StoreControlError("invalid_request", "商店请求过大。", 2)
-                payload = json.load(stream)
+            # _claim_request() has already authenticated this directory and
+            # established the per-request lock.  os.replace performs the
+            # consume as one filesystem operation before we parse anything.
+            if claimed.exists():
+                raise StoreControlError(
+                    "request_in_progress", "该软件操作正在处理中，请勿重复提交。", 2)
+            os.replace(path, claimed)
         except StoreControlError:
             raise
-        except (OSError, ValueError) as exc:
-            raise StoreControlError("invalid_request", "无法读取商店请求。", 2) from exc
-        request = self.core.StoreTransactionRequest.from_dict(payload)
-        if request.uid != uid or request.action != action or request.request_id != request_id:
-            raise StoreControlError("invalid_request", "商店请求身份不一致。", 2)
+        except (FileNotFoundError, OSError) as exc:
+            raise StoreControlError(
+                "invalid_request", "无法领取商店请求，请重新操作。", 2
+            ) from exc
         try:
-            created = calendar.timegm(time.strptime(
-                request.created_at, "%Y-%m-%dT%H:%M:%SZ"))
-        except ValueError as exc:
-            raise StoreControlError("invalid_request", "商店请求时间无效。", 2) from exc
-        if abs(time.time() - created) > 20 * 60:
-            raise StoreControlError("expired_request", "商店请求已过期，请重新操作。", 2)
-        return path, request
+            try:
+                nofollow = os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0
+                descriptor = os.open(claimed, os.O_RDONLY | nofollow)
+                with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+                        raise StoreControlError("invalid_request", "商店请求文件不可信。", 2)
+                    if stat.S_IMODE(info.st_mode) & 0o077:
+                        raise StoreControlError("invalid_request", "商店请求权限过宽。", 2)
+                    if info.st_size > 16 * 1024:
+                        raise StoreControlError("invalid_request", "商店请求过大。", 2)
+                    payload = json.load(stream)
+            except StoreControlError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise StoreControlError("invalid_request", "无法读取商店请求。", 2) from exc
+            request = self.core.StoreTransactionRequest.from_dict(payload)
+            if request.uid != uid or request.action != action or request.request_id != request_id:
+                raise StoreControlError("invalid_request", "商店请求身份不一致。", 2)
+            try:
+                created = calendar.timegm(time.strptime(
+                    request.created_at, "%Y-%m-%dT%H:%M:%SZ"))
+            except ValueError as exc:
+                raise StoreControlError("invalid_request", "商店请求时间无效。", 2) from exc
+            if abs(time.time() - created) > 20 * 60:
+                raise StoreControlError("expired_request", "商店请求已过期，请重新操作。", 2)
+            return claimed, request
+        finally:
+            # claimed lives in the trusted root-side directory, unlike the
+            # caller-controlled request pathname that was atomically moved.
+            try:
+                os.unlink(claimed)
+            except FileNotFoundError:
+                pass
 
     def _journal(self, request, state, detail=""):
         event = {
@@ -198,8 +240,264 @@ class StoreControl:
             "debian-apt": self.core.DebianAptProvider(
                 self.catalog_root, runner=self.runner),
             "vendor-official": self.core.VendorOfficialProvider(self.catalog_root),
+            "wine-official": self.core.WineOfficialProvider(self.catalog_root),
+            "spark-public": self.core.SparkPublicProvider(
+                cache_root=self.artifact_root / "catalog",
+                keyring_path="/etc/ming-os/store/spark-archive-keyring.gpg",
+                config_path=self.catalog_root / "spark-public.json",
+            ),
         })
         return registry.get(request.provider)
+
+    def _spark_policy(self):
+        path = self.catalog_root / "spark-public.json"
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {
+                "schema": "ming.store.spark-public.v1",
+                "provider": "spark-public",
+                "installation_enabled": False,
+                "installation_disabled_reason": "星火公开目录当前仅供浏览，不能安装。",
+            }
+        if not isinstance(document, dict):
+            return {"installation_enabled": False}
+        fingerprint = str(document.get("key_fingerprint") or "").strip().upper()
+        valid = (
+            document.get("schema") == "ming.store.spark-public.v1"
+            and document.get("provider") == "spark-public"
+            and fingerprint == getattr(self.core, "SPARK_KEY_FINGERPRINT", "")
+            and bool(re.fullmatch(r"[0-9A-F]{40}", fingerprint))
+        )
+        return dict(document,
+                    key_fingerprint=fingerprint,
+                    installation_enabled=bool(document.get("installation_enabled")) and valid)
+
+    @staticmethod
+    def _legacy_package_name(package):
+        value = str(package or "").strip().casefold()
+        bases = (
+            "spark-store", "ssinstall", "aptss", "apm", "amber-ce",
+            "bookworm-run", "trixie-run", "cn.flamescion.bookworm-compatibility-mode",
+        )
+        return any(value == base or value.startswith(base + "-") for base in bases)
+
+    @classmethod
+    def _has_legacy_spark_dependency(cls, dependency_text):
+        lines = str(dependency_text or "").splitlines()
+        has_dependency_label = any(
+            re.match(r"^\s*(?:Pre-)?Depends:\s*", line, re.IGNORECASE)
+            for line in lines
+        )
+        dependency_continuation = False
+        for line in lines:
+            match = re.match(r"^\s*(?:Pre-)?Depends:\s*(.*)$", line, re.IGNORECASE)
+            if match:
+                values = match.group(1)
+                dependency_continuation = True
+            else:
+                if has_dependency_label:
+                    if not (line[:1].isspace() and dependency_continuation):
+                        dependency_continuation = False
+                        continue
+                    values = line
+                else:
+                    dependency_continuation = False
+                    prefix = line.strip().split(":", 1)[0].casefold()
+                    if (":" in line and prefix in {
+                            "package", "version", "architecture", "description",
+                            "maintainer", "section", "priority", "source", "size",
+                            "sha256", "filename", "installed-size", "homepage",
+                    }):
+                        continue
+                    values = line
+            for group in values.split(","):
+                for alternative in group.split("|"):
+                    atom = alternative.strip()
+                    atom = re.sub(r"\s*\([^)]*\)", "", atom).strip()
+                    atom = atom.split(":", 1)[0].strip().casefold()
+                    if cls._legacy_package_name(atom):
+                        return True
+        return False
+
+    @staticmethod
+    def _deb_metadata(output):
+        lines = [line.rstrip() for line in str(output or "").splitlines()]
+        labelled = {}
+        current_key = None
+        for line in lines:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                if key.strip() in {"Package", "Version", "Architecture", "Depends", "Pre-Depends"}:
+                    current_key = key.strip()
+                    labelled.setdefault(current_key, []).append(value.strip())
+                    continue
+            if line[:1].isspace() and current_key in {"Depends", "Pre-Depends"}:
+                labelled[current_key][-1] = "%s %s" % (
+                    labelled[current_key][-1], line.strip())
+            else:
+                current_key = None
+        if labelled.get("Package") and labelled.get("Version") and labelled.get("Architecture"):
+            return {
+                "package": labelled["Package"][0],
+                "version": labelled["Version"][0],
+                "architecture": labelled["Architecture"][0],
+                "dependencies": [
+                    "%s: %s" % (key, value)
+                    for key in ("Depends", "Pre-Depends")
+                    for value in labelled.get(key, [])
+                ],
+            }
+        return {
+            "package": lines[0].strip() if len(lines) > 0 else "",
+            "version": lines[1].strip() if len(lines) > 1 else "",
+            "architecture": lines[2].strip() if len(lines) > 2 else "",
+            "dependencies": lines[3:],
+        }
+
+    def _secure_artifact_dir(self, request_id):
+        if not REQUEST_ID.fullmatch(str(request_id)):
+            raise StoreControlError("invalid_request", "商店请求格式无效。", 2)
+        self.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for directory in (self.artifact_root,):
+            info = directory.lstat()
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077)):
+                raise StoreControlError("runtime_untrusted", "软件包缓存目录不可信。", 2)
+        target = self.artifact_root / str(request_id)
+        if target.exists() and target.is_symlink():
+            raise StoreControlError("runtime_untrusted", "软件包事务目录不得是符号链接。", 2)
+        target.mkdir(mode=0o700, exist_ok=True)
+        info = target.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise StoreControlError("runtime_untrusted", "软件包事务目录不可信。", 2)
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise StoreControlError("runtime_untrusted", "软件包事务目录权限过宽。", 2)
+        return target
+
+    @staticmethod
+    def _spark_filename(resolved):
+        filename = str(resolved.get("artifact_filename") or "")
+        if not filename:
+            filename = pathlib.PurePosixPath(
+                urllib.parse.urlsplit(str(resolved.get("download_url") or "")).path
+            ).name
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+ -]{0,127}\.deb", filename)
+                or pathlib.PurePath(filename).name != filename):
+            raise StoreControlError("provider_unavailable", "星火软件包文件名不安全。", 9)
+        return filename
+
+    def _spark_install(self, request, item, resolved, action):
+        if str(item.get("install_method") or "") == "spark-wine-deb":
+            raise StoreControlError(
+                "toolbox_required",
+                "该星火 Wine 软件需要兼容声明/工具箱，不能通过普通 APT 安装。", 9)
+        url = str(resolved.get("download_url") or "")
+        parsed = urllib.parse.urlsplit(url)
+        if (not hasattr(self.core, "SparkPublicProvider")
+                or not self.core.SparkPublicProvider._safe_host(url)):
+            raise StoreControlError("provider_unavailable", "星火下载地址未通过来源白名单校验。", 9)
+        digest = str((resolved.get("identity") or {}).get("sha256") or "").lower()
+        if not self.core.SHA256.fullmatch(digest):
+            raise StoreControlError("provider_unavailable", "星火软件包缺少签名索引 SHA256。", 9)
+        package_name = str(item.get("package_name") or "").strip().lower()
+        if self._legacy_package_name(package_name):
+            raise StoreControlError(
+                "legacy_dependency",
+                "该软件包属于已退役的 Spark/APM/ACE 运行时，已拒绝安装。", 9)
+        resolved_package = str(resolved.get("package_name") or "").strip().lower()
+        if not package_name or resolved_package != package_name:
+            raise StoreControlError("identity_mismatch", "软件包身份与签名索引不一致。", 9)
+        item_digest = str((item.get("identity") or {}).get("sha256") or "").lower()
+        if item_digest and item_digest != digest:
+            raise StoreControlError("identity_mismatch", "软件包身份与签名索引不一致。", 9)
+        filename = self._spark_filename(resolved)
+        if pathlib.PurePosixPath(parsed.path).name != filename:
+            raise StoreControlError("provider_unavailable", "星火下载路径与索引文件名不一致。", 9)
+        artifact_dir = self._secure_artifact_dir(request.request_id)
+        destination = artifact_dir / filename
+        self._journal(request, "downloading")
+        try:
+            downloaded = self.downloader.download(url, destination, digest)
+        except StoreControlError:
+            raise
+        except Exception as exc:
+            state, message = self._apt_error(str(exc))
+            raise StoreControlError(state, message) from exc
+        try:
+            info = destination.lstat()
+        except OSError as exc:
+            raise StoreControlError("integrity_failed", "星火软件包下载结果不可用。", 9) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            raise StoreControlError("integrity_failed", "星火软件包下载结果不是普通文件。", 9)
+        returned_digest = str(downloaded.get("sha256") or "").lower() if isinstance(downloaded, dict) else ""
+        if not isinstance(downloaded, dict) or not downloaded.get("ok") or returned_digest != digest:
+            destination.unlink(missing_ok=True)
+            raise StoreControlError("integrity_failed", "星火软件包 SHA256 校验失败。", 9)
+        actual_digest = hashlib.sha256()
+        try:
+            with destination.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    actual_digest.update(chunk)
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise StoreControlError("integrity_failed", "星火软件包无法读取以完成校验。", 9) from exc
+        if actual_digest.hexdigest() != digest:
+            destination.unlink(missing_ok=True)
+            raise StoreControlError("integrity_failed", "星火软件包 SHA256 校验失败。", 9)
+        self._journal(request, "verifying")
+        rc, output, error = self._call((
+            "dpkg-deb", "--field", str(destination),
+            "Package", "Version", "Architecture", "Depends", "Pre-Depends",
+        ), timeout=30)
+        if rc != 0:
+            raise StoreControlError("invalid_package", "下载的软件包无法读取元数据。", 9)
+        metadata = self._deb_metadata(output)
+        expected_version = str(resolved.get("resolved_version") or resolved.get("version") or "")
+        signed_architecture = str(
+            resolved.get("resolved_architecture")
+            or (resolved.get("identity") or {}).get("architecture")
+            or ""
+        ).strip().casefold()
+        actual_package = str(metadata.get("package") or "").strip().casefold()
+        actual_version = str(metadata.get("version") or "").strip()
+        actual_architecture = str(metadata.get("architecture") or "").strip().casefold()
+        if (actual_package != package_name or actual_version != expected_version
+                or not signed_architecture or actual_architecture != signed_architecture):
+            raise StoreControlError("identity_mismatch", "软件包身份与签名索引不一致。", 9)
+        item_architecture = str(
+            (item.get("identity") or {}).get("architecture")
+            or (item.get("architectures") or [""])[0]
+        ).strip().casefold()
+        if item_architecture and item_architecture != signed_architecture:
+            raise StoreControlError("identity_mismatch", "软件包架构与签名索引不一致。", 9)
+        if actual_architecture not in {"amd64", "all"}:
+            raise StoreControlError("unsupported_architecture", "软件包架构不受支持。", 9)
+        dependencies = "\n".join(metadata.get("dependencies") or [])
+        if self._has_legacy_spark_dependency(dependencies):
+            raise StoreControlError(
+                "legacy_dependency", "该星火软件包依赖已退役的 Spark/APM/ACE 运行时，已拒绝安装。", 9)
+        self._journal(request, "awaiting_authorization")
+        self._journal(request, "installing")
+        rc, _output, error = self._call((
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            "-o", "Acquire::Retries=3", "--no-install-recommends",
+            "install", str(destination),
+        ), timeout=900)
+        if rc != 0:
+            state, message = self._apt_error(error)
+            raise StoreControlError(state, message)
+        self._journal(request, "readback")
+        state = self._installed(package_name)
+        if (not state["installed"] or state["version"] != expected_version
+                or str(state.get("architecture") or "").strip().casefold() != signed_architecture):
+            raise StoreControlError("readback_failed", "软件操作结束，但版本读回不一致。")
+        try:
+            destination.unlink(missing_ok=True)
+            artifact_dir.rmdir()
+        except OSError:
+            pass
+        return state
 
     def _is_protected(self, package):
         if package in PROTECTED_PACKAGES or package.startswith(("linux-image-", "grub-")):
@@ -236,7 +534,7 @@ class StoreControl:
             rc, _output, _error = self._call((
                 "runuser", "-u", user_name, "--", "env",
                 "XDG_RUNTIME_DIR=" + str(runtime),
-                "/usr/local/bin/ming-phone-desktop", "--refresh-apps",
+                "/usr/local/bin/ming-phone-desktop", "--sync",
             ), timeout=45)
             checks["desktop_shell"] = rc == 0
         return checks
@@ -287,44 +585,82 @@ class StoreControl:
             claim.unlink(missing_ok=True)
 
     def _execute_request(self, uid, account, action, request_id):
-        path, request = self._load_request(uid, action, request_id)
-        try:
-            path.unlink()
-        except OSError as exc:
-            raise StoreControlError(
-                "invalid_request", "无法将商店请求标记为已使用。", 2
-            ) from exc
+        _claimed_path, request = self._load_request(uid, action, request_id)
         self._journal(request, "resolving")
+        if request.provider == "spark-public" and action in ("install", "update"):
+            policy = self._spark_policy()
+            if not policy.get("installation_enabled"):
+                raise StoreControlError(
+                    "installation_disabled",
+                    str(policy.get("installation_disabled_reason")
+                        or "星火公开目录当前仅供浏览，不能安装。"), 9)
         provider = self._provider(request)
+        if (request.provider == "spark-public"
+                and action in ("install", "update")
+                and hasattr(provider, "refresh_catalog")):
+            try:
+                provider.refresh_catalog()
+            except Exception as exc:
+                raise StoreControlError(
+                    "network_failed", "星火目录无法刷新并验证签名，请检查网络后重试。", 9
+                ) from exc
+            if (getattr(provider, "catalog_state", "unavailable") != "ready"
+                    or getattr(provider, "cache_trusted", False) is not True):
+                raise StoreControlError(
+                    "provider_unavailable",
+                    "星火安装必须在本轮联网刷新并完成签名校验后进行。", 9)
         item = provider.get(request.app_id)
+        if request.provider == "wine-official":
+            raise StoreControlError(
+                "toolbox_required",
+                "Wine 应用必须由 Ming 工具箱下载、校验和安装，商店不会直接执行 Windows 安装文件。",
+                9,
+            )
         package = item["package_name"]
         if action == "remove" and (
                 bool(item.get("protected")) or self._is_protected(package)):
             raise StoreControlError("protected_package", "该软件是系统核心组件，不能卸载。", 8)
 
         if action in ("install", "update"):
+            if self._legacy_package_name(package):
+                raise StoreControlError(
+                    "legacy_dependency",
+                    "该软件包属于已退役的 Spark/APM/ACE 运行时，已拒绝安装。", 9)
+            if str(item.get("install_method") or "") == "spark-wine-deb":
+                raise StoreControlError(
+                    "toolbox_required",
+                    "该星火 Wine 软件需要兼容声明/工具箱，不能通过普通 APT 安装。", 9)
             resolved = provider.resolve(request.app_id)
             version = resolved.get("resolved_version") or resolved.get("version")
             if request.expected_version and request.expected_version != version:
                 raise StoreControlError("candidate_changed", "软件版本已变化，请刷新页面后重试。", 9)
-            target = resolved.get("apt_target")
-            if not target:
-                raise StoreControlError("provider_unavailable", "该来源尚未开放安装。", 9)
-            self._journal(request, "awaiting_authorization")
-            command = (
-                "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
-                "-o", "Acquire::Retries=3", "--no-install-recommends",
-                "install", target,
-            )
-            self._journal(request, "installing")
-            rc, _output, error = self._call(command, timeout=900)
-            if rc != 0:
-                state, message = self._apt_error(error)
-                raise StoreControlError(state, message)
-            self._journal(request, "readback")
-            state = self._installed(package)
-            if not state["installed"] or state["version"] != version:
-                raise StoreControlError("readback_failed", "软件操作结束，但版本读回不一致。")
+            if request.provider == "spark-public":
+                state = self._spark_install(request, item, resolved, action)
+            else:
+                target = resolved.get("apt_target")
+                if not target:
+                    raise StoreControlError("provider_unavailable", "该来源尚未开放安装。", 9)
+                rc, package_metadata, _metadata_error = self._call(
+                    ("apt-cache", "show", package), timeout=15)
+                if rc == 0 and self._has_legacy_spark_dependency(package_metadata):
+                    raise StoreControlError(
+                        "legacy_dependency",
+                        "该软件包依赖已退役的 Spark/APM/ACE 运行时，已拒绝安装。", 9)
+                self._journal(request, "awaiting_authorization")
+                command = (
+                    "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+                    "-o", "Acquire::Retries=3", "--no-install-recommends",
+                    "install", target,
+                )
+                self._journal(request, "installing")
+                rc, _output, error = self._call(command, timeout=900)
+                if rc != 0:
+                    state, message = self._apt_error(error)
+                    raise StoreControlError(state, message)
+                self._journal(request, "readback")
+                state = self._installed(package)
+                if not state["installed"] or state["version"] != version:
+                    raise StoreControlError("readback_failed", "软件操作结束，但版本读回不一致。")
         elif action == "remove":
             self._journal(request, "awaiting_authorization")
             self._journal(request, "installing")
@@ -358,12 +694,14 @@ class StoreControl:
             self._journal(request, "refresh_warning", ",".join(failed))
             return {
                 "ok": True, "state": "refresh_warning", "installed_state": state,
+                "provider": request.provider, "app_id": request.app_id,
                 "message": "软件操作已完成，但桌面入口刷新失败。可在商店中安全重试刷新。",
                 "refresh_failed": failed,
             }
         self._journal(request, "succeeded")
         return {
             "ok": True, "state": "succeeded", "installed_state": state,
+            "provider": request.provider, "app_id": request.app_id,
             "message": "软件操作已完成。", "refresh_failed": [],
         }
 
