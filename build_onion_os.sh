@@ -512,6 +512,7 @@ check_host_environment() {
     require_cmd grub-mkimage "dnf install grub2-tools-extra 或 apt install grub-pc-bin grub-efi-amd64-bin"
     require_cmd mkfs.vfat "dnf install dosfstools 或 apt install dosfstools"
     require_cmd mcopy "dnf install mtools 或 apt install mtools"
+    require_cmd file "apt install file"
     require_cmd chroot "系统内置"
     if [[ ! -d /proc/sys ]]; then
         log_error "请确保 /proc 已挂载"
@@ -526,7 +527,7 @@ check_host_environment() {
 }
 install_build_deps() {
     log_step "安装构建依赖"
-    local required_bins=(debootstrap mksquashfs xorriso grub-mkimage mkfs.vfat mcopy)
+    local required_bins=(debootstrap mksquashfs xorriso grub-mkimage mkfs.vfat mcopy file)
     local missing_bins=()
     local bin
     for bin in "${required_bins[@]}"; do
@@ -559,7 +560,7 @@ install_build_deps() {
             apt-get "${apt_options[@]}" install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools dosfstools debian-archive-keyring; then
+            mtools dosfstools file debian-archive-keyring; then
             if [[ "${apt_ok}" -eq 0 ]]; then
                 log_error "apt 依赖安装失败且缓存不可用"
                 exit 1
@@ -3775,8 +3776,8 @@ EOF
 }
 # ======================== 分阶段主流程 ========================
 stage_host_preflight() {
-    check_host_environment
     install_build_deps
+    check_host_environment
     verify_debootstrap_keyring
 }
 

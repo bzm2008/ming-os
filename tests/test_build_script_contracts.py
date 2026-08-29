@@ -172,6 +172,13 @@ class BuildScriptContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, install)
 
+    def test_host_preflight_installs_file_for_kernel_validation(self):
+        self.assertIn("require_cmd file", BUILD)
+        install = BUILD.split("install_build_deps() {", 1)[1].split(
+            "verify_debootstrap_keyring() {", 1
+        )[0]
+        self.assertIn("mtools dosfstools file debian-archive-keyring", install)
+
     def test_apt_cache_manifest_validates_mirror_identity(self):
         validation = BUILD.split("validate_apt_cache_manifest() {", 1)[1].split(
             "write_apt_cache_manifest() {", 1
