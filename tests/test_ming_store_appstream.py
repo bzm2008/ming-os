@@ -156,7 +156,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
 
     def test_target_image_installs_appstream_metadata_runtime(self):
         self.assertRegex(BASE, r"\bappstream\b")
-        self.assertRegex(BASE, r"\bappstream-data\b")
+        self.assertNotRegex(BASE, r"\bappstream-data\b")
         self.assertIn("appstreamcli refresh-cache --force", BASE)
 
     def test_build_gate_checks_actual_rootfs_appstream_inventory(self):

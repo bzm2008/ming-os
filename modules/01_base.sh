@@ -196,7 +196,9 @@ MINGAPTCONVERGE
 
 install_base_packages() {
     # 安装 Linux 内核及核心系统组件（必须成功）
-    apt install -y --no-install-recommends \
+    # Keep package names limited to packages present in the selected Debian
+    # suite; AppStream metadata is refreshed separately when available.
+    if ! apt install -y --no-install-recommends \
         linux-image-amd64 \
         linux-headers-amd64 \
         dkms \
@@ -210,7 +212,6 @@ install_base_packages() {
         sudo \
         apt-utils \
         appstream \
-        appstream-data \
         gnupg2 \
         ca-certificates \
         curl \
@@ -306,7 +307,23 @@ install_base_packages() {
         firmware-amd-graphics \
         amd64-microcode \
         mokutil \
-        thermald
+        thermald; then
+        echo "[ERROR] 基础软件或 Linux 内核安装失败，停止构建。" >&2
+        return 1
+    fi
+
+    # A successful apt transaction must leave a bootable kernel in the
+    # target.  This explicit read-back prevents errexit suppression when the
+    # function is called from `install_base_packages || return 1`.
+    if ! dpkg-query -W -f='${db:Status-Status}' linux-image-amd64 2>/dev/null \
+        | grep -Fxq installed \
+        || ! find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -size +0c \
+            | grep -q . \
+        || ! find /lib/modules -mindepth 1 -maxdepth 1 -type d \
+            | grep -q .; then
+        echo "[ERROR] Linux 内核安装后校验失败，/boot 或 /lib/modules 不完整。" >&2
+        return 1
+    fi
 
     # Build the local AppStream index when the package is available.  The store
     # can still use its curated fallback if a mirror has no metadata.
