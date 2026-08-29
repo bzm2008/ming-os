@@ -21,6 +21,11 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+try:
+    import yaml
+except ImportError:  # AppStream YAML is optional on minimal installed systems.
+    yaml = None
+
 
 CATALOG_SCHEMA = "ming.store.catalog.v1"
 TRANSACTION_SCHEMA = "ming.store.transaction.v1"
@@ -42,6 +47,18 @@ DEFAULT_APPSTREAM_PATHS = (
     "/var/cache/swcatalog/xml/*.xml.gz",
     "/var/lib/app-info/xmls/*.xml",
     "/var/lib/app-info/xmls/*.xml.gz",
+    "/var/cache/swcatalog/yaml/*.yml",
+    "/var/cache/swcatalog/yaml/*.yaml",
+    "/var/cache/swcatalog/yaml/*.yml.gz",
+    "/var/cache/swcatalog/yaml/*.yaml.gz",
+    "/var/lib/swcatalog/yaml/*.yml",
+    "/var/lib/swcatalog/yaml/*.yaml",
+    "/var/lib/swcatalog/yaml/*.yml.gz",
+    "/usr/share/ming-os/appstream/*.yml",
+    "/usr/share/ming-os/appstream/*.yaml",
+    "/usr/share/ming-os/appstream/*.yml.gz",
+    "/usr/share/ming-os/appstream/*.yaml.gz",
+    "/var/lib/swcatalog/yaml/*.yaml.gz",
 )
 # These paths are relative to a target rootfs.  Keep the source metadata
 # separate from Ming's JSON catalog: the release gate must count applications
@@ -61,6 +78,18 @@ ROOTFS_APPSTREAM_PATTERNS = (
     "var/lib/app-info/xmls/*.xml.gz",
     "var/lib/swcatalog/xml/*.xml",
     "var/lib/swcatalog/xml/*.xml.gz",
+    "var/cache/swcatalog/yaml/*.yml",
+    "var/cache/swcatalog/yaml/*.yaml",
+    "var/cache/swcatalog/yaml/*.yml.gz",
+    "var/cache/swcatalog/yaml/*.yaml.gz",
+    "var/lib/swcatalog/yaml/*.yml",
+    "var/lib/swcatalog/yaml/*.yaml",
+    "var/lib/swcatalog/yaml/*.yml.gz",
+    "var/lib/swcatalog/yaml/*.yaml.gz",
+    "usr/share/ming-os/appstream/*.yml",
+    "usr/share/ming-os/appstream/*.yaml",
+    "usr/share/ming-os/appstream/*.yml.gz",
+    "usr/share/ming-os/appstream/*.yaml.gz",
 )
 MIN_ROOTFS_APPSTREAM_APPS = 1000
 SPARK_SOURCE_ID = "spark-public"
@@ -216,6 +245,92 @@ def parse_appstream_xml(document):
     return items
 
 
+def _dep11_localized(value, default=""):
+    if isinstance(value, str):
+        return value.strip() or default
+    if isinstance(value, dict):
+        for key in ("zh-Hans-CN", "zh_CN", "C", "en"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for candidate in value.values():
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return default
+
+
+def _dep11_list(value):
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def parse_dep11_yaml(document):
+    """Convert signed Debian DEP-11 YAML components into store items."""
+    if yaml is None:
+        return []
+    try:
+        documents = yaml.safe_load_all(document)
+    except (TypeError, ValueError, yaml.YAMLError):
+        return []
+    items = []
+    seen_packages = set()
+    try:
+        for component in documents:
+            if not isinstance(component, dict) or component.get("Type") != "desktop-application":
+                continue
+            package = str(component.get("Package") or component.get("PkgName") or "").strip().lower()
+            if not SAFE_PACKAGE.fullmatch(package) or package in seen_packages:
+                continue
+            architectures = set(item.lower() for item in _dep11_list(
+                component.get("Architectures") or component.get("Architecture")))
+            compatible = {"amd64", "x86_64", "all", "any", "noarch", "universal"}
+            if architectures and architectures.isdisjoint(compatible):
+                continue
+            component_id = str(component.get("ID") or "").strip()
+            launchables = component.get("Launchable") or component.get("Launchables")
+            if isinstance(launchables, dict):
+                launchables = [launchables]
+            desktop_ids = []
+            for launchable in launchables if isinstance(launchables, list) else []:
+                if isinstance(launchable, dict):
+                    value = launchable.get("value") or launchable.get("ID") or launchable.get("id")
+                    kind = launchable.get("type") or launchable.get("Type")
+                    if kind and str(kind).lower() not in ("desktop-id", "desktop_id"):
+                        continue
+                else:
+                    value = launchable
+                value = str(value or "").strip()
+                if value.endswith(".desktop"):
+                    desktop_ids.append(value)
+            if not desktop_ids and component_id.endswith(".desktop"):
+                desktop_ids.append(component_id)
+            categories = _dep11_list(component.get("Categories") or component.get("Category"))
+            item = {
+                "app_id": re.sub(r"[^a-z0-9._-]", "-", package),
+                "name": _dep11_localized(component.get("Name"), package),
+                "summary": _dep11_localized(component.get("Summary"), ""),
+                "package_name": package,
+                "version": "candidate",
+                "architectures": ["amd64"],
+                "install_method": "apt",
+                "dependencies": [],
+                "license": str(component.get("ProjectLicense") or component.get("MetadataLicense") or "软件包元数据未声明许可证"),
+                "categories": categories or ["其他"],
+                "desktop_ids": list(dict.fromkeys(desktop_ids)),
+                "identity": {"type": "apt-repository-signature", "required": True},
+                "enabled": True,
+                "protected": False,
+            }
+            items.append(item)
+            seen_packages.add(package)
+    except (TypeError, AttributeError):
+        return items
+    return items
+
+
 def _rootfs_appstream_paths(root, paths=None):
     """Return regular AppStream metadata files contained by *root*.
 
@@ -283,7 +398,8 @@ def scan_appstream_rootfs(root, paths=None):
             metadata_bytes += path.stat().st_size
         except OSError:
             continue
-        for item in parse_appstream_xml(_read_appstream_document(path)):
+        parser = parse_dep11_yaml if path.suffix.casefold() in {".yml", ".yaml"} or path.name.casefold().endswith((".yml.gz", ".yaml.gz")) else parse_appstream_xml
+        for item in parser(_read_appstream_document(path)):
             items_by_package.setdefault(item["package_name"], item)
     return {
         "count": len(items_by_package),
@@ -1442,7 +1558,8 @@ class DebianAptProvider(CatalogProvider):
         curated = super().refresh_catalog()
         merged = {item["package_name"]: item for item in curated}
         for path in self.appstream_paths:
-            for raw in parse_appstream_xml(self._read_appstream(path)):
+            parser = parse_dep11_yaml if path.suffix.casefold() in {".yml", ".yaml"} or path.name.casefold().endswith((".yml.gz", ".yaml.gz")) else parse_appstream_xml
+            for raw in parser(self._read_appstream(path)):
                 if raw["package_name"] in merged:
                     continue
                 item = self._validate_item(raw)

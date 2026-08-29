@@ -118,6 +118,34 @@ class MingStoreAppStreamTests(unittest.TestCase):
         self.assertEqual(1, inventory["count"])
         self.assertEqual(1, len(inventory["paths"]))
 
+    def test_rootfs_appstream_inventory_reads_debian_dep11_yaml(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            metadata = root / "var" / "cache" / "swcatalog" / "yaml"
+            metadata.mkdir(parents=True)
+            records = []
+            for index in range(2):
+                records.append(
+                    "---\n"
+                    "Type: desktop-application\n"
+                    "ID: org.example.Dep{0}\n"
+                    "Package: dep-example-{0}\n"
+                    "Name:\n"
+                    "  C: DEP Example {0}\n"
+                    "Summary:\n"
+                    "  C: A real Debian DEP-11 entry\n"
+                    "ProjectLicense: GPL-3.0-or-later\n".format(index)
+                )
+            with gzip.open(metadata / "Components-amd64.yml.gz", "wt", encoding="utf-8") as stream:
+                stream.write("".join(records))
+
+            inventory = self.core.scan_appstream_rootfs(root)
+
+        self.assertEqual(2, inventory["count"])
+        self.assertEqual({"dep-example-0", "dep-example-1"}, {
+            item["package_name"] for item in inventory["items"]
+        })
+
     def test_rootfs_appstream_gate_requires_real_metadata_and_1000_apps(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

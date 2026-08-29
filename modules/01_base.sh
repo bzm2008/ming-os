@@ -212,6 +212,7 @@ install_base_packages() {
         sudo \
         apt-utils \
         appstream \
+        python3-yaml \
         gnupg2 \
         ca-certificates \
         curl \

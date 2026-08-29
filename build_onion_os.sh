@@ -939,6 +939,28 @@ clean_chroot() {
     else
         chroot_exec bash -c "apt clean"
     fi
+    # Debian Trixie stores the signed AppStream DEP-11 catalog in apt lists
+    # and exposes it through swcatalog symlinks.  Preserve real copies inside
+    # the rootfs before removing apt lists so the store remains searchable
+    # offline and the release gate can inspect authentic metadata.
+    chroot_exec bash -c '
+        set -u
+        destination=/var/cache/swcatalog/yaml
+        mkdir -p "${destination}"
+        for source in /var/lib/swcatalog/yaml/*.yml /var/lib/swcatalog/yaml/*.yaml \
+                      /var/lib/swcatalog/yaml/*.yml.gz /var/lib/swcatalog/yaml/*.yaml.gz; do
+            [ -e "${source}" ] || continue
+            resolved=$(readlink -f -- "${source}" 2>/dev/null || true)
+            case "${resolved}" in
+                /var/lib/apt/lists/*|/var/lib/swcatalog/*|/var/cache/swcatalog/*) ;;
+                *) continue ;;
+            esac
+            [ -f "${resolved}" ] || continue
+            target="${destination}/$(basename "${source}")"
+            cp -f -- "${resolved}" "${target}"
+            chmod 0644 "${target}"
+        done
+    '
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
     chroot_exec bash -c "rm -rf /tmp/ming-build"
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
