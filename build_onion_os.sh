@@ -2461,6 +2461,7 @@ for residue in [
     "usr/bin/spark-store", "opt/spark-store", "opt/durapps/spark-store",
     "usr/bin/apm", "usr/bin/bookworm-run", "usr/bin/trixie-run",
     "usr/local/bin/ming-spark-store", "usr/local/sbin/ming-spark-package-control",
+    "usr/local/bin/ming-package-install-gui",
     "usr/local/bin/ming-spark-backend-status", "usr/local/libexec/ming-spark-aria2c",
     "etc/apt/preferences.d/90-ming-spark-store",
     "usr/share/polkit-1/actions/org.ming.spark.package-control.policy",
@@ -2469,6 +2470,7 @@ for residue in [
     "usr/lib/systemd/system/spark-update-notifier.service",
     "etc/systemd/system/spark-store-refresh.service",
     "usr/share/applications/spark-store.desktop",
+    "usr/share/applications/ming-spark-store.desktop",
     "usr/share/applications/ming-install-spark-store.desktop",
     "usr/local/bin/ming-install-wps",
     "usr/share/applications/ming-install-wps.desktop",
@@ -2476,6 +2478,32 @@ for residue in [
     "usr/share/ming-os/vendor/spark-store",
 ]:
     require_absent(residue, "Spark/APM residue")
+
+# AppFinder and managed desktop history can survive an in-place upgrade even
+# after the old launchers have been removed.  Reject only the known state files
+# and inspect their text for retired command names; unrelated user history is
+# outside the image gate and is never deleted here.
+for appfinder_state in [
+    "home/user/.cache/xfce4/appfinder",
+    "home/user/.cache/xfce4/appfinder-history",
+    "home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-appfinder.xml",
+    "etc/skel/.cache/xfce4/appfinder",
+    "etc/skel/.cache/xfce4/appfinder-history",
+    "etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-appfinder.xml",
+]:
+    history_path = _rootfs_path(appfinder_state)
+    if history_path is None or not history_path.is_file():
+        continue
+    try:
+        history = history_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        errors.append(f"cannot inspect AppFinder history {appfinder_state}: {error}")
+        continue
+    for retired_command in ("ming-spark-store", "ming-package-install-gui"):
+        if retired_command in history:
+            errors.append(
+                f"{appfinder_state} contains retired Spark command {retired_command}"
+            )
 
 if os.environ.get("MING_SKIP_XIAHAI") != "1":
     xiahai_binary = require_file(

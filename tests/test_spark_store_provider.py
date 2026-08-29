@@ -26,6 +26,20 @@ class SparkPublicProviderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.core = load("ming_store_core_spark_public", CORE_PATH)
         cls.ui = load("ming_store_ui_spark_public", UI_PATH)
+        # Keep catalog fixtures deterministic.  Production still uses the
+        # real clock; only this test module injects a clock after the fixture
+        # release date so the expiry policy is exercised reproducibly.
+        cls.test_release_date = "Thu, 28 Aug 2026 00:00:00 +0000"
+        cls.test_now = email.utils.parsedate_to_datetime(
+            cls.test_release_date).timestamp() + 60
+        cls._clock_patch = mock.patch.object(
+            cls.core.time, "time", return_value=cls.test_now)
+        cls._clock_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._clock_patch.stop()
+        super().tearDownClass()
 
     def _packages(self, filename="./tools/demo/demo_1.2.3_amd64.deb"):
         return """Package: demo
@@ -44,7 +58,8 @@ Description: Demo package
             sha512="b" * 128,
         )
 
-    def _inrelease(self, packages, date="Thu, 28 Aug 2026 00:00:00 +0000"):
+    def _inrelease(self, packages, date=None):
+        date = date or self.test_release_date
         digest = hashlib.sha256(packages.encode()).hexdigest()
         return """-----BEGIN PGP SIGNED MESSAGE-----
 Hash: SHA512
@@ -489,6 +504,29 @@ signature
         self.assertEqual(1, len(items))
         self.assertEqual("stale", provider.catalog_state)
         self.assertFalse(provider.cache_trusted)
+
+    def test_real_expired_release_is_rejected(self):
+        packages = self._packages()
+        responses = {
+            "/store/InRelease": self._inrelease(packages),
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+
+        def fetch(url, _headers=None):
+            return {"status": 200, "headers": {},
+                    "body": responses[urllib.parse.urlsplit(url).path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            provider = self.core.SparkPublicProvider(
+                cache_root=root / "cache", categories=("tools",), fetcher=fetch,
+                release_verifier=lambda *_args: True,
+                config_path=self._policy(root, True),
+                clock=lambda: self.test_now + 2 * 24 * 60 * 60,
+            )
+            with self.assertRaises(self.core.ProviderUnavailable):
+                provider.refresh_catalog()
 
     def test_tampered_display_catalog_is_not_accepted_as_last_good_cache(self):
         packages = self._packages()

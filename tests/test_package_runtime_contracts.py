@@ -102,10 +102,11 @@ class PackageRuntimeContracts(unittest.TestCase):
         self.assertNotIn('"command"', transaction)
         self.assertNotIn('"url"', transaction)
 
-    def test_package_gui_explains_refresh_warning_after_successful_install(self):
-        self.assertIn("installed_with_refresh_warning", DESKTOP)
-        self.assertIn("桌面刷新失败", DESKTOP)
-        self.assertIn("刷新/重试", DESKTOP)
+    def test_store_local_deb_entry_exposes_refresh_retry_path(self):
+        self.assertIn("ming-store --local-deb", DESKTOP)
+        self.assertIn("ming-refresh-desktop-state", DESKTOP)
+        self.assertIn("refresh_warning", STORE)
+        self.assertIn("重试刷新", STORE)
 
     def test_privileged_gui_actions_use_one_whitelisted_polkit_bridge(self):
         opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"
@@ -125,11 +126,8 @@ class PackageRuntimeContracts(unittest.TestCase):
         self.assertIn('"usr/local/bin/ming-authorized-action"', build)
 
     def test_package_and_store_callers_use_the_ming_authorization_bridge(self):
-        package_gui = DESKTOP.split(
-            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
-        )[1].split("\nMINGPACKAGEGUI", 1)[0]
-        self.assertIn("ming-authorized-action package install", package_gui)
-        self.assertNotIn("pkexec /usr/local/sbin/ming-package-installer", package_gui)
+        self.assertNotIn("ming-package-install-gui", DESKTOP)
+        self.assertIn("ming-store --local-deb", DESKTOP)
 
         self.assertIn(
             '"/usr/local/bin/ming-authorized-action", "store", action',

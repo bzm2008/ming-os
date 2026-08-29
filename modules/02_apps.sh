@@ -866,7 +866,7 @@ padding:8vh 6vw;font-size:1.3rem;line-height:1.9}h1{color:#9FE7D7}a{color:#5fe0c
 <p>· 桌面底部是<strong>程序坞</strong>，点击图标即可打开应用。</p>
 <p>· 打开「<strong>铭设置</strong>」可调整字体大小、连接 Wi-Fi、检查更新。</p>
 <p>· 上网遇到广告会被自动拦截（已内置 uBlock Origin）。</p>
-<p>· 需要更多软件，点开「<strong>星火应用商店</strong>」。</p>
+<p>· 需要更多软件，点开「<strong>Ming 应用商店</strong>」。</p>
 <p><a href="index.html">返回导航首页</a></p>
 </body></html>
 HELPPAGE
@@ -892,10 +892,10 @@ echo "Downloading official WeChat for Linux..."
 wget -c --show-progress -O "${deb}" "${url}"
 if [[ ${EUID:-$(id -u)} -eq 0 && -x /usr/local/sbin/ming-package-installer ]]; then
     /usr/local/sbin/ming-package-installer install "${deb}"
-elif [[ -x /usr/local/bin/ming-package-install-gui ]]; then
-    /usr/local/bin/ming-package-install-gui "${deb}"
+elif [[ -x /usr/local/bin/ming-store ]]; then
+    /usr/local/bin/ming-store --local-deb "${deb}"
 else
-    echo "Administrator privileges are required through Ming package installer, but the graphical installer is unavailable." >&2
+    echo "Ming 应用商店不可用，无法安全安装微信软件包。" >&2
     exit 1
 fi
 echo "WeChat installed."

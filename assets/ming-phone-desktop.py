@@ -285,7 +285,44 @@ class ResourceMetricSampler:
         return {mode: self.sample(mode) for mode in METRIC_MODES}
 
 
-DESKTOP_DIR = Path.home() / "Desktop"
+def desktop_directory():
+    """Resolve the user's XDG desktop directory for visible copies only.
+
+    Desktop launchers are presentation artifacts and must never be treated as
+    an application catalog.  Prefer the desktop directory advertised by
+    xdg-user-dirs, while keeping an explicit environment override for tests
+    and recovery sessions.
+    """
+    override = os.environ.get("MING_DESKTOP_DIR") or os.environ.get("XDG_DESKTOP_DIR")
+    if override:
+        candidate = Path(os.path.expandvars(override)).expanduser()
+        if candidate.is_absolute() and candidate != Path("/"):
+            return candidate
+    try:
+        completed = subprocess.run(
+            ["xdg-user-dir", "DESKTOP"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        completed = None
+    if completed is not None:
+        value = (completed.stdout or "").strip()
+        if completed.returncode == 0 and value:
+            candidate = Path(os.path.expandvars(value)).expanduser()
+            if candidate.is_absolute() and candidate != Path("/"):
+                return candidate
+    return Path.home() / "Desktop"
+
+
+# Keep AST-based migration tests able to load the pure layout helpers without
+# importing the optional XDG resolver.  In the real process the resolver is
+# defined above; reduced AST fixtures simply use the safe Desktop fallback.
+_desktop_resolver = globals().get("desktop_directory")
+DESKTOP_DIR = _desktop_resolver() if callable(_desktop_resolver) else Path.home() / "Desktop"
 
 
 def _unique_desktop_path(stem, suffix=""):
@@ -348,7 +385,6 @@ READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
 SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
 LOCAL_APPLICATION_DIR = Path("/usr/local/share/applications")
 APP_DIRS = [
-    DESKTOP_DIR,
     SYSTEM_APPLICATION_DIR,
     LOCAL_APPLICATION_DIR,
     HOME / ".local/share/applications",
@@ -450,6 +486,11 @@ CLOCK_MARGIN_Y = 8
 STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_EXPANDED_HEIGHT = 220
 STATUS_WIDGET_TOP_GAP_MAX = 8
+
+
+def status_widget_pid_file():
+    """Return the per-session marker path without probing GTK at import time."""
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ming-phone-desktop.pid"
 
 
 def status_widget_top_gap_is_valid(content_y, card_y, max_gap=STATUS_WIDGET_TOP_GAP_MAX):
@@ -2752,6 +2793,11 @@ class StatusWidget(Gtk.Box):
         self.expanded_window.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
         self.expanded_window.set_decorated(False)
         self.expanded_window.set_resizable(False)
+        # Keep the expanded panel a bounded, normal-opacity window.  In
+        # software-rendered Live sessions an uninitialised popup can otherwise
+        # become a black, input-blocking surface when the Win key is pressed.
+        self.expanded_window.set_modal(False)
+        self.expanded_window.set_opacity(1.0)
         self.expanded_window.set_skip_taskbar_hint(True)
         self.expanded_window.set_skip_pager_hint(True)
         self.expanded_window.set_position(Gtk.WindowPosition.NONE)
@@ -3759,7 +3805,8 @@ class PhoneDesktop(Gtk.Window):
         self.set_default_size(screen_w, screen_h)
         self.resize(screen_w, screen_h)
         self.move(0, 0)
-        self.connect("destroy", Gtk.main_quit)
+        self.connect("destroy", self.on_destroy)
+        self.register_status_widget_pid()
         # Gtk.Fixed and transparent EventBox children can be no-window widgets
         # on the VirtualBox/Xrender path.  Receive root-window events as the
         # final, renderer-independent desktop input route.
@@ -3830,6 +3877,42 @@ class PhoneDesktop(Gtk.Window):
         # Ming Store and package installers trigger refresh_desktop immediately. This
         # timer is only a bounded fallback for changes made outside Ming tools.
         GLib.timeout_add_seconds(15, self.refresh_if_apps_changed)
+
+    def register_status_widget_pid(self):
+        """Publish one user-owned PID for the Win-key broker.
+
+        The broker first trusts this marker and validates the process owner and
+        command before signalling it.  A stale marker is harmless and is
+        replaced by the next desktop instance.
+        """
+        pid_file = status_widget_pid_file()
+        try:
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = pid_file.with_name(
+                ".%s.%s.tmp" % (pid_file.name, os.getpid()))
+            descriptor = os.open(
+                str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                handle.write(str(os.getpid()) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, pid_file)
+            pid_file.chmod(0o600)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        except OSError as exc:
+            log("could not write status widget pid marker: %s" % exc)
+
+    def on_destroy(self, *_args):
+        pid_file = status_widget_pid_file()
+        try:
+            if pid_file.read_text(encoding="ascii").strip() == str(os.getpid()):
+                pid_file.unlink()
+        except (OSError, ValueError):
+            pass
+        Gtk.main_quit()
 
     @property
     def window_origin(self):

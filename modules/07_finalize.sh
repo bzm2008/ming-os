@@ -111,6 +111,7 @@ copy_default_launcher() {
     local launcher="$1"
     local target_dir="$2"
     local source="/usr/share/applications/${launcher}"
+    local target="${target_dir}/${launcher}"
 
     case "${launcher}" in
         ming-firefox.desktop)
@@ -127,30 +128,57 @@ copy_default_launcher() {
         return 0
     fi
 
-    write_managed_launcher_copy "${source}" "${target_dir}/${launcher}" || {
+    # Never overwrite an unmanaged file supplied by the user.  A byte-identical
+    # copy from an older image is safe to migrate into the marked form; any
+    # other contents are left untouched and the canonical system entry remains
+    # available to the drawer and Dock.
+    if [[ -e "${target}" || -L "${target}" ]] \
+       && ! is_managed_desktop_file "${target}"; then
+        if [[ -f "${target}" ]] && cmp -s -- "${source}" "${target}"; then
+            write_managed_launcher_copy "${source}" "${target}" || true
+        else
+            echo "[07_finalize] preserving unmanaged desktop launcher: ${target}"
+            return 0
+        fi
+    fi
+
+    write_managed_launcher_copy "${source}" "${target}" || {
         echo "[07_finalize][WARN] could not write managed launcher: ${launcher}"
         return 0
     }
-    chmod 0755 "${target_dir}/${launcher}" 2>/dev/null || true
+    chmod 0755 "${target}" 2>/dev/null || true
+}
+
+is_managed_desktop_file() {
+    local target="$1"
+    [[ -f "${target}" ]] || return 1
+    grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${target}"
 }
 
 reset_desktop_dir() {
     local target_dir="$1"
     local owner="$2"
+    local seed="${3:-true}"
 
     mkdir -p "${target_dir}"
-    find "${target_dir}" -maxdepth 1 -type f -name '*.desktop' -delete 2>/dev/null || true
-    find "${target_dir}" -maxdepth 1 -type l -delete 2>/dev/null || true
-    while IFS= read -r -d '' dir; do
-        if ! find "${dir}" -mindepth 1 ! -name '*.desktop' -print -quit 2>/dev/null | grep -q .; then
-            rm -rf "${dir}"
+    # User-created launchers are preserved, not ours to remove.  Only files carrying the
+    # explicit Ming marker participate in migration; old Spark entries are
+    # removed by retire_legacy_store_runtime using their known names.
+    while IFS= read -r -d '' launcher; do
+        if is_managed_desktop_file "${launcher}"; then
+            rm -f -- "${launcher}"
         fi
-    done < <(find "${target_dir}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    done < <(find "${target_dir}" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+    # Do not remove directories: a directory containing only a user launcher
+    # is still user data.  Ming-owned category directories are handled by the
+    # organizer's explicit marker-aware cleanup path.
 
-    local launcher
-    for launcher in "${DESKTOP_LAUNCHERS[@]}"; do
-        copy_default_launcher "${launcher}" "${target_dir}"
-    done
+    if [[ "${seed}" == true ]]; then
+        local launcher
+        for launcher in "${DESKTOP_LAUNCHERS[@]}"; do
+            copy_default_launcher "${launcher}" "${target_dir}"
+        done
+    fi
 
     chown -R "${owner}" "${target_dir}" 2>/dev/null || true
 }
@@ -165,10 +193,23 @@ constrain_default_desktop() {
           "/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
           "/etc/skel/.config/ming-os/desktop-generated-manifest.json" 2>/dev/null || true
 
-    reset_desktop_dir "${USER_HOME}/Desktop" "${MING_USER}:${MING_USER}"
-    reset_desktop_dir "${USER_HOME}/桌面" "${MING_USER}:${MING_USER}"
-    reset_desktop_dir "/etc/skel/Desktop" "root:root"
-    reset_desktop_dir "/etc/skel/桌面" "root:root"
+    local canonical_desktop="${USER_HOME}/Desktop"
+    local discovered_desktop=""
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        discovered_desktop="$(runuser -u "${MING_USER}" -- env HOME="${USER_HOME}" \
+            xdg-user-dir DESKTOP 2>/dev/null || true)"
+        if [[ "${discovered_desktop}" == "${USER_HOME}"/* \
+           && "${discovered_desktop}" != "${USER_HOME}" ]]; then
+            canonical_desktop="${discovered_desktop}"
+        fi
+    fi
+    reset_desktop_dir "${canonical_desktop}" "${MING_USER}:${MING_USER}" true
+    for legacy_desktop in "${USER_HOME}/Desktop" "${USER_HOME}/桌面"; do
+        [[ "${legacy_desktop}" == "${canonical_desktop}" ]] && continue
+        reset_desktop_dir "${legacy_desktop}" "${MING_USER}:${MING_USER}" false
+    done
+    reset_desktop_dir "/etc/skel/Desktop" "root:root" true
+    reset_desktop_dir "/etc/skel/桌面" "root:root" false
 }
 
 repair_default_user_ownership() {
@@ -279,6 +320,7 @@ retire_legacy_store_runtime() {
         /usr/share/polkit-1/actions/store.spark-app.*.policy \
         /usr/local/sbin/ming-spark-package-control \
         /usr/local/bin/ming-spark-store \
+        /usr/local/bin/ming-package-install-gui \
         /usr/local/bin/ming-spark-backend-status \
         /usr/local/libexec/ming-spark-aria2c \
         /usr/local/bin/ming-install-wps \
@@ -287,13 +329,36 @@ retire_legacy_store_runtime() {
         /etc/systemd/system/spark-store-refresh.service 2>/dev/null || true
     rm -f /usr/share/applications/spark-store.desktop \
         /usr/share/applications/ming-install-spark-store.desktop \
-        /usr/share/applications/ming-install-wps.desktop \
-        /usr/share/applications/wps-office.desktop 2>/dev/null || true
-    find /home /etc/skel -xdev -type f \
-        \( -name 'spark-store.desktop' -o -name 'spark-store.dockitem' \
-           -o -name 'ming-install-wps.desktop' -o -name 'ming-install-wps.dockitem' \
-           -o -name 'wps-office.desktop' -o -name 'wps-office.dockitem' \) \
-        -delete 2>/dev/null || true
+        /usr/share/applications/ming-install-wps.desktop 2>/dev/null || true
+    # Remove only legacy entries that Ming generated itself and carry the
+    # explicit X-Ming-Managed=true marker.  A user may have
+    # independently installed a similarly named application, so matching the
+    # filename alone is not sufficient and no broad find -delete is allowed.
+    local legacy_root legacy_entry
+    for legacy_root in /home /etc/skel; do
+        [[ -d "${legacy_root}" ]] || continue
+        while IFS= read -r -d '' legacy_entry; do
+            if is_managed_desktop_file "${legacy_entry}"; then
+                rm -f -- "${legacy_entry}"
+            fi
+        done < <(find "${legacy_root}" -xdev -type f \
+            \( -name 'spark-store.desktop' -o -name 'spark-store.dockitem' \
+               -o -name 'ming-spark-store.desktop' -o -name 'ming-spark-store.dockitem' \
+               -o -name 'ming-install-wps.desktop' -o -name 'ming-install-wps.dockitem' \
+               -o -name 'wps-office.dockitem' \) \
+            -print0 2>/dev/null)
+    done
+    # Xfce AppFinder persists recent commands in user cache/config files.
+    # Remove only retired Spark command lines; keep all other user history.
+    local appfinder_state
+    for appfinder_state in \
+        "${USER_HOME}/.cache/xfce4/appfinder"* \
+        "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-appfinder.xml" \
+        "/etc/skel/.cache/xfce4/appfinder"* \
+        "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-appfinder.xml"; do
+        [[ -f "${appfinder_state}" ]] || continue
+        sed -i -e '/ming-spark-store/d' -e '/ming-package-install-gui/d' "${appfinder_state}" 2>/dev/null || true
+    done
     # Do not run autoremove and do not touch /opt/apps or user application
     # data: software installed through the old store remains installed.
     systemctl daemon-reload 2>/dev/null || true

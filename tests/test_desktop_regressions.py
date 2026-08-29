@@ -1672,6 +1672,69 @@ class InstallerBootContractTests(unittest.TestCase):
         self.assertIn('boot_disk="${physical_disks[0]}"', resolver)
 
 
+class WinToggleAndLiveSessionContractTests(unittest.TestCase):
+    """RC4 contracts for the Win-key toggle and the Live installer session."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.phone = PHONE_DESKTOP.read_text(encoding="utf-8")
+        cls.desktop = DESKTOP_MODULE.read_text(encoding="utf-8")
+
+    def test_only_plain_super_binding_remains(self):
+        shortcuts = self.desktop.split(
+            "cat > \"/home/${MING_USER}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml\" << 'KEYBOARDSHORTCUTSCFG'",
+            1,
+        )[1].split("KEYBOARDSHORTCUTSCFG", 1)[0]
+        self.assertIn("&lt;Super&gt;", shortcuts)
+        for retired in ("&lt;Super_L&gt;", "&lt;Super_R&gt;", "&lt;Super&gt;space"):
+            self.assertNotIn(retired, shortcuts)
+        appearance = self.desktop.split(
+            "cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'", 1
+        )[1].split("APPLYAPPEARANCE", 1)[0]
+        self.assertIn("/commands/custom/<Super>", appearance)
+        for retired in (
+            "/commands/custom/<Super_L>",
+            "/commands/custom/<Super_R>",
+            "/commands/custom/<Super>space",
+        ):
+            self.assertNotIn(retired, appearance)
+
+    def test_status_toggle_helper_targets_exactly_one_pid(self):
+        toggle = self.desktop.split(
+            "cat > /usr/local/bin/ming-status-widget-toggle << 'MINGSTATUSWIDGETTOGGLE'",
+            1,
+        )[1].split("MINGSTATUSWIDGETTOGGLE", 1)[0]
+        self.assertIn("pid=", toggle)
+        self.assertIn("head -n 1", toggle)
+        self.assertNotIn("while read -r pid", toggle)
+        self.assertEqual(toggle.count('kill -USR1 "${pid}"'), 1)
+        self.assertIn("ming-phone-desktop.pid", toggle)
+        self.assertIn("ps -o args=", toggle)
+        self.assertIn("ming-phone-desktop*", toggle)
+        self.assertIn('[[ "${process_count}" == "1" ]] || exit 0', toggle)
+
+    def test_status_popup_is_opaque_and_not_modal_overlay(self):
+        popup = self.phone[self.phone.index("self.expanded_window = Gtk.Window"):
+                           self.phone.index("box.pack_start(self.compact_button")]
+        self.assertIn("self.expanded_window.set_opacity(1.0)", popup)
+        self.assertIn("self.expanded_window.set_modal(False)", popup)
+        self.assertIn("self.expanded_window.set_skip_taskbar_hint(True)", popup)
+        css = self.phone[self.phone.index(".status-expanded-panel {"):
+                         self.phone.index(".status-expanded-title {")]
+        self.assertIn("background: #FFFFFF", css)
+
+    def test_installer_session_survives_calamares_exit_and_notifies_user(self):
+        session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session << 'KIOSK'"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        self.assertIn("launcher_status=\"$?\"", session)
+        self.assertIn("安装器已关闭，可从桌面重新打开", session)
+        self.assertIn("ming-live-notice", session)
+        self.assertIn("session_alive_marker", session)
+        self.assertNotIn("exec /usr/local/bin/ming-calamares-launcher", session)
+
+
 class HardwareAndWirelessContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

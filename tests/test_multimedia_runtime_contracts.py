@@ -152,10 +152,10 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             "WECHATINSTALL",
         )
         self.assertIn("ming-package-installer install", installer)
-        self.assertIn("Administrator privileges are required", installer)
+        self.assertIn("Ming 应用商店不可用", installer)
         self.assertNotIn("sudo apt install", installer)
 
-    def test_wechat_on_demand_install_uses_ming_gui_without_sudo_fallback(self):
+    def test_wechat_on_demand_install_uses_ming_store_without_sudo_fallback(self):
         installer = heredoc(
             APPS,
             "cat > /usr/local/bin/ming-install-wechat << 'WECHATINSTALL'",
@@ -167,7 +167,7 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             "cat > /usr/share/applications/ming-install-wechat.desktop << WECHATDESKTOPSYS",
             "WECHATDESKTOPSYS",
         )
-        self.assertIn("ming-package-install-gui", installer)
+        self.assertIn("ming-store --local-deb", installer)
         self.assertIn("ming-install-wechat", wrapper)
         self.assertIn("/usr/local/bin/ming-install-wechat", desktop)
         self.assertNotIn("sudo /usr/local/bin/ming-install-wechat", wrapper)
@@ -180,7 +180,7 @@ class MultimediaRuntimeContracts(unittest.TestCase):
             "WECHATINSTALL",
         )
         self.assertIn("ming-package-installer install", installer)
-        self.assertIn("ming-package-install-gui", installer)
+        self.assertIn("ming-store --local-deb", installer)
         self.assertNotIn("apt-get -y", installer)
 
     def test_ming_helper_install_actions_do_not_use_sudo_fallbacks(self):

@@ -46,7 +46,8 @@ class ReleaseGateContracts(unittest.TestCase):
 
     def test_drawer_is_dock_only(self):
         self.assertIn('DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem', self.desktop)
-        self.assertIn('rm -f "${desktop}/Ming 应用库.desktop"', self.desktop)
+        self.assertIn('for legacy_launcher in', self.desktop)
+        self.assertIn('X-Ming-Managed', self.desktop)
         self.assertNotIn('"ming-app-library.desktop",\n    "ming-files.desktop"', self.phone)
 
     def test_dock_uses_launch_broker_proxies(self):

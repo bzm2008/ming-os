@@ -472,27 +472,13 @@ class BuildContractTests(unittest.TestCase):
         self.assertIn('$1 !~ /^systemd-/', identity)
         self.assertIn('validate_posix_user_name "${user_name}"', identity)
 
-    def test_package_gui_blocks_before_authorized_action_when_administrator_is_not_ready(self):
-        gui = self.desktop.split(
-            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
-        )[1].split("\nMINGPACKAGEGUI", 1)[0]
-        self.assertIn("ming-admin-bootstrap status", gui)
-        self.assertIn("ming-oobe-account", gui)
-        self.assertIn("请先完成首次开机账户设置", gui)
-        self.assertIn("ming-authorized-action package install", gui)
-        self.assertNotIn("pkexec /usr/local/sbin/ming-package-installer", gui)
-        self.assertLess(
-            gui.index("ming-admin-bootstrap status"),
-            gui.index("ming-authorized-action package install"),
-        )
+    def test_local_deb_uses_ming_store_instead_of_legacy_package_gui(self):
+        self.assertNotIn("ming-package-install-gui", self.desktop)
+        self.assertIn("ming-store --local-deb", self.desktop)
 
-    def test_package_gui_requires_an_active_polkit_agent(self):
-        gui = self.desktop.split(
-            "cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'", 1
-        )[1].split("\nMINGPACKAGEGUI", 1)[0]
-        self.assertIn("pgrep -u", gui)
-        self.assertIn("lxpolkit|polkit-gnome-authentication-agent", gui)
-        self.assertIn("系统授权服务尚未就绪", gui)
+    def test_store_authorization_agent_is_scoped_to_ming_store(self):
+        self.assertIn("ming-authorized-action", self.desktop)
+        self.assertNotIn("ming-package-install-gui", self.desktop)
 
     def test_welcome_waits_for_account_oobe_before_presenting(self):
         welcome = self.desktop.split("cat > /usr/local/bin/ming-welcome << 'WELCOMEPY'", 1)[1].split(

@@ -187,11 +187,16 @@ fi
 if [[ -f "${bookmarks}" ]]; then
     sed -i '\|file://.*/所有磁盘|d' "${bookmarks}"
 fi
-rm -f -- \
+for legacy_launcher in \
     "${HOME}/Desktop/Ming 应用库.desktop" \
     "${HOME}/Desktop/所有磁盘.desktop" \
     "${HOME}/Desktop/ming-app-library.desktop" \
-    "${HOME}/Desktop/ming-disk-hub.desktop"
+    "${HOME}/Desktop/ming-disk-hub.desktop"; do
+    if [[ -f "${legacy_launcher}" ]] \
+       && grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${legacy_launcher}"; then
+        rm -f -- "${legacy_launcher}"
+    fi
+done
 MINGMIGRATEDISKS
     chmod 0755 /usr/local/bin/ming-migrate-all-disks
 
@@ -208,18 +213,23 @@ MINGMIGRATEDISKS
             \( -iname '*claw*' -o -iname 'open*claw*' \) \
             -delete 2>/dev/null || true
     done
-    find "/home/${MING_USER}" -maxdepth 4 -type f \
-        \( -iname '*claw*' -o -iname 'open*claw*' \) \
-        -delete 2>/dev/null || true
+    # Do not scan or delete arbitrary user files under $HOME.  Only the
+    # explicitly named desktop/Dock/autostart entries below are retired.
     find /usr/share/applications \
          "/home/${MING_USER}/Desktop" \
          "/home/${MING_USER}/.config/plank/dock1/launchers" \
          -maxdepth 1 \( -iname '*claw*.desktop' -o -iname '*claw*.dockitem' \) \
          -delete 2>/dev/null || true
-    rm -f "/home/${MING_USER}/Desktop/Ming 应用库.desktop" \
-          "/home/${MING_USER}/Desktop/所有磁盘.desktop" \
-          "/home/${MING_USER}/Desktop/ming-app-library.desktop" \
-          "/home/${MING_USER}/Desktop/ming-disk-hub.desktop"
+    for legacy_launcher in \
+        "/home/${MING_USER}/Desktop/Ming 应用库.desktop" \
+        "/home/${MING_USER}/Desktop/所有磁盘.desktop" \
+        "/home/${MING_USER}/Desktop/ming-app-library.desktop" \
+        "/home/${MING_USER}/Desktop/ming-disk-hub.desktop"; do
+        if [[ -f "${legacy_launcher}" ]] \
+           && grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${legacy_launcher}"; then
+            rm -f -- "${legacy_launcher}"
+        fi
+    done
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
     cat > "/home/${MING_USER}/.config/autostart/ming-migrate-all-disks.desktop" << 'MINGMIGRATEAUTO'
@@ -329,11 +339,27 @@ install_ming_shell_components() {
 #!/usr/bin/env bash
 set -u
 uid="$(id -u)"
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+pid_file="${runtime_dir}/ming-phone-desktop.pid"
 pattern='(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)'
-while read -r pid; do
-    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-    kill -USR1 "${pid}" 2>/dev/null || true
-done < <(pgrep -u "${uid}" -f "${pattern}" 2>/dev/null || true)
+pid=""
+process_count="$(pgrep -u "${uid}" -f "${pattern}" 2>/dev/null | wc -l | tr -d ' ' || true)"
+[[ "${process_count}" == "1" ]] || exit 0
+if [[ -r "${pid_file}" ]]; then
+    read -r candidate <"${pid_file}" || candidate=""
+    candidate_cmd="$(ps -o args= -p "${candidate}" 2>/dev/null || true)"
+    if [[ "${candidate}" =~ ^[0-9]+$ ]] && kill -0 "${candidate}" 2>/dev/null \
+       && [[ "$(ps -o uid= -p "${candidate}" 2>/dev/null | tr -d ' ')" == "${uid}" ]] \
+       && [[ "${candidate_cmd}" == *ming-phone-desktop* ]]; then
+        pid="${candidate}"
+    fi
+fi
+if [[ -z "${pid}" ]]; then
+    pid="$(pgrep -u "${uid}" -f "${pattern}" 2>/dev/null | head -n 1 || true)"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || exit 0
+    printf '%s\n' "${pid}" >"${pid_file}" 2>/dev/null || true
+fi
+kill -USR1 "${pid}" 2>/dev/null || true
 MINGSTATUSWIDGETTOGGLE
     chmod 0755 /usr/local/bin/ming-status-widget-toggle
     install -m 0755 "${asset_dir}/ming-package-installer.py" /usr/local/sbin/ming-package-installer
@@ -827,145 +853,9 @@ exit "${status}"
 MINGREFRESHDESKTOP
     chmod 0755 /usr/local/bin/ming-refresh-desktop-state
 
-    # Thunar custom actions do not display a command's stdout.  Keep privilege
-    # elevation in the narrow installer, while this unprivileged wrapper turns
-    # its structured result into an explicit success/failure dialog and asks
-    # the running phone desktop to rescan newly installed launchers.
-    cat > /usr/local/bin/ming-package-install-gui << 'MINGPACKAGEGUI'
-#!/usr/bin/env bash
-set -uo pipefail
-
-package_file="${1:-}"
-if [[ -z "${package_file}" || ! -f "${package_file}" ]]; then
-    if command -v zenity >/dev/null 2>&1; then
-        zenity --error --title="安装 DEB 软件包" --text="找不到要安装的本地 DEB 软件包。" --width=420 2>/dev/null || true
-    else
-        notify-send -u critical "安装 DEB 软件包" "找不到要安装的本地 DEB 软件包。" 2>/dev/null || true
-    fi
-    exit 2
-fi
-
-show_blocking_error() {
-    local message="$1"
-    if command -v zenity >/dev/null 2>&1; then
-        zenity --error --title="无法安装软件" --text="${message}" --width=460 2>/dev/null || true
-    else
-        notify-send -u critical "无法安装软件" "${message}" 2>/dev/null || true
-    fi
-}
-
-current_user="$(id -un)"
-admin_status="$(/usr/local/sbin/ming-admin-bootstrap status \
-    --user "${current_user}" --json 2>/dev/null || true)"
-if ! grep -Fq '"ready": true' <<<"${admin_status}"; then
-    show_blocking_error "请先完成首次开机账户设置，再安装需要管理员权限的软件。"
-    if [[ -x /usr/local/bin/ming-oobe-account ]]; then
-        nohup /usr/local/bin/ming-oobe-account \
-            >"${XDG_RUNTIME_DIR:-/tmp}/ming-oobe-account.log" 2>&1 </dev/null &
-    fi
-    exit 4
-fi
-
-polkit_agent_pattern='lxpolkit|polkit-gnome-authentication-agent'
-if ! pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1; then
-    if command -v lxpolkit >/dev/null 2>&1; then
-        nohup lxpolkit >"${XDG_RUNTIME_DIR:-/tmp}/ming-polkit-agent.log" 2>&1 </dev/null &
-        for _attempt in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1 && break
-            sleep 0.2
-        done
-    fi
-fi
-if ! pgrep -u "$(id -u)" -f "${polkit_agent_pattern}" >/dev/null 2>&1; then
-    show_blocking_error "系统授权服务尚未就绪，请注销并重新登录后再试。"
-    exit 5
-fi
-
-result_file="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/ming-package-result.XXXXXX" 2>/dev/null || true)"
-if [[ -z "${result_file}" ]]; then
-    notify-send -u critical "安装 DEB 软件包" "无法创建安装结果文件。" 2>/dev/null || true
-    exit 1
-fi
-trap 'rm -f "${result_file}"' EXIT
-
-if /usr/local/bin/ming-authorized-action package install "${package_file}" >"${result_file}" 2>&1; then
-    installer_rc=0
-else
-    installer_rc=$?
-fi
-
-if python3 - "${result_file}" "${installer_rc}" << 'MINGPACKAGEUIPY'
-import json
-from pathlib import Path
-import shutil
-import subprocess
-import sys
-
-raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
-return_code = int(sys.argv[2])
-try:
-    result = json.loads(raw)
-except (TypeError, ValueError):
-    result = {}
-installed = bool(result.get("installed"))
-launch_ready = bool(result.get("launch_ready"))
-state = str(result.get("state") or "")
-refresh_warning = installed and state == "installed_with_refresh_warning"
-ok = bool(result.get("ok")) and installed and launch_ready and return_code == 0
-package = str(result.get("package") or "该软件")
-version = str(result.get("version") or "")
-log_path = str(result.get("log_path") or "/var/log/ming-package-installer.log")
-launcher_warnings = result.get("launcher_warnings")
-launcher_warnings = launcher_warnings if isinstance(launcher_warnings, list) else []
-if ok:
-    title = "软件安装完成"
-    detail = "已安装：%s%s\n应用抽屉和桌面将自动刷新。\n日志：%s" % (
-        package, (" " + version) if version else "", log_path)
-    if launcher_warnings:
-        title = "软件已安装，但启动器需要修复"
-        warnings = [str(item.get("error") or "启动器不可用")
-                    for item in launcher_warnings if isinstance(item, dict)]
-        detail += "\n\n注意：" + "；".join(warnings[:3])
-elif refresh_warning:
-    title = "软件已安装，但桌面刷新失败"
-    reason = str(result.get("error") or "桌面刷新失败，可点击刷新/重试。")
-    detail = "%s\n可点击刷新/重试；软件本体已经安装。\n日志：%s" % (
-        reason[:1200], log_path)
-elif installed and not launch_ready:
-    title = "软件已安装，但无法确认可启动"
-    reason = str(result.get("error") or "未找到可验证的图形启动器。")
-    detail = "%s\n日志：%s" % (reason[:1200], log_path)
-else:
-    title = "软件安装失败"
-    reason = str(result.get("error") or raw or "安装被取消或未返回可读结果。")
-    detail = "%s\n日志：%s" % (reason[:1200], log_path)
-if shutil.which("zenity"):
-    subprocess.run(
-        ["zenity", "--info" if ok else ("--warning" if refresh_warning else "--error"), "--title=" + title,
-         "--text=" + detail, "--width=520"], check=False)
-elif shutil.which("notify-send"):
-    subprocess.run(
-        ["notify-send", "-u", "normal" if ok or refresh_warning else "critical", title, detail], check=False)
-else:
-    print(title + "\n" + detail, file=sys.stderr)
-raise SystemExit(0 if ok or refresh_warning else 1)
-MINGPACKAGEUIPY
-then
-    if command -v ming-phone-desktop >/dev/null 2>&1; then
-        ming-phone-desktop --sync >/dev/null 2>&1 || true
-    fi
-    if command -v ming-refresh-desktop-state >/dev/null 2>&1; then
-        ming-refresh-desktop-state >/dev/null 2>&1 || true
-    fi
-    if command -v ming-refresh-dock-launchers >/dev/null 2>&1; then
-        ming-refresh-dock-launchers "$(id -un)" >/dev/null 2>&1 || true
-    fi
-    [[ "${installer_rc}" -eq 0 ]] && exit 0
-    exit "${installer_rc}"
-fi
-exit 1
-MINGPACKAGEGUI
-    chmod 0755 /usr/local/bin/ming-package-install-gui
+    # Local DEB files are opened by Ming Store via the MIME handler below.
+    # The retired package GUI helper is intentionally absent so upgrades
+    # cannot route around the store's verified transaction path.
 
     cat > /usr/local/bin/ming-appimage-install-gui << 'MINGAPPIMAGEGUI'
 #!/usr/bin/env bash
@@ -5979,7 +5869,11 @@ MINGAPPLIBCOMPAT
 #!/usr/bin/env bash
 set -uo pipefail
 
-desktop="${HOME}/Desktop"
+desktop="${MING_DESKTOP_DIR:-}"
+if [[ -z "${desktop}" ]] && command -v xdg-user-dir >/dev/null 2>&1; then
+    desktop="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+fi
+[[ "${desktop}" == /* && "${desktop}" != "/" ]] || desktop="${HOME}/Desktop"
 apps_dir="${desktop}/应用"
 system_dir="${desktop}/系统"
 internet_dir="${desktop}/上网"
@@ -5990,7 +5884,7 @@ tools_dir="${desktop}/工具"
 common_dir="${desktop}/常用"
 state_dir="${HOME}/.config/ming-os"
 
-mkdir -p "${apps_dir}" "${system_dir}" "${internet_dir}" "${office_dir}" "${media_dir}" "${games_dir}" "${tools_dir}" "${common_dir}" "${state_dir}" "${desktop}"
+mkdir -p "${state_dir}" "${desktop}"
 
 desktop_name() {
     local file="$1"
@@ -6035,20 +5929,47 @@ copy_launcher() {
     display_name="$(desktop_name "${src}")"
     [[ -n "${display_name}" ]] || return 0
     display_name="${display_name//\//-}"
+    mkdir -p "${dest_dir}"
     cp -f "${src}" "${dest_dir}/${display_name}.desktop" 2>/dev/null || return 0
+    # Copies are explicitly managed so upgrades can remove them without
+    # touching a user's own desktop launcher.
+    printf '\nX-Ming-Managed=true\nX-Ming-Source-Desktop=%s\n' "${src}" \
+        >> "${dest_dir}/${display_name}.desktop"
     chmod +x "${dest_dir}/${display_name}.desktop" 2>/dev/null || true
 }
 
-sync_apps() {
-    for src in /usr/share/applications/*.desktop "${HOME}/.local/share/applications/"*.desktop; do
-        [[ -f "${src}" ]] || continue
-        grep -q '^NoDisplay=true' "${src}" 2>/dev/null && continue
-        grep -q '^Hidden=true' "${src}" 2>/dev/null && continue
-        case "$(basename "${src}")" in
-            mimeinfo.cache|defaults.list) continue ;;
-        esac
-        copy_launcher "${src}" "$(target_for "${src}")"
+is_canonical_launcher_copy() {
+    local candidate="$1" source
+    # Legacy organizer copies were byte-identical to their canonical source;
+    # identify those without deleting unrelated user launchers.
+    for source in /usr/share/applications/*.desktop \
+        "${HOME}/.local/share/applications/"*.desktop; do
+        [[ -f "${source}" ]] || continue
+        cmp -s -- "${source}" "${candidate}" && return 0
     done
+    return 1
+}
+
+cleanup_generated_category_copies() {
+    local category_dir launcher
+    for category_dir in "${apps_dir}" "${system_dir}" "${internet_dir}" \
+        "${office_dir}" "${media_dir}" "${games_dir}" "${tools_dir}" "${common_dir}"; do
+        [[ -d "${category_dir}" ]] || continue
+        while IFS= read -r -d '' launcher; do
+            if grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${launcher}" \
+               || is_canonical_launcher_copy "${launcher}"; then
+                rm -f -- "${launcher}"
+            fi
+        done < <(find "${category_dir}" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+        rmdir -- "${category_dir}" 2>/dev/null || true
+    done
+}
+
+sync_apps() {
+    # The phone desktop is the sole application catalog.  Do not copy every
+    # system entry into category folders: those copies produced duplicate
+    # Store/Toolbox icons and made the desktop diverge from /usr/share/apps.
+    cleanup_generated_category_copies
 }
 
 legacy_settings="${desktop}/Ming 设置.desktop"
@@ -6067,8 +5988,14 @@ fi
 if [[ "${legacy_settings_is_managed}" == true ]]; then
     rm -f "${legacy_settings}" 2>/dev/null || true
 fi
-rm -f "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop" 2>/dev/null || true
+for retired_launcher in "${desktop}/Ming 应用库.desktop" "${desktop}/所有磁盘.desktop"; do
+    if [[ -f "${retired_launcher}" ]] \
+       && grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${retired_launcher}"; then
+        rm -f -- "${retired_launcher}"
+    fi
+done
 
+cleanup_generated_category_copies
 gio set "${apps_dir}" metadata::custom-icon-name application-x-executable 2>/dev/null || true
 gio set "${system_dir}" metadata::custom-icon-name ming-control-center 2>/dev/null || true
 gio set "${internet_dir}" metadata::custom-icon-name network-workgroup 2>/dev/null || true
@@ -6095,6 +6022,7 @@ if [[ "${1:-}" == "--watch" ]]; then
         else
             sync_apps
         fi
+        cleanup_generated_category_copies
         # 增量更新图标缓存（.desktop 变化后立即刷新，避免图标库全盘扫描）
         for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Papirus /usr/share/icons/Adwaita; do
             if [[ -d "${icon_dir}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
@@ -6499,13 +6427,9 @@ ensure_wps_office() {
     rm -f \
         /usr/local/bin/ming-install-wps \
         /usr/share/applications/ming-install-wps.desktop \
-        /usr/share/applications/wps-office.desktop \
         "${user_home}/Desktop/ming-install-wps.desktop" \
-        "${user_home}/Desktop/wps-office.desktop" \
         "${user_home}/.local/share/applications/ming-install-wps.desktop" \
-        "${user_home}/.local/share/applications/wps-office.desktop" \
         "${user_home}/.config/plank/dock1/launchers/ming-install-wps.dockitem" \
-        "${user_home}/.config/plank/dock1/launchers/wps-office.dockitem" \
         2>/dev/null || true
     find /etc/skel -xdev -type f \
         \( -name 'ming-install-wps.desktop' -o -name 'ming-install-wps.dockitem' \) \
@@ -7787,8 +7711,8 @@ MINGCREATEITEM
     <icon>package-x-generic</icon>
     <name>安装 DEB 软件包</name>
     <submenu></submenu>
-    <command>/usr/local/bin/ming-package-install-gui "%f"</command>
-    <description>验证并安装本地 Debian 软件包</description>
+    <command>/usr/local/bin/ming-store --local-deb "%f"</command>
+    <description>在 Ming 应用商店中校验并安装本地 Debian 软件包</description>
     <range>*</range>
     <patterns>*.deb</patterns>
     <other-files/>
@@ -9079,6 +9003,12 @@ if command -v ming-window-manager-watchdog >/dev/null 2>&1; then
     /usr/local/bin/ming-window-manager-watchdog --session \
         >/tmp/ming-installer-window-health.log 2>&1 &
 fi
+session_alive_marker="/tmp/ming-installer/session-alive"
+touch "${session_alive_marker}" 2>/dev/null || true
+cleanup_installer_session() {
+    rm -f "${session_alive_marker}" 2>/dev/null || true
+}
+trap cleanup_installer_session EXIT
 /usr/local/bin/ming-live-notice >/tmp/ming-installer-live-notice.log 2>&1 &
 notice_pid="$!"
 
@@ -9141,14 +9071,24 @@ while true; do
     notice_watcher_pid="$!"
     /usr/local/bin/ming-calamares-launcher >/tmp/ming-installer/calamares.log 2>&1
     launcher_status="$?"
-    if [[ "${launcher_status}" -ne 0 ]]; then
-        kill "${notice_watcher_pid}" 2>/dev/null || true
-        wait "${notice_watcher_pid}" 2>/dev/null || true
+    kill "${notice_watcher_pid}" 2>/dev/null || true
+    wait "${notice_watcher_pid}" 2>/dev/null || true
+    kill "${notice_pid}" 2>/dev/null || true
+    wait "${notice_pid}" 2>/dev/null || true
+    # Calamares 是 Live 桌面中的子任务。无论用户取消、关闭还是安装器
+    # 返回错误，保留当前图形会话和桌面栈，避免 LightDM 重新显示登录界面。
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u normal "Ming OS 安装器" \
+            "安装器已关闭，可从桌面重新打开（返回码 ${launcher_status}）。" \
+            >/tmp/ming-installer/session-notice.log 2>&1 || true
     fi
-    [[ "${launcher_status}" -eq 2 ]] && break
-    # 已触发关机/重启则退出循环
+    touch "${session_alive_marker}" 2>/dev/null || true
+    # 已触发关机/重启则退出循环；否则保持会话进程存活。
     systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null && break
-    sleep 1
+    while ! systemctl is-active --quiet reboot.target poweroff.target shutdown.target 2>/dev/null; do
+        sleep 2
+    done
+    break
 done
 KIOSK
     chmod +x /usr/local/bin/ming-installer-session
@@ -9486,9 +9426,6 @@ SCREENSAVERCFG
       <property name="&lt;Super&gt;e" type="string" value="ming-files"/>
       <property name="&lt;Super&gt;i" type="string" value="ming-control-center"/>
       <property name="&lt;Super&gt;" type="string" value="ming-status-widget-toggle"/>
-      <property name="&lt;Super_L&gt;" type="string" value="ming-status-widget-toggle"/>
-      <property name="&lt;Super_R&gt;" type="string" value="ming-status-widget-toggle"/>
-      <property name="&lt;Super&gt;space" type="string" value="ming-status-widget-toggle"/>
     </property>
   </property>
 </channel>
@@ -9618,9 +9555,6 @@ xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
-xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super_L>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
-xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super_R>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
-xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>space' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
 oobe_ready=false
 if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
     && grep -Fxq configured "${HOME}/.config/ming-os/oobe-account-done" 2>/dev/null; then
