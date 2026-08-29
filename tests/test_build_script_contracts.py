@@ -177,7 +177,14 @@ class BuildScriptContractTests(unittest.TestCase):
         install = BUILD.split("install_build_deps() {", 1)[1].split(
             "verify_debootstrap_keyring() {", 1
         )[0]
-        self.assertIn("mtools dosfstools file debian-archive-keyring", install)
+        self.assertIn("mtools dosfstools file python3-yaml debian-archive-keyring", install)
+
+    def test_host_preflight_installs_yaml_for_calamares_validation(self):
+        install = BUILD.split("install_build_deps() {", 1)[1].split(
+            "verify_debootstrap_keyring() {", 1
+        )[0]
+        self.assertIn("python3-yaml", install)
+        self.assertIn("import yaml", BUILD)
 
     def test_apt_cache_manifest_validates_mirror_identity(self):
         validation = BUILD.split("validate_apt_cache_manifest() {", 1)[1].split(

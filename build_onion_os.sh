@@ -560,7 +560,7 @@ install_build_deps() {
             apt-get "${apt_options[@]}" install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools dosfstools file debian-archive-keyring; then
+            mtools dosfstools file python3-yaml debian-archive-keyring; then
             if [[ "${apt_ok}" -eq 0 ]]; then
                 log_error "apt 依赖安装失败且缓存不可用"
                 exit 1
@@ -1079,6 +1079,10 @@ validate_iso_boot_layout() {
 
 validate_calamares_config() {
     log_info "Validating Calamares installer configuration..."
+    if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        log_error "缺少 Calamares 配置校验依赖 python3-yaml，请先安装该包"
+        return 1
+    fi
     python3 - "${CHROOT_DIR}" "${SCRIPT_DIR}" <<'PY'
 from pathlib import Path
 import sys
