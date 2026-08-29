@@ -168,7 +168,7 @@ reset_desktop_dir() {
         if is_managed_desktop_file "${launcher}"; then
             rm -f -- "${launcher}"
         fi
-    done < <(find "${target_dir}" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+    done < <(find "${target_dir}" -maxdepth 1 \( -type f -o -type l \) -name '*.desktop' -print0 2>/dev/null)
     # Do not remove directories: a directory containing only a user launcher
     # is still user data.  Ming-owned category directories are handled by the
     # organizer's explicit marker-aware cleanup path.

@@ -339,8 +339,8 @@ class HistoricalRegressionContracts(unittest.TestCase):
 
     def test_xiahai_runtime_is_readable_and_garlic_is_removed(self):
         self.assertIn("chmod 0755 /opt/xiahai-xiaoming", APPS)
-        self.assertIn("-iname '*claw*.desktop'", DESKTOP)
-        self.assertIn("-iname '*claw*.dockitem'", DESKTOP)
+        self.assertIn("is_legacy_garlic_entry", DESKTOP)
+        self.assertIn("X-Ming-Managed", DESKTOP)
         self.assertIn("rm -f", APPS + DESKTOP)
 
     def test_install_completion_mentions_removing_media_before_reboot(self):

@@ -2474,7 +2474,6 @@ for residue in [
     "usr/share/applications/ming-install-spark-store.desktop",
     "usr/local/bin/ming-install-wps",
     "usr/share/applications/ming-install-wps.desktop",
-    "usr/share/applications/wps-office.desktop",
     "usr/share/ming-os/vendor/spark-store",
 ]:
     require_absent(residue, "Spark/APM residue")
@@ -2540,6 +2539,14 @@ for retired_path in [
     "home/user/Desktop/所有磁盘.desktop",
     "home/user/Desktop/ming-app-library.desktop",
     "home/user/Desktop/ming-disk-hub.desktop",
+    "home/user/桌面/Ming 应用库.desktop",
+    "home/user/桌面/所有磁盘.desktop",
+    "home/user/桌面/ming-app-library.desktop",
+    "home/user/桌面/ming-disk-hub.desktop",
+    "etc/skel/桌面/Ming 应用库.desktop",
+    "etc/skel/桌面/所有磁盘.desktop",
+    "etc/skel/桌面/ming-app-library.desktop",
+    "etc/skel/桌面/ming-disk-hub.desktop",
     "usr/share/applications/ming-update.desktop",
     "home/user/Desktop/ming-update.desktop",
     "home/user/.config/plank/dock1/launchers/ming-update.dockitem",
@@ -2849,10 +2856,8 @@ for config_path in [
 
 for retired_path in [
     "usr/share/applications/ming-wechat.desktop",
-    "usr/share/applications/wps-office.desktop",
     "home/user/Desktop/ming-wechat.desktop",
     "home/user/Desktop/wechat.desktop",
-    "home/user/Desktop/wps-office.desktop",
 ]:
     require_absent(retired_path, "WeChat and WPS are optional installs in Ming OS 26.4.1")
 

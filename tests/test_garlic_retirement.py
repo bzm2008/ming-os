@@ -30,10 +30,12 @@ class GarlicRetirementContracts(unittest.TestCase):
     def test_desktop_cleanup_removes_retired_agent_files_from_reused_rootfs(self):
         desktop = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8").lower()
         for marker in (
+            "is_legacy_garlic_entry",
+            "x-ming-managed",
             "for retired_root in /usr/local/bin",
             'find "${retired_root}"',
-            "-iname '*claw*'",
-            "-iname 'open*claw*'",
             "/usr/share/icons",
         ):
             self.assertIn(marker, desktop)
+        self.assertNotIn("-iname '*claw*'", desktop)
+        self.assertNotIn("-iname 'open*claw*'", desktop)

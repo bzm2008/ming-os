@@ -93,6 +93,27 @@ class Rc4DesktopSparkRegressionTests(unittest.TestCase):
         self.assertNotRegex(cleanup, r"find\s+/home\s+/etc/skel.*-delete")
         self.assertIn("X-Ming-Managed", cleanup)
 
+    def test_garlic_cleanup_does_not_delete_unrelated_claw_files(self):
+        cleanup = DESKTOP.split("cleanup_retired_ming_entries() {", 1)[1].split(
+            "install_ming_shell_components() {", 1
+        )[0]
+        self.assertIn("is_legacy_garlic_entry", cleanup)
+        self.assertNotIn("-iname '*claw*'", cleanup)
+        self.assertNotIn("-iname 'open*claw*'", cleanup)
+
+    def test_finalize_migrates_managed_desktop_symlinks_and_localized_desktop(self):
+        reset = FINALIZE.split("reset_desktop_dir() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("-type l", reset)
+        self.assertIn("is_managed_desktop_file", reset)
+        for localized in (
+            "home/user/桌面/Ming 应用库.desktop",
+            "etc/skel/桌面/Ming 应用库.desktop",
+        ):
+            self.assertIn(localized, BUILD)
+
+    def test_retired_shortcut_generator_cannot_recreate_unmanaged_entries(self):
+        self.assertNotIn("setup_desktop_shortcuts() {", DESKTOP)
+
 
 if __name__ == "__main__":
     unittest.main()

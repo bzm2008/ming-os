@@ -203,32 +203,55 @@ MINGMIGRATEDISKS
     rm -f /usr/share/applications/ming-disk-hub.desktop
     rm -f /usr/local/bin/ming-disk-hub
     rm -f "/home/${MING_USER}/.config/plank/dock1/launchers/ming-disk-hub.dockitem"
+
+    # Retire only launchers created by an older Ming component. Package-owned
+    # files and user-installed applications are never removed by a name-only
+    # glob. The marker plus the product token is required for every deletion.
+    is_legacy_garlic_entry() {
+        local entry="$1" base managed token
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        managed="$(grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${entry}" && printf true || printf false)"
+        [[ "${managed}" == true ]] || return 1
+        base="$(basename -- "${entry}" | tr '[:upper:]' '[:lower:]')"
+        token="$(printf 'garlic%sclaw' '-')"
+        [[ "${base}" == "${token}"* ]] && return 0
+        grep -Eiq 'garlic|open[[:space:]_-]+claw|ming[[:space:]_-]+agent' "${entry}"
+    }
+
     for retired_root in /usr/local/bin /usr/local/sbin /usr/share/applications \
         /usr/share/icons /etc/systemd/system /usr/lib/systemd/system; do
         [[ -d "${retired_root}" ]] || continue
-        find "${retired_root}" -maxdepth 2 -type f \
-            \( -iname '*claw*' -o -iname 'open*claw*' \) \
-            -delete 2>/dev/null || true
-        find "${retired_root}" -maxdepth 2 -type l \
-            \( -iname '*claw*' -o -iname 'open*claw*' \) \
-            -delete 2>/dev/null || true
+        while IFS= read -r -d '' retired_entry; do
+            if is_legacy_garlic_entry "${retired_entry}"; then
+                rm -f -- "${retired_entry}"
+            fi
+        done < <(find "${retired_root}" -maxdepth 2 -type f \
+            \( -name '*.desktop' -o -name '*.dockitem' -o -name '*.service' -o -name 'ming-*' \) \
+            -print0 2>/dev/null)
     done
-    # Do not scan or delete arbitrary user files under $HOME.  Only the
+
+    # Do not scan or delete arbitrary user files under $HOME. Only the
     # explicitly named desktop/Dock/autostart entries below are retired.
-    find /usr/share/applications \
-         "/home/${MING_USER}/Desktop" \
-         "/home/${MING_USER}/.config/plank/dock1/launchers" \
-         -maxdepth 1 \( -iname '*claw*.desktop' -o -iname '*claw*.dockitem' \) \
-         -delete 2>/dev/null || true
-    for legacy_launcher in \
-        "/home/${MING_USER}/Desktop/Ming 应用库.desktop" \
-        "/home/${MING_USER}/Desktop/所有磁盘.desktop" \
-        "/home/${MING_USER}/Desktop/ming-app-library.desktop" \
-        "/home/${MING_USER}/Desktop/ming-disk-hub.desktop"; do
-        if [[ -f "${legacy_launcher}" ]] \
-           && grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${legacy_launcher}"; then
-            rm -f -- "${legacy_launcher}"
-        fi
+    for desktop_root in "/home/${MING_USER}/Desktop" "/home/${MING_USER}/桌面"; do
+        [[ -d "${desktop_root}" ]] || continue
+        while IFS= read -r -d '' retired_entry; do
+            if is_legacy_garlic_entry "${retired_entry}"; then
+                rm -f -- "${retired_entry}"
+            fi
+        done < <(find "${desktop_root}" -maxdepth 1 -type f \
+            \( -name '*.desktop' -o -name '*.dockitem' \) -print0 2>/dev/null)
+    done
+    for desktop_root in "/home/${MING_USER}/Desktop" "/home/${MING_USER}/桌面"; do
+        for legacy_launcher in \
+            "${desktop_root}/Ming 应用库.desktop" \
+            "${desktop_root}/所有磁盘.desktop" \
+            "${desktop_root}/ming-app-library.desktop" \
+            "${desktop_root}/ming-disk-hub.desktop"; do
+            if [[ -f "${legacy_launcher}" ]] \
+               && grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${legacy_launcher}"; then
+                rm -f -- "${legacy_launcher}"
+            fi
+        done
     done
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
@@ -4152,7 +4175,6 @@ migrate_responsive_dock_profile() {
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-2$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=/d' "${settings}" 2>/dev/null || true
     printf '# MingDockProfile=2641-responsive-centered\n' >>"${settings}"
-    find "${HOME}/.config/plank/dock1/launchers" -maxdepth 1 -iname '*claw*.dockitem' -delete 2>/dev/null || true
     MING_PLANK_RELOAD_REQUIRED=1
     log "migrated Dock to the responsive RC4 profile"
 }
@@ -6745,60 +6767,6 @@ configure_thunar_uca() {
 </action>
 </actions>
 UCACFG
-}
-
-# ======================== 桌面快捷方式 (极简) ========================
-
-setup_desktop_shortcuts() {
-    local desktop_dir="/home/${MING_USER}/Desktop"
-    mkdir -p "${desktop_dir}"
-
-    # 仅保留 3 个核心快捷方式
-    cat > "${desktop_dir}/thunar.desktop" << THUNARDESKTOP
-[Desktop Entry]
-Name=文件
-Name[zh_CN]=文件管理器
-Comment=浏览文件和文件夹
-Exec=thunar
-Icon=system-file-manager
-Terminal=false
-Type=Application
-Categories=System;FileManager;
-StartupNotify=true
-THUNARDESKTOP
-
-    cat > "${desktop_dir}/ming-firefox.desktop" << FIREFOXDESKTOP
-[Desktop Entry]
-Name=浏览器
-Name[zh_CN]=Firefox ESR 浏览器
-Comment=浏览互联网
-Exec=/usr/local/bin/ming-firefox
-Icon=firefox-esr
-Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
-StartupNotify=true
-FIREFOXDESKTOP
-
-    cat > "${desktop_dir}/ming-app-library.desktop" << APPLIBDESKTOP
-[Desktop Entry]
-Name=应用库
-Name[zh_CN]=Ming 应用库
-Comment=搜索、打开、整理已安装应用
-Exec=/usr/local/bin/ming-app-drawer --toggle
-Icon=ming-app-library
-Terminal=false
-Type=Application
-Categories=Utility;System;
-StartupNotify=true
-APPLIBDESKTOP
-
-    if [[ -s /usr/share/applications/xiahai-xiaoming.desktop ]]; then
-        cp -f /usr/share/applications/xiahai-xiaoming.desktop "${desktop_dir}/xiahai-xiaoming.desktop"
-    fi
-
-    chown -R "${MING_USER}:${MING_USER}" "${desktop_dir}"
-    chmod +x "${desktop_dir}"/*.desktop
 }
 
 # ======================== 发布说明与给网站 AI 的提示词 ========================
