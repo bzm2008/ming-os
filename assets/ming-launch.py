@@ -633,6 +633,13 @@ def probe_window_async(
         returncode = process.poll() if hasattr(process, "poll") else None
         if returncode not in (None, 0) and on_failure:
             on_failure(_process_exit_error(process, returncode))
+        elif returncode is None and on_ready:
+            # Some valid launchers intentionally stay in the tray or expose a
+            # window through a detached child.  A process that survived the
+            # complete probe window is a successful launch even when wmctrl
+            # cannot observe a matching window class.
+            _close_stderr_capture(process)
+            on_ready()
         elif on_timeout:
             _close_stderr_capture(process)
             on_timeout()

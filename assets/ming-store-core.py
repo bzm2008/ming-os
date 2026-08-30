@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import email.utils
 import gzip
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import shutil
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -38,6 +40,10 @@ SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]{0,127}\Z")
+# Catalog metadata is installed separately from the Python runtime in release
+# images.  Keep the path explicit so a deployed store never silently falls
+# back to the source tree (which is absent on an installed system).
+SYSTEM_CATALOG_ROOT = pathlib.Path("/usr/share/ming-os/store/catalog")
 SAFE_WINE_APP = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 SAFE_WINE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\Z")
 SAFE_WINE_EXECUTABLE = re.compile(r"(?:[A-Za-z0-9._ +()-]+/)*[A-Za-z0-9._ +()-]+\.exe\Z", re.IGNORECASE)
@@ -105,6 +111,7 @@ SPARK_ALLOWED_HOSTS = frozenset({
     "mirrors.sdu.edu.cn",
 })
 SPARK_DEFAULT_CACHE_TTL = 30 * 24 * 60 * 60
+SPARK_CATEGORY_WORKERS = 4
 
 
 class StoreError(RuntimeError):
@@ -148,7 +155,13 @@ def _default_runner(command, timeout=15):
 
 
 def _catalog_root(catalog_root=None):
-    return pathlib.Path(catalog_root or pathlib.Path(__file__).with_name("ming-store-catalog"))
+    if catalog_root is not None:
+        return pathlib.Path(catalog_root)
+    if SYSTEM_CATALOG_ROOT.is_dir():
+        return SYSTEM_CATALOG_ROOT
+    # Source checkouts keep the catalog beside the core module for local tests
+    # and development previews.
+    return pathlib.Path(__file__).with_name("ming-store-catalog")
 
 
 def _local_name(tag):
@@ -904,6 +917,7 @@ class SparkPublicProvider(Provider):
         self.release_date = None
         self.cache_warning = ""
         self._resource_updates = {}
+        self._resource_updates_lock = threading.Lock()
 
     @staticmethod
     def _safe_host(url):
@@ -1213,9 +1227,10 @@ class SparkPublicProvider(Provider):
             body_hash = hashlib.sha256(raw_body).hexdigest()
             if body_hash != str(cached.get("body_sha256") or "").lower():
                 raise IntegrityError("星火 304 缓存内容校验失败。")
-            self._resource_updates[key] = {
-                name: value for name, value in cached.items() if name != "raw_body"
-            }
+            with self._resource_updates_lock:
+                self._resource_updates[key] = {
+                    name: value for name, value in cached.items() if name != "raw_body"
+                }
             return {"status": 200, "headers": {"ETag": cached.get("etag", "")},
                     "body": body, "raw_body": raw_body, "from_cache": True}
         body = response.get("body", "")
@@ -1235,7 +1250,8 @@ class SparkPublicProvider(Provider):
         }
         if raw_body != body.encode("utf-8"):
             update["body_b64"] = base64.b64encode(raw_body).decode("ascii")
-        self._resource_updates[key] = update
+        with self._resource_updates_lock:
+            self._resource_updates[key] = update
         return dict(response, body=body, raw_body=raw_body)
 
     def _write_resource_cache(self, resources):
@@ -1440,10 +1456,26 @@ class SparkPublicProvider(Provider):
             if actual != advertised:
                 raise IntegrityError("星火 Packages 索引 SHA256 与 InRelease 不一致。")
             package_index = self._record_index(parse_spark_packages(packages))
+        # Category JSON documents are independent presentation resources. Fetch
+        # them with a small bounded pool so a slow category cannot make the
+        # store appear frozen for minutes, while preserving deterministic merge
+        # order and the same per-resource integrity checks.
+        category_responses = {}
+        worker_count = min(SPARK_CATEGORY_WORKERS, max(1, len(self.categories)))
+        with ThreadPoolExecutor(max_workers=worker_count,
+                                thread_name_prefix="ming-spark-category") as pool:
+            futures = {
+                category: pool.submit(
+                    self._fetch_resource, "store/%s/applist.json" % category)
+                for category in self.categories
+            }
+            for category in self.categories:
+                category_responses[category] = futures[category].result()
+
         items = []
         seen = set()
         for category in self.categories:
-            response = self._fetch_resource("store/%s/applist.json" % category)
+            response = category_responses[category]
             try:
                 raw_items = json.loads(response["body"])
             except (TypeError, ValueError) as exc:

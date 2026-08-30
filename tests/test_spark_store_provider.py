@@ -4,6 +4,7 @@ import importlib.util
 import json
 import pathlib
 import tempfile
+import threading
 import unittest
 import urllib.parse
 from unittest import mock
@@ -304,6 +305,48 @@ signature
         self.assertEqual(3, attempts["catalog"])
         self.assertEqual(1, len(items))
         self.assertEqual("ready", provider.catalog_state)
+
+    def test_category_catalog_requests_use_bounded_parallelism(self):
+        """Independent public categories must not make the UI wait serially."""
+        packages = self._packages()
+        categories = ("tools", "games", "office")
+        responses = {
+            "/store/InRelease": self._inrelease(packages),
+            "/store/Packages": packages,
+        }
+        started = {category: threading.Event() for category in categories}
+        active = {"value": 0, "max": 0}
+        lock = threading.Lock()
+
+        def fetch(url, _headers=None):
+            path = urllib.parse.urlsplit(url).path
+            if path.endswith("/applist.json"):
+                category = path.split("/")[-2]
+                started[category].set()
+                with lock:
+                    active["value"] += 1
+                    active["max"] = max(active["max"], active["value"])
+                try:
+                    # The first request can finish only after another category
+                    # has started; a sequential implementation times out here.
+                    if category == categories[0]:
+                        started[categories[1]].wait(1.5)
+                    return {"status": 200, "headers": {}, "body": "[]"}
+                finally:
+                    with lock:
+                        active["value"] -= 1
+            return {"status": 200, "headers": {}, "body": responses[path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = self.core.SparkPublicProvider(
+                cache_root=pathlib.Path(directory), categories=categories,
+                fetcher=fetch, release_verifier=lambda *_args: True,
+                config_path=self._policy(directory, True),
+                max_fetch_attempts=1,
+            )
+            provider.refresh_catalog()
+
+        self.assertGreaterEqual(active["max"], 2)
 
     def test_catalog_refresh_retries_transient_http_status(self):
         packages = self._packages()

@@ -49,7 +49,8 @@ window.ming-store { background: #f5faf8; color: #17332c; }
 .ming-store-sidebar { background: #e8f3ef; padding: 8px; }
 .ming-store-accent { background: #1f8a70; color: white; border-radius: 8px; }
 .ming-store-results { padding: 16px; }
-.ming-store-card { background: #ffffff; border-radius: 8px; padding: 12px; min-width: 220px; min-height: 218px; }
+.ming-store-card { background: #ffffff; border-radius: 8px; padding: 12px; }
+.ming-store-app-card { width: 240px; min-width: 240px; max-width: 240px; min-height: 218px; }
 .ming-store-card:hover { border: 1px solid rgba(31, 138, 112, .30); }
 .ming-store-card-icon { min-width: 64px; min-height: 64px; }
 .ming-store-card-title { font-size: 15px; font-weight: 700; }
@@ -1003,8 +1004,11 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     split.set_sidebar(sidebar)
     results = Gtk.FlowBox()
     results.set_selection_mode(Gtk.SelectionMode.NONE)
-    results.set_min_children_per_line(1)
-    results.set_max_children_per_line(4)
+    # Keep the catalogue dense on normal screens while allowing one column on
+    # genuinely narrow windows.  A fixed one-column minimum made every app
+    # consume an entire row on the installed system.
+    results.set_min_children_per_line(2)
+    results.set_max_children_per_line(5)
     results.set_row_spacing(12)
     results.set_column_spacing(12)
     results.set_homogeneous(False)
@@ -1019,6 +1023,11 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         Adw.BreakpointCondition.parse("max-width: 699px"))
     breakpoint.add_setter(split, "collapsed", True)
     window.add_breakpoint(breakpoint)
+    grid_breakpoint = Adw.Breakpoint.new(
+        Adw.BreakpointCondition.parse("max-width: 560px"))
+    grid_breakpoint.add_setter(results, "min-children-per-line", 1)
+    grid_breakpoint.add_setter(results, "max-children-per-line", 2)
+    window.add_breakpoint(grid_breakpoint)
 
     def clear_results():
         while results.get_first_child() is not None:
@@ -1163,7 +1172,10 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         version = item.get("available_version") or item.get("installed_version") or item.get("version") or ""
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         card.add_css_class("ming-store-card")
+        card.add_css_class("ming-store-app-card")
         card.set_size_request(240, 218)
+        card.set_hexpand(False)
+        card.set_vexpand(False)
         icon_name = str(item.get("icon_name") or item.get("icon") or "application-x-executable")
         icon_url = str(item.get("icon_url") or "")
         icon = Gtk.Image.new_from_icon_name(icon_name)
@@ -1214,6 +1226,10 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         if item.get("app_id") and item.get("source_id"):
             action_button(card, item, forced_action=forced_action)
         child = Gtk.FlowBoxChild()
+        child.set_halign(Gtk.Align.START)
+        child.set_hexpand(False)
+        child.set_vexpand(False)
+        child.set_size_request(240, 218)
         child.set_child(card)
         results.append(child)
         return card

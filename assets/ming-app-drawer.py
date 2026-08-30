@@ -10,6 +10,7 @@ import pathlib
 import re
 import socket
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,16 @@ CANONICAL_PREFERENCE = {
     "browser": "ming-firefox.desktop",
     "agent": "xiahai-xiaoming.desktop",
 }
+CORE_CANONICAL_NAMES = frozenset(
+    set(CANONICAL_LAUNCHERS) | {
+        "ming-store.desktop", "ming-toolbox.desktop", "ming-app-library.desktop",
+        "ming-update.desktop",
+    }
+)
+CANONICAL_APPLICATION_DIRS = (
+    pathlib.Path("/usr/share/applications"),
+    pathlib.Path("/usr/local/share/applications"),
+)
 
 # Xfce remains an implementation dependency, not a second user-facing shell.
 # Keep only the fallback launchers that are collapsed into a Ming core entry;
@@ -91,6 +102,13 @@ LEGACY_XFCE_LAUNCHERS = frozenset({
     "xfce4-mime-settings.desktop",
     "exo-preferred-applications.desktop",
 })
+LEGACY_XFCE_PREFIXES = ("xfdesktop", "xfwm", "exo-")
+FALLBACK_REPLACEMENTS = {
+    "xfce4-settings-manager.desktop": frozenset(
+        {"ming-settings.desktop", "ming-control-center.desktop"}),
+    "xfce4-terminal.desktop": frozenset({"ming-terminal.desktop"}),
+    "thunar.desktop": frozenset({"ming-files.desktop"}),
+}
 
 
 def is_legacy_system_entry(path):
@@ -99,8 +117,68 @@ def is_legacy_system_entry(path):
     if basename in {item.casefold() for item in VISIBLE_XFCE_FALLBACKS}:
         return False
     return basename in {item.casefold() for item in LEGACY_XFCE_LAUNCHERS} or (
-        basename.startswith(("xfce4-", "xfce-")) and basename.endswith(".desktop")
+        basename.startswith(("xfce4-", "xfce-", *LEGACY_XFCE_PREFIXES))
+        and basename.endswith(".desktop")
     )
+
+
+def fallback_replaced_by_ming(path, available_names):
+    """Hide an implementation fallback once its Ming launcher is present."""
+    basename = pathlib.Path(path).name.casefold()
+    replacements = FALLBACK_REPLACEMENTS.get(basename)
+    if not replacements:
+        return False
+    names = {str(name).casefold() for name in (available_names or ())}
+    return bool(names.intersection(replacements))
+
+
+def is_managed_desktop_copy(path):
+    """Return true only for a regular file explicitly owned by Ming."""
+    target = pathlib.Path(path)
+    try:
+        info = target.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return False
+        if info.st_size > 256 * 1024:
+            return False
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        return False
+    return bool(re.search(
+        r"(?im)^\s*X-Ming-(?:Managed\s*=\s*true|Source-Desktop\s*=)", text
+    ))
+
+
+def canonical_copy_should_win(path, canonical_path):
+    """Decide whether a duplicate Ming launcher must defer to the system copy."""
+    target = pathlib.Path(path)
+    canonical = pathlib.Path(canonical_path) if canonical_path else None
+    if canonical is None or target.name.casefold() not in {
+            name.casefold() for name in CORE_CANONICAL_NAMES}:
+        return False
+    try:
+        if target.resolve(strict=False) == canonical.resolve(strict=False):
+            return False
+        if not canonical.is_file() or canonical.is_symlink():
+            return False
+    except (OSError, RuntimeError):
+        return False
+    # Managed user copies are migration artifacts; an unmarked duplicate of a
+    # core launcher is also safe to suppress because the system entry is the
+    # single source of truth for its icon and Exec line.
+    return is_managed_desktop_copy(target) or target.name.casefold() in {
+        name.casefold() for name in CORE_CANONICAL_NAMES}
+
+
+def _is_canonical_application_path(path):
+    try:
+        parent = pathlib.Path(path).resolve(strict=False).parent
+        return parent in {
+            pathlib.Path(directory).resolve(strict=False)
+            for directory in CANONICAL_APPLICATION_DIRS
+        }
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _desktop_directories():
@@ -421,6 +499,29 @@ def discover_apps(paths=None):
     found = {}
     seen = set()
     desktop_dirs = _desktop_directories()
+    available_names = set()
+    canonical_entries = {}
+    for directory in paths:
+        if _is_desktop_directory(directory, desktop_dirs):
+            continue
+        try:
+            candidates = list(directory.glob("*.desktop"))
+        except OSError:
+            continue
+        for path in candidates:
+            try:
+                if path.is_file() and not path.is_symlink():
+                    available_names.add(path.name)
+                    if (path.name.casefold() in {
+                            name.casefold() for name in CORE_CANONICAL_NAMES}
+                            and _is_canonical_application_path(path)):
+                        current = canonical_entries.get(path.name.casefold())
+                        # /usr/share is preferred over /usr/local when both
+                        # contain a package-owned launcher.
+                        if current is None or str(path).startswith("/usr/share/"):
+                            canonical_entries[path.name.casefold()] = path
+            except OSError:
+                continue
     for directory in paths:
         if _is_desktop_directory(directory, desktop_dirs):
             continue
@@ -438,6 +539,13 @@ def discover_apps(paths=None):
             except OSError:
                 continue
             if path.name in seen:
+                continue
+            canonical = canonical_entries.get(path.name.casefold())
+            if canonical is not None and canonical_copy_should_win(path, canonical):
+                seen.add(path.name)
+                continue
+            if fallback_replaced_by_ming(path, available_names):
+                seen.add(path.name)
                 continue
             if is_legacy_system_entry(path):
                 seen.add(path.name)

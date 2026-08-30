@@ -2450,7 +2450,7 @@ Encoding=UTF-8
 [X-GNOME-Metatheme]
 GtkTheme=Ming-Glass
 MetacityTheme=Ming-Glass
-IconTheme=Papirus
+IconTheme=Ming-Mint
 CursorTheme=Adwaita
 THEMEINDEX
 
@@ -2567,7 +2567,7 @@ Encoding=UTF-8
 [X-GNOME-Metatheme]
 GtkTheme=Ming-Dark
 MetacityTheme=Ming-Dark
-IconTheme=Papirus
+IconTheme=Ming-Mint
 CursorTheme=Adwaita
 DARKTHEMEINDEX
 }
@@ -4147,7 +4147,7 @@ apply_plank_runtime_preferences() {
         dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-40}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
         dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
         dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-148}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
-        dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
+        dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-1}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
         dconf write /net/launchpad/plank/docks/dock1/alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf alignment"
         dconf write /net/launchpad/plank/docks/dock1/items-alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf item alignment"
         dconf write /net/launchpad/plank/docks/dock1/offset "${offset:-0}" >>"${log_file}" 2>&1 || log "could not write Plank dconf offset"
@@ -9398,7 +9398,7 @@ DESKTOPCFG
   <property name="Net" type="empty">
     <!-- Legacy Ming-Glass profiles are migrated to Ming-Mint on first login. -->
     <property name="ThemeName" type="string" value="Ming-Mint"/>
-    <property name="IconThemeName" type="string" value="Papirus"/>
+    <property name="IconThemeName" type="string" value="Ming-Mint"/>
     <property name="DoubleClickTime" type="int" value="400"/>
     <property name="DoubleClickDistance" type="int" value="5"/>
     <property name="DndDragThreshold" type="int" value="8"/>

@@ -238,6 +238,34 @@ class LaunchResultTests(unittest.TestCase):
         )
         self.assertTrue(timed_out.wait(2))
 
+    def test_window_probe_accepts_a_process_that_remains_stable_without_a_window(self):
+        """Tray/background launchers are successful when their process stays alive."""
+        ready = threading.Event()
+        timed_out = threading.Event()
+
+        class Process:
+            pid = 999998
+
+            @staticmethod
+            def poll():
+                return None
+
+        class EmptyWindows:
+            stdout = ""
+
+        with mock.patch.object(self.launch.subprocess, "run", return_value=EmptyWindows()):
+            self.launch.probe_window_async(
+                Process(),
+                desktop_file="stable-daemon.desktop",
+                attempts=2,
+                interval=0,
+                on_ready=ready.set,
+                on_timeout=timed_out.set,
+            )
+
+        self.assertTrue(ready.wait(2))
+        self.assertFalse(timed_out.is_set())
+
     def test_window_probe_reports_timeout_when_process_exits_zero_without_window(self):
         timed_out = threading.Event()
 
