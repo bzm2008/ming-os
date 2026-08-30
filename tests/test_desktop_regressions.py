@@ -381,6 +381,36 @@ class DesktopSourceTests(unittest.TestCase):
             [item["basename"] for item in namespace["deduplicate_apps"](apps)],
         )
 
+    def test_phone_desktop_deduplicates_store_and_toolbox_user_copies(self):
+        namespace = load_phone_dedup_functions()
+        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
+        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
+        apps = []
+        for basename in ("ming-store.desktop", "ming-toolbox.desktop"):
+            apps.extend([
+                {
+                    "path": f"C:/ming-test/applications/{basename}",
+                    "basename": basename,
+                    "diagnostic": "",
+                },
+                {
+                    "path": f"C:/ming-test/home/user/.local/share/applications/{basename}",
+                    "basename": basename,
+                    "diagnostic": "",
+                },
+            ])
+
+        selected = namespace["deduplicate_apps"](apps)
+
+        self.assertEqual(
+            ["ming-store.desktop", "ming-toolbox.desktop"],
+            [item["basename"] for item in selected],
+        )
+        self.assertTrue(all(
+            item["path"].startswith("C:/ming-test/applications/")
+            for item in selected
+        ))
+
     def test_phone_desktop_deduplicates_wps_and_dingtalk_by_launcher_identity(self):
         namespace = load_phone_dedup_functions()
         with tempfile.TemporaryDirectory() as temp_dir:

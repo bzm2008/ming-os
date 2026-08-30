@@ -424,6 +424,10 @@ CANONICAL_LAUNCHERS = {
     "ming-terminal.desktop": "terminal",
     "ming-dock-ming-terminal.desktop": "terminal",
     "xfce4-terminal.desktop": "terminal",
+    "ming-store.desktop": "store",
+    "ming-dock-ming-store.desktop": "store",
+    "ming-toolbox.desktop": "toolbox",
+    "ming-dock-ming-toolbox.desktop": "toolbox",
     "ming-firefox.desktop": "browser",
     "firefox-esr.desktop": "browser",
     "firefox.desktop": "browser",
@@ -438,6 +442,8 @@ CANONICAL_PREFERENCE = {
     "settings": "ming-settings.desktop",
     "files": "ming-files.desktop",
     "terminal": "ming-terminal.desktop",
+    "store": "ming-store.desktop",
+    "toolbox": "ming-toolbox.desktop",
     "browser": "ming-firefox.desktop",
     "agent": "xiahai-xiaoming.desktop",
 }
@@ -1219,14 +1225,21 @@ def deduplicate_apps(apps):
             app, package_owners
         )
         current = selected.get(identity)
-        if (
-            current is None
-            or (preferred and app["basename"].casefold() == preferred)
-            or (
-                not preferred
-                and app_dedup_preference(app, package_owners)
+        if current is None:
+            selected[identity] = app
+            continue
+        if preferred:
+            current_is_preferred = current["basename"].casefold() == preferred
+            app_is_preferred = app["basename"].casefold() == preferred
+            if app_is_preferred and not current_is_preferred:
+                selected[identity] = app
+            elif app_is_preferred == current_is_preferred and (
+                app_dedup_preference(app, package_owners)
                 > app_dedup_preference(current, package_owners)
-            )
+            ):
+                selected[identity] = app
+        elif app_dedup_preference(app, package_owners) > app_dedup_preference(
+            current, package_owners
         ):
             selected[identity] = app
     return list(selected.values())
