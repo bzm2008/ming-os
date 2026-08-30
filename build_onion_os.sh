@@ -2275,7 +2275,7 @@ for marker in [
     # the active value "Offset=0" (the legacy marker "Offset=12" is rejected).
     # zero offset and reserve the 12px bottom margin through the strut helper.
     "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=0",
-    "ZoomEnabled=true", "ZoomPercent=148", "HideMode=0", "Theme=Ming",
+    "ZoomEnabled=true", "ZoomPercent=148", "HideMode=1", "Theme=Ming",
     "ming-store.dockitem",
 ]:
     if marker not in plank_settings:
