@@ -48,7 +48,14 @@ MING_MINT_CSS = """
 window.ming-store { background: #f5faf8; color: #17332c; }
 .ming-store-sidebar { background: #e8f3ef; padding: 8px; }
 .ming-store-accent { background: #1f8a70; color: white; border-radius: 8px; }
-.ming-store-card { background: #ffffff; border-radius: 8px; padding: 12px; }
+.ming-store-results { padding: 16px; }
+.ming-store-card { background: #ffffff; border-radius: 8px; padding: 12px; min-width: 220px; min-height: 218px; }
+.ming-store-card:hover { border: 1px solid rgba(31, 138, 112, .30); }
+.ming-store-card-icon { min-width: 64px; min-height: 64px; }
+.ming-store-card-title { font-size: 15px; font-weight: 700; }
+.ming-store-card-summary { color: #4c655c; min-height: 42px; }
+.ming-store-card-meta { color: #6a7e76; font-size: 11px; }
+.ming-store-card-actions { margin-top: 8px; }
 """
 SAFE_REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
 TRANSACTION_PHASE_LABELS = {
@@ -459,11 +466,14 @@ class StoreController:
                 provider_state = str(getattr(provider, "catalog_state", "ready"))
                 using_cache = provider_state in {"stale", "browse-only"}
                 if using_cache:
+                    cache_warning = str(getattr(provider, "cache_warning", "") or "").strip()
                     message = (
                         "来源暂不可用，正在使用缓存目录。"
                         if provider_state == "stale" else
                         "来源暂不可用，当前仅提供公开目录浏览。"
                     )
+                    if cache_warning:
+                        message = "%s %s" % (message, cache_warning)
                     statuses.append({
                         "source_id": source_id, "ok": False, "count": len(items),
                         "using_cache": True, "message": message,
@@ -480,7 +490,9 @@ class StoreController:
                     "source_id": source_id, "ok": False, "error": str(exc),
                     "using_cache": using_cache,
                     "message": (
-                        "来源暂不可用，正在使用缓存目录。" if using_cache
+                        ("来源暂不可用，正在使用缓存目录。 %s" % str(
+                            getattr(provider, "cache_warning", "") or "").strip()).strip()
+                        if using_cache
                         else "来源暂不可用，请稍后重试。"
                     ),
                 })
@@ -989,7 +1001,14 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         row.page_name = name
         sidebar.append(row)
     split.set_sidebar(sidebar)
-    results = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+    results = Gtk.FlowBox()
+    results.set_selection_mode(Gtk.SelectionMode.NONE)
+    results.set_min_children_per_line(1)
+    results.set_max_children_per_line(4)
+    results.set_row_spacing(12)
+    results.set_column_spacing(12)
+    results.set_homogeneous(False)
+    results.add_css_class("ming-store-results")
     scroller = Gtk.ScrolledWindow(child=results, hexpand=True, vexpand=True)
     split.set_content(scroller)
     current_page = {"name": "home"}
@@ -1008,7 +1027,9 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     def add_message(title_text, subtitle=""):
         row = Adw.ActionRow(title=title_text, subtitle=subtitle)
         row.add_css_class("ming-store-card")
-        results.append(row)
+        child = Gtk.FlowBoxChild()
+        child.set_child(row)
+        results.append(child)
         return row
 
     def load_page_async(loader, renderer, empty_title, empty_subtitle):
@@ -1048,7 +1069,12 @@ def _build_window(application, controller, initial_query="", local_deb=None):
 
     def set_row_result(row, button, result):
         presentation = operation_presentation(result)
-        row.set_subtitle(presentation["message"])
+        status_label = getattr(row, "_status_label", None)
+        if status_label is not None:
+            status_label.set_text(presentation["message"])
+            status_label.set_visible(True)
+        else:
+            row.set_subtitle(presentation["message"])
         button.set_label(presentation["retry_label"])
         button.store_action = presentation["retry_action"]
         if presentation["tone"] == "success":
@@ -1107,7 +1133,11 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 button.connect("clicked", run_item_action, row, button, item)
         else:
             button.connect("clicked", run_item_action, row, button, item)
-        row.add_suffix(button)
+        action_box = getattr(row, "_action_box", None)
+        if action_box is not None:
+            action_box.append(button)
+        else:
+            row.add_suffix(button)
         return button
 
     def build_detail(item):
@@ -1131,18 +1161,62 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     def add_software_row(item, forced_action=None):
         source_name = SOURCES.get(item.get("source_id"), item.get("source_id", ""))
         version = item.get("available_version") or item.get("installed_version") or item.get("version") or ""
-        row = Adw.ActionRow(
-            title=str(item.get("name") or item.get("app_id") or "未知软件"),
-            subtitle="%s · %s · %s" % (item.get("package_name", item.get("app_id", "")), version, source_name),
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("ming-store-card")
+        card.set_size_request(240, 218)
+        icon_name = str(item.get("icon_name") or item.get("icon") or "application-x-executable")
+        icon_url = str(item.get("icon_url") or "")
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_pixel_size(64)
+        icon.set_halign(Gtk.Align.CENTER)
+        icon.add_css_class("ming-store-card-icon")
+        if icon_url.startswith("file://"):
+            try:
+                icon.set_from_file(icon_url[7:])
+            except (OSError, TypeError, ValueError):
+                pass
+        card.append(icon)
+        title = Gtk.Label(label=str(item.get("name") or item.get("app_id") or "未知软件"))
+        title.set_halign(Gtk.Align.CENTER)
+        title.set_ellipsize(3)
+        title.set_max_width_chars(24)
+        title.add_css_class("ming-store-card-title")
+        card.append(title)
+        summary = str(item.get("summary") or item.get("description") or "暂无软件介绍。")
+        summary_label = Gtk.Label(label=summary, wrap=True, xalign=0)
+        summary_label.set_lines(2)
+        summary_label.set_ellipsize(3)
+        summary_label.add_css_class("ming-store-card-summary")
+        card.append(summary_label)
+        meta = Gtk.Label(
+            label="%s · %s · %s" % (
+                item.get("package_name", item.get("app_id", "")),
+                version or "待解析", source_name,
+            ), xalign=0,
         )
-        row.add_css_class("ming-store-card")
+        meta.set_ellipsize(3)
+        meta.add_css_class("ming-store-card-meta")
+        card.append(meta)
+        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        action_box.set_halign(Gtk.Align.END)
+        action_box.add_css_class("ming-store-card-actions")
+        status_label = Gtk.Label(label="", wrap=True, xalign=0)
+        status_label.set_visible(False)
+        status_label.add_css_class("ming-store-card-meta")
+        card.append(status_label)
+        card.append(action_box)
+        card._action_box = action_box
+        card._status_label = status_label
         detail = Gtk.Button(icon_name="go-next-symbolic", valign=Gtk.Align.CENTER)
         detail.set_tooltip_text("查看软件详情与来源")
         detail.connect("clicked", lambda _button: build_detail(item))
-        row.add_suffix(detail)
+        action_box.append(detail)
         if item.get("app_id") and item.get("source_id"):
-            action_button(row, item, forced_action=forced_action)
-        results.append(row)
+            action_button(card, item, forced_action=forced_action)
+        child = Gtk.FlowBoxChild()
+        child.set_child(card)
+        results.append(child)
+        return card
 
     def selected_source():
         selected = source.get_selected()

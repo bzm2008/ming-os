@@ -2446,10 +2446,20 @@ fi
 SURFACE
     chmod 0755 /usr/local/bin/ming-surface-support
 
-    cat > /usr/local/bin/ming-classic-mode << 'CLASSIC'
+cat > /usr/local/bin/ming-classic-mode << 'CLASSIC'
 #!/usr/bin/env bash
 set -uo pipefail
 STATE="${HOME}/.config/ming-os/classic-mode"
+
+# Autostart invokes this fixed entry point instead of composing a shell
+# command in a desktop file.  Keep the session action idempotent and scoped to
+# the current user's compositor/settings.
+if [[ "${1:-}" == "--session" ]]; then
+    pkill picom 2>/dev/null || true
+    xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
+    exit 0
+fi
+
 mkdir -p "$(dirname "${STATE}")"
 
 if [[ -f "${STATE}" ]]; then
@@ -2468,7 +2478,7 @@ else
 [Desktop Entry]
 Type=Application
 Name=Ming Classic Mode Runtime
-Exec=sh -c 'pkill picom 2>/dev/null || true; xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true'
+Exec=/usr/local/bin/ming-classic-mode --session
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -5309,6 +5319,7 @@ for arg in "$@"; do
     case "${arg}" in
         --json) JSON=true ;;
         --monitor) MONITOR=true ;;
+        --session) MONITOR=true ;;
     esac
 done
 
@@ -5515,7 +5526,7 @@ Type=Application
 Name=Ming Volume Automount
 Name[zh_CN]=Ming 自动挂载数据分区
 Comment=Mount safe data partitions in the user session without editing fstab.
-Exec=sh -c '/usr/local/bin/ming-volume-automount --json >/dev/null 2>&1; exec /usr/local/bin/ming-volume-automount --monitor --json >/dev/null 2>&1'
+Exec=/usr/local/bin/ming-volume-automount --session --json
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true
 VOLUMEAUTOMOUNTDESKTOP

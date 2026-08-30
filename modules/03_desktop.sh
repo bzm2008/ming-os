@@ -197,6 +197,9 @@ for legacy_launcher in \
         rm -f -- "${legacy_launcher}"
     fi
 done
+# This migration is intentionally one-shot.  Removing only its own managed
+# autostart entry avoids rerunning the cleanup on every login.
+rm -f -- "${HOME}/.config/autostart/ming-migrate-all-disks.desktop"
 MINGMIGRATEDISKS
     chmod 0755 /usr/local/bin/ming-migrate-all-disks
 
@@ -255,11 +258,23 @@ MINGMIGRATEDISKS
     done
 
     mkdir -p "/home/${MING_USER}/.config/autostart"
+    cat > /usr/local/bin/ming-dock-only-init << 'MINGDOCKINIT'
+#!/usr/bin/env bash
+set -u
+
+mkdir -p "${HOME}/.cache/sessions" 2>/dev/null || true
+rm -f -- "${HOME}"/.cache/sessions/xfce4-session-* 2>/dev/null || true
+if command -v xfconf-query >/dev/null 2>&1; then
+    xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command \
+        -n -t string -s xfwm4 2>/dev/null || true
+fi
+MINGDOCKINIT
+    chmod 0755 /usr/local/bin/ming-dock-only-init
     cat > "/home/${MING_USER}/.config/autostart/ming-migrate-all-disks.desktop" << 'MINGMIGRATEAUTO'
 [Desktop Entry]
 Type=Application
 Name=Ming Files Migration
-Exec=sh -c '/usr/local/bin/ming-migrate-all-disks && rm -f ~/.config/autostart/ming-migrate-all-disks.desktop'
+Exec=/usr/local/bin/ming-migrate-all-disks
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -2818,7 +2833,7 @@ PANELDISABLED
 Type=Application
 Name=Ming Dock Only
 Comment=Hide the legacy Xfce top taskbar and keep Dock as the only launcher
-Exec=sh -c "mkdir -p ~/.cache/sessions; rm -f ~/.cache/sessions/xfce4-session-* 2>/dev/null || true; xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command -n -t string -s xfwm4 2>/dev/null || true"
+Exec=/usr/local/bin/ming-dock-only-init
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -6631,6 +6646,7 @@ set -u
 
 log="/tmp/ming-picom.log"
 policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
+lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom.lock"
 main_conf="${HOME}/.config/picom/picom.conf"
 fallback_conf="/etc/xdg/picom/picom-fallback.conf"
 lowmem_conf="/etc/xdg/picom/picom-lowmem.conf"
@@ -6697,6 +6713,12 @@ if ! command -v picom >/dev/null 2>&1; then
     exit 0
 fi
 
+# The session coordinator and a manually started compatibility helper can
+# race during login.  Keep one lock open through exec so only one compositor
+# owns the X11 selection at a time.
+mkdir -p "$(dirname "${lock_file}")" 2>/dev/null || true
+exec 9>"${lock_file}"
+flock -n 9 >/dev/null 2>&1 || exit 0
 pgrep -u "$(id -u)" -x picom >/dev/null 2>&1 && exit 0
 exec picom --config "${config}" --log-level=warn
 MINGPICOM
@@ -7069,12 +7091,20 @@ CALAMARES
         "/etc/skel/Desktop/安装 Debian.desktop" 2>/dev/null || true
 
     # 安卓式桌面文件夹：登录后自动整理应用，并监听新安装应用。
+    cat > /usr/local/bin/ming-desktop-organizer-session << 'MINGDESKTOPORGANIZERSESSION'
+#!/usr/bin/env bash
+set -u
+
+sleep 5
+exec /usr/local/bin/ming-desktop-organizer --watch
+MINGDESKTOPORGANIZERSESSION
+    chmod 0755 /usr/local/bin/ming-desktop-organizer-session
     cat > "${autostart_dir}/ming-desktop-organizer.desktop" << DESKORGAUTO
 [Desktop Entry]
 Type=Application
 Name=Ming Desktop Organizer
 Comment=同步新安装应用到 Ming 手机式桌面
-Exec=sh -c "sleep 5 && /usr/local/bin/ming-desktop-organizer --watch"
+Exec=/usr/local/bin/ming-desktop-organizer-session
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -9662,12 +9692,26 @@ force-to-top=true
 ONBOARDCFG
 
     # 登录时把默认值灌入 dconf（用户可后续自行调整）
+    cat > /usr/local/bin/ming-onboard-defaults << 'MINGONBOARDDEFAULTS'
+#!/usr/bin/env bash
+set -u
+
+marker="${HOME}/.config/onboard/.applied"
+defaults="${HOME}/.config/onboard/ming-defaults.dconf"
+[[ -f "${marker}" ]] && exit 0
+command -v dconf >/dev/null 2>&1 || exit 0
+[[ -f "${defaults}" ]] || exit 0
+if dconf load /org/onboard/ < "${defaults}" 2>/dev/null; then
+    touch -- "${marker}"
+fi
+MINGONBOARDDEFAULTS
+    chmod 0755 /usr/local/bin/ming-onboard-defaults
     cat > "/home/${MING_USER}/.config/autostart/ming-onboard-defaults.desktop" << 'ONBOARDLOAD'
 [Desktop Entry]
 Type=Application
 Name=Ming Onboard Defaults
 Comment=应用虚拟键盘默认设置
-Exec=sh -c "test -f ~/.config/onboard/.applied || (dconf load /org/onboard/ < ~/.config/onboard/ming-defaults.dconf 2>/dev/null && touch ~/.config/onboard/.applied)"
+Exec=/usr/local/bin/ming-onboard-defaults
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true

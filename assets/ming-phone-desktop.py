@@ -31,6 +31,12 @@ STATUS_SUMMARY_REFRESH_SECONDS = 45
 STATUS_RESOURCE_REFRESH_SECONDS = 30
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
 MING_WIDGET_MARK_ICON = "ming-mark"
+# The capsule is deliberately narrower than the expanded control panel.  Keep
+# these dimensions stable so battery/network readbacks cannot resize it.
+STATUS_WIDGET_COMPACT_WIDTH = 252
+STATUS_WIDGET_COMPACT_HEIGHT = 58
+STATUS_WIDGET_COMPACT_NARROW_WIDTH = 242
+STATUS_TOGGLE_DEDUP_SECONDS = 0.65
 
 
 def is_status_widget_toggle_key(keyval):
@@ -134,6 +140,16 @@ def status_widget_overlay_geometry(pill_geometry, panel_size, screen_size):
         "pill": pill,
         "panel": {"x": panel_x, "y": panel_y, "width": panel_w, "height": panel_h},
     }
+
+
+def status_widget_compact_geometry(screen_size):
+    """Return a fixed-size capsule that fits narrow monitors without growth."""
+    screen_w = max(1, int((screen_size or {}).get("width", 1)))
+    if screen_w >= 900:
+        width = STATUS_WIDGET_COMPACT_WIDTH
+    else:
+        width = max(220, min(STATUS_WIDGET_COMPACT_NARROW_WIDTH, screen_w - 48))
+    return {"width": width, "height": STATUS_WIDGET_COMPACT_HEIGHT}
 
 
 def load_appearance_theme(path=None):
@@ -489,7 +505,6 @@ CLOCK_MARGIN_X = 26
 # Keep the status widget close to the top edge in both compact and expanded
 # layouts; the desktop coordinator owns the remaining vertical spacing.
 CLOCK_MARGIN_Y = 8
-STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_EXPANDED_HEIGHT = 220
 STATUS_WIDGET_TOP_GAP_MAX = 8
 
@@ -3972,7 +3987,10 @@ class PhoneDesktop(Gtk.Window):
 
     def toggle_status_widget(self):
         now = time.monotonic()
-        if now - self._last_status_toggle_at < 0.25:
+        # Xfce may deliver the same Super press through both the shortcut
+        # command and the desktop key handler.  A single debounce window keeps
+        # one physical press from expanding and immediately collapsing again.
+        if now - self._last_status_toggle_at < STATUS_TOGGLE_DEDUP_SECONDS:
             return False
         self._last_status_toggle_at = now
         self.status.set_collapsed(not self.status.collapsed)
@@ -4418,8 +4436,19 @@ class PhoneDesktop(Gtk.Window):
 
     def place_overlays(self):
         screen_w = max(320, self.get_screen().get_width())
-        widget_w = 300 if screen_w >= 900 else 260
+        widget_geometry = status_widget_compact_geometry({
+            "width": screen_w, "height": self.get_screen().get_height(),
+        })
+        widget_w = widget_geometry["width"]
+        widget_h = widget_geometry["height"]
         self.status.set_size_request(widget_w, self.status.preferred_height())
+        # Keep the compact height explicit even if a future theme changes the
+        # preferred height implementation.
+        self.status.set_size_request(widget_w, widget_h)
+        # Pin the visible capsule itself as well as its outer allocation.  The
+        # expanded popup is a separate window and must never resize this pill.
+        self.status.widget_box.set_size_request(widget_w, widget_h)
+        self.status.compact_button.set_size_request(widget_w, widget_h)
         x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
         y = CLOCK_MARGIN_Y
         if self.status.get_parent() is None:

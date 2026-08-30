@@ -184,6 +184,10 @@ if GTK_AVAILABLE:
             self.list_view.set_single_click_activate(False)
             self.list_view.connect("activate", self._on_item_activated)
             list_scroll = Gtk.ScrolledWindow(child=self.list_view)
+            # Attach the empty-area gesture to the actual view as well as its
+            # scroller.  GTK4 may stop propagation at the viewport, which
+            # otherwise makes right-click on blank space a no-op.
+            self._attach_background_gestures(self.list_view)
             self._attach_background_gestures(list_scroll)
             self.view_stack.add_named(list_scroll, "list")
             self.grid_view = Gtk.GridView(
@@ -194,6 +198,7 @@ if GTK_AVAILABLE:
             self.grid_view.set_single_click_activate(False)
             self.grid_view.connect("activate", self._on_item_activated)
             grid_scroll = Gtk.ScrolledWindow(child=self.grid_view)
+            self._attach_background_gestures(self.grid_view)
             self._attach_background_gestures(grid_scroll)
             self.view_stack.add_named(grid_scroll, "grid")
             self.view_stack.set_visible_child_name("list")
@@ -361,20 +366,35 @@ if GTK_AVAILABLE:
 
         def _attach_background_gestures(self, widget):
             """Offer file operations when the pointer is over an empty area."""
+            def show_if_empty(_gesture, _count, x, y):
+                if self._background_target_is_empty(widget, x, y):
+                    self._show_background_menu(widget, x, y)
+
+            def long_press_if_empty(_gesture, x, y):
+                if self._background_target_is_empty(widget, x, y):
+                    self._show_background_menu(widget, x, y)
+
             click = Gtk.GestureClick(button=3)
             click.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
-            click.connect(
-                "pressed",
-                lambda _gesture, _count, x, y: self._show_background_menu(widget, x, y),
-            )
+            click.connect("pressed", show_if_empty)
             widget.add_controller(click)
             long_press = Gtk.GestureLongPress()
             long_press.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
-            long_press.connect(
-                "pressed",
-                lambda _gesture, x, y: self._show_background_menu(widget, x, y),
-            )
+            long_press.connect("pressed", long_press_if_empty)
             widget.add_controller(long_press)
+
+        @staticmethod
+        def _background_target_is_empty(widget, x, y):
+            """Do not show a background menu when a file row owns the click."""
+            try:
+                picked = widget.pick(x, y, Gtk.PickFlags.DEFAULT)
+            except (AttributeError, TypeError, ValueError):
+                return True
+            while picked is not None:
+                if getattr(picked, "file_object", None) is not None:
+                    return False
+                picked = picked.get_parent()
+            return True
 
         def refresh_sidebar(self):
             while True:

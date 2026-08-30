@@ -1165,11 +1165,20 @@ class DesktopSourceTests(unittest.TestCase):
             self.assertIn("xfce4-panel.desktop", source)
             self.assertIn("Hidden=true", source)
             self.assertIn("X-GNOME-Autostart-enabled=false", source)
-        dock_only = self.desktop[
-            self.desktop.index("cat > \"${autostart_dir}/ming-dock-only.desktop\""):
-            self.desktop.index("\nDOCKONLY", self.desktop.index("cat > \"${autostart_dir}/ming-dock-only.desktop\""))
+        dock_script_start = self.desktop.index("cat > /usr/local/bin/ming-dock-only-init")
+        dock_script = self.desktop[
+            dock_script_start:
+            self.desktop.index("\nMINGDOCKINIT", dock_script_start)
         ]
-        self.assertIn("xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command", dock_only)
+        self.assertIn(
+            "xfconf-query -c xfce4-session -p /sessions/Failsafe/Client0_Command",
+            dock_script,
+        )
+        dock_entry = self.desktop[
+            self.desktop.index('cat > "${autostart_dir}/ming-dock-only.desktop"'):
+            self.desktop.index("\nDOCKONLY", self.desktop.index('cat > "${autostart_dir}/ming-dock-only.desktop"'))
+        ]
+        self.assertIn("Exec=/usr/local/bin/ming-dock-only-init", dock_entry)
 
     def test_default_desktop_copies_record_managed_source_identity(self):
         finalizer = FINALIZE_MODULE.read_text(encoding="utf-8")

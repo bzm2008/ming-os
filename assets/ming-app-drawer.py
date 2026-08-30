@@ -2,11 +2,14 @@
 """Single-instance GTK3 application drawer for Ming OS."""
 
 import argparse
+import configparser
 import importlib.util
 import json
 import os
 import pathlib
+import re
 import socket
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -96,8 +99,124 @@ def is_legacy_system_entry(path):
     if basename in {item.casefold() for item in VISIBLE_XFCE_FALLBACKS}:
         return False
     return basename in {item.casefold() for item in LEGACY_XFCE_LAUNCHERS} or (
-        basename.startswith("xfce4-") and basename.endswith(".desktop")
+        basename.startswith(("xfce4-", "xfce-")) and basename.endswith(".desktop")
     )
+
+
+def _desktop_directories():
+    """Return the user's presentation-only Desktop directories.
+
+    A desktop shortcut is not an application catalog entry.  Keep this list
+    narrow to the XDG-resolved directory and the two names used by existing
+    Ming installations; arbitrary directories named ``Desktop`` elsewhere
+    remain valid catalog roots.
+    """
+    home = pathlib.Path.home()
+    candidates = {home / "Desktop", home / "桌面"}
+    for value in (
+        os.environ.get("MING_DESKTOP_DIR"),
+        os.environ.get("XDG_DESKTOP_DIR"),
+    ):
+        if value:
+            candidate = pathlib.Path(os.path.expandvars(value)).expanduser()
+            if candidate.is_absolute() and candidate != pathlib.Path("/"):
+                candidates.add(candidate)
+    try:
+        resolved = subprocess.run(
+            ["xdg-user-dir", "DESKTOP"],
+            capture_output=True, text=True, timeout=1, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        resolved = None
+    if resolved is not None and resolved.returncode == 0:
+        candidate = pathlib.Path((resolved.stdout or "").strip()).expanduser()
+        if candidate.is_absolute() and candidate != pathlib.Path("/"):
+            candidates.add(candidate)
+    result = set()
+    for candidate in candidates:
+        try:
+            result.add(candidate.resolve(strict=False))
+        except (OSError, RuntimeError):
+            continue
+    return result
+
+
+def _is_desktop_directory(path, desktop_dirs=None):
+    try:
+        candidate = pathlib.Path(path).resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return candidate in (desktop_dirs if desktop_dirs is not None else _desktop_directories())
+
+
+def _normalized_exec_program(exec_line):
+    """Extract the executable used to identify duplicate launchers."""
+    if not isinstance(exec_line, str) or not exec_line.strip() or "\x00" in exec_line:
+        return ""
+    if any(marker in exec_line for marker in (";", "`", "$(", "\n", "\r")):
+        return ""
+    try:
+        argv = shlex.split(exec_line, posix=True)
+    except ValueError:
+        return ""
+    if not argv or any(token in {"|", "||", "&&", ">", ">>", "<"} for token in argv):
+        return ""
+    offset = 0
+    if pathlib.Path(argv[0]).name.casefold() == "env":
+        offset = 1
+        while offset < len(argv) and (argv[offset].startswith("-") or "=" in argv[offset]):
+            offset += 1
+    if offset >= len(argv):
+        return ""
+    program = argv[offset]
+    if pathlib.Path(program).name.casefold() in {"sh", "bash", "dash", "zsh", "ksh"}:
+        if "-c" in argv[offset + 1:]:
+            return ""
+    try:
+        return str(pathlib.Path(program).resolve(strict=False)).casefold()
+    except (OSError, RuntimeError):
+        return program.casefold()
+
+
+def _desktop_identity_fields(path):
+    """Read launch-critical identity without executing a desktop file."""
+    target = pathlib.Path(path)
+    try:
+        if target.stat().st_size > 256 * 1024:
+            return None
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        with target.open("r", encoding="utf-8", errors="replace") as stream:
+            parser.read_file(stream)
+    except (OSError, UnicodeError, configparser.Error):
+        return None
+    if not parser.has_section("Desktop Entry"):
+        return None
+    section = parser["Desktop Entry"]
+    if section.get("Type", "Application").strip().casefold() != "application":
+        return None
+    source = section.get("X-Ming-Source-Desktop", "").strip()
+    if source.startswith("/") and "\x00" not in source:
+        try:
+            source_path = pathlib.Path(source).resolve(strict=False)
+            if source_path.parent == pathlib.Path("/usr/share/applications"):
+                return ("source", str(source_path).casefold())
+        except (OSError, RuntimeError):
+            pass
+    program = _normalized_exec_program(section.get("Exec", ""))
+    wm_class = section.get("StartupWMClass", "").strip().casefold()
+    if wm_class:
+        return ("wmclass", wm_class)
+    if program:
+        return ("exec", program)
+    return None
+
+
+def _desktop_preference(app):
+    path = pathlib.Path(app.path)
+    launchable = not bool(getattr(app, "diagnostic", ""))
+    canonical = path.parent == pathlib.Path("/usr/share/applications")
+    return (int(canonical and launchable), int(launchable), int(canonical))
 
 
 def _load_common():
@@ -153,8 +272,16 @@ def deduplicate_apps(apps):
             continue
         identity = canonical_identity(app)
         preferred = CANONICAL_PREFERENCE.get(identity)
+        if preferred is None:
+            launch_identity = _desktop_identity_fields(app.path)
+            if launch_identity is not None:
+                identity = launch_identity
         current = selected.get(identity)
-        if current is None or basename == preferred:
+        if current is None or basename == preferred or (
+            basename != preferred
+            and pathlib.Path(current.path).name != preferred
+            and _desktop_preference(app) > _desktop_preference(current)
+        ):
             selected[identity] = app
     return list(selected.values())
 
@@ -293,12 +420,23 @@ def discover_apps(paths=None):
     )
     found = {}
     seen = set()
+    desktop_dirs = _desktop_directories()
     for directory in paths:
+        if _is_desktop_directory(directory, desktop_dirs):
+            continue
         try:
             candidates = directory.glob("*.desktop")
         except OSError:
             continue
         for path in candidates:
+            # A symlinked Desktop entry can otherwise escape the canonical
+            # application roots and reintroduce an entry already shown by the
+            # system catalog.  Only regular files are catalog inputs.
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+            except OSError:
+                continue
             if path.name in seen:
                 continue
             if is_legacy_system_entry(path):

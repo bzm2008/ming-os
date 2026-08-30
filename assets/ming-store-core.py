@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime
 import email.utils
@@ -103,6 +104,7 @@ SPARK_ALLOWED_HOSTS = frozenset({
     "cdn.d.store.deepinos.org.cn",
     "mirrors.sdu.edu.cn",
 })
+SPARK_DEFAULT_CACHE_TTL = 30 * 24 * 60 * 60
 
 
 class StoreError(RuntimeError):
@@ -874,7 +876,7 @@ class SparkPublicProvider(Provider):
 
     def __init__(self, cache_root=None, categories=None, fetcher=None,
                  release_verifier=None, keyring_path=None, base_url=None,
-                 cache_ttl=24 * 60 * 60, clock=None, max_response_bytes=32 * 1024 * 1024,
+                 cache_ttl=SPARK_DEFAULT_CACHE_TTL, clock=None, max_response_bytes=32 * 1024 * 1024,
                  config_path=None, max_fetch_attempts=3):
         self.cache_root = pathlib.Path(cache_root or (
             pathlib.Path.home() / ".cache" / "ming-os" / "store" / SPARK_SOURCE_ID
@@ -900,6 +902,7 @@ class SparkPublicProvider(Provider):
         self.cache_trusted = False
         self.last_error = ""
         self.release_date = None
+        self.cache_warning = ""
         self._resource_updates = {}
 
     @staticmethod
@@ -1062,10 +1065,15 @@ class SparkPublicProvider(Provider):
             body = response.read(self.max_response_bytes + 1)
             if len(body) > self.max_response_bytes:
                 raise DownloadRejected("星火目录响应超过大小限制。")
+            package_index = urllib.parse.urlsplit(str(url)).path.rstrip("/").casefold().endswith("/packages")
             return {
                 "status": status,
                 "headers": dict(response.headers.items()),
-                "body": body.decode("utf-8", errors="strict"),
+                # Packages is a signed byte index.  Keep the wire bytes for
+                # its InRelease hash and expose a replacement-decoded view
+                # only for the tolerant stanza parser.
+                "body": body.decode("utf-8", errors="replace" if package_index else "strict"),
+                "_raw_body": body,
                 "final_url": final_url,
             }
 
@@ -1086,15 +1094,32 @@ class SparkPublicProvider(Provider):
         if status == 304:
             return response
         if status != 200:
+            if status in (408, 425, 429) or 500 <= status <= 599:
+                raise DownloadFailed("星火来源暂时不可用（HTTP %s）。" % status)
             raise ProviderUnavailable("星火来源请求失败（HTTP %s）。" % status)
+        package_index = str(path).rstrip("/").casefold().endswith("/packages")
         body = response.get("body", "")
-        if isinstance(body, bytes):
-            if len(body) > self.max_response_bytes:
-                raise DownloadRejected("星火来源响应超过大小限制。")
-            body = body.decode("utf-8", errors="strict")
-        if not isinstance(body, str) or len(body.encode("utf-8")) > self.max_response_bytes:
+        raw_body = response.get("_raw_body")
+        if raw_body is not None and not isinstance(raw_body, (bytes, bytearray)):
+            raise DownloadRejected("星火来源响应原始内容格式无效。")
+        if isinstance(body, (bytes, bytearray)):
+            raw_body = bytes(body)
+            body = raw_body.decode("utf-8", errors="replace" if package_index else "strict")
+        elif isinstance(body, str):
+            if raw_body is None:
+                raw_body = body.encode("utf-8")
+            else:
+                raw_body = bytes(raw_body)
+            # Always derive the text view from the bytes used for integrity
+            # checks.  This prevents a custom fetcher from supplying a
+            # different text representation for the same response.
+            body = raw_body.decode("utf-8", errors="replace" if package_index else "strict")
+        else:
+            raise DownloadRejected("星火来源响应内容格式无效。")
+        if len(raw_body) > self.max_response_bytes:
             raise DownloadRejected("星火来源响应超过大小限制。")
         response["body"] = body
+        response["_raw_body"] = raw_body
         return response
 
     @staticmethod
@@ -1134,13 +1159,28 @@ class SparkPublicProvider(Provider):
             body_hash = str(entry.get("body_sha256") or "").lower()
             if not isinstance(body, str) or not SHA256.fullmatch(body_hash):
                 raise IntegrityError("星火资源缓存内容不完整。")
-            if hashlib.sha256(body.encode("utf-8")).hexdigest() != body_hash:
+            encoded_body = entry.get("body_b64")
+            if encoded_body is None:
+                raw_body = body.encode("utf-8")
+            else:
+                if not isinstance(encoded_body, str):
+                    raise IntegrityError("星火资源缓存原始内容无效。")
+                try:
+                    raw_body = base64.b64decode(
+                        encoded_body.encode("ascii"), validate=True
+                    )
+                except (ValueError, UnicodeError):
+                    raise IntegrityError("星火资源缓存原始内容无效。")
+                if raw_body.decode("utf-8", errors="replace") != body:
+                    raise IntegrityError("星火资源缓存展示内容与原始内容不一致。")
+            if hashlib.sha256(raw_body).hexdigest() != body_hash:
                 raise IntegrityError("星火资源缓存内容校验失败。")
             etag = entry.get("etag")
             if etag is not None and not isinstance(etag, str):
                 raise IntegrityError("星火资源缓存 ETag 无效。")
             checked[key] = {
                 "etag": str(etag or ""), "body": body, "body_sha256": body_hash,
+                "body_b64": encoded_body, "raw_body": raw_body,
             }
         return checked
 
@@ -1169,22 +1209,34 @@ class SparkPublicProvider(Provider):
             if response_etag and response_etag != cached.get("etag"):
                 raise IntegrityError("星火服务器 304 的 ETag 与缓存不匹配。")
             body = cached["body"]
-            body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            raw_body = cached.get("raw_body", body.encode("utf-8"))
+            body_hash = hashlib.sha256(raw_body).hexdigest()
             if body_hash != str(cached.get("body_sha256") or "").lower():
                 raise IntegrityError("星火 304 缓存内容校验失败。")
-            self._resource_updates[key] = dict(cached)
+            self._resource_updates[key] = {
+                name: value for name, value in cached.items() if name != "raw_body"
+            }
             return {"status": 200, "headers": {"ETag": cached.get("etag", "")},
-                    "body": body, "from_cache": True}
+                    "body": body, "raw_body": raw_body, "from_cache": True}
         body = response.get("body", "")
         if not isinstance(body, str):
             raise IntegrityError("星火资源响应内容无效。")
+        raw_body = response.get("_raw_body")
+        if not isinstance(raw_body, (bytes, bytearray)):
+            raw_body = body.encode("utf-8")
+        raw_body = bytes(raw_body)
+        if len(raw_body) > self.max_response_bytes:
+            raise DownloadRejected("星火来源响应超过大小限制。")
         etag = self._header(response.get("headers"), "ETag")
-        self._resource_updates[key] = {
+        update = {
             "etag": etag,
             "body": body,
-            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "body_sha256": hashlib.sha256(raw_body).hexdigest(),
         }
-        return response
+        if raw_body != body.encode("utf-8"):
+            update["body_b64"] = base64.b64encode(raw_body).decode("ascii")
+        self._resource_updates[key] = update
+        return dict(response, body=body, raw_body=raw_body)
 
     def _write_resource_cache(self, resources):
         _catalog_path, _metadata_path, resources_path = self._cache_paths()
@@ -1353,6 +1405,7 @@ class SparkPublicProvider(Provider):
         policy = self._load_policy()
         policy_enabled = bool(policy.get("installation_enabled"))
         self._resource_updates = {}
+        self.cache_warning = ""
         advertised = ""
         release_timestamp = None
         package_index = {}
@@ -1374,9 +1427,16 @@ class SparkPublicProvider(Provider):
                 previous_date = None
             if previous_date is not None and release_timestamp < previous_date:
                 raise IntegrityError("星火仓库 InRelease Date 回退，已拒绝重放。")
-            packages = self._fetch_resource("store/Packages")["body"]
+            packages_response = self._fetch_resource("store/Packages")
+            packages = packages_response["body"]
+            # The signed InRelease digest covers the exact bytes served by
+            # the repository.  Keep the tolerant text view only for parsing
+            # stanzas; never hash a re-encoded replacement-decoded string.
+            packages_raw = packages_response.get("raw_body")
+            if not isinstance(packages_raw, (bytes, bytearray)):
+                packages_raw = packages.encode("utf-8")
             advertised = parse_spark_inrelease(inrelease)
-            actual = hashlib.sha256(packages.encode("utf-8")).hexdigest()
+            actual = hashlib.sha256(bytes(packages_raw)).hexdigest()
             if actual != advertised:
                 raise IntegrityError("星火 Packages 索引 SHA256 与 InRelease 不一致。")
             package_index = self._record_index(parse_spark_packages(packages))
@@ -1457,16 +1517,38 @@ class SparkPublicProvider(Provider):
             item["enabled"] = False
             item["disabled_reason"] = "正在使用缓存目录，仅供浏览；安装前必须联网重新验签。"
             checked_items.append(item)
-        self._items = checked_items
         self.index_digest = str(metadata.get("inrelease_sha256") or "")
         try:
             self.release_date = float(metadata.get("release_timestamp"))
         except (TypeError, ValueError):
             self.release_date = None
+        if self.release_date is not None:
+            age = max(0.0, float(self.clock()) - self.release_date)
+            if age > self.cache_ttl:
+                raise ProviderUnavailable("星火目录缓存已超过 30 天，必须联网重新验证。")
+            if age >= 60:
+                days = age / (24 * 60 * 60)
+                self.cache_warning = (
+                    "正在使用缓存目录（签名索引距发布时间约 %.1f 天），"
+                    "仅供浏览；联网后才能安装。" % (days / 1.0)
+                )
+            else:
+                self.cache_warning = "正在使用缓存目录，仅供浏览；联网后才能安装。"
+        else:
+            self.cache_warning = "正在使用缓存目录，无法确认签名索引时间；仅供浏览。"
+        # Publish the cache only after every freshness and integrity check has
+        # passed; an expired cache must not remain searchable in memory.
+        self._items = checked_items
         self.cache_trusted = False
         return copy.deepcopy(self._items)
 
     def refresh_catalog(self):
+        # A failed refresh must not leave a previously published catalog
+        # searchable while its freshness state is being re-evaluated.
+        self._items = []
+        self.cache_trusted = False
+        self.catalog_state = "unavailable"
+        self.cache_warning = ""
         try:
             return self._remote_refresh()
         except (DownloadRejected, DownloadFailed, IntegrityError, InvalidCatalog,
@@ -1474,9 +1556,12 @@ class SparkPublicProvider(Provider):
             self.last_error = str(error)
             try:
                 cached = self._load_cache()
-            except ProviderUnavailable:
+            except ProviderUnavailable as cache_error:
                 self.catalog_state = "unavailable"
-                raise ProviderUnavailable("星火目录刷新失败，且没有可用缓存：%s" % error) from error
+                raise ProviderUnavailable(
+                    "星火目录刷新失败，且没有可用缓存：%s（缓存状态：%s）"
+                    % (error, cache_error)
+                ) from error
             self.catalog_state = "stale"
             return cached
 

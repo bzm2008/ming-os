@@ -253,6 +253,28 @@ X-GNOME-Autostart-enabled=false
 PANELDISABLED
 }
 
+# Old image layers occasionally leave zero-byte Calamares launchers behind.
+# Remove only those known installer filenames from the finite desktop roots;
+# keep valid Live autostart entries and all unrelated user files intact.
+cleanup_zero_byte_calamares_entries() {
+    local root entry
+    for root in \
+        "${USER_HOME}/Desktop" "${USER_HOME}/桌面" \
+        "${USER_HOME}/.local/share/applications" \
+        "/etc/skel/Desktop" "/etc/skel/桌面" \
+        "/etc/skel/.local/share/applications" \
+        "/usr/share/applications"; do
+        [[ -d "${root}" ]] || continue
+        while IFS= read -r -d '' entry; do
+            echo "[07_finalize] removing zero-byte Calamares entry: ${entry}"
+            rm -f -- "${entry}" || return 1
+        done < <(find "${root}" -maxdepth 1 -type f -size 0 \
+            \( -iname '*calamares*.desktop' -o -iname '*calamares*.dockitem' \) \
+            -print0 2>/dev/null)
+    done
+    return 0
+}
+
 query_legacy_package_state() {
     local package="$1" output rc
     output="$(dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null)"
@@ -335,10 +357,18 @@ retire_legacy_store_runtime() {
     # independently installed a similarly named application, so matching the
     # filename alone is not sufficient and no broad find -delete is allowed.
     local legacy_root legacy_entry
+    is_legacy_spark_launcher() {
+        local entry="$1"
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        grep -Eiq \
+            '^[[:space:]]*(Exec|TryExec)=.*(ming-spark-store|spark-store|ming-package-install-gui)|^[[:space:]]*Name(\[[^]]+\])?=.*星火应用商店' \
+            "${entry}"
+    }
     for legacy_root in /home /etc/skel; do
         [[ -d "${legacy_root}" ]] || continue
         while IFS= read -r -d '' legacy_entry; do
-            if is_managed_desktop_file "${legacy_entry}"; then
+            if is_managed_desktop_file "${legacy_entry}" \
+               || is_legacy_spark_launcher "${legacy_entry}"; then
                 rm -f -- "${legacy_entry}"
             fi
         done < <(find "${legacy_root}" -xdev -type f \
@@ -455,6 +485,7 @@ main() {
     seed_trusted_desktop_receipts
     verify_other_os_detector || return 1
     disable_phone_panel_restore
+    cleanup_zero_byte_calamares_entries || return 1
     retire_legacy_store_runtime || return 1
     seed_skel
     constrain_default_desktop

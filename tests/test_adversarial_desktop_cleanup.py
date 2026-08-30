@@ -1,13 +1,26 @@
 import pathlib
 import re
+import tempfile
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
+BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 DRAWER = (ROOT / "assets" / "ming-app-drawer.py").read_text(encoding="utf-8")
 FILES = (ROOT / "assets" / "ming-files.py").read_text(encoding="utf-8")
 MODEL = (ROOT / "assets" / "ming-files-model.py").read_text(encoding="utf-8")
+FINALIZE = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
+
+
+def load_drawer_module():
+    import importlib.util
+
+    path = ROOT / "assets" / "ming-app-drawer.py"
+    spec = importlib.util.spec_from_file_location("ming_app_drawer_adversarial", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def heredoc(source, opener, marker):
@@ -88,6 +101,97 @@ class AdversarialDesktopCleanupTests(unittest.TestCase):
         self.assertIn("新建空白文件", FILES)
         self.assertIn("create_file", FILES)
         self.assertIn("def create_file", MODEL)
+        self.assertIn("self._attach_background_gestures(self.list_view)", FILES)
+        self.assertIn("self._attach_background_gestures(self.grid_view)", FILES)
+
+    def test_drawer_hides_all_retired_xfce_namespace_entries(self):
+        drawer = load_drawer_module()
+        for basename in (
+            "xfce-ui-settings.desktop",
+            "xfce-wm-settings.desktop",
+            "xfce-wmtweaks-settings.desktop",
+            "xfce-workspaces-settings.desktop",
+            "xfce4-appfinder.desktop",
+            "xfce4-taskmanager.desktop",
+        ):
+            with self.subTest(basename=basename):
+                self.assertTrue(drawer.is_legacy_system_entry(pathlib.Path(basename)))
+        self.assertFalse(
+            drawer.is_legacy_system_entry(pathlib.Path("xfce4-terminal.desktop"))
+        )
+
+    def test_drawer_deduplicates_same_exec_and_startup_class(self):
+        drawer = load_drawer_module()
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for basename, name in (("vendor.desktop", "Vendor"), ("vendor-alias.desktop", "Vendor Alias")):
+                (root / basename).write_text(
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    f"Name={name}\n"
+                    "Exec=/bin/true --desktop\n"
+                    "StartupWMClass=Vendor.Main\n"
+                    "Categories=Utility;\n",
+                    encoding="utf-8",
+                )
+            apps = drawer.discover_apps(paths=[root])
+            self.assertEqual(1, len(apps), apps)
+
+    def test_drawer_ignores_desktop_directory_even_when_explicitly_scanned(self):
+        drawer = load_drawer_module()
+        with tempfile.TemporaryDirectory() as temp:
+            home = pathlib.Path(temp)
+            desktop = home / "Desktop"
+            apps = home / ".local" / "share" / "applications"
+            desktop.mkdir(parents=True)
+            apps.mkdir(parents=True)
+            for target, name in ((desktop / "desktop-entry.desktop", "Desktop Entry"), (apps / "system-entry.desktop", "System Entry")):
+                target.write_text(
+                    "[Desktop Entry]\nType=Application\n"
+                    f"Name={name}\nExec=/bin/true\nCategories=Utility;\n",
+                    encoding="utf-8",
+                )
+            original_home = drawer.pathlib.Path.home
+            drawer.pathlib.Path.home = staticmethod(lambda: home)
+            try:
+                found = drawer.discover_apps(paths=[desktop, apps])
+            finally:
+                drawer.pathlib.Path.home = original_home
+            self.assertEqual(["system-entry.desktop"], [item.path.name for item in found])
+
+    def test_finalize_removes_only_zero_byte_calamares_entries(self):
+        self.assertIn("-size 0", FINALIZE)
+        self.assertIn("calamares", FINALIZE.lower())
+        self.assertIn("zero-byte", FINALIZE.lower())
+
+    def test_finalize_main_calls_zero_byte_calamares_cleanup(self):
+        call = "cleanup_zero_byte_calamares_entries || return 1"
+        self.assertIn(call, FINALIZE)
+        self.assertLess(
+            FINALIZE.index(call),
+            FINALIZE.index("retire_legacy_store_runtime || return 1"),
+        )
+
+    def test_desktop_autostart_entries_use_fixed_managed_scripts(self):
+        """Autostart files must not compose commands through a shell string."""
+        self.assertNotIn("Exec=sh -c", DESKTOP)
+        for script in (
+            "ming-migrate-all-disks",
+            "ming-dock-only-init",
+            "ming-desktop-organizer-session",
+            "ming-onboard-defaults",
+        ):
+            self.assertIn(f"/usr/local/bin/{script}", DESKTOP)
+            self.assertRegex(
+                DESKTOP,
+                rf"chmod (?:\+x|0755) /usr/local/bin/{re.escape(script)}",
+            )
+
+    def test_base_autostart_entries_do_not_compose_shell_commands(self):
+        """Base-session entries must use fixed argv scripts, never sh -c."""
+        self.assertNotIn("Exec=sh -c", BASE)
+        self.assertIn("Exec=/usr/local/bin/ming-volume-automount --session --json", BASE)
+        self.assertIn("Exec=/usr/local/bin/ming-classic-mode --session", BASE)
 
 
 if __name__ == "__main__":

@@ -765,6 +765,8 @@ class MingSettings(Adw.ApplicationWindow):
 
         # Adw.NavigationSplitView：左导航 + 右内容（Android 风格单窗口）
         self.split = Adw.NavigationSplitView()
+        self.split.set_hexpand(True)
+        self.split.set_vexpand(True)
         self.split.set_collapsed(window_width < 760)
         self.set_content(self.split)
         self.connect("notify::width", self.on_window_width_changed)
@@ -782,6 +784,7 @@ class MingSettings(Adw.ApplicationWindow):
         self.nav_list.add_css_class("navigation-sidebar")
         self.nav_list.connect("row-selected", self.on_nav_selected)
         self.nav_list.set_size_request(212, -1)
+        self.nav_list.set_vexpand(True)
         sidebar_box.append(self.nav_list)
 
         sidebar_page = Adw.NavigationPage(title="Ming 设置", child=sidebar_box)
@@ -792,9 +795,12 @@ class MingSettings(Adw.ApplicationWindow):
         # Page changes are deliberately instantaneous: this keeps the settings
         # hub responsive on older GPUs and avoids transition flicker in VMs.
         self.content_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        self.content_stack.set_hexpand(True)
         self.content_stack.set_vexpand(True)
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         content_box.set_spacing(12)
+        content_box.set_hexpand(True)
+        content_box.set_vexpand(True)
         content_box.add_css_class("ming-settings-content")
         c_header = Adw.HeaderBar()
         self.content_title = Adw.WindowTitle(title="", subtitle="")

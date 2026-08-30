@@ -145,6 +145,81 @@ signature
             item["download_url"],
         )
 
+    def test_provider_verifies_packages_using_original_bytes_with_invalid_utf8(self):
+        """The live index contains a non-UTF-8 byte; hash the wire bytes first."""
+        packages = self._packages().replace(
+            "Description: Demo package", "Description: Demo package\n .\xb8"
+        ).encode("latin-1")
+        digest = hashlib.sha256(packages).hexdigest()
+        inrelease = """-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Date: {date}
+SHA256:
+ {digest} {size} Packages
+-----BEGIN PGP SIGNATURE-----
+signature
+-----END PGP SIGNATURE-----
+""".format(date=self.test_release_date, digest=digest, size=len(packages))
+        responses = {
+            "/store/InRelease": inrelease,
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+
+        def fetch(url, _headers=None):
+            return {"status": 200, "headers": {},
+                    "body": responses[urllib.parse.urlsplit(url).path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = self.core.SparkPublicProvider(
+                cache_root=pathlib.Path(directory), categories=("tools",),
+                fetcher=fetch, release_verifier=lambda *_args: True,
+                config_path=self._policy(directory, True),
+                clock=lambda: self.test_now,
+            )
+            items = provider.refresh_catalog()
+
+        self.assertEqual(1, len(items))
+        self.assertTrue(items[0]["enabled"])
+        self.assertEqual(digest, provider.index_digest)
+
+    def test_invalid_utf8_packages_survive_cache_and_offline_browse(self):
+        """A successful binary index must remain readable after a network loss."""
+        packages = self._packages().replace(
+            "Description: Demo package", "Description: Demo package\n .\xb8"
+        ).encode("latin-1")
+        digest = hashlib.sha256(packages).hexdigest()
+        responses = {
+            "/store/InRelease": self._inrelease(
+                packages.decode("latin-1")
+            ).replace(
+                hashlib.sha256(packages.decode("latin-1").encode()).hexdigest(), digest
+            ),
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+
+        def healthy(url, _headers=None):
+            return {"status": 200, "headers": {"ETag": "v1"},
+                    "body": responses[urllib.parse.urlsplit(url).path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            writer = self.core.SparkPublicProvider(
+                cache_root=root, categories=("tools",), fetcher=healthy,
+                release_verifier=lambda *_args: True,
+                config_path=self._policy(root, True),
+                clock=lambda: self.test_now,
+            )
+            writer.refresh_catalog()
+            writer.fetcher = lambda *_args: (_ for _ in ()).throw(OSError("offline"))
+            cached = writer.refresh_catalog()
+
+        self.assertEqual(1, len(cached))
+        self.assertEqual("stale", writer.catalog_state)
+        self.assertFalse(cached[0]["enabled"])
+
     def test_public_provider_rejects_catalog_path_injection_and_unmatched_package(self):
         packages = self._packages(filename="./tools/demo/demo_1.2.3_amd64.deb")
         applist = [{
@@ -215,6 +290,36 @@ signature
                 attempts["catalog"] += 1
                 if attempts["catalog"] < 3:
                     raise OSError("transient reset")
+            return {"status": 200, "headers": {}, "body": responses[path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            provider = self.core.SparkPublicProvider(
+                cache_root=root / "cache", categories=("tools",), fetcher=fetch,
+                release_verifier=lambda *_args: True,
+                config_path=self._policy(root, True),
+            )
+            items = provider.refresh_catalog()
+
+        self.assertEqual(3, attempts["catalog"])
+        self.assertEqual(1, len(items))
+        self.assertEqual("ready", provider.catalog_state)
+
+    def test_catalog_refresh_retries_transient_http_status(self):
+        packages = self._packages()
+        responses = {
+            "/store/InRelease": self._inrelease(packages),
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+        attempts = {"catalog": 0}
+
+        def fetch(url, _headers=None):
+            path = urllib.parse.urlsplit(url).path
+            if path == "/store/tools/applist.json":
+                attempts["catalog"] += 1
+                if attempts["catalog"] < 3:
+                    return {"status": 503, "headers": {}, "body": "temporary"}
             return {"status": 200, "headers": {}, "body": responses[path]}
 
         with tempfile.TemporaryDirectory() as directory:
@@ -523,10 +628,73 @@ signature
                 cache_root=root / "cache", categories=("tools",), fetcher=fetch,
                 release_verifier=lambda *_args: True,
                 config_path=self._policy(root, True),
-                clock=lambda: self.test_now + 2 * 24 * 60 * 60,
+                clock=lambda: self.test_now + 31 * 24 * 60 * 60,
             )
             with self.assertRaises(self.core.ProviderUnavailable):
                 provider.refresh_catalog()
+
+    def test_default_release_window_is_thirty_days(self):
+        provider = self.core.SparkPublicProvider()
+        self.assertEqual(30 * 24 * 60 * 60, provider.cache_ttl)
+
+    def test_cached_catalog_within_thirty_days_reports_age_warning(self):
+        packages = self._packages()
+        responses = {
+            "/store/InRelease": self._inrelease(packages),
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+
+        def healthy(url, _headers=None):
+            return {"status": 200, "headers": {},
+                    "body": responses[urllib.parse.urlsplit(url).path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            provider = self.core.SparkPublicProvider(
+                cache_root=root / "cache", categories=("tools",), fetcher=healthy,
+                release_verifier=lambda *_args: True,
+                config_path=self._policy(root, True),
+                clock=lambda: self.test_now,
+            )
+            provider.refresh_catalog()
+            provider.fetcher = lambda *_args: (_ for _ in ()).throw(OSError("offline"))
+            provider.clock = lambda: self.test_now + 2 * 24 * 60 * 60
+            cached = provider.refresh_catalog()
+
+        self.assertEqual(1, len(cached))
+        self.assertEqual("stale", provider.catalog_state)
+        self.assertIn("缓存目录", provider.cache_warning)
+        self.assertIn("2.0", provider.cache_warning)
+
+    def test_cached_catalog_older_than_thirty_days_is_not_browsable(self):
+        packages = self._packages()
+        responses = {
+            "/store/InRelease": self._inrelease(packages),
+            "/store/Packages": packages,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+
+        def healthy(url, _headers=None):
+            return {"status": 200, "headers": {},
+                    "body": responses[urllib.parse.urlsplit(url).path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            provider = self.core.SparkPublicProvider(
+                cache_root=root / "cache", categories=("tools",), fetcher=healthy,
+                release_verifier=lambda *_args: True,
+                config_path=self._policy(root, True),
+                clock=lambda: self.test_now,
+            )
+            provider.refresh_catalog()
+            provider.fetcher = lambda *_args: (_ for _ in ()).throw(OSError("offline"))
+            provider.clock = lambda: self.test_now + 31 * 24 * 60 * 60
+            with self.assertRaises(self.core.ProviderUnavailable) as error:
+                provider.refresh_catalog()
+
+        self.assertIn("超过 30 天", str(error.exception))
+        self.assertEqual([], provider.search("Demo"))
 
     def test_tampered_display_catalog_is_not_accepted_as_last_good_cache(self):
         packages = self._packages()

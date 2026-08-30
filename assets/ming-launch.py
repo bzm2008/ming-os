@@ -828,13 +828,12 @@ def _launch_feedback_window(request, workarea=None, animated=True):
     workarea = COMMON.Rect.from_mapping(workarea or _default_workarea())
     window = Gtk.Window(type=Gtk.WindowType.POPUP)
     window.set_decorated(False)
-    window.set_app_paintable(True)
+    # Keep feedback as a normal opaque X11 surface.  Requesting an RGBA visual
+    # for a short-lived popup can be painted black by XRender/VirtualBox and
+    # leave an input-blocking rectangle after the application starts.
+    window.set_app_paintable(False)
     window.set_keep_above(True)
     window.set_accept_focus(False)
-    screen = window.get_screen()
-    visual = screen.get_rgba_visual() if screen else None
-    if visual:
-        window.set_visual(visual)
 
     width = min(320, max(240, int(workarea.width * 0.28)))
     height = 76

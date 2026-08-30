@@ -199,6 +199,38 @@
 - VirtualBox 无真实 Wi-Fi/蓝牙/笔记本电池，不能替代真机硬件验收。
 - 在没有读取 Xiahai 与校时日志前，不把当前现象归因于单一源码模块。
 
+## 2026-08-30 现场验收补充
+
+本节只记录用户现场反馈和当前 VM 状态，不代表问题已修复或源码验收通过。
+
+- `RC4-UX-015`（P1）：桌面与文件管理器空白处右键菜单仍缺少“新建文件夹/新建文件”等创建操作。该问题在已安装硬盘系统中由用户再次确认，需区分桌面管理器菜单和文件管理器目录菜单分别复现。
+- `RC4-UX-016`（P1）：状态小组件折叠仍显示旧样式；展开后出现重复的折叠入口/重复内容，和已确认的 A 方案短胶囊不一致。用户提供的现场截图作为外部证据保留，不据此推断具体 GTK 根因。
+- `RC4-UX-017`（P1）：应用抽屉打开后会自动关闭，且仍包含大量 Xfce 原版程序入口。需要检查抽屉进程生命周期、焦点/窗口层级和 `xfce-*` 桌面文件过滤规则。
+- `RC4-REL-018`（P0）：本次验收曾误启动 `MingOS-2641-rc4-smoke-20260826-UEFI`（旧 8 月 26 日硬盘盘），其画面不能作为 8 月 30 日新 ISO 的证据。已将该盘与最新 ISO VM 分离记录。
+- `RC4-BOOT-019`（P0）：启动 `MingOS-2641-rc4-final-UEFI-20260830` 时，VM 长时间停留在 systemd 启动日志并反复出现 `systemd-ssh-generator: Failed to query local AF_VSOCK CID: Cannot assign requested address`，桌面未出现，VirtualBox GUI 一度无响应。该问题需要在源码/VM 修复阶段定位，当前不把它归因于单一 VSOCK 配置，也不宣称最新 ISO 已通过启动验收。
+
+当前最新 ISO `output/ming-os-26.4.1-home-amd64-rc4.iso` 的构建元数据仍为源码提交 `655acb172c...`，当前工作树 HEAD 为 `885fe285...`；因此本节问题和此前重复入口证据均不能替代基于最新 HEAD 的重建验收。
+
+### 2026-08-30 只读源码/镜像审计补充
+
+- 最新 ISO 的来源提交为 `655acb1`，当前工作树为 `885fe28`；ISO 尚未包含 canonical Store/Toolbox 去重提交，不能作为最新源码的回归证据。
+- ISO 的应用目录中仍存在 `ming-package-installer` 受控本地 DEB 入口（转发到 Ming Store），需在最终门禁中明确区分“受控兼容入口”和已退役 Spark 安装器，避免误删或误放行。
+- `assets/ming-app-drawer.py` 的旧 Xfce 过滤规则未覆盖 `xfce-wm-settings`、`xfce-workspaces-settings`、`xfce-ui-settings`、`xfce-display-settings`、`xfce-mouse-settings`、`xfce-session-settings`、`xfce-keyboard-settings`、`xfce-backdrop-settings` 等入口；这些文件仍可能出现在应用抽屉中。
+- `assets/ming-settings.py` 仍有通过 `bash -c` 串联 `pkill plank`/延时/后续命令的实现，绕过结构化参数边界；需改为独立受控调用并增加安全回归测试。
+- ISO 发现 Debian 默认 `/etc/ssl/private/ssl-cert-snakeoil.key`。这不是 Ming OTA 私钥，但发布门禁应明确是否清理默认测试证书，避免将测试密钥带入正式镜像。
+- 8 月 30 日最新 UEFI VM 启动时长时间停留在 systemd 日志并反复出现 `systemd-ssh-generator: Failed to query local AF_VSOCK CID: Cannot assign requested address`，VirtualBox 前端一度无响应。当前只有主机/VM 启动层证据，尚未证明该报错是桌面未启动的唯一根因。
+- 实网 Provider 验证补充：星火 CDN 的 `InRelease` 可由镜像内 keyring 验证签名，但日期已明显早于当前时间，默认 24 小时有效期使 `refresh_catalog()` 返回 `ProviderUnavailable`，对应商店“来源暂不可用/一直读取”的现象。进一步检查发现 `Packages` 响应包含非法 UTF-8 字节；当前实现对响应做严格 UTF-8 解码会抛出 `UnicodeDecodeError`，而直接替换字符又会破坏按原始字节计算的索引哈希。后续必须保留原始 bytes 做哈希/签名校验，再使用明确的编码容错或给出“源索引编码无效”的可读错误；在此修复前星火目录安装链按 P0 阻断处理。
+- `RC4-SES-020`（P1）：用户再次报告桌面约每 20 秒出现一次黑屏闪烁。当前只确认现场症状，尚未在正确版本的 VM 中取得窗口层级、合成器或显示驱动的时间关联证据；需分别排查 Xfwm4/Picom、Dock/组件重绘、VirtualBox 显示后端和系统服务重启。
+- `RC4-APP-021`（P0）：Ming 应用商店不论选择何种分类或软件都长期显示“正在读取”，稍后“星火应用”变为“来源暂不可用”，“源应用”显示无软件。实网检查已发现星火索引过期及 `Packages` 非 UTF-8，故当前安装链不能宣称可用；源应用为空还需另查 AppStream/Apt 缓存是否加载失败。
+- `RC4-UX-022`（P0）：Xiahai Xiaoming 在用户当前已安装验收盘上再次点击仍无法启动。延续 `RC4-UX-001` 的 Chromium GPU/子进程崩溃证据，尚未在最新 HEAD 重建镜像上复核受控降级启动是否生效。
+
+### 2026-08-30 客体版本身份复核
+
+- 对 `MingOS-2641-rc4-final-UEFI-20260830` 的虚拟硬盘执行只读挂载后，`/etc/os-release` 为 `Ming OS 26.4.1 Home Edition`，`/etc/ming-os-build.json` 为 `build_id=2641-rc4-655acb172cac-20260830T022309Z`、`source_commit=655acb172c...`。该 VM 当前配置为 UEFI、`boot1=disk`、`boot2=none`，光驱未挂载，确认是硬盘安装系统而非 Live 光盘。
+- 客体中的 `ming-toolbox.py`、`ming-app-drawer.py`、`ming-settings.py`、`ming-store.py` 与当前工作树版本相同；`ming-phone-desktop` 缺少 `885fe28` 新增的 Store/Toolbox canonical identity 去重改动。该差异解释了“RC4 新镜像但仍像旧版本、重复 Store/Toolbox”的现象。
+- 重新启动该 VM 后的截图 `output/identity-verified-final-uefi.png` 可见已安装桌面和两个 Store/两个 Toolbox 入口；本证据不支持“当前仍在 Live 模式”，但支持“镜像落后当前源码且最新桌面去重未进入镜像”。
+- 进一步比对已安装用户目录与 `/etc/skel`：用户 `gtk-3.0/settings.ini`/`gtk-4.0/settings.ini` 使用 `Noto Sans CJK SC 11`，而模板为 14；用户 Plank `IconSize=36`，模板配置为 40；用户 `xfce4-keyboard-shortcuts.xml` 仍保留 `xfce4-appfinder -c`、`xfce4-display-settings --minimal`、`thunar` 等旧 `<Super>` 绑定，模板则将单一 `<Super>` 指向 `ming-status-widget-toggle`。这证明安装后用户配置迁移/登录自愈没有完全应用 Live 默认值，是“硬盘系统视觉和交互像早期版本”的直接证据；后续应修复迁移优先级和首次登录收敛，而不是只重建系统文件。
+
 ### RC4-DIAG-015 用户确认的诊断上报链路
 
 - 严重级别：通过（命令行完整链路）；设置页按钮因 RC4-UX-005 的内容区异常，尚未完成图形界面点击验收。
