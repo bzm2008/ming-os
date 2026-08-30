@@ -237,7 +237,9 @@ build_inputs_sha256() {
         while IFS= read -r -d '' input_file; do
             sha256sum "${input_file}"
         done < <(find "${MODULES_DIR}" "${CONFIG_DIR}" "${SCRIPT_DIR}/assets" \
-            -type f -print0 | sort -z)
+            -type d \( -name __pycache__ -o -name .pytest_cache \) -prune -o \
+            -type f ! -name '*.pyc' ! -name '*.pyo' \
+            -print0 | sort -z)
         printf 'xiahai-source=%s\0' \
             "$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"
         printf 'ota-release-key=%s\0' \
@@ -513,6 +515,7 @@ check_host_environment() {
     require_cmd mkfs.vfat "dnf install dosfstools 或 apt install dosfstools"
     require_cmd mcopy "dnf install mtools 或 apt install mtools"
     require_cmd file "apt install file"
+    require_cmd rsync "apt install rsync"
     require_cmd chroot "系统内置"
     if [[ ! -d /proc/sys ]]; then
         log_error "请确保 /proc 已挂载"
@@ -527,7 +530,7 @@ check_host_environment() {
 }
 install_build_deps() {
     log_step "安装构建依赖"
-    local required_bins=(debootstrap mksquashfs xorriso grub-mkimage mkfs.vfat mcopy file)
+    local required_bins=(debootstrap mksquashfs xorriso grub-mkimage mkfs.vfat mcopy file rsync)
     local missing_bins=()
     local bin
     for bin in "${required_bins[@]}"; do
@@ -560,7 +563,7 @@ install_build_deps() {
             apt-get "${apt_options[@]}" install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
             grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools dosfstools file python3-yaml debian-archive-keyring; then
+            mtools dosfstools file rsync python3-yaml debian-archive-keyring; then
             if [[ "${apt_ok}" -eq 0 ]]; then
                 log_error "apt 依赖安装失败且缓存不可用"
                 exit 1
@@ -570,11 +573,11 @@ install_build_deps() {
     elif command -v dnf &>/dev/null; then
         dnf install -y debootstrap squashfs-tools xorriso \
             grub2-tools grub2-tools-extra grub2-efi-x64-modules \
-            mtools dosfstools syslinux
+            mtools dosfstools rsync syslinux
     elif command -v yum &>/dev/null; then
         yum install -y debootstrap squashfs-tools xorriso \
             grub2-tools grub2-tools-extra grub2-efi-x64-modules \
-            mtools dosfstools syslinux
+            mtools dosfstools rsync syslinux
     else
         log_error "未找到 apt/dnf/yum 包管理器"
         exit 1
@@ -838,12 +841,18 @@ prepare_chroot_scripts() {
     fi
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/modules"
     mkdir -p "${CHROOT_DIR}/tmp/ming-build/config"
-    cp -r "${MODULES_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/modules/"
-    cp -r "${CONFIG_DIR}"/* "${CHROOT_DIR}/tmp/ming-build/config/"
+    rsync -a --delete \
+        --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='*.pyc' --exclude='*.pyo' \
+        "${MODULES_DIR}/" "${CHROOT_DIR}/tmp/ming-build/modules/"
+    rsync -a --delete \
+        --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='*.pyc' --exclude='*.pyo' \
+        "${CONFIG_DIR}/" "${CHROOT_DIR}/tmp/ming-build/config/"
     chmod +x "${CHROOT_DIR}/tmp/ming-build/modules/"*.sh
     if [[ -d "${SCRIPT_DIR}/assets" ]]; then
         mkdir -p "${CHROOT_DIR}/tmp/ming-build/assets"
-        cp -r "${SCRIPT_DIR}/assets/"* "${CHROOT_DIR}/tmp/ming-build/assets/" 2>/dev/null || true
+        rsync -a --delete \
+            --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='*.pyc' --exclude='*.pyo' \
+            "${SCRIPT_DIR}/assets/" "${CHROOT_DIR}/tmp/ming-build/assets/"
     fi
     if [[ -n "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ]]; then
         if [[ ! -s "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" ||

@@ -87,6 +87,24 @@ class BuildScriptContractTests(unittest.TestCase):
     def test_apt_cache_manifest_is_written_atomically(self):
         self.assertIn("cache-manifest.json.partial", BUILD)
 
+    def test_build_inputs_ignore_generated_python_cache_files(self):
+        """Only source assets participate in the reproducible input hash."""
+        inputs = BUILD.split("build_inputs_sha256() {", 1)[1].split(
+            "file_sha256_or_missing() {", 1
+        )[0]
+        self.assertIn("-name __pycache__ -o -name .pytest_cache", inputs)
+        self.assertIn("-prune -o", inputs)
+        self.assertIn("! -name '*.pyc'", inputs)
+        self.assertIn("! -name '*.pyo'", inputs)
+
+    def test_asset_copy_excludes_generated_python_cache_files(self):
+        prepare = BUILD.split("prepare_chroot_scripts() {", 1)[1].split(
+            "mount_chroot() {", 1
+        )[0]
+        self.assertIn("rsync", prepare)
+        self.assertIn("--exclude='__pycache__/'", prepare)
+        self.assertIn("--exclude='*.pyc'", prepare)
+
     def test_successful_build_preserves_checkpoint_artifacts_for_resume(self):
         body = BUILD.split("build_iso() {", 1)[1].split(
             "build_iso_manual() {", 1
@@ -177,7 +195,7 @@ class BuildScriptContractTests(unittest.TestCase):
         install = BUILD.split("install_build_deps() {", 1)[1].split(
             "verify_debootstrap_keyring() {", 1
         )[0]
-        self.assertIn("mtools dosfstools file python3-yaml debian-archive-keyring", install)
+        self.assertIn("mtools dosfstools file rsync python3-yaml debian-archive-keyring", install)
 
     def test_host_preflight_installs_yaml_for_calamares_validation(self):
         install = BUILD.split("install_build_deps() {", 1)[1].split(
