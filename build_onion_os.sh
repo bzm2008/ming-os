@@ -972,6 +972,18 @@ clean_chroot() {
     '
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
     chroot_exec bash -c "rm -rf /tmp/ming-build"
+    # Module validation invokes py_compile inside the target rootfs.  Remove
+    # the generated caches before packaging so stale bytecode cannot shadow
+    # the source shipped in this release (and never becomes a resume artifact).
+    chroot_exec bash -c '
+        set -u
+        for root in /usr/local/bin /usr/local/sbin /usr/local/lib \
+                    /usr/share/ming-os /etc/skel /home; do
+            [ -e "${root}" ] || continue
+            find "${root}" -type d -name __pycache__ -prune -exec rm -rf {} +
+            find "${root}" -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
+        done
+    '
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
     chroot_exec bash -c "rm -f /var/cache/debconf/*-old"
     chroot_exec bash -c "> /etc/machine-id"

@@ -105,6 +105,15 @@ class BuildScriptContractTests(unittest.TestCase):
         self.assertIn("--exclude='__pycache__/'", prepare)
         self.assertIn("--exclude='*.pyc'", prepare)
 
+    def test_clean_rootfs_removes_generated_python_cache_files(self):
+        """Module-time py_compile must not ship bytecode in the release rootfs."""
+        clean = BUILD.split("clean_chroot() {", 1)[1].split(
+            "# ======================== 生成 initramfs ========================", 1
+        )[0]
+        self.assertIn("__pycache__", clean)
+        self.assertIn("*.pyc", clean)
+        self.assertIn("*.pyo", clean)
+
     def test_successful_build_preserves_checkpoint_artifacts_for_resume(self):
         body = BUILD.split("build_iso() {", 1)[1].split(
             "build_iso_manual() {", 1
