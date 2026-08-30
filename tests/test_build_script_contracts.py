@@ -114,6 +114,40 @@ class BuildScriptContractTests(unittest.TestCase):
         self.assertIn("*.pyc", clean)
         self.assertIn("*.pyo", clean)
 
+    def test_clean_rootfs_removes_machine_keys_without_broad_public_material_wipe(self):
+        """A release image must not clone build-host identities to every install."""
+        clean = BUILD.split("clean_chroot() {", 1)[1].split(
+            "# ======================== 生成 initramfs ========================", 1
+        )[0]
+        for marker in (
+            "/etc/ssh/ssh_host_*_key",
+            "/etc/ssh/ssh_host_*_key.pub",
+            "/etc/ssl/private/ssl-cert-snakeoil.key",
+            "/usr/share/doc/openvpn/examples/sample-keys/*.key",
+        ):
+            self.assertIn(marker, clean)
+        self.assertNotIn("/etc/ssh/*'", clean)
+        self.assertNotIn("/etc/ssh/*\"", clean)
+        self.assertNotIn(
+            "rm -f /usr/share/doc/openvpn/examples/sample-keys/*", clean
+        )
+        self.assertNotIn("sample-keys/*.pub", clean)
+
+    def test_rootfs_gate_rejects_build_time_private_key_material(self):
+        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split(
+            "\n# ========================", 1
+        )[0]
+        for marker in (
+            'root.glob("etc/ssh/ssh_host_*_key")',
+            '"etc/ssl/private/ssl-cert-snakeoil.key"',
+            'root.glob("usr/share/doc/openvpn/examples/sample-keys/*.key")',
+            '"build-time private key material"',
+        ):
+            self.assertIn(marker, validator)
+        self.assertNotIn(
+            'root.glob("usr/share/doc/openvpn/examples/sample-keys/*")', validator
+        )
+
     def test_successful_build_preserves_checkpoint_artifacts_for_resume(self):
         body = BUILD.split("build_iso() {", 1)[1].split(
             "build_iso_manual() {", 1

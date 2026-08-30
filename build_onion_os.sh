@@ -984,6 +984,16 @@ clean_chroot() {
             find "${root}" -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
         done
     '
+    # Host identities created while assembling the image must never be cloned
+    # onto every installed machine.  Remove each SSH key pair so ssh-keygen -A
+    # can create a matching, machine-local pair when the user later enables SSH.
+    # Keep the patterns narrow: public example certificates and trust keys are
+    # not build-host identities and remain part of their owning packages.
+    chroot_exec bash -c '
+        rm -f -- /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+        rm -f -- /etc/ssl/private/ssl-cert-snakeoil.key
+        rm -f -- /usr/share/doc/openvpn/examples/sample-keys/*.key
+    '
     chroot_exec bash -c "rm -f /var/log/*.log /var/log/apt/*.log"
     chroot_exec bash -c "rm -f /var/cache/debconf/*-old"
     chroot_exec bash -c "> /etc/machine-id"
@@ -2078,6 +2088,16 @@ def require_absent(relative_path, reason):
     # residues cannot hide behind a broken symlink.
     if path.exists() or path.is_symlink():
         errors.append(f"{relative_path} must not be preinstalled: {reason}")
+
+for private_key in [
+    *root.glob("etc/ssh/ssh_host_*_key"),
+    root / "etc/ssl/private/ssl-cert-snakeoil.key",
+    *root.glob("usr/share/doc/openvpn/examples/sample-keys/*.key"),
+]:
+    require_absent(
+        private_key.relative_to(root).as_posix(),
+        "build-time private key material",
+    )
 
 def validate_generated_executable(relative_path, language):
     """Reject a missing, non-executable, or syntactically invalid shipped helper."""

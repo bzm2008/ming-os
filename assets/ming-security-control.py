@@ -272,17 +272,77 @@ def status(path=STATE_PATH, runner=run_command, apt_path=APT_AUTO_UPGRADES_PATH)
     return build_status(state, probes)
 
 
+def _disable_sshd_after_failure(runner, error):
+    """Leave SSH stopped when preparation or readback fails."""
+    disable_rc, _out, disable_error = runner(
+        ["systemctl", "disable", "--now", "ssh.service"])
+    message = error or "SSH configuration failed"
+    if disable_rc != 0:
+        message += "; unable to keep SSH disabled: %s" % (
+            disable_error or "disable failed")
+    return False, message
+
+
+def _validate_generated_host_keys(runner):
+    """Validate ssh-keygen output without following links or trusting ownership."""
+    rc, output, error = runner([
+        "find", "/etc/ssh", "-maxdepth", "1", "-name", "ssh_host_*_key",
+        "-printf", "%f\t%y\t%u\t%g\t%m\n",
+    ])
+    if rc != 0:
+        return False, error or "unable to inspect SSH host keys"
+    entries = [line.split("\t") for line in output.splitlines() if line.strip()]
+    if not entries:
+        return False, "SSH host keys were not generated"
+    for fields in entries:
+        if len(fields) != 5:
+            return False, "unsafe SSH host key metadata"
+        name, file_type, owner, group, mode = fields
+        if (not re.fullmatch(r"ssh_host_[A-Za-z0-9_-]+_key", name)
+                or file_type != "f" or owner != "root" or group != "root"
+                or mode != "600"):
+            return False, "unsafe SSH host key: %s" % name
+    return True, ""
+
+
 def configure_sshd(enabled, runner=run_command):
-    if enabled:
-        dropin = pathlib.Path("/etc/ssh/sshd_config.d/60-ming-security.conf")
-        dropin.parent.mkdir(parents=True, exist_ok=True)
-        dropin.write_text(
-            "PermitRootLogin no\nPermitEmptyPasswords no\nPasswordAuthentication yes\n",
-            encoding="utf-8")
-        rc, _out, error = runner(["systemctl", "enable", "--now", "ssh.service"])
-    else:
+    if not enabled:
         rc, _out, error = runner(["systemctl", "disable", "--now", "ssh.service"])
-    return rc == 0, error
+        return rc == 0, error
+
+    dropin = pathlib.Path("/etc/ssh/sshd_config.d/60-ming-security.conf")
+    try:
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        save_text_atomic(
+            "PermitRootLogin no\nPermitEmptyPasswords no\nPasswordAuthentication yes\n",
+            dropin,
+            mode=0o644,
+        )
+    except OSError as error:
+        return _disable_sshd_after_failure(runner, "unable to write SSH policy: %s" % error)
+
+    rc, _out, error = runner(["ssh-keygen", "-A"])
+    if rc != 0:
+        return _disable_sshd_after_failure(runner, error or "SSH host key generation failed")
+    valid, key_error = _validate_generated_host_keys(runner)
+    if not valid:
+        return _disable_sshd_after_failure(runner, key_error)
+    rc, _out, error = runner(["sshd", "-t"])
+    if rc != 0:
+        return _disable_sshd_after_failure(runner, error or "SSH configuration validation failed")
+    rc, _out, error = runner(["systemctl", "enable", "--now", "ssh.service"])
+    if rc != 0:
+        return _disable_sshd_after_failure(runner, error or "SSH service failed to start")
+    enabled_rc, enabled_output, enabled_error = runner(
+        ["systemctl", "is-enabled", "ssh.service"])
+    active_rc, active_output, active_error = runner(
+        ["systemctl", "is-active", "ssh.service"])
+    if (enabled_rc != 0 or enabled_output.strip() != "enabled"
+            or active_rc != 0 or active_output.strip() != "active"):
+        detail = (enabled_error or active_error or
+                  "SSH service readback mismatch")
+        return _disable_sshd_after_failure(runner, detail)
+    return True, ""
 
 
 def configure_updates(enabled, runner=run_command, apt_path=APT_AUTO_UPGRADES_PATH):
@@ -405,14 +465,39 @@ def mutate(kind, value, path=STATE_PATH, rules_path=RULES_PATH,
         old_updates_enabled = update_probes(runner, apt_path)["updates_enabled"]
     state[kind.replace("security-updates", "security_updates")] = desired
     candidate = None
+
+    # Prepare SSH before changing firewall state. A failed key generation or
+    # sshd validation must not briefly expose port 22.
+    ssh_prepared = False
+    if kind == "ssh" and desired:
+        ok, error = configure_sshd(True, runner=runner)
+        if not ok:
+            rollback_ok, rollback_error = True, ""
+            if old["ssh"]:
+                rollback_ok, rollback_error = configure_sshd(True, runner=runner)
+            message = error or "SSH preparation failed"
+            if not rollback_ok:
+                message += "; rollback failed: " + (rollback_error or "restore failed")
+            return {"ok": False, "error": message, "rolled_back": rollback_ok,
+                    "rollback_error": rollback_error}
+        ssh_prepared = True
+
     if kind != "security-updates":
         candidate = firewall_rules(state)
         result = apply_firewall_atomic(candidate, runner=runner)
         if not result["ok"]:
+            if ssh_prepared:
+                service_ok, service_error = configure_sshd(old["ssh"], runner=runner)
+                result["rolled_back"] = bool(result.get("rolled_back")) and service_ok
+                if not service_ok:
+                    result["error"] = "%s; SSH rollback failed: %s" % (
+                        result.get("error") or "firewall update failed",
+                        service_error or "restore failed")
             return result
-        nft_snapshot = result["snapshot"]
+        nft_snapshot = result.get("snapshot")
     if kind == "ssh":
-        ok, error = configure_sshd(desired, runner=runner)
+        ok, error = ((True, "") if ssh_prepared else
+                     configure_sshd(desired, runner=runner))
     elif kind == "security-updates":
         ok, error = configure_updates(desired, runner=runner, apt_path=apt_path)
     else:
