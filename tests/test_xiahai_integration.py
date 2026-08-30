@@ -59,6 +59,8 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn("chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming", installer)
         self.assertIn("chown root:root /opt/xiahai-xiaoming/chrome-sandbox", installer)
         self.assertIn("chmod 4755 /opt/xiahai-xiaoming/chrome-sandbox", installer)
+        self.assertIn("chrome_crashpad_handler", installer)
+        self.assertIn("chmod 0755 /opt/xiahai-xiaoming/chrome_crashpad_handler", installer)
 
     def test_xiahai_desktop_metadata_is_normalized_before_validation(self):
         installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
@@ -81,6 +83,11 @@ class XiahaiIntegrationContracts(unittest.TestCase):
     def test_launch_feedback_starts_opaque_for_xrender_compatibility(self):
         self.assertIn("window.set_opacity(1.0)", LAUNCH)
         self.assertNotIn("window.set_opacity(0.0 if animated else 1.0)", LAUNCH)
+
+    def test_xiahai_desktop_marks_brokered_non_desktop_entrypoints_without_recursing(self):
+        installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("X-Ming-Launch-Broker=true", installer)
+        self.assertIn("Exec=/opt/xiahai-xiaoming/xiahai-xiaoming", installer)
 
 
 if __name__ == "__main__":

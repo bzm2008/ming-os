@@ -17,7 +17,7 @@ DEFAULTS = {
     "version": 2,
     "theme": "system",
     "font_family": "Noto Sans CJK SC",
-    "font_size": 11,
+    "font_size": 14,
     "desktop_icon_scale": 1.0,
     "desktop_icon_size": 48,
     "dock_icon_size": 40,
@@ -482,8 +482,9 @@ def apply_runtime(config, reload_dock=False):
             raise OSError("%s readback did not match the requested value" % label)
 
     theme = config["theme"]
-    gtk_theme = "Ming-Dark" if theme == "dark" else "Ming-Glass"
+    gtk_theme = "Ming-Dark" if theme == "dark" else "Ming-Mint"
     xfconf_set("xsettings", "/Net/ThemeName", gtk_theme, "GTK theme")
+    xfconf_set("xsettings", "/Net/IconThemeName", "Ming-Mint", "GTK icon theme")
     xfconf_set("xfwm4", "/general/theme", gtk_theme, "window manager theme")
     xfconf_set(
         "xsettings", "/Gtk/FontName", "%s %s" % (config["font_family"], config["font_size"]),

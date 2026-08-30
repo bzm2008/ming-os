@@ -465,8 +465,8 @@ CANONICAL_PREFERENCE = {
 }
 
 CORE_GENERATED = {
-    "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-control-center", "Settings;System;"),
-    "ming-files.desktop": ("文件", "ming-files", "files-icon", "System;FileManager;"),
+    "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-settings", "Settings;System;"),
+    "ming-files.desktop": ("文件", "ming-files", "ming-files", "System;FileManager;"),
     "ming-terminal.desktop": ("Ming 终端", "ming-terminal", "ming-terminal", "System;TerminalEmulator;"),
     "ming-firefox.desktop": ("Firefox ESR", "ming-firefox", "firefox-esr", "Network;WebBrowser;"),
 }
@@ -1037,7 +1037,13 @@ def write_generated_core_launcher(basename):
     name, exec_cmd, icon, categories = data
     DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
     path = DESKTOP_DIR / basename
-    if not path.exists():
+    managed = False
+    if path.exists():
+        try:
+            managed = DESKTOP_MANAGED_MARKER in path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            managed = False
+    if not path.exists() or managed:
         path.write_text(
             "[Desktop Entry]\n"
             "Type=Application\n"
@@ -1070,7 +1076,9 @@ def add_app_from_path(apps_by_basename, path, default_only=False):
 
 
 def add_core_app(apps_by_basename, basename):
-    candidates = [DESKTOP_DIR / basename, Path("/usr/share/applications") / basename]
+    # The system desktop file is the canonical source. A managed desktop copy
+    # is refreshed from it; user-created launchers remain untouched.
+    candidates = [Path("/usr/share/applications") / basename, DESKTOP_DIR / basename]
     candidates.extend(Path("/usr/share/applications") / alt for alt in CORE_FALLBACKS.get(basename, []))
     for candidate in candidates:
         if add_app_from_path(apps_by_basename, candidate):

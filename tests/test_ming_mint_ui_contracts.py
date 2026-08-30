@@ -93,6 +93,19 @@ class MingMintThemeContracts(unittest.TestCase):
         ):
             self.assertIn(f"[{desktop_name}]={icon_name}", self.desktop)
 
+    def test_active_entries_never_reference_legacy_icon_names(self):
+        self.assertNotIn("Icon=files-icon", self.desktop)
+        self.assertNotIn("Icon=ming-control-center", self.desktop)
+        self.assertNotIn("Icon=ming-update-icon", self.desktop)
+        self.assertIn('"${user_home}/.config/ming-os"', self.desktop)
+
+    def test_login_enforcer_does_not_skip_ming_mint_readback_after_reapply(self):
+        enforcer = self.desktop.split(
+            "cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'", 1
+        )[1].split("APPLYAPPEARANCE", 1)[0]
+        self.assertNotIn("ming-appearance-control reapply --json \\\n        >>\"${appearance_log}\" 2>&1 || true\n    exit 0", enforcer)
+        self.assertIn('xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint"', enforcer)
+
 
 if __name__ == "__main__":
     unittest.main()

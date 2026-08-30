@@ -1889,14 +1889,17 @@ install_xiahai_xiaoming() {
         chown root:root /opt/xiahai-xiaoming/chrome-sandbox 2>/dev/null || return 1
         chmod 4755 /opt/xiahai-xiaoming/chrome-sandbox 2>/dev/null || return 1
     fi
+    if [[ -f /opt/xiahai-xiaoming/chrome_crashpad_handler ]]; then
+        chmod 0755 /opt/xiahai-xiaoming/chrome_crashpad_handler 2>/dev/null || return 1
+    fi
 
     local desktop="/usr/share/applications/xiahai-xiaoming.desktop"
     if [[ ! -x /opt/xiahai-xiaoming/xiahai-xiaoming || ! -s "${desktop}" ]]; then
         echo "[ERROR] Xiahai Xiaoming runtime or desktop entry is missing after installation" >&2
         return 1
     fi
-    grep -Fq 'Exec=/opt/xiahai-xiaoming/xiahai-xiaoming' "${desktop}" || {
-        echo "[ERROR] Xiahai Xiaoming desktop entry points to an unexpected executable" >&2
+    grep -Fq 'Exec=' "${desktop}" || {
+        echo "[ERROR] Xiahai Xiaoming desktop entry has no executable" >&2
         return 1
     }
     # Some approved Xiahai builds contain CRLF desktop metadata and multiple
@@ -1905,6 +1908,23 @@ install_xiahai_xiaoming() {
     sed -i 's/\r$//' "${desktop}"
     if grep -q '^Categories=' "${desktop}"; then
         sed -i 's/^Categories=.*/Categories=Office;/' "${desktop}"
+    fi
+    # System desktop activation goes through Gio, while Dock/drawer/settings
+    # explicitly invoke ming-launch. Keep the desktop Exec pointed at the
+    # verified binary to avoid a broker-to-itself recursion loop.
+    if grep -q '^Exec=' "${desktop}"; then
+        sed -i 's|^Exec=.*|Exec=/opt/xiahai-xiaoming/xiahai-xiaoming|' "${desktop}"
+    fi
+    if grep -q '^Icon=' "${desktop}"; then
+        sed -i 's/^Icon=.*/Icon=ming-xiahai/' "${desktop}"
+    else
+        sed -i '/^\[Desktop Entry\]/a Icon=ming-xiahai' "${desktop}"
+    fi
+    grep -Fq 'Exec=/opt/xiahai-xiaoming/xiahai-xiaoming' "${desktop}" || return 1
+    if grep -q '^X-Ming-Launch-Broker=' "${desktop}"; then
+        sed -i 's/^X-Ming-Launch-Broker=.*/X-Ming-Launch-Broker=true/' "${desktop}"
+    else
+        sed -i '/^\[Desktop Entry\]/a X-Ming-Launch-Broker=true' "${desktop}"
     fi
     desktop-file-validate "${desktop}" || return 1
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true

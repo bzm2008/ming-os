@@ -1100,7 +1100,7 @@ Name[zh_CN]=Ming 文件
 Comment=Browse files, disks and network locations
 Comment[zh_CN]=浏览文件、磁盘与网络位置
 Exec=/usr/local/bin/ming-files %U
-Icon=files-icon
+Icon=ming-files
 Terminal=false
 Categories=System;FileManager;
 MimeType=inode/directory;application/x-gnome-saved-search;
@@ -1683,10 +1683,10 @@ APPLIBICON
 
         # 资产名 -> 目标图标名（一对多用空格分隔）
         local -A png_map=(
-            [settings]="ming-settings ming-control-center"
+            [settings]="ming-settings"
             [files]="ming-files"
             [terminal]="ming-terminal"
-            [update]="ming-update-icon"
+            [update]="ming-update"
             [store]="ming-store"
             [app-library]="ming-app-library"
             [wechat-mgr]="ming-wechat-manager wechat"
@@ -1755,12 +1755,12 @@ TILESVG
     local -A sq_map=(
         [browser]="ming-browser"
         [files]="ming-files"
-        [control]="ming-control-center"
+        [control]="ming-control"
         [settings]="ming-settings"
         [security]="ming-security"
         [store]="ming-store"
         [terminal]="ming-terminal"
-        [update]="ming-update-icon"
+        [update]="ming-update"
     )
 
     for src_name in "${!sq_map[@]}"; do
@@ -1824,7 +1824,14 @@ configure_ming_mint_theme() {
     local user_home="/home/${MING_USER}"
     install -d -m 0755 "${theme_root}/gtk-3.0" "${theme_root}/gtk-4.0" \
         "${theme_root}/xfwm4" "${theme_root}/xfce-notify-4.0" \
-        "${user_home}/.config/gtk-3.0" "${user_home}/.config/gtk-4.0"
+        "${user_home}/.config/gtk-3.0" "${user_home}/.config/gtk-4.0" \
+        "${user_home}/.config/ming-os"
+
+    # Reuse mature Xfwm button assets so the Ming-Mint decoration always has
+    # visible close/minimize/maximize controls, even without a compositor.
+    if [[ -d /usr/share/themes/Arc-Darker/xfwm4 ]]; then
+        cp -a /usr/share/themes/Arc-Darker/xfwm4/. "${theme_root}/xfwm4/" 2>/dev/null || true
+    fi
 
     cat > "${theme_root}/gtk-3.0/gtk.css" << 'MINGMINTGTK3'
 /* Ming Mint: opaque, flat surfaces that remain readable without a compositor. */
@@ -1889,11 +1896,13 @@ MINGMINTGTK4
 MINGMINTNOTIFY
 
     cat > "${theme_root}/xfwm4/themerc" << 'MINGMINTXFW'
+# button_close/minimize/maximize assets are inherited from Arc-Darker/xfwm4.
 active_text_color=#21423D
 inactive_text_color=#58756D
 title_font=Noto Sans CJK SC Medium 14
 button_spacing=4
 title_alignment=left
+button_layout=O|HMC
 MINGMINTXFW
 
     cat > "${theme_root}/index.theme" << 'MINGMINTINDEX'
@@ -1968,6 +1977,7 @@ MINGMINTDOCK
 
 configure_ming_mint_desktop_icons() {
     local app_dir="/usr/share/applications"
+    local user_app_dir="/home/${MING_USER}/.local/share/applications"
     declare -A icons=(
         [ming-control-center.desktop]=ming-settings
         [ming-settings.desktop]=ming-settings
@@ -1988,7 +1998,16 @@ configure_ming_mint_desktop_icons() {
             sed -i "/^\[Desktop Entry\]/a Icon=${icon}" "${app_dir}/${desktop_file}"
         fi
     done
+    # Keep the user-level copies in lockstep with the canonical system entries
+    # so an upgraded installation cannot continue resolving legacy icons.
+    install -d -m 0755 "${user_app_dir}"
+    for desktop_file in "${!icons[@]}"; do
+        [[ -f "${app_dir}/${desktop_file}" ]] || continue
+        cp -f "${app_dir}/${desktop_file}" "${user_app_dir}/${desktop_file}"
+    done
+    chown -R "${MING_USER}:${MING_USER}" "${user_app_dir}" 2>/dev/null || true
     update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
+    update-desktop-database "${user_app_dir}" >/dev/null 2>&1 || true
 }
 
 # ======================== 主题与图标 ========================
@@ -2041,7 +2060,7 @@ MINGGTKCSS
 # Legacy Ming-Glass profiles are migrated; Ming-Mint is the active GTK3 theme.
 gtk-theme-name=Ming-Mint
 gtk-icon-theme-name=Ming-Mint
-gtk-font-name=Noto Sans CJK SC 11
+gtk-font-name=Noto Sans CJK SC 14
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-toolbar-style=GTK_TOOLBAR_ICONS
@@ -2058,7 +2077,7 @@ GTKSETTINGS
     cat > "/home/${MING_USER}/.gtkrc-2.0" << 'GTK2SETTINGS'
 gtk-theme-name="Ming-Mint"
 gtk-icon-theme-name="Ming-Mint"
-gtk-font-name="Noto Sans CJK SC 11"
+gtk-font-name="Noto Sans CJK SC 14"
 gtk-cursor-theme-name="Adwaita"
 gtk-cursor-theme-size=24
 gtk-toolbar-style=GTK_TOOLBAR_ICONS
@@ -2881,7 +2900,7 @@ ZoomEnabled=true
 #放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
 ZoomPercent=148
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
-HideMode=0
+HideMode=1
 #自动隐藏延迟
 UnhideDelay=0
 HideDelay=0
@@ -3044,9 +3063,9 @@ gi.require_version('Gdk', '3.0')
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 APPS = [
-    ('ming-settings.desktop', 'ming-control-center', 'Ming 设置'),
+    ('ming-settings.desktop', 'ming-settings', 'Ming 设置'),
     ('ming-app-library.desktop', 'ming-app-library', '应用库'),
-    ('ming-files.desktop', 'files-icon', '文件'),
+    ('ming-files.desktop', 'ming-files', '文件'),
     ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
     ('ming-store.desktop', 'ming-store', 'Ming 应用商店'),
     ('xiahai-xiaoming.desktop', 'xiahai-xiaoming', '小明 AI 助手'),
@@ -4021,7 +4040,7 @@ Offset=0
 IconSize=40
 ZoomEnabled=true
 ZoomPercent=148
-HideMode=0
+HideMode=1
 UnhideDelay=0
 HideDelay=0
 Theme=Ming
@@ -4078,7 +4097,7 @@ apply_plank_runtime_preferences() {
     icon_size="$(plank_setting_value "${settings}" IconSize 40)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
     zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
-    hide_mode="$(plank_setting_value "${settings}" HideMode 0)"
+    hide_mode="$(plank_setting_value "${settings}" HideMode 1)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
     local screen_width screen_height short_side
     read -r screen_width screen_height < <(xrandr --current 2>/dev/null |
@@ -4108,10 +4127,10 @@ apply_plank_runtime_preferences() {
                -e "s/^Theme=.*/Theme=${theme}/" "${settings}" 2>/dev/null || true
     fi
     case "${hide_mode}" in
-        0) hide_mode_runtime=none ;;
+        0) hide_mode_runtime=intelligent ;;
         1) hide_mode_runtime=intelligent ;;
         2) hide_mode_runtime=auto ;;
-        *) hide_mode_runtime=none ;;
+        *) hide_mode_runtime=intelligent ;;
     esac
     if command -v gsettings >/dev/null 2>&1; then
         gsettings set "${plank_schema}" theme "${theme:-Ming}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings theme"
@@ -4211,9 +4230,9 @@ ensure_plank_settings() {
     MING_PLANK_RELOAD_REQUIRED=0
     migrate_responsive_dock_profile "${settings}"
     if grep -q '^HideMode=' "${settings}"; then
-        sed -i 's/^HideMode=.*/HideMode=0/' "${settings}" 2>/dev/null || true
+        sed -i 's/^HideMode=.*/HideMode=1/' "${settings}" 2>/dev/null || true
     else
-        printf 'HideMode=0\n' >>"${settings}"
+        printf 'HideMode=1\n' >>"${settings}"
     fi
     if ${restored} && [[ -x /usr/local/sbin/ming-refresh-dock-launchers ]]; then
         /usr/local/sbin/ming-refresh-dock-launchers "$(id -un)" >>"${log_file}" 2>&1 || \
@@ -4541,6 +4560,7 @@ metrics_file="${log_dir}/session-startup.json"
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
 pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
 picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
+picom_cooldown_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-cooldown"
 drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
 dock_immersive_state=unknown
 dock_immersive_window_id=""
@@ -4767,7 +4787,7 @@ drawer_window_present() {
 }
 
 drawer_window_visible() {
-    local drawer_pid="" state_age=0 now=0 modified=0
+    local drawer_pid=""
     drawer_window_present && return 0
     [[ -r "${drawer_state_file}" ]] || return 1
     read -r drawer_pid <"${drawer_state_file}" || drawer_pid=""
@@ -4776,16 +4796,9 @@ drawer_window_visible() {
         rm -f "${drawer_state_file}" 2>/dev/null || true
         return 1
     fi
-    command -v wmctrl >/dev/null 2>&1 || return 0
-    now="$(date +%s 2>/dev/null || printf '0')"
-    modified="$(stat -c %Y "${drawer_state_file}" 2>/dev/null || printf '0')"
-    [[ "${now}" =~ ^[0-9]+$ && "${modified}" =~ ^[0-9]+$ ]] \
-        && state_age=$((now - modified))
-    if (( state_age <= 2 )); then
-        return 0
-    fi
-    rm -f "${drawer_state_file}" 2>/dev/null || true
-    return 1
+    # A live drawer process remains immersive even when wmctrl cannot expose
+    # its class during a transient remap. Do not expire state by wall-clock age.
+    return 0
 }
 
 immersive_surface_active() {
@@ -4815,25 +4828,35 @@ reserve_bottom_workarea() {
 }
 
 apply_dock_immersive_state() {
-    local desired=normal window_id
+    local desired=normal window_id state attempt
+    local same_window=false
     immersive_surface_active && desired=immersive
     window_id="$(dock_window_id 2>/dev/null || true)"
     valid_window_id "${window_id}" || return 0
-    if [[ "${desired}" == normal \
-       && "${desired}" == "${dock_immersive_state}" \
-       && "${window_id}" == "${dock_immersive_window_id}" ]]; then
-        return 0
-    fi
+    [[ "${window_id}" == "${dock_immersive_window_id}" ]] && same_window=true
     if [[ "${desired}" == immersive ]]; then
-        if [[ "${desired}" != "${dock_immersive_state}" \
-           || "${window_id}" != "${dock_immersive_window_id}" ]]; then
+        # Remove ABOVE first; Plank may recreate it after a remap. Reapply on
+        # every coordinator tick and only record success after readback.
+        x11_call wmctrl -i -r "${window_id}" -b remove,above,sticky >/dev/null 2>&1 || true
+        for attempt in 1 2 3; do
             x11_call wmctrl -i -r "${window_id}" -b add,hidden,below >/dev/null 2>&1 || true
-            log 'Dock lowered below fullscreen or application drawer'
+            state="$(x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null || true)"
+            if [[ "${state}" == *'_NET_WM_STATE_HIDDEN'* || "${state}" == *'_NET_WM_STATE_BELOW'* ]]; then
+                log 'Dock lowered below fullscreen or application drawer (readback ok)'
+                break
+            fi
+            sleep 0.05
+        done
+        if [[ "${state}" != *'_NET_WM_STATE_HIDDEN'* && "${state}" != *'_NET_WM_STATE_BELOW'* ]] \
+           && command -v xdotool >/dev/null 2>&1; then
+            x11_call xdotool windowunmap "${window_id}" >/dev/null 2>&1 || true
+            log 'Dock state readback failed; unmapped Dock as bounded fallback'
         fi
         x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT >/dev/null 2>&1 || true
         x11_call xprop -id "${window_id}" -remove _NET_WM_STRUT_PARTIAL >/dev/null 2>&1 || true
-    else
+    elif [[ "${desired}" == normal ]]; then
         x11_call wmctrl -i -r "${window_id}" -b remove,hidden,below >/dev/null 2>&1 || true
+        command -v xdotool >/dev/null 2>&1 && x11_call xdotool windowmap "${window_id}" >/dev/null 2>&1 || true
         x11_call wmctrl -i -r "${window_id}" -b add,sticky >/dev/null 2>&1 || true
         reserve_bottom_workarea
         log 'Dock restored after fullscreen or application drawer'
@@ -4949,6 +4972,15 @@ PY
 
 picom_disabled() {
     picom_policy_disabled || picom_user_disabled
+}
+
+picom_in_cooldown() {
+    local failed_at now
+    [[ -r "${picom_cooldown_file}" ]] || return 1
+    read -r failed_at <"${picom_cooldown_file}" || return 1
+    now="$(date +%s 2>/dev/null || printf '0')"
+    [[ "${failed_at}" =~ ^[0-9]+$ && "${now}" =~ ^[0-9]+$ ]] || return 1
+    (( now - failed_at < 60 ))
 }
 
 wait_for_picom_exit() {
@@ -5077,6 +5109,11 @@ start_xrender_picom() {
 
 start_picom() {
     local started_at finished_at deadline_at
+    if picom_in_cooldown; then
+        log 'Picom startup is cooling down after a recent failure'
+        picom_recovered=false
+        return 1
+    fi
     stop_duplicate_picom || return 1
     if picom_disabled; then
         if ! stop_picom_and_wait; then
@@ -5118,6 +5155,7 @@ start_picom() {
         picom_recovered=true
         return 0
     fi
+    printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" >"${picom_cooldown_file}" 2>/dev/null || true
     finished_at="$(now_ms)"
     picom_elapsed_ms=$((finished_at - started_at))
     picom_recovered=false
@@ -5355,9 +5393,9 @@ exec /usr/local/bin/ming-app-drawer --toggle "$@"
 MINGAPPLIBPRESEED
     chmod 0755 /usr/local/bin/ming-app-library
 
-    cat > /usr/local/bin/ming-terminal << 'MINGTERM'
+cat > /usr/local/bin/ming-terminal << 'MINGTERM'
 #!/usr/bin/env bash
-exec xfce4-terminal --hide-menubar --title="Ming Terminal" "$@"
+exec xfce4-terminal --hide-menubar --class=MingTerminal --title="Ming Terminal" "$@"
 MINGTERM
     chmod +x /usr/local/bin/ming-terminal
 
@@ -6192,16 +6230,16 @@ MINGHELPER
 
     cat > "/home/${MING_USER}/.config/xfce4/terminal/terminalrc" << 'TERMINALRC'
 [Configuration]
-    FontName=Noto Sans Mono 11
-MiscAlwaysShowTabs=FALSE
+    FontName=Noto Sans Mono 13
+MiscAlwaysShowTabs=TRUE
 MiscBell=FALSE
 MiscBordersDefault=TRUE
 MiscCursorBlinks=FALSE
 MiscCursorShape=TERMINAL_CURSOR_SHAPE_BLOCK
 MiscDefaultGeometry=92x26
 MiscMenubarDefault=FALSE
-MiscToolbarDefault=FALSE
-MiscConfirmClose=FALSE
+MiscToolbarDefault=TRUE
+MiscConfirmClose=TRUE
 ColorForeground=#D4F7F1
 ColorBackground=#1D2421
 ColorCursor=#9FE7D7
@@ -6223,7 +6261,7 @@ import subprocess
 import sys
 
 TASKS = [
-    ('检查系统更新', 'ming-update-icon', '下载并安装新版本 Ming OS', 'ming-helper update'),
+     ('检查系统更新', 'ming-update', '下载并安装新版本 Ming OS', 'ming-helper update'),
     ('修复界面显示', 'ming-display', '重新整理壁纸、缩放和 Dock', 'ming-helper repair-display'),
     ('连接网络', 'network-wireless', '打开无线和有线网络设置', 'nm-connection-editor'),
     ('安装微信', 'wechat', '下载腾讯官方 Linux 版微信', 'ming-helper install-wechat'),
@@ -6238,8 +6276,8 @@ TASKS = [
     ('声音和音量', 'multimedia-volume-control', '调节扬声器、麦克风和输出设备', 'pavucontrol'),
     ('电源和电池', 'battery', '调节亮度、合盖和省电', 'xfce4-power-manager-settings'),
     ('外观主题', 'preferences-desktop-theme', '更换主题、字体和图标', 'xfce4-appearance-settings'),
-    ('文件', 'files-icon', '打开文件和下载目录', 'ming-files'),
-    ('小明 AI 助手', 'xiahai-xiaoming', '打开小明 AI 助手', '/opt/xiahai-xiaoming/xiahai-xiaoming'),
+     ('文件', 'ming-files', '打开文件和下载目录', 'ming-files'),
+     ('小明 AI 助手', 'ming-xiahai', '打开小明 AI 助手', 'ming-launch --desktop-file /usr/share/applications/xiahai-xiaoming.desktop --source settings'),
     ('高级设置', 'ming-settings', '窗口、Dock、动画和通知', 'ming-settings --page advanced'),
 ]
 
@@ -6382,7 +6420,7 @@ Name=Ming 设置
 Name[zh_CN]=Ming 设置
 Comment=Ming OS control center
 Exec=/usr/local/bin/ming-control-center
-Icon=ming-control-center
+Icon=ming-settings
 Terminal=false
 Type=Application
 Categories=Settings;System;
@@ -6395,7 +6433,7 @@ Name=Ming 文件
 Name[zh_CN]=Ming 文件
 Comment=Browse files in Ming OS
 Exec=/usr/local/bin/ming-files
-Icon=files-icon
+Icon=ming-files
 Terminal=false
 Type=Application
 Categories=System;FileManager;
@@ -6409,6 +6447,7 @@ Name[zh_CN]=Ming 终端
 Comment=Ming OS terminal
 Exec=/usr/local/bin/ming-terminal
 Icon=ming-terminal
+StartupWMClass=MingTerminal
 Terminal=false
 Type=Application
 Categories=System;TerminalEmulator;
@@ -6422,7 +6461,7 @@ Name[zh_CN]=Ming 状态中心
 Comment=Network, sound, power, time, and session actions
 Comment[zh_CN]=网络、声音、电源、时间和退出
 Exec=/usr/local/bin/ming-status-center
-Icon=ming-control-center
+Icon=ming-settings
 Terminal=false
 Type=Application
 Categories=Settings;System;Utility;
@@ -9480,7 +9519,6 @@ mkdir -p "$(dirname "${appearance_log}")" 2>/dev/null || true
 if command -v ming-appearance-control >/dev/null 2>&1; then
     timeout --foreground 8s ming-appearance-control reapply --json \
         >>"${appearance_log}" 2>&1 || true
-    exit 0
 fi
 WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
 WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
@@ -9542,10 +9580,6 @@ else
 fi
 
 # 强制主题/图标主题（防止首次会话回退到默认）
-# Legacy Ming-Glass is a compatibility alias only; do not write it at login.
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus" 2>/dev/null || true
-# Ming Mint is the final active selection; the legacy values above remain only
-# as compatibility markers for older user profiles and release tooling.
 xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/theme -s "Ming-Mint" 2>/dev/null || true

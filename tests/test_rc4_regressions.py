@@ -305,6 +305,22 @@ class DiagnosticsAndRc4Contracts(unittest.TestCase):
         self.assertIn("dpkg-deb --info", BUILD)
         self.assertIn("sha256", BUILD.lower())
 
+    def test_terminal_profile_has_a_closeable_ming_window(self):
+        terminal = DESKTOP.split("cat > /usr/local/bin/ming-terminal << 'MINGTERM'", 1)[1].split(
+            "MINGTERM", 1
+        )[0]
+        profile = DESKTOP.split(
+            'cat > "/home/${MING_USER}/.config/xfce4/terminal/terminalrc" << \'TERMINALRC\'', 1
+        )[1].split("TERMINALRC", 1)[0]
+        desktop = DESKTOP.split("cat > /usr/share/applications/ming-terminal.desktop << 'TERMAPP'", 1)[1].split(
+            "TERMAPP", 1
+        )[0]
+        self.assertIn("--class=MingTerminal", terminal)
+        self.assertIn("MiscConfirmClose=TRUE", profile)
+        self.assertIn("MiscAlwaysShowTabs=TRUE", profile)
+        self.assertIn("StartupWMClass=MingTerminal", desktop)
+        self.assertIn("button_close", DESKTOP)
+
 
 if __name__ == "__main__":
     unittest.main()

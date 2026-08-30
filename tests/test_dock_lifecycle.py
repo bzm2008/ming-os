@@ -39,7 +39,7 @@ class DockLifecycleContracts(unittest.TestCase):
         )[1].split("OOBEACCOUNT", 1)[0]
 
     def test_plank_never_auto_hides(self):
-        self.assertIn("HideMode=0", self.plank_settings)
+        self.assertIn("HideMode=1", self.plank_settings)
         self.assertIn('ensure_plank_settings', self.watchdog)
         self.assertIn('^HideMode=', self.watchdog)
 
@@ -428,6 +428,21 @@ class DockLifecycleContracts(unittest.TestCase):
             "sleep 10",
         ):
             self.assertIn(marker, self.session_healthcheck)
+
+    def test_dock_immersive_state_is_read_back_and_repaired_each_tick(self):
+        self.assertIn("HideMode=1", self.plank_settings)
+        immersive = self.source.split("apply_dock_immersive_state() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("remove,above", immersive)
+        self.assertIn("_NET_WM_STATE", immersive)
+        self.assertIn("windowunmap", immersive)
+        self.assertIn("readback", immersive.lower())
+
+    def test_drawer_window_has_stable_wm_class_and_live_state(self):
+        drawer_path = ROOT / "assets" / "ming-app-drawer.py"
+        drawer = drawer_path.read_text(encoding="utf-8")
+        self.assertIn("set_wmclass", drawer)
+        self.assertIn("MingAppDrawer", drawer)
+        self.assertNotIn("state_age <= 2", self.source)
 
         self.assertIn(
             "Exec=/usr/local/bin/ming-session-healthcheck --session",

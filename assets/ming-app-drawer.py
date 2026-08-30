@@ -547,6 +547,12 @@ class DrawerController:
             self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
         window.set_name("ming-app-drawer")
+        # Stable X11 identity lets the session coordinator keep the Dock
+        # immersive while the drawer remains open.
+        try:
+            window.set_wmclass("ming-app-drawer", "MingAppDrawer")
+        except AttributeError:
+            pass
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         root.get_style_context().add_class("drawer-root")
         window.add(root)

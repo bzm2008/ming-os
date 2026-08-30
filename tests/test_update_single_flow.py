@@ -290,7 +290,7 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn('exec /usr/local/bin/ming-settings "$@"', wrapper_writer)
         self.assertNotIn("TASKS = [", wrapper_writer)
         self.assertIn("TASKS = [", legacy_writer)
-        self.assertIn("('检查系统更新', 'ming-update-icon'", legacy_writer)
+        self.assertIn("('检查系统更新', 'ming-update'", legacy_writer)
 
     def test_boot_check_reads_the_same_root_cache_used_by_the_cli(self):
         boot = self.ota[self.ota.index("cat > /usr/local/bin/ming-boot-update-check") :]
