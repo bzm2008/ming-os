@@ -64,6 +64,31 @@ REQUIRED_DESKTOP_FILES = (
     "usr/share/xsessions/xfce.desktop",
     "home/user/.config/autostart/ming-session-healthcheck.desktop",
 )
+LOCAL_USER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+REQUIRED_PROFILE_FILES = {
+    ".config/autostart/ming-session-healthcheck.desktop": (
+        "/usr/local/bin/ming-session-healthcheck --session",
+        "X-GNOME-Autostart-enabled=true",
+    ),
+    ".config/autostart/ming-apply-appearance.desktop": (
+        "/usr/local/bin/ming-apply-appearance",
+        "X-GNOME-Autostart-enabled=true",
+    ),
+    ".config/plank/dock1/settings": (
+        "DockItems=",
+        "Theme=Ming",
+    ),
+}
+# ``ming-phone-desktop.desktop`` remains a compatibility entry, while
+# ``ming-session-healthcheck.desktop`` is the single installed coordinator.
+COMPAT_PROFILE_ENTRY = ".config/autostart/ming-phone-desktop.desktop"
+REQUIRED_CANONICAL_DESKTOPS = (
+    "ming-settings.desktop",
+    "ming-files.desktop",
+    "ming-terminal.desktop",
+    "ming-store.desktop",
+    "ming-toolbox.desktop",
+)
 INSTALL_MODE_SCHEMA = "ming-install-mode/v1"
 INSTALL_MODE_POLICIES = {
     "blank_ab": "ab_slot",
@@ -590,6 +615,12 @@ def validate_target_boundary(root: Path | str) -> Path:
     for relative in TARGET_BOUNDARY_DIRECTORIES:
         _validate_target_boundary_entry(root_path, relative, expect_directory=True)
     for relative in TARGET_BOUNDARY_FILES:
+        # The installed account is selected by Calamares and may not be named
+        # ``user``.  The legacy path remains in the boundary contract for
+        # existing images, while the actual account profile is validated by
+        # _validate_installed_profile below.
+        if relative.startswith("home/user/") and not (root_path / "home/user").exists():
+            continue
         _validate_target_boundary_entry(root_path, relative, expect_directory=False)
     return root_path
 
@@ -624,11 +655,137 @@ def _sudoers_allows_sudo_group(root_path: Path) -> bool:
     return False
 
 
-def _validate_installed_admin(root_path: Path, errors: list[str]) -> None:
+def _local_user_records(root_path: Path) -> list[tuple[str, int, str]]:
+    records: list[tuple[str, int, str]] = []
+    for line in _read_text(root_path / "etc/passwd").splitlines():
+        fields = line.split(":")
+        if len(fields) < 7 or not LOCAL_USER_PATTERN.fullmatch(fields[0]):
+            continue
+        try:
+            uid = int(fields[2])
+        except ValueError:
+            continue
+        if uid < 1000 or uid >= 60000 or fields[0] in {"nobody"} or fields[0].startswith("systemd-"):
+            continue
+        home = fields[5]
+        if not home.startswith("/home/") or "/../" in home or "/./" in home or home.endswith("/"):
+            continue
+        records.append((fields[0], uid, home))
+    return records
+
+
+def _configured_lightdm_user(root_path: Path) -> str:
+    candidates = [root_path / "etc/lightdm/lightdm.conf"]
+    candidates.extend(sorted((root_path / "etc/lightdm/lightdm.conf.d").glob("*.conf")))
+    for config in candidates:
+        try:
+            if config.is_symlink() or not config.is_file():
+                continue
+            text = config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"^\s*autologin-user\s*=\s*([^\s#]+)", text, flags=re.MULTILINE)
+        if match and LOCAL_USER_PATTERN.fullmatch(match.group(1)):
+            return match.group(1)
+    return ""
+
+
+def _discover_primary_user(root_path: Path) -> tuple[str, str] | None:
+    records = _local_user_records(root_path)
+    if not records:
+        return None
+    by_name = {name: (name, home) for name, _uid, home in records}
+    configured = _configured_lightdm_user(root_path)
+    if configured in by_name:
+        return by_name[configured]
+    uid_1000 = [record for record in records if record[1] == 1000]
+    if len(uid_1000) == 1:
+        name, _uid, home = uid_1000[0]
+        return name, home
+    if len(records) == 1:
+        name, _uid, home = records[0]
+        return name, home
+    return None
+
+
+def _safe_profile_path(root_path: Path, home: str, relative: str) -> Path | None:
+    if not home.startswith("/home/") or "/../" in home or "/./" in home:
+        return None
+    relative_parts = [part for part in relative.split("/") if part]
+    if any(part in {".", ".."} for part in relative_parts):
+        return None
+    path = root_path / home.lstrip("/")
+    try:
+        home_metadata = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(home_metadata.st_mode) or not stat.S_ISDIR(home_metadata.st_mode):
+        return None
+    current = path
+    for part in relative_parts:
+        current = current / part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            return current
+        except OSError:
+            return None
+        if stat.S_ISLNK(metadata.st_mode):
+            return None
+    return current
+
+
+def _validate_installed_profile(
+    root_path: Path,
+    primary_user: str,
+    primary_home: str,
+    errors: list[str],
+) -> None:
+    """Require the profile that keeps the installed desktop alive after reboot."""
+    home_path = _safe_profile_path(root_path, primary_home, "")
+    if home_path is None or not home_path.is_dir():
+        errors.append(f"Installed primary user home is missing or unsafe: {primary_home}")
+        return
+    for relative, markers in REQUIRED_PROFILE_FILES.items():
+        path = _safe_profile_path(root_path, primary_home, relative)
+        if path is None:
+            errors.append(f"Installed {primary_user} desktop profile path is unsafe: {relative}")
+            continue
+        if not path.is_file():
+            errors.append(f"Installed {primary_user} desktop profile is missing: {relative}")
+            continue
+        text = _read_text(path)
+        for marker in markers:
+            if marker not in text:
+                errors.append(f"Installed {primary_user} desktop profile missing {marker}: {relative}")
+    theme_marker = _safe_profile_path(root_path, primary_home, ".config/ming-os/ming-mint-theme")
+    theme_config = _safe_profile_path(
+        root_path,
+        primary_home,
+        ".config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml",
+    )
+    theme_text = _read_text(theme_marker) if theme_marker and theme_marker.is_file() else ""
+    if theme_config and theme_config.is_file():
+        theme_text += "\n" + _read_text(theme_config)
+    if "Ming-Mint" not in theme_text:
+        errors.append(f"Installed {primary_user} profile does not select Ming-Mint")
+    for launcher in REQUIRED_CANONICAL_DESKTOPS:
+        path = root_path / "usr/share/applications" / launcher
+        if path.is_symlink() or not path.is_file():
+            errors.append(f"Installed canonical Ming desktop entry is missing: {launcher}")
+
+
+def _validate_installed_admin(root_path: Path, errors: list[str]) -> tuple[str, str]:
     """The installed desktop must remain maintainable after the ISO is removed."""
-    if not _passwd_has_user(root_path, "user"):
-        errors.append("Installed primary user account is missing")
-    if "user" not in _group_members(root_path, "sudo"):
+    primary = _discover_primary_user(root_path)
+    if primary is None:
+        errors.append("Installed primary user account is missing or ambiguous")
+        primary_user, primary_home = "", ""
+    else:
+        primary_user, primary_home = primary
+    if not primary_user:
+        primary_user = "user"
+    if primary_user not in _group_members(root_path, "sudo"):
         errors.append("Installed primary user must belong to sudo group")
     if not _sudoers_allows_sudo_group(root_path):
         errors.append("Installed sudoers does not authorize the sudo group")
@@ -636,6 +793,7 @@ def _validate_installed_admin(root_path: Path, errors: list[str]) -> None:
         path = root_path / relative
         if not path.is_file() or not os.access(path, os.X_OK):
             errors.append(f"Installed administrator executable is missing: {relative}")
+    return primary_user, (primary[1] if primary is not None else "")
 
 
 def _read_regular_at(directory_fd: int, name: str, relative: str) -> str:
@@ -1260,6 +1418,7 @@ def verify_installed(
     root_source: str | None = None,
     firmware_efi: bool | None = None,
     storage_info_provider: Callable[[str], Mapping[str, Any]] | None = None,
+    require_desktop_profile: bool | None = None,
 ) -> dict[str, Any]:
     requested_target = str(root or "")
     if root is None:
@@ -1456,9 +1615,20 @@ def verify_installed(
         if not path.is_file() or not os.access(path, os.X_OK):
             errors.append(f"Installed desktop executable is missing: {relative}")
     for relative in REQUIRED_DESKTOP_FILES:
+        if relative.startswith("home/user/"):
+            # The user-specific healthcheck is validated against the account
+            # discovered from the installed passwd/LightDM configuration.
+            continue
         if not (root_path / relative).is_file():
             errors.append(f"Installed desktop file is missing: {relative}")
-    _validate_installed_admin(root_path, errors)
+    primary_user, primary_home = _validate_installed_admin(root_path, errors)
+    if require_desktop_profile is None:
+        # Early receipt and final-boot checks can run before a user profile is
+        # materialized in test or recovery targets. The Calamares installed
+        # gate opts in explicitly once profile migration has completed.
+        require_desktop_profile = False
+    if require_desktop_profile and primary_user and primary_home:
+        _validate_installed_profile(root_path, primary_user, primary_home, errors)
     autologin = _read_text(root_path / "etc/lightdm/lightdm.conf.d/60-ming-autologin.conf")
     if "autologin-session=xfce" not in autologin:
         errors.append("Installed LightDM configuration does not select the Xfce session")
@@ -1471,6 +1641,11 @@ def verify_installed(
         major_ota=major_ota,
         default_target="graphical" if "graphical.target" in default_target else "non-graphical",
         display_manager="lightdm" if "lightdm.service" in display_manager else "missing",
+        primary_user=primary_user,
+        primary_home=primary_home,
+        desktop_profile="ready" if require_desktop_profile and not errors else (
+            "not_checked" if not require_desktop_profile else "incomplete"
+        ),
         desktop_session="ready" if not errors else "incomplete",
     )
 
@@ -1479,6 +1654,7 @@ def verify_installed_from_receipt(
     receipt_path: Path | str = TARGET_RECEIPT_PATH,
     *,
     final_boot: bool = False,
+    require_desktop_profile: bool = False,
     attempt_path: Path | str | None = None,
     mount_info_provider: Callable[[Path], Mapping[str, Any]] | None = None,
     firmware_efi: bool | None = None,
@@ -1502,6 +1678,7 @@ def verify_installed_from_receipt(
         root_source=receipt["canonical_source"],
         firmware_efi=firmware_efi,
         storage_info_provider=storage_info_provider,
+        require_desktop_profile=require_desktop_profile,
     )
 
 
@@ -1517,6 +1694,7 @@ def main(argv: list[str] | None = None) -> int:
     installed.add_argument("--receipt", action="store_true")
     installed.add_argument("--receipt-path", default=str(TARGET_RECEIPT_PATH))
     installed.add_argument("--final-boot", action="store_true")
+    installed.add_argument("--require-desktop-profile", action="store_true")
     receipt = commands.add_parser("receipt")
     receipt.add_argument("--path", default=str(TARGET_RECEIPT_PATH))
     receipt.add_argument("--begin-attempt", action="store_true")
@@ -1573,6 +1751,7 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_installed_from_receipt(
                 args.receipt_path,
                 final_boot=args.final_boot,
+                require_desktop_profile=args.require_desktop_profile,
             )
         except TargetReceiptError as exc:
             result = _result(
@@ -1588,6 +1767,7 @@ def main(argv: list[str] | None = None) -> int:
         result = verify_installed(
             args.root or args.target,
             final_boot=args.final_boot,
+            require_desktop_profile=args.require_desktop_profile,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["ok"] else 1

@@ -326,8 +326,18 @@ install_base_packages() {
         return 1
     fi
 
+    # appstream installs APT's DEP-11 index target.  The source configuration
+    # was refreshed before appstream existed, so refresh once more now; without
+    # this read-back the image would ship only the curated handful of entries.
+    if ! apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
+        -o Acquire::https::Timeout=15 >/var/log/ming-appstream-apt-update.log 2>&1; then
+        echo "[ERROR] AppStream 索引更新失败，无法建立完整软件目录。" >&2
+        return 1
+    fi
+
     # Build the local AppStream index when the package is available.  The store
-    # can still use its curated fallback if a mirror has no metadata.
+    # can still use its curated fallback for development images, but release
+    # validation requires real DEP-11 metadata in the rootfs.
     if command -v appstreamcli >/dev/null 2>&1; then
         appstreamcli refresh-cache --force >/var/log/ming-appstream-refresh.log 2>&1 \
             || appstreamcli refresh --force >>/var/log/ming-appstream-refresh.log 2>&1 \
@@ -2905,12 +2915,26 @@ passwd_record_for_user() {
 }
 
 resolve_primary_user() {
-    local candidates count resolved
+    local candidates count resolved preferred conf
     candidates="$(chroot "${target}" getent passwd 2>/dev/null \
         | awk -F: '$1 ~ /^[a-z_][a-z0-9_-]{0,31}$/ && $1 != "nobody" && $1 !~ /^systemd-/ && $3 >= 1000 && $3 < 60000 {print $3 ":" $1}' \
         | sort -t: -k1,1n || true)"
     count="$(printf '%s\n' "${candidates}" | awk 'NF {count++} END {print count+0}')"
     if [[ "${count}" -gt 0 ]]; then
+        # Calamares may preserve an existing account and create a second
+        # local account.  Prefer the account LightDM is configured to start;
+        # only reject ambiguity when no authoritative preference exists.
+        preferred=""
+        for conf in "${target}"/etc/lightdm/lightdm.conf "${target}"/etc/lightdm/lightdm.conf.d/*.conf; do
+            [[ -f "${conf}" && ! -L "${conf}" ]] || continue
+            preferred="$(awk -F= '/^[[:space:]]*autologin-user[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "${conf}" 2>/dev/null || true)"
+            [[ -n "${preferred}" ]] || continue
+            if printf '%s\n' "${candidates}" | awk -F: -v wanted="${preferred}" '$2 == wanted {found=1} END {exit found ? 0 : 1}'; then
+                printf '%s\n' "${preferred}"
+                return 0
+            fi
+            preferred=""
+        done
         resolved="$(printf '%s\n' "${candidates}" | awk -F: 'NF {print $2; exit}')"
         if [[ "${count}" -gt 1 ]]; then
             echo "ERROR: multiple local primary users found; refusing to guess an administrator" >&2
@@ -2950,6 +2974,10 @@ ensure_ming_user() {
     )
     local grp
 
+    profile_path_is_safe "${target}${user_home}" || {
+        echo "ERROR: resolved primary user home is unsafe: ${user_home}" >&2
+        return 1
+    }
     mkdir -p "${target}/etc/sudoers.d" "${target}/etc/lightdm/lightdm.conf.d" "${target}${user_home}"
 
     for grp in "${groups[@]}"; do
@@ -2981,9 +3009,264 @@ ensure_ming_user() {
         return 1
     fi
 
-    chroot "${target}" chown "${user_name}:${user_name}" "${user_home}" >/dev/null 2>&1 || true
+    chroot "${target}" chown --no-dereference "${user_name}:${user_name}" "${user_home}" >/dev/null 2>&1 || true
     MING_PRIMARY_USER="${user_name}"
     MING_PRIMARY_HOME="${user_home}"
+}
+
+# Installed users are created by Calamares and need not use the Live account
+# name.  Migrate only the Ming-owned desktop profile into the resolved home.
+# Every path is checked with lstat/readlink before it is opened; unmanaged
+# files and symlinks are never followed or overwritten.
+profile_path_is_safe() {
+    local candidate="$1" root="${target%/}" current root_current root_component component relative index last_index
+    local -a _profile_root_components _profile_components
+    [[ -d "${root}" && ! -L "${root}" ]] || return 1
+    # Verify every existing component beneath the build root before using a
+    # candidate path.  Checking only the final directory would allow a
+    # symlinked parent to redirect profile writes outside the target tree.
+    root_current=""
+    IFS='/' read -r -a _profile_root_components <<< "${root#/}"
+    for root_component in "${_profile_root_components[@]}"; do
+        [[ -n "${root_component}" && "${root_component}" != "." && "${root_component}" != ".." ]] || return 1
+        root_current="${root_current}/${root_component}"
+        [[ ! -L "${root_current}" ]] || return 1
+        if [[ -e "${root_current}" && ! -d "${root_current}" ]]; then
+            return 1
+        fi
+    done
+    [[ -d "${root}" && ! -L "${root}" ]] || return 1
+    case "${candidate}" in
+        "${root}"/*) ;;
+        *) return 1 ;;
+    esac
+    relative="${candidate#"${root}"/}"
+    current="${root}"
+    IFS='/' read -r -a _profile_components <<< "${relative}"
+    last_index=$((${#_profile_components[@]} - 1))
+    for index in "${!_profile_components[@]}"; do
+        component="${_profile_components[index]}"
+        [[ -n "${component}" && "${component}" != "." && "${component}" != ".." ]] || return 1
+        current="${current}/${component}"
+        [[ ! -L "${current}" ]] || return 1
+        if [[ "${index}" -lt "${last_index}" && -e "${current}" && ! -d "${current}" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+profile_source_is_safe() {
+    local source="$1" current component
+    local -a _source_components
+    [[ "${source}" == /* && -d "${source}" && ! -L "${source}" ]] || return 1
+    current=""
+    IFS='/' read -r -a _source_components <<< "${source#/}"
+    for component in "${_source_components[@]}"; do
+        [[ -n "${component}" && "${component}" != "." && "${component}" != ".." ]] || return 1
+        current="${current}/${component}"
+        [[ ! -L "${current}" ]] || return 1
+    done
+    return 0
+}
+
+profile_source_path_is_safe() {
+    local source="$1" current component
+    local -a _source_components
+    [[ "${source}" == /* ]] || return 1
+    current=""
+    IFS='/' read -r -a _source_components <<< "${source#/}"
+    for component in "${_source_components[@]}"; do
+        [[ -n "${component}" && "${component}" != "." && "${component}" != ".." ]] || return 1
+        current="${current}/${component}"
+        [[ ! -L "${current}" ]] || return 1
+        # A missing tail is fine because the caller performs the final
+        # regular-file check, but an existing non-directory parent is unsafe.
+        if [[ "${current}" != "${source}" && -e "${current}" && ! -d "${current}" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+is_managed_profile_file() {
+    local path="$1"
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    grep -Eiq \
+        '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$|^[[:space:]]*X-Ming-Managed-(By|Components|Profile)[[:space:]]*=' \
+        "${path}"
+}
+
+profile_manifest_has() {
+    local manifest="$1" relative="$2"
+    [[ -f "${manifest}" && ! -L "${manifest}" ]] || return 1
+    grep -Fxq -- "${relative}" "${manifest}" 2>/dev/null
+}
+
+record_profile_manifest() {
+    local manifest="$1" relative="$2" parent temporary
+    parent="$(dirname -- "${manifest}")"
+    profile_path_is_safe "${manifest}" || return 1
+    [[ ! -L "${parent}" ]] || return 1
+    mkdir -p "${parent}" || return 1
+    profile_path_is_safe "${manifest}" || return 1
+    if profile_manifest_has "${manifest}" "${relative}"; then
+        return 0
+    fi
+    if [[ -e "${manifest}" && ! -f "${manifest}" ]]; then
+        return 1
+    fi
+    temporary="$(mktemp "${manifest}.tmp.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${temporary}" && -f "${temporary}" && ! -L "${temporary}" ]] || return 1
+    if [[ -f "${manifest}" ]]; then
+        cp --no-dereference -- "${manifest}" "${temporary}" || {
+            rm -f -- "${temporary}"
+            return 1
+        }
+    else
+        : > "${temporary}" || { rm -f -- "${temporary}"; return 1; }
+    fi
+    printf '%s\n' "${relative}" >> "${temporary}" || { rm -f -- "${temporary}"; return 1; }
+    chmod 0644 "${temporary}" 2>/dev/null || true
+    if [[ -L "${manifest}" ]]; then
+        rm -f -- "${temporary}"
+        return 1
+    fi
+    mv -f -- "${temporary}" "${manifest}" || { rm -f -- "${temporary}"; return 1; }
+    return 0
+}
+
+copy_profile_file() {
+    local source="$1" relative="$2" force="${3:-false}" destination="${MING_PRIMARY_HOME}/${2}" manifest destination_parent
+    profile_source_path_is_safe "${source}" || return 1
+    [[ -f "${source}" && ! -L "${source}" ]] || return 0
+    destination="${target}${MING_PRIMARY_HOME}/${relative}"
+    manifest="${target}${MING_PRIMARY_HOME}/.config/ming-os/profile-managed.list"
+    destination_parent="$(dirname -- "${destination}")"
+    # A leaf symlink is user-owned state: preserve it without following it.
+    # Parent symlinks are rejected by the full component walk below.
+    profile_path_is_safe "${destination_parent}" || {
+        echo "ERROR: refusing unsafe installed profile parent: ${relative}" >&2
+        return 1
+    }
+    if [[ -L "${destination}" ]]; then
+        echo "[ming-profile] preserving symlink target: ${relative}" >&2
+        return 0
+    fi
+    profile_path_is_safe "${destination}" || {
+        echo "ERROR: refusing unsafe installed profile path: ${relative}" >&2
+        return 1
+    }
+    profile_path_is_safe "${manifest}" || {
+        echo "ERROR: refusing unsafe installed profile manifest" >&2
+        return 1
+    }
+    if [[ "${force}" != true && -e "${destination}" ]] \
+       && ! is_managed_profile_file "${destination}" \
+       && ! profile_manifest_has "${manifest}" "${relative}"; then
+        return 0
+    fi
+    mkdir -p "${destination_parent}" || return 1
+    profile_path_is_safe "${destination}" || return 1
+    local temporary="$(mktemp "${destination}.tmp.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${temporary}" && -f "${temporary}" && ! -L "${temporary}" ]] || return 1
+    install -m 0644 "${source}" "${temporary}" || { rm -f -- "${temporary}"; return 1; }
+    profile_path_is_safe "${destination}" || { rm -f -- "${temporary}"; return 1; }
+    [[ ! -L "${destination}" ]] || { rm -f -- "${temporary}"; return 1; }
+    mv -f -- "${temporary}" "${destination}" || { rm -f -- "${temporary}"; return 1; }
+    chroot "${target}" chown --no-dereference "${MING_PRIMARY_USER}:${MING_PRIMARY_USER}" "${MING_PRIMARY_HOME}/${relative}" >/dev/null 2>&1 || true
+    record_profile_manifest "${manifest}" "${relative}" || return 1
+    return 0
+}
+
+copy_managed_profile_directory() {
+    local source_root="$1" relative_root="$2" source_dir="${source_root}/${relative_root}" entry relative
+    profile_source_is_safe "${source_dir}" || return 0
+    while IFS= read -r -d '' entry; do
+        [[ -f "${entry}" && ! -L "${entry}" ]] || continue
+        is_managed_profile_file "${entry}" || continue
+        relative="${entry#"${source_root}"/}"
+        copy_profile_file "${entry}" "${relative}" || return 1
+    done < <(find -P "${source_dir}" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+}
+
+migrate_installed_ming_profile() {
+    local source_root relative source candidate launcher
+    local profile_sources=(
+        "/etc/skel"
+        "${target}/etc/skel"
+    )
+    local profile_files=(
+        # Canonical skeleton entries: /etc/skel/.config/autostart/ming-phone-desktop.desktop,
+        # /etc/skel/.config/autostart/ming-apply-appearance.desktop and the
+        # /etc/skel/.config/plank/dock1/settings; the session health
+        # coordinator is copied by relative path below.
+        ".config/autostart/ming-session-healthcheck.desktop"
+        ".config/autostart/ming-apply-appearance.desktop"
+        ".config/autostart/ming-desktop-sync-once.desktop"
+        ".config/autostart/ming-desktop-organizer.desktop"
+        ".config/autostart/ming-phone-desktop.desktop"
+        ".config/autostart/ming-dock.desktop"
+        ".config/autostart/ming-window-manager.desktop"
+        ".config/plank/dock1/settings"
+        ".config/gtk-3.0/settings.ini"
+        ".config/gtk-4.0/settings.ini"
+        ".config/ming-os/ming-mint-theme"
+        ".config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+        ".config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+        ".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
+        ".gtkrc-2.0"
+    )
+    echo "[ming-profile] migrating managed desktop profile for ${MING_PRIMARY_USER}:${MING_PRIMARY_HOME}"
+    [[ ! -L "${target}${MING_PRIMARY_HOME}" && ! -L "${target}/home" ]] || {
+        echo "ERROR: installed user home is a symbolic link; refusing profile migration" >&2
+        return 1
+    }
+    profile_path_is_safe "${target}${MING_PRIMARY_HOME}" || return 1
+    mkdir -p "${target}${MING_PRIMARY_HOME}" || return 1
+    for relative in "${profile_files[@]}"; do
+        for source_root in "${profile_sources[@]}"; do
+            source="${source_root}/${relative}"
+            [[ -f "${source}" && ! -L "${source}" ]] || continue
+            # These paths are part of the Ming session contract.  A previous
+            # RC3 image may have left an unmarked copy, so the canonical
+            # profile must win while unrelated user files remain untouched.
+            copy_profile_file "${source}" "${relative}" true || return 1
+            break
+        done
+    done
+    # Canonical system entries are copied only when present and never treated
+    # as arbitrary user-provided desktop files.
+    for launcher in \
+        ming-settings.desktop ming-files.desktop ming-terminal.desktop \
+        ming-status-center.desktop ming-app-library.desktop ming-store.desktop \
+        ming-toolbox.desktop ming-firefox.desktop xiahai-xiaoming.desktop; do
+        for profile_source in "${target}/usr/share/applications/${launcher}" "/usr/share/applications/${launcher}"; do
+            [[ -f "${profile_source}" && ! -L "${profile_source}" ]] || continue
+            copy_profile_file "${profile_source}" ".local/share/applications/${launcher}" true || return 1
+            break
+        done
+    done
+    for source_root in "${profile_sources[@]}"; do
+        copy_managed_profile_directory "${source_root}" "Desktop" || return 1
+        copy_managed_profile_directory "${source_root}" "桌面" || return 1
+        copy_managed_profile_directory "${source_root}" ".config/autostart" || return 1
+    done
+    local dock_dir="${target}${MING_PRIMARY_HOME}/.config/plank/dock1/launchers"
+    profile_path_is_safe "${dock_dir}" || return 1
+    [[ ! -L "${dock_dir}" ]] || return 1
+    mkdir -p "${dock_dir}" || return 1
+    profile_path_is_safe "${dock_dir}" || return 1
+    for source_root in "${profile_sources[@]}"; do
+        local source_dock="${source_root}/.config/plank/dock1/launchers"
+        profile_source_is_safe "${source_dock}" || continue
+        while IFS= read -r -d '' source; do
+            [[ -f "${source}" && ! -L "${source}" ]] || continue
+            relative="${source#"${source_root}"/}"
+            copy_profile_file "${source}" "${relative}" || return 1
+        done < <(find -P "${source_dock}" -maxdepth 1 -type f -name '*.dockitem' -print0 2>/dev/null)
+    done
+    return 0
 }
 
 ensure_kernel_boot_links() {
@@ -3181,6 +3464,7 @@ TARGETKEYBOARD
 
 restore_ota_home || exit $?
 ensure_ming_user || exit 30
+migrate_installed_ming_profile || exit 30
 ensure_kernel_boot_links
 
 kernel="$(find "${target}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"
@@ -3871,7 +4155,7 @@ if [ -x "${root}/usr/bin/grub-script-check" ]; then
 elif command -v grub-script-check >/dev/null 2>&1; then
     grub-script-check "${root}/boot/grub/grub.cfg" || exit 22
 fi
-final_install_result="$(/usr/local/sbin/ming-installer-verify installed --receipt --final-boot)" || {
+final_install_result="$(/usr/local/sbin/ming-installer-verify installed --receipt --final-boot --require-desktop-profile)" || {
     printf '%s\n' "${final_install_result}" >&2
     echo "ERROR: unified final installed-system verification failed"
     exit 22
@@ -4203,7 +4487,7 @@ TARGETRECEIPTRESETCONF
 dontChroot: true
 timeout: 30
 script:
-  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+  - "/usr/local/sbin/ming-installer-verify installed --receipt --require-desktop-profile"
 INSTALLEDDESKTOPGATECONF
 
     cat > /etc/calamares/modules/ming-ota-preflight.conf << PREFLIGHTCONF

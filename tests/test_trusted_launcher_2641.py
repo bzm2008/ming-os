@@ -126,6 +126,32 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         self.assertEqual("argv", request.mode)
         self.assertEqual("/bin/echo", request.argv[0])
 
+    def test_user_xiahai_entry_redirects_to_the_canonical_system_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            user_dir = root / "user-apps"
+            system_dir = root / "system-apps"
+            user_dir.mkdir()
+            system_dir.mkdir()
+            user_entry = user_dir / "xiahai-xiaoming.desktop"
+            system_entry = system_dir / "xiahai-xiaoming.desktop"
+            # A stale user copy is deliberately non-launchable.  Its contents
+            # must never override the package-owned canonical entry.
+            user_entry.write_text(
+                "[Desktop Entry]\nType=Application\nHidden=true\n",
+                encoding="utf-8")
+            system_entry.write_text(
+                "[Desktop Entry]\nType=Application\nName=Xiahai Xiaoming\n"
+                "Exec=/opt/xiahai/xiahai-xiaoming\n",
+                encoding="utf-8")
+
+            request = self.launch.request_from_desktop_file(
+                user_entry, allowed_dirs=[user_dir, system_dir], system_dir=system_dir)
+
+        self.assertEqual("desktop_app_info", request.mode)
+        self.assertEqual((), request.argv)
+        self.assertEqual(str(system_entry), request.desktop_file)
+
     def test_image_owned_system_launchers_have_read_only_receipts(self):
         module = (ROOT / "modules" / "07_finalize.sh").read_text(encoding="utf-8")
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")

@@ -57,7 +57,7 @@ CANONICAL_LAUNCHERS = {
     "papyrus.desktop": "agent",
 }
 CANONICAL_PREFERENCE = {
-    "settings": "ming-control-center.desktop",
+    "settings": "ming-settings.desktop",
     "files": "ming-files.desktop",
     "terminal": "ming-terminal.desktop",
     "browser": "ming-firefox.desktop",

@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "modules" / "03_desktop.sh"
 DRAWER = ROOT / "assets" / "ming-app-drawer.py"
+SETTINGS_HUB = ROOT / "modules" / "08_settings_hub.sh"
 ICON_ROOT = ROOT / "assets" / "icons" / "ming-mint"
 
 
@@ -93,11 +94,40 @@ class MingMintThemeContracts(unittest.TestCase):
         ):
             self.assertIn(f"[{desktop_name}]={icon_name}", self.desktop)
 
+    def test_settings_hub_does_not_reintroduce_legacy_settings_icon(self):
+        """The later settings module must preserve the canonical Mint icon."""
+        settings_hub = SETTINGS_HUB.read_text(encoding="utf-8")
+        self.assertIn("Icon=ming-settings", settings_hub)
+        self.assertNotIn("Icon=ming-control-center", settings_hub)
+
+    def test_drawer_prefers_the_canonical_ming_settings_desktop_id(self):
+        drawer = self.drawer
+        self.assertIn('"settings": "ming-settings.desktop"', drawer)
+        self.assertNotIn('"settings": "ming-control-center.desktop"', drawer)
+
+    def test_settings_hub_user_launcher_copy_is_symlink_safe_and_atomic(self):
+        settings_hub = SETTINGS_HUB.read_text(encoding="utf-8")
+        self.assertIn('if [[ -L "${user_app_dir}" ]]', settings_hub)
+        self.assertIn('[[ -d "${user_app_dir}" && ! -L "${user_app_dir}" ]]', settings_hub)
+        self.assertIn('mktemp "${user_target}.tmp.XXXXXX"', settings_hub)
+        self.assertIn('mv -f -- "${temporary}" "${user_target}"', settings_hub)
+        self.assertIn('chown --no-dereference', settings_hub)
+
     def test_active_entries_never_reference_legacy_icon_names(self):
         self.assertNotIn("Icon=files-icon", self.desktop)
         self.assertNotIn("Icon=ming-control-center", self.desktop)
         self.assertNotIn("Icon=ming-update-icon", self.desktop)
         self.assertIn('"${user_home}/.config/ming-os"', self.desktop)
+
+    def test_user_icon_migration_rejects_symlinked_destination_and_uses_atomic_copy(self):
+        helper = self.desktop.split(
+            "configure_ming_mint_desktop_icons() {", 1
+        )[1].split("\n}\n\n# ======================== 主题与图标", 1)[0]
+        self.assertIn('[[ -f "${app_dir}/${desktop_file}" && ! -L "${app_dir}/${desktop_file}" ]]', helper)
+        self.assertIn('[[ ! -L "${user_app_dir}" ]]', helper)
+        self.assertIn('[[ ! -L "${user_target}" ]]', helper)
+        self.assertIn('mktemp "${user_target}.tmp.XXXXXX"', helper)
+        self.assertIn('mv -f -- "${temporary}" "${user_target}"', helper)
 
     def test_login_enforcer_does_not_skip_ming_mint_readback_after_reapply(self):
         enforcer = self.desktop.split(
@@ -105,6 +135,32 @@ class MingMintThemeContracts(unittest.TestCase):
         )[1].split("APPLYAPPEARANCE", 1)[0]
         self.assertNotIn("ming-appearance-control reapply --json \\\n        >>\"${appearance_log}\" 2>&1 || true\n    exit 0", enforcer)
         self.assertIn('xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint"', enforcer)
+
+    def test_login_enforcer_preserves_a_user_selected_dark_theme(self):
+        """A successful reapply must not be overwritten by the login fallback."""
+        enforcer = self.desktop.split(
+            "cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'", 1
+        )[1].split("APPLYAPPEARANCE", 1)[0]
+        self.assertIn("appearance_reapply_ok=false", enforcer)
+        self.assertIn("if timeout --foreground 8s ming-appearance-control reapply --json", enforcer)
+        self.assertIn("appearance_reapply_ok=true", enforcer)
+        self.assertIn('fallback_theme="Ming-Dark"', enforcer)
+        self.assertIn('if [[ "${appearance_reapply_ok}" != "true" ]]; then', enforcer)
+        fallback = enforcer.split('if [[ "${appearance_reapply_ok}" != "true" ]]; then', 1)[1].split(
+            "fi", 1
+        )[0]
+        self.assertIn('xfconf-query -c xsettings -p /Net/ThemeName -s "${fallback_theme}"', fallback)
+        self.assertIn('xfconf-query -c xfwm4 -p /general/theme -s "${fallback_theme}"', fallback)
+        self.assertNotIn('xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true', fallback)
+
+    def test_default_login_and_light_notifications_use_ming_mint(self):
+        apps = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+        appearance = (ROOT / "assets" / "ming-appearance-control.py").read_text(encoding="utf-8")
+        self.assertIn("theme-name = Ming-Mint", apps)
+        notification = appearance.split("def sync_notification_theme", 1)[1].split(
+            "def sync_dock_runtime", 1
+        )[0]
+        self.assertIn('else "Ming-Mint"', notification)
 
 
 if __name__ == "__main__":

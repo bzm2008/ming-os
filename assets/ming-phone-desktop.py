@@ -464,6 +464,47 @@ CANONICAL_PREFERENCE = {
     "agent": "xiahai-xiaoming.desktop",
 }
 
+# Xfce remains the implementation layer, but its individual utility windows
+# should not leak into the Ming desktop catalog.  The three launchers below are
+# retained only as graceful fallbacks when a minimal image lacks the canonical
+# Ming entry; normal images deduplicate them in favor of the Ming launcher.
+VISIBLE_XFCE_FALLBACKS = frozenset({
+    "xfce4-settings-manager.desktop",
+    "xfce4-terminal.desktop",
+    "thunar.desktop",
+})
+LEGACY_XFCE_LAUNCHERS = frozenset({
+    "xfce4-appfinder.desktop",
+    "xfce4-taskmanager.desktop",
+    "xfce4-power-manager-settings.desktop",
+    "xfce4-power-manager.desktop",
+    "xfce4-about.desktop",
+    "xfce4-mouse-settings.desktop",
+    "xfce4-keyboard-settings.desktop",
+    "xfce4-display-settings.desktop",
+    "xfce4-appearance-settings.desktop",
+    "xfce4-settings-editor.desktop",
+    "xfce4-notifyd-config.desktop",
+    "xfce4-screensaver-preferences.desktop",
+    "xfce4-session-logout.desktop",
+    "xfce4-run.desktop",
+    "xfdesktop-settings.desktop",
+    "xfce4-mime-settings.desktop",
+    "exo-preferred-applications.desktop",
+})
+LEGACY_XFCE_PREFIXES = ("xfdesktop", "xfwm", "exo-")
+
+
+def is_legacy_xfce_entry(path):
+    """Return whether a launcher is an Xfce utility hidden by Ming UI."""
+    basename = Path(path).name.casefold()
+    if basename in {item.casefold() for item in VISIBLE_XFCE_FALLBACKS}:
+        return False
+    return basename in {item.casefold() for item in LEGACY_XFCE_LAUNCHERS} or (
+        basename.startswith(("xfce4-", "xfce-", *LEGACY_XFCE_PREFIXES))
+        and basename.endswith(".desktop")
+    )
+
 CORE_GENERATED = {
     "ming-settings.desktop": ("Ming 设置", "ming-control-center", "ming-settings", "Settings;System;"),
     "ming-files.desktop": ("文件", "ming-files", "ming-files", "System;FileManager;"),
@@ -506,6 +547,11 @@ CLOCK_MARGIN_X = 26
 # layouts; the desktop coordinator owns the remaining vertical spacing.
 CLOCK_MARGIN_Y = 8
 STATUS_WIDGET_EXPANDED_HEIGHT = 220
+# Keep the expanded surface independent from the capsule allocation.  The
+# popup is deliberately bounded so a long status string cannot move the
+# desktop overlays or make the capsule grow between refreshes.
+STATUS_WIDGET_EXPANDED_WIDTH = 330
+STATUS_WIDGET_EXPANDED_PANEL_HEIGHT = STATUS_WIDGET_EXPANDED_HEIGHT
 STATUS_WIDGET_TOP_GAP_MAX = 8
 
 
@@ -1277,6 +1323,8 @@ def load_apps(default_only=False):
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.desktop")):
+            if is_legacy_xfce_entry(path):
+                continue
             add_app_from_path(apps_by_basename, path, default_only=default_only)
     apps = deduplicate_apps(list(apps_by_basename.values()))
     apps.sort(key=lambda item: (DESKTOP_ORDER.get(item["basename"], 999), item["name"].lower()))
@@ -1708,6 +1756,8 @@ def sync_layout(width=1366):
                 folder = dict(item)
                 children = []
                 for child_path in item.get("children", []):
+                    if is_legacy_xfce_entry(child_path):
+                        continue
                     canonical_child = canonicalize_core_layout_item(
                         {"type": "app", "path": child_path}, canonical_core_apps, core_seen)
                     if canonical_child is None:
@@ -1720,6 +1770,8 @@ def sync_layout(width=1366):
                 items.append(folder)
                 known.update(layout_item_identity({"path": child}) for child in children)
         elif item.get("path"):
+            if is_legacy_xfce_entry(item.get("path")):
+                continue
             item = canonicalize_core_layout_item(item, canonical_core_apps, core_seen)
             if item is None:
                 continue
@@ -2611,6 +2663,12 @@ class StatusWidget(Gtk.Box):
         self._height_animation = None
         self._height_animation_source = 0
         self._collapse_hide_source = 0
+        self._expanded_window_realized = False
+        self._expanded_geometry = None
+        self._context_menu = None
+        self._context_menu_item = None
+        self.last_context_result = None
+        self._last_context_event = None
         self._display_height = (
             STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
             else STATUS_WIDGET_EXPANDED_HEIGHT)
@@ -2625,7 +2683,19 @@ class StatusWidget(Gtk.Box):
 
         self.compact_button = Gtk.Button()
         self.compact_button.get_style_context().add_class("status-compact-pill")
+        # The capsule is a stable hit target.  Expanded controls are rendered
+        # in a separate popup and must never participate in this allocation.
+        self.compact_button.set_hexpand(False)
+        self.compact_button.set_vexpand(False)
+        self.compact_button.set_halign(Gtk.Align.END)
+        self.compact_button.set_valign(Gtk.Align.START)
+        self.compact_button.set_size_request(
+            STATUS_WIDGET_COMPACT_WIDTH, STATUS_WIDGET_COMPACT_HEIGHT)
         compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        compact.set_hexpand(False)
+        compact.set_vexpand(False)
+        compact.set_size_request(
+            STATUS_WIDGET_COMPACT_WIDTH - 24, STATUS_WIDGET_COMPACT_HEIGHT - 2)
         self.compact_time_label = Gtk.Label()
         self.compact_time_label.get_style_context().add_class("status-compact-time")
         compact.pack_start(self.compact_time_label, False, False, 0)
@@ -2714,7 +2784,10 @@ class StatusWidget(Gtk.Box):
         self.collapse_button.add(collapse_content)
         self.collapse_button.set_tooltip_text("收起状态控制")
         self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
-        header.pack_start(self.collapse_button, False, False, 0)
+        # The collapse control is attached to ``expanded_header`` below.  Do
+        # not parent it to the unused legacy header first: GTK widgets may
+        # only have one parent, and the old double-parenting caused the button
+        # to disappear from the popup on some GTK versions.
 
         actions = Gtk.Grid()
         actions.set_column_spacing(6)
@@ -2805,11 +2878,24 @@ class StatusWidget(Gtk.Box):
         expanded.set_valign(Gtk.Align.START)
         expanded.set_vexpand(False)
         expanded.set_margin_top(0)
-        expanded.pack_start(header, False, False, 0)
+        # Do not reuse ``header`` here.  It belongs to the legacy in-card
+        # clock representation and contains the same time/date fields as the
+        # compact capsule.  Reusing it made the expanded popup show a second
+        # clock row and a second collapse affordance.  The popup has one small
+        # title row instead.
         expanded_title = Gtk.Label(label="快速控制 · 资源状态")
         expanded_title.set_halign(Gtk.Align.START)
         expanded_title.get_style_context().add_class("status-expanded-title")
-        expanded.pack_start(expanded_title, False, False, 0)
+        expanded_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        expanded_header.set_halign(Gtk.Align.FILL)
+        expanded_header.set_hexpand(True)
+        expanded_header.set_size_request(-1, 30)
+        expanded_header.pack_start(expanded_title, True, True, 0)
+        # ``collapse_button`` is owned by the popup only; the capsule keeps its
+        # own single logo/arrow button.  This avoids duplicate controls when
+        # Gtk.show_all() is called during a desktop refresh.
+        expanded_header.pack_end(self.collapse_button, False, False, 0)
+        expanded.pack_start(expanded_header, False, False, 0)
         expanded.pack_start(actions, False, False, 0)
         expanded.pack_start(resource_grid, False, False, 0)
         expanded.pack_start(controls, False, False, 0)
@@ -2823,7 +2909,10 @@ class StatusWidget(Gtk.Box):
         expanded_panel.get_style_context().add_class("status-expanded-panel")
         expanded_panel.set_valign(Gtk.Align.START)
         expanded_panel.set_vexpand(False)
+        expanded_panel.set_size_request(
+            STATUS_WIDGET_EXPANDED_WIDTH, STATUS_WIDGET_EXPANDED_PANEL_HEIGHT)
         expanded_panel.add(self.content_revealer)
+        self.expanded_panel = expanded_panel
         self.expanded_window = Gtk.Window(type=Gtk.WindowType.POPUP)
         # Gtk.WindowTypeHint.POPUP_MENU is exposed through Gdk in GTK 3.
         self.expanded_window.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
@@ -2837,6 +2926,7 @@ class StatusWidget(Gtk.Box):
         self.expanded_window.set_skip_taskbar_hint(True)
         self.expanded_window.set_skip_pager_hint(True)
         self.expanded_window.set_position(Gtk.WindowPosition.NONE)
+        self.expanded_window.connect("realize", self._on_expanded_window_realize)
         self.expanded_window.add(expanded_panel)
         box.pack_start(self.compact_button, False, False, 0)
         # The expanded controls live in expanded_window, so this box keeps a
@@ -2960,16 +3050,27 @@ class StatusWidget(Gtk.Box):
                 "height": STATUS_WIDGET_COMPACT_HEIGHT,
             }
             geometry = status_widget_overlay_geometry(
-                pill, {"width": 330, "height": STATUS_WIDGET_EXPANDED_HEIGHT}, screen_size)
+                pill, {"width": STATUS_WIDGET_EXPANDED_WIDTH,
+                       "height": STATUS_WIDGET_EXPANDED_PANEL_HEIGHT}, screen_size)
             if self.expanded_window.get_transient_for() is not desktop:
                 self.expanded_window.set_transient_for(desktop)
+            self._expanded_geometry = geometry
             self.expanded_window.set_default_size(
                 geometry["panel"]["width"], geometry["panel"]["height"])
+            if self.expanded_window.get_realized():
+                self.expanded_window.resize(
+                    geometry["panel"]["width"], geometry["panel"]["height"])
             self.expanded_window.move(geometry["panel"]["x"], geometry["panel"]["y"])
             return True
         except Exception as exc:
             log("could not position status widget popup: %s" % exc)
             return False
+
+    def _on_expanded_window_realize(self, *_args):
+        """Reapply clamped root coordinates after GTK assigns popup geometry."""
+        self._expanded_window_realized = True
+        GLib.idle_add(self.position_expanded_window)
+        return False
 
     def on_resource_clicked(self, _button):
         current = normalize_metric_mode(self.metric_mode)
@@ -3899,6 +4000,8 @@ class PhoneDesktop(Gtk.Window):
         self.drag_positions = {}
         self.layer_enforcement_pending = False
         self._last_status_toggle_at = 0.0
+        self._context_menu = None
+        self.last_context_result = None
         self.status = StatusWidget()
         self.launch_feedback = LaunchFeedbackOverlay()
         self.launch_feedback.set_sensitive(False)
@@ -4357,8 +4460,49 @@ class PhoneDesktop(Gtk.Window):
             return True
         return False
 
+    def _desktop_action_result(self, action, callback):
+        """Run one desktop action and return a user-visible result record."""
+        try:
+            value = callback()
+            return {
+                "ok": True,
+                "action": str(action),
+                "path": str(value) if value is not None else "",
+                "message": "操作已完成。",
+            }
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            result = {
+                "ok": False,
+                "action": str(action),
+                "path": "",
+                "message": "%s失败：%s" % (action, exc),
+            }
+            log("desktop action failed: %s" % json.dumps(result, ensure_ascii=False))
+            return result
+
+    def _show_context_error(self, result):
+        self.last_context_result = result
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text="桌面操作未完成",
+        )
+        dialog.format_secondary_text(str(result.get("message") or "请稍后重试。"))
+        dialog.run()
+        dialog.destroy()
+        return False
+
+    def _on_context_menu_deactivate(self, menu):
+        if self._context_menu is menu:
+            self._context_menu = None
+        return False
+
     def show_desktop_context_menu(self, event):
         menu = Gtk.Menu()
+        self._context_menu = menu
+        menu.connect("deactivate", self._on_context_menu_deactivate)
         # The canonical action is ``ming-app-drawer --toggle``; keep argv
         # structured so paths and arguments are never shell-interpreted.
         actions = (
@@ -4378,18 +4522,20 @@ class PhoneDesktop(Gtk.Window):
         menu.popup_at_pointer(event)
 
     def _create_blank_desktop_file(self):
-        try:
-            create_blank_desktop_file()
-        except (OSError, ValueError) as exc:
-            log(f"could not create desktop file: {exc}")
-        self.refresh_desktop()
+        result = self._desktop_action_result("新建空白文件", create_blank_desktop_file)
+        if result["ok"]:
+            self.refresh_desktop()
+        else:
+            self._show_context_error(result)
+        return result
 
     def _create_desktop_folder(self):
-        try:
-            create_desktop_folder()
-        except (OSError, ValueError) as exc:
-            log(f"could not create desktop folder: {exc}")
-        self.refresh_desktop()
+        result = self._desktop_action_result("新建文件夹", create_desktop_folder)
+        if result["ok"]:
+            self.refresh_desktop()
+        else:
+            self._show_context_error(result)
+        return result
 
     def refresh_desktop(self):
         updated = sync_layout(self.get_screen().get_width())
@@ -4660,6 +4806,8 @@ class PhoneDesktop(Gtk.Window):
 
     def show_context_menu(self, item, event):
         menu = Gtk.Menu()
+        self._context_menu = menu
+        menu.connect("deactivate", self._on_context_menu_deactivate)
         open_item = Gtk.MenuItem(label="打开")
         open_item.connect("activate", lambda _i: self.open_item(item))
         menu.append(open_item)

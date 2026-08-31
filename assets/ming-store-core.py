@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import datetime
 import email.utils
 import gzip
@@ -98,6 +98,16 @@ ROOTFS_APPSTREAM_PATTERNS = (
     "usr/share/ming-os/appstream/*.yml.gz",
     "usr/share/ming-os/appstream/*.yaml.gz",
 )
+# Release validation deliberately reads only the DEP-11 copies produced by the
+# build.  Human-authored metainfo XML remains useful to the local/UI parser but
+# is not evidence that a package came from the signed Debian archive.
+ROOTFS_TRUSTED_APPSTREAM_PATTERNS = (
+    "var/cache/swcatalog/yaml/*.yml",
+    "var/cache/swcatalog/yaml/*.yaml",
+    "var/cache/swcatalog/yaml/*.yml.gz",
+    "var/cache/swcatalog/yaml/*.yaml.gz",
+)
+ROOTFS_APPSTREAM_PACKAGE_INDEX = "var/lib/ming-os/appstream-apt-packages.txt"
 MIN_ROOTFS_APPSTREAM_APPS = 1000
 SPARK_SOURCE_ID = "spark-public"
 SPARK_BASE_URL = "https://cdn.d.store.deepinos.org.cn"
@@ -112,6 +122,11 @@ SPARK_ALLOWED_HOSTS = frozenset({
 })
 SPARK_DEFAULT_CACHE_TTL = 30 * 24 * 60 * 60
 SPARK_CATEGORY_WORKERS = 4
+# Keep the first paint of the store bounded when a mirror, DNS resolver or
+# captive portal never completes.  These values are deliberately injectable
+# in tests and can be tuned by a future policy without changing the UI.
+SPARK_FETCH_TIMEOUT = 8.0
+SPARK_REFRESH_TIMEOUT = 20.0
 
 
 class StoreError(RuntimeError):
@@ -147,10 +162,16 @@ class IntegrityError(StoreError):
 
 
 def _default_runner(command, timeout=15):
-    completed = subprocess.run(
-        list(command), capture_output=True, text=True, timeout=timeout,
-        check=False, shell=False,
-    )
+    try:
+        completed = subprocess.run(
+            list(command), capture_output=True, text=True, timeout=timeout,
+            check=False, shell=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A minimal Live/development environment may not ship dpkg, apt or
+        # PackageKit. Missing optional system tools are a readable status,
+        # not an exception that tears down the whole store page.
+        return 127, "", str(exc)
     return completed.returncode, completed.stdout, completed.stderr
 
 
@@ -424,15 +445,101 @@ def scan_appstream_rootfs(root, paths=None):
     }
 
 
-def validate_appstream_rootfs(root, minimum=MIN_ROOTFS_APPSTREAM_APPS, inventory=None):
-    """Enforce the release inventory contract for a target rootfs."""
+def _trusted_appstream_inventory(root):
+    """Scan only build-copied, regular DEP-11 files under the target rootfs."""
+    root = pathlib.Path(root)
+    candidates = []
+    for pattern in ROOTFS_TRUSTED_APPSTREAM_PATTERNS:
+        candidates.extend(sorted(root.glob(pattern)))
+    paths = _rootfs_appstream_paths(
+        root,
+        paths=candidates,
+    )
+    items_by_package = {}
+    metadata_bytes = 0
+    for path in paths:
+        try:
+            metadata_bytes += path.stat().st_size
+        except OSError:
+            continue
+        for item in parse_dep11_yaml(_read_appstream_document(path)):
+            items_by_package.setdefault(item["package_name"], item)
+    return {
+        "count": len(items_by_package),
+        "items": list(items_by_package.values()),
+        "paths": [str(path) for path in paths],
+        "metadata_bytes": metadata_bytes,
+    }
+
+
+def _read_rootfs_package_index(root, relative_path=ROOTFS_APPSTREAM_PACKAGE_INDEX):
+    """Read the build-generated package identity index without following links."""
+    root = pathlib.Path(root)
+    path = root / relative_path
+    try:
+        info = path.lstat()
+    except OSError:
+        return set()
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        return set()
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        payload = path.read_text(encoding="ascii")
+    except (OSError, UnicodeError, ValueError):
+        return set()
+
+    packages = set()
+    for line in payload.splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        if value.lower().startswith("package:"):
+            value = value.split(":", 1)[1].strip()
+        value = value.strip().strip("\"'").lower()
+        if SAFE_PACKAGE.fullmatch(value):
+            packages.add(value)
+    return packages
+
+
+def validate_appstream_rootfs(
+    root,
+    minimum=MIN_ROOTFS_APPSTREAM_APPS,
+    inventory=None,
+    strict=False,
+    require_package_index=True,
+):
+    """Enforce the AppStream inventory contract for a target rootfs.
+
+    ``strict=True`` is the release path.  It ignores caller-supplied inventory
+    data and intersects copied DEP-11 records with the build-generated APT
+    package identity index, so arbitrary metainfo XML cannot inflate the count.
+    The non-strict path retains the historical UI/local parsing behavior.
+    """
     try:
         minimum = int(minimum)
     except (TypeError, ValueError) as error:
         raise InvalidCatalog("AppStream 最低应用数量无效。") from error
     if minimum < 1:
         raise InvalidCatalog("AppStream 最低应用数量必须为正数。")
-    inventory = inventory or scan_appstream_rootfs(root)
+
+    if strict:
+        trusted_inventory = _trusted_appstream_inventory(root)
+        package_index = _read_rootfs_package_index(root)
+        if require_package_index and not package_index:
+            raise InvalidCatalog(
+                "构建 rootfs 缺少可信的 AppStream APT 包索引。"
+            )
+        if require_package_index:
+            trusted_inventory["items"] = [
+                item for item in trusted_inventory["items"]
+                if item.get("package_name") in package_index
+            ]
+            trusted_inventory["count"] = len(trusted_inventory["items"])
+        inventory = trusted_inventory
+    else:
+        inventory = inventory or scan_appstream_rootfs(root)
+
     paths = inventory.get("paths")
     count = inventory.get("count")
     if not paths:
@@ -890,7 +997,9 @@ class SparkPublicProvider(Provider):
     def __init__(self, cache_root=None, categories=None, fetcher=None,
                  release_verifier=None, keyring_path=None, base_url=None,
                  cache_ttl=SPARK_DEFAULT_CACHE_TTL, clock=None, max_response_bytes=32 * 1024 * 1024,
-                 config_path=None, max_fetch_attempts=3):
+                 config_path=None, max_fetch_attempts=3,
+                 fetch_timeout=SPARK_FETCH_TIMEOUT,
+                 refresh_timeout=SPARK_REFRESH_TIMEOUT):
         self.cache_root = pathlib.Path(cache_root or (
             pathlib.Path.home() / ".cache" / "ming-os" / "store" / SPARK_SOURCE_ID
         ))
@@ -906,6 +1015,14 @@ class SparkPublicProvider(Provider):
         self.clock = clock or time.time
         self.max_response_bytes = max(1024, int(max_response_bytes))
         self.max_fetch_attempts = max(1, min(int(max_fetch_attempts), 3))
+        try:
+            self.fetch_timeout = max(0.01, float(fetch_timeout))
+        except (TypeError, ValueError):
+            self.fetch_timeout = SPARK_FETCH_TIMEOUT
+        try:
+            self.refresh_timeout = max(0.05, float(refresh_timeout))
+        except (TypeError, ValueError):
+            self.refresh_timeout = SPARK_REFRESH_TIMEOUT
         self.config_path = pathlib.Path(config_path or (
             pathlib.Path("/usr/share/ming-os/store/catalog/spark-public.json")
         ))
@@ -1091,14 +1208,45 @@ class SparkPublicProvider(Provider):
                 "final_url": final_url,
             }
 
-    def _fetch(self, path, etag=None):
+    def _invoke_fetcher(self, url, headers, timeout):
+        """Call an arbitrary fetcher without allowing it to block the UI.
+
+        The production urllib fetcher has its own socket timeout, but tests and
+        vendor adapters are ordinary callables and may block in DNS or a
+        library call.  A daemon worker lets the caller enforce a hard bound;
+        a late response is discarded and can never publish cache state.
+        """
+        result = []
+        error = []
+
+        def run():
+            try:
+                result.append(self.fetcher(url, headers))
+            except BaseException as exc:  # propagate the original fetch error
+                error.append(exc)
+
+        worker = threading.Thread(target=run, name="ming-spark-fetch", daemon=True)
+        worker.start()
+        worker.join(max(0.01, float(timeout)))
+        if worker.is_alive():
+            raise DownloadFailed("星火来源请求超时。")
+        if error:
+            raise error[0]
+        return result[0] if result else None
+
+    def _fetch(self, path, etag=None, deadline=None):
         url = path if str(path).startswith("https://") else self.base_url + "/" + str(path).lstrip("/")
         if not self._safe_host(url):
             raise DownloadRejected("星火来源主机不在 HTTPS 白名单中。")
         headers = {"Accept": "application/json, text/plain"}
         if etag:
             headers["If-None-Match"] = str(etag)
-        response = self.fetcher(url, headers)
+        remaining = self.fetch_timeout
+        if deadline is not None:
+            remaining = min(remaining, float(deadline) - time.monotonic())
+            if remaining <= 0:
+                raise DownloadFailed("星火目录刷新超时。")
+        response = self._invoke_fetcher(url, headers, remaining)
         if not isinstance(response, dict):
             raise ProviderUnavailable("星火来源返回格式无效。")
         final_url = response.get("final_url")
@@ -1198,19 +1346,25 @@ class SparkPublicProvider(Provider):
             }
         return checked
 
-    def _fetch_resource(self, path):
+    def _fetch_resource(self, path, deadline=None):
         key = str(path).lstrip("/")
         resources = self._load_resource_cache(required=False)
         cached = resources.get(key)
         response = None
         retry_error = None
         for attempt in range(self.max_fetch_attempts):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise DownloadFailed("星火目录刷新超时。")
             try:
-                response = self._fetch(path, etag=(cached or {}).get("etag") or None)
+                response = self._fetch(
+                    path, etag=(cached or {}).get("etag") or None,
+                    deadline=deadline,
+                )
                 break
             except (OSError, DownloadFailed) as exc:
                 retry_error = exc
-                if attempt + 1 >= self.max_fetch_attempts:
+                if (attempt + 1 >= self.max_fetch_attempts
+                        or (deadline is not None and time.monotonic() >= deadline)):
                     raise
         if response is None:
             raise ProviderUnavailable("星火目录请求失败：%s" % retry_error)
@@ -1418,6 +1572,7 @@ class SparkPublicProvider(Provider):
         return item
 
     def _remote_refresh(self):
+        deadline = time.monotonic() + self.refresh_timeout
         policy = self._load_policy()
         policy_enabled = bool(policy.get("installation_enabled"))
         self._resource_updates = {}
@@ -1426,7 +1581,7 @@ class SparkPublicProvider(Provider):
         release_timestamp = None
         package_index = {}
         if policy_enabled:
-            inrelease = self._fetch_resource("store/InRelease")["body"]
+            inrelease = self._fetch_resource("store/InRelease", deadline=deadline)["body"]
             if not self._verify_inrelease(inrelease):
                 raise ProviderUnavailable("星火仓库 InRelease 签名验证失败。")
             release_timestamp = parse_spark_release_date(inrelease)
@@ -1443,7 +1598,7 @@ class SparkPublicProvider(Provider):
                 previous_date = None
             if previous_date is not None and release_timestamp < previous_date:
                 raise IntegrityError("星火仓库 InRelease Date 回退，已拒绝重放。")
-            packages_response = self._fetch_resource("store/Packages")
+            packages_response = self._fetch_resource("store/Packages", deadline=deadline)
             packages = packages_response["body"]
             # The signed InRelease digest covers the exact bytes served by
             # the repository.  Keep the tolerant text view only for parsing
@@ -1462,15 +1617,40 @@ class SparkPublicProvider(Provider):
         # order and the same per-resource integrity checks.
         category_responses = {}
         worker_count = min(SPARK_CATEGORY_WORKERS, max(1, len(self.categories)))
-        with ThreadPoolExecutor(max_workers=worker_count,
-                                thread_name_prefix="ming-spark-category") as pool:
+        # Do not use an executor context manager here.  Its implicit
+        # ``shutdown(wait=True)`` turns a bounded refresh into an unbounded UI
+        # stall when an adapter gets stuck after the deadline.  Explicitly
+        # cancel pending work and return immediately; the normal fetch path is
+        # already bounded and any late worker is harmlessly discarded.
+        pool = ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="ming-spark-category"
+        )
+        futures = {}
+        try:
             futures = {
                 category: pool.submit(
-                    self._fetch_resource, "store/%s/applist.json" % category)
+                    self._fetch_resource, "store/%s/applist.json" % category,
+                    deadline,
+                )
                 for category in self.categories
             }
             for category in self.categories:
-                category_responses[category] = futures[category].result()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DownloadFailed("星火目录刷新超时。")
+                try:
+                    category_responses[category] = futures[category].result(
+                        timeout=remaining
+                    )
+                except FutureTimeoutError as exc:
+                    raise DownloadFailed("星火目录刷新超时。") from exc
+        finally:
+            for future in futures.values():
+                future.cancel()
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except TypeError:  # Python < 3.9 compatibility
+                pool.shutdown(wait=False)
 
         items = []
         seen = set()

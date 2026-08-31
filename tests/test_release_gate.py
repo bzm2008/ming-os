@@ -463,8 +463,6 @@ class ReleaseGateContracts(unittest.TestCase):
 
     def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
         self.assertIn("/usr/local/sbin/apt-build", self.build)
-    def test_build_installs_noninteractive_apt_wrapper_for_modules(self):
-        self.assertIn("/usr/local/sbin/apt-build", self.build)
         self.assertIn("/usr/local/sbin/apt\" <<", self.build)
         self.assertIn("Acquire::Retries=5", self.build)
         self.assertIn("Acquire::ForceIPv4=true", self.build)

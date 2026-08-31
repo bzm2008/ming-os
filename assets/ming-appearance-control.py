@@ -401,7 +401,7 @@ def sync_terminal_theme(config):
 def sync_notification_theme(config):
     if not shutil.which("xfconf-query"):
         return
-    theme = "Ming-Dark" if config.get("theme") == "dark" else "Ming-Glass"
+    theme = "Ming-Dark" if config.get("theme") == "dark" else "Ming-Mint"
     try:
         subprocess.run([
             "xfconf-query", "-c", "xfce4-notifyd", "-p", "/theme",

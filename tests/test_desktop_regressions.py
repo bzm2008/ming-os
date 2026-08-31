@@ -909,7 +909,7 @@ class DesktopSourceTests(unittest.TestCase):
             "desktop_entry_identity_fields", "legacy_managed_source_path",
             "desktop_entry_dedup_fields", "normalized_desktop_exec_program",
             "desktop_entry_package_owners", "third_party_app_identity",
-            "app_dedup_preference",
+            "app_dedup_preference", "is_legacy_xfce_entry",
         }
         body = [node for node in tree.body if isinstance(node, ast.Assign)]
         body.extend(node for node in tree.body if isinstance(node, ast.Import) and all(alias.name != "gi" for alias in node.names))

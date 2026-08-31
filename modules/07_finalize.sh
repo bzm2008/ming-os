@@ -84,10 +84,66 @@ verify_other_os_detector() {
     fi
 }
 
+# Treat every path component as an lstat-style boundary.  Missing tail
+# components are allowed so callers can create them, but an existing symlink or
+# non-directory parent always fails closed.
+finalize_path_is_safe() {
+    local path="$1" current component index last_index
+    local -a _finalize_components
+    [[ "${path}" == /* ]] || return 1
+    current=""
+    IFS='/' read -r -a _finalize_components <<< "${path#/}"
+    last_index=$((${#_finalize_components[@]} - 1))
+    for index in "${!_finalize_components[@]}"; do
+        component="${_finalize_components[index]}"
+        [[ -n "${component}" && "${component}" != "." && "${component}" != ".." ]] || return 1
+        current="${current}/${component}"
+        [[ ! -L "${current}" ]] || return 1
+        if [[ "${index}" -lt "${last_index}" && -e "${current}" && ! -d "${current}" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+remove_managed_state_file() {
+    local path="$1" parent
+    [[ "${path}" == /* ]] || return 1
+    parent="$(dirname -- "${path}")"
+    finalize_path_is_safe "${parent}" || return 1
+    # A user-owned symlink is deliberately left untouched.  In particular,
+    # never let rm resolve it while cleaning stale coordinator state.
+    [[ ! -L "${path}" ]] || return 0
+    finalize_path_is_safe "${path}" || return 1
+    [[ -e "${path}" || -L "${path}" ]] || return 0
+    [[ -f "${path}" ]] || return 1
+    rm -f -- "${path}"
+}
+
+remove_staged_tree() {
+    local root="$1"
+    finalize_path_is_safe "${root}" || return 1
+    [[ -d "${root}" && ! -L "${root}" ]] || return 0
+    # find -P never follows a link while cleaning an atomically replaced tree.
+    find -P "${root}" -depth -mindepth 1 -type f -delete 2>/dev/null || return 1
+    find -P "${root}" -depth -mindepth 1 -type l -delete 2>/dev/null || return 1
+    find -P "${root}" -depth -mindepth 1 -type d -empty -delete 2>/dev/null || return 1
+    rmdir -- "${root}" 2>/dev/null || return 1
+}
+
 # Keep the shipped desktop intentional. App discovery belongs in Ming App Library.
 write_managed_launcher_copy() {
     local source="$1"
     local target="$2"
+    local parent temporary
+    [[ -f "${source}" && ! -L "${source}" ]] || return 1
+    finalize_path_is_safe "${source}" || return 1
+    finalize_path_is_safe "${target}" || return 1
+    parent="$(dirname -- "${target}")"
+    mkdir -p "${parent}" || return 1
+    finalize_path_is_safe "${target}" || return 1
+    temporary="$(mktemp "${target}.tmp.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${temporary}" && -f "${temporary}" && ! -L "${temporary}" ]] || return 1
     awk -v source="${source}" '
         /^X-Ming-Managed=/ || /^X-Ming-Source-Desktop=/ { next }
         /^\[/ && $0 != "[Desktop Entry]" && in_desktop {
@@ -104,7 +160,10 @@ write_managed_launcher_copy() {
                 print "X-Ming-Source-Desktop=" source
             }
         }
-    ' "${source}" > "${target}"
+    ' "${source}" > "${temporary}" || { rm -f -- "${temporary}"; return 1; }
+    finalize_path_is_safe "${target}" || { rm -f -- "${temporary}"; return 1; }
+    [[ ! -L "${target}" ]] || { rm -f -- "${temporary}"; return 1; }
+    mv -f -- "${temporary}" "${target}" || { rm -f -- "${temporary}"; return 1; }
 }
 
 copy_default_launcher() {
@@ -123,10 +182,18 @@ copy_default_launcher() {
             ;;
     esac
 
-    if [[ ! -f "${source}" ]]; then
+    if [[ ! -f "${source}" || -L "${source}" ]]; then
         echo "[07_finalize][WARN] default desktop launcher missing: ${launcher}"
         return 0
     fi
+    # Validate the parent first.  A user-owned leaf symlink is preserved as-is
+    # rather than followed (or causing the whole finalization to abort).
+    finalize_path_is_safe "${target_dir}" || return 1
+    if [[ -L "${target}" ]]; then
+        echo "[07_finalize] preserving symlinked desktop launcher: ${target}"
+        return 0
+    fi
+    finalize_path_is_safe "${target}" || return 1
 
     # Never overwrite an unmanaged file supplied by the user.  A byte-identical
     # copy from an older image is safe to migrate into the marked form; any
@@ -151,7 +218,7 @@ copy_default_launcher() {
 
 is_managed_desktop_file() {
     local target="$1"
-    [[ -f "${target}" ]] || return 1
+    [[ -f "${target}" && ! -L "${target}" ]] || return 1
     grep -Eiq '^[[:space:]]*X-Ming-Managed[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${target}"
 }
 
@@ -160,7 +227,9 @@ reset_desktop_dir() {
     local owner="$2"
     local seed="${3:-true}"
 
-    mkdir -p "${target_dir}"
+    finalize_path_is_safe "${target_dir}" || return 1
+    mkdir -p "${target_dir}" || return 1
+    finalize_path_is_safe "${target_dir}" || return 1
     # User-created launchers are preserved, not ours to remove.  Only files carrying the
     # explicit Ming marker participate in migration; old Spark entries are
     # removed by retire_legacy_store_runtime using their known names.
@@ -168,7 +237,7 @@ reset_desktop_dir() {
         if is_managed_desktop_file "${launcher}"; then
             rm -f -- "${launcher}"
         fi
-    done < <(find "${target_dir}" -maxdepth 1 \( -type f -o -type l \) -name '*.desktop' -print0 2>/dev/null)
+    done < <(find -P "${target_dir}" -maxdepth 1 \( -type f -o -type l \) -name '*.desktop' -print0 2>/dev/null)
     # Do not remove directories: a directory containing only a user launcher
     # is still user data.  Ming-owned category directories are handled by the
     # organizer's explicit marker-aware cleanup path.
@@ -180,18 +249,25 @@ reset_desktop_dir() {
         done
     fi
 
-    chown -R "${owner}" "${target_dir}" 2>/dev/null || true
+    chown -R --no-dereference "${owner}" "${target_dir}" 2>/dev/null || true
 }
 
 constrain_default_desktop() {
     echo "[07_finalize] constraining default desktop launchers ..."
 
-    rm -f "${USER_HOME}/.config/ming-os/desktop-layout.json" \
-          "${USER_HOME}/.config/ming-os/desktop-layout.last-good.json" \
-          "${USER_HOME}/.config/ming-os/desktop-generated-manifest.json" \
-          "/etc/skel/.config/ming-os/desktop-layout.json" \
-          "/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
-          "/etc/skel/.config/ming-os/desktop-generated-manifest.json" 2>/dev/null || true
+    # These are transient coordinator files, not user content.  Remove them
+    # only after checking every parent component and never follow a leaf link.
+    local managed_state
+    for managed_state in \
+        "${USER_HOME}/.config/ming-os/desktop-layout.json" \
+        "${USER_HOME}/.config/ming-os/desktop-layout.last-good.json" \
+        "${USER_HOME}/.config/ming-os/desktop-generated-manifest.json" \
+        "/etc/skel/.config/ming-os/desktop-layout.json" \
+        "/etc/skel/.config/ming-os/desktop-layout.last-good.json" \
+        "/etc/skel/.config/ming-os/desktop-generated-manifest.json"; do
+        finalize_path_is_safe "${managed_state}" || return 1
+        remove_managed_state_file "${managed_state}" || return 1
+    done
 
     local canonical_desktop="${USER_HOME}/Desktop"
     local discovered_desktop=""
@@ -213,24 +289,73 @@ constrain_default_desktop() {
 }
 
 repair_default_user_ownership() {
+    local cache_dir="${USER_HOME}/.cache"
+    local cache_ming_dir="${cache_dir}/ming-os"
+    local cache_sessions_dir="${cache_dir}/sessions"
+    local config_dir="${USER_HOME}/.config"
+    local config_ming_dir="${config_dir}/ming-os"
+    local managed_dir
+    local -a managed_dirs=(
+        "${cache_dir}"
+        "${cache_ming_dir}"
+        "${cache_sessions_dir}"
+        "${config_dir}"
+        "${config_ming_dir}"
+    )
+
     echo "[07_finalize] repairing default user ownership ..."
 
-    mkdir -p "${USER_HOME}/.cache/ming-os" \
-             "${USER_HOME}/.cache/sessions" \
-             "${USER_HOME}/.config/ming-os" 2>/dev/null || true
+    finalize_path_is_safe "${USER_HOME}" || {
+        echo "[07_finalize][ERROR] refusing unsafe default user home: ${USER_HOME}" >&2
+        return 1
+    }
+    for managed_dir in "${managed_dirs[@]}"; do
+        finalize_path_is_safe "${managed_dir}" || {
+            echo "[07_finalize][ERROR] refusing unsafe default user state path: ${managed_dir}" >&2
+            return 1
+        }
+    done
+    mkdir -p "${managed_dirs[@]}" 2>/dev/null || return 1
+    for managed_dir in "${managed_dirs[@]}"; do
+        finalize_path_is_safe "${managed_dir}" || return 1
+    done
 
     # Calamares no longer runs the users module; /home/user comes from squashfs.
     # Keep it user-owned so autostart watchdogs can write logs and state files.
-    chown -R "${MING_USER}:${MING_USER}" "${USER_HOME}" 2>/dev/null || true
+    finalize_path_is_safe "${USER_HOME}" || return 1
+    chown -R --no-dereference "${MING_USER}:${MING_USER}" "${USER_HOME}" 2>/dev/null || true
     chmod 0700 "${USER_HOME}" 2>/dev/null || true
-    chmod 0755 "${USER_HOME}/.cache" "${USER_HOME}/.cache/ming-os" 2>/dev/null || true
+    chmod 0755 "${cache_dir}" "${cache_ming_dir}" 2>/dev/null || true
 }
 
 disable_phone_panel_restore() {
     local xfconf_dir="${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
     local autostart_dir="${USER_HOME}/.config/autostart"
-    mkdir -p "${xfconf_dir}" "${autostart_dir}"
-    cat > "${xfconf_dir}/xfce4-session.xml" << 'PHONESESSIONXML'
+    local session_path="${xfconf_dir}/xfce4-session.xml"
+    local panel_path="${autostart_dir}/xfce4-panel.desktop"
+    local session_tmp panel_tmp
+
+    # Check the user boundary before creating any directory.  This prevents a
+    # pre-existing /home/user link from redirecting writes outside the image.
+    finalize_path_is_safe "${USER_HOME}" || return 1
+    finalize_path_is_safe "${xfconf_dir}" || return 1
+    finalize_path_is_safe "${autostart_dir}" || return 1
+    mkdir -p "${xfconf_dir}" "${autostart_dir}" || return 1
+    finalize_path_is_safe "${xfconf_dir}" || return 1
+    finalize_path_is_safe "${autostart_dir}" || return 1
+
+    if [[ -L "${session_path}" || -L "${panel_path}" ]]; then
+        echo "[07_finalize][WARN] preserving symlinked panel/session state" >&2
+        return 0
+    fi
+    session_tmp="$(mktemp "${xfconf_dir}/.xfce4-session.xml.XXXXXX" 2>/dev/null || true)"
+    panel_tmp="$(mktemp "${autostart_dir}/.xfce4-panel.desktop.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${session_tmp}" && -f "${session_tmp}" && ! -L "${session_tmp}" ]] || return 1
+    [[ -n "${panel_tmp}" && -f "${panel_tmp}" && ! -L "${panel_tmp}" ]] || {
+        rm -f -- "${session_tmp}" 2>/dev/null || true
+        return 1
+    }
+    cat > "${session_tmp}" << 'PHONESESSIONXML'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-session" version="1.0">
   <property name="sessions" type="empty">
@@ -242,7 +367,7 @@ disable_phone_panel_restore() {
   </property>
 </channel>
 PHONESESSIONXML
-    cat > "${autostart_dir}/xfce4-panel.desktop" << 'PANELDISABLED'
+    cat > "${panel_tmp}" << 'PANELDISABLED'
 [Desktop Entry]
 Type=Application
 Name=Xfce Panel
@@ -251,6 +376,22 @@ Hidden=true
 NoDisplay=true
 X-GNOME-Autostart-enabled=false
 PANELDISABLED
+    finalize_path_is_safe "${session_path}" || {
+        rm -f -- "${session_tmp}" "${panel_tmp}" 2>/dev/null || true
+        return 1
+    }
+    finalize_path_is_safe "${panel_path}" || {
+        rm -f -- "${session_tmp}" "${panel_tmp}" 2>/dev/null || true
+        return 1
+    }
+    mv -f -- "${session_tmp}" "${session_path}" || {
+        rm -f -- "${session_tmp}" "${panel_tmp}" 2>/dev/null || true
+        return 1
+    }
+    mv -f -- "${panel_tmp}" "${panel_path}" || {
+        rm -f -- "${panel_tmp}" 2>/dev/null || true
+        return 1
+    }
 }
 
 # Old image layers occasionally leave zero-byte Calamares launchers behind.
@@ -396,9 +537,96 @@ retire_legacy_store_runtime() {
 
 # ======================== 同步用户配置到 /etc/skel ========================
 
+copy_skel_item() {
+    local src="$1" item="$2" destination="/etc/skel/${2}"
+    local stage_root old_root parent
+
+    [[ -e "${src}" || -L "${src}" ]] || return 0
+    # A top-level link or a link in the source tree could escape the image.
+    # Leave that item untouched rather than materializing it in /etc/skel.
+    if [[ -L "${src}" ]]; then
+        echo "[07_finalize][WARN] skipping symlinked skeleton source: ${src}" >&2
+        return 0
+    fi
+    finalize_path_is_safe "${src}" || return 1
+    [[ -f "${src}" || -d "${src}" ]] || return 0
+    if find -P "${src}" \( -type l -o -type b -o -type c -o -type p -o -type s \) \
+        -print -quit 2>/dev/null | grep -q .; then
+        echo "[07_finalize][WARN] refusing special or symlinked skeleton source: ${src}" >&2
+        return 0
+    fi
+
+    parent="$(dirname -- "${destination}")"
+    finalize_path_is_safe "${parent}" || return 1
+    if [[ -L "${destination}" ]]; then
+        echo "[07_finalize][WARN] preserving symlinked skeleton target: ${destination}" >&2
+        return 0
+    fi
+    finalize_path_is_safe "${destination}" || return 1
+    if [[ -e "${destination}" ]] && find -P "${destination}" \
+        \( -type l -o -type b -o -type c -o -type p -o -type s \) \
+        -print -quit 2>/dev/null | grep -q .; then
+        echo "[07_finalize][WARN] preserving unsafe existing skeleton target: ${destination}" >&2
+        return 0
+    fi
+
+    mkdir -p "${parent}" || return 1
+    finalize_path_is_safe "${destination}" || return 1
+    stage_root="$(mktemp -d "${parent}/.ming-skel.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${stage_root}" && -d "${stage_root}" && ! -L "${stage_root}" ]] || return 1
+    finalize_path_is_safe "${stage_root}" || { remove_staged_tree "${stage_root}" || true; return 1; }
+    if ! cp -a --no-dereference -- "${src}" "${stage_root}/${item}"; then
+        remove_staged_tree "${stage_root}" || true
+        return 1
+    fi
+    finalize_path_is_safe "${stage_root}/${item}" || {
+        remove_staged_tree "${stage_root}" || true
+        return 1
+    }
+    if find -P "${stage_root}/${item}" -type l -print -quit 2>/dev/null | grep -q .; then
+        echo "[07_finalize][WARN] staged skeleton unexpectedly contains a symlink: ${src}" >&2
+        remove_staged_tree "${stage_root}" || true
+        return 0
+    fi
+
+    old_root=""
+    if [[ -e "${destination}" ]]; then
+        old_root="$(mktemp -d "${parent}/.ming-skel-old.XXXXXX" 2>/dev/null || true)"
+        [[ -n "${old_root}" && -d "${old_root}" && ! -L "${old_root}" ]] || {
+            remove_staged_tree "${stage_root}" || true
+            return 1
+        }
+        finalize_path_is_safe "${old_root}" || {
+            remove_staged_tree "${stage_root}" || true
+            remove_staged_tree "${old_root}" || true
+            return 1
+        }
+        mv -- "${destination}" "${old_root}/${item}" || {
+            remove_staged_tree "${stage_root}" || true
+            remove_staged_tree "${old_root}" || true
+            return 1
+        }
+    fi
+    if ! mv -- "${stage_root}/${item}" "${destination}"; then
+        if [[ -n "${old_root}" && -e "${old_root}/${item}" && ! -e "${destination}" ]]; then
+            mv -- "${old_root}/${item}" "${destination}" || true
+        fi
+        remove_staged_tree "${stage_root}" || true
+        [[ -z "${old_root}" ]] || remove_staged_tree "${old_root}" || true
+        return 1
+    fi
+    remove_staged_tree "${stage_root}" || return 1
+    [[ -z "${old_root}" ]] || remove_staged_tree "${old_root}" || return 1
+    return 0
+}
+
 seed_skel() {
     echo "[07_finalize] 将默认用户配置同步到 /etc/skel ..."
-    mkdir -p /etc/skel
+    # lstat-style checks in finalize_path_is_safe keep the skeleton boundary intact.
+    finalize_path_is_safe "/etc/skel" || return 1
+    mkdir -p /etc/skel || return 1
+    finalize_path_is_safe "/etc/skel" || return 1
+    finalize_path_is_safe "${USER_HOME}" || return 1
 
     # 需要带入新用户的配置项（目录与点文件）
     local items=(
@@ -412,21 +640,25 @@ seed_skel() {
 
     for item in "${items[@]}"; do
         local src="${USER_HOME}/${item}"
-        if [[ -e "${src}" ]]; then
-            rm -rf "/etc/skel/${item}"
-            cp -a "${src}" "/etc/skel/${item}"
-        fi
+        copy_skel_item "${src}" "${item}" || return 1
     done
 
     # 清除 Live 会话写下的“一次性完成”标记，
     # 否则新安装用户会跳过欢迎引导与缩放检测。
-    rm -f /etc/skel/.config/ming-os/scale-done \
-          /etc/skel/.config/ming-os/welcome-done \
-          /etc/skel/.config/ming-os/oobe-account-done \
-          /etc/skel/.config/ming-os/app-recommend-done 2>/dev/null || true
+    local marker
+    for marker in \
+        /etc/skel/.config/ming-os/scale-done \
+        /etc/skel/.config/ming-os/welcome-done \
+        /etc/skel/.config/ming-os/oobe-account-done \
+        /etc/skel/.config/ming-os/app-recommend-done; do
+        finalize_path_is_safe "${marker}" || continue
+        [[ ! -L "${marker}" ]] || continue
+        rm -f -- "${marker}" 2>/dev/null || true
+    done
 
     # /etc/skel 内文件应为 root 所有（useradd 复制时会重新赋予新用户）
-    chown -R root:root /etc/skel 2>/dev/null || true
+    finalize_path_is_safe "/etc/skel" || return 1
+    chown -R --no-dereference root:root /etc/skel 2>/dev/null || true
 
     echo "[07_finalize] /etc/skel 同步完成"
 }
@@ -438,7 +670,9 @@ verify_appearance_assets() {
     local missing=0
 
     local must_exist=(
-        "/usr/share/themes/Ming-Glass/gtk-3.0/gtk.css"
+        "/usr/share/themes/Ming-Mint/gtk-3.0/gtk.css"
+        "/usr/share/themes/Ming-Mint/index.theme"
+        "/usr/share/themes/Ming-Mint/xfwm4/themerc"
         "/usr/share/backgrounds/ming-os/default.png"
         "/usr/share/icons/hicolor/48x48/apps/ming-os-menu.svg"
         "/usr/local/bin/ming-picom"
@@ -489,7 +723,7 @@ main() {
     retire_legacy_store_runtime || return 1
     seed_skel
     constrain_default_desktop
-    repair_default_user_ownership
+    repair_default_user_ownership || return 1
     verify_appearance_assets
     converge_package_state || return 1
 

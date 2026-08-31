@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
+PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
 DRAWER = (ROOT / "assets" / "ming-app-drawer.py").read_text(encoding="utf-8")
 FILES = (ROOT / "assets" / "ming-files.py").read_text(encoding="utf-8")
 MODEL = (ROOT / "assets" / "ming-files-model.py").read_text(encoding="utf-8")
@@ -35,6 +36,19 @@ def last_heredoc(source, opener, marker):
 
 
 class AdversarialDesktopCleanupTests(unittest.TestCase):
+    def test_phone_desktop_hides_retired_xfce_utilities_from_new_layouts(self):
+        self.assertIn("LEGACY_XFCE_LAUNCHERS", PHONE)
+        self.assertIn("def is_legacy_xfce_entry", PHONE)
+        self.assertIn("if is_legacy_xfce_entry(path)", PHONE)
+        drawer = load_drawer_module()
+        for basename in (
+            "xfce4-appfinder.desktop",
+            "xfce4-taskmanager.desktop",
+            "xfce4-power-manager-settings.desktop",
+            "xfce4-appearance-settings.desktop",
+        ):
+            self.assertTrue(drawer.is_legacy_system_entry(pathlib.Path(basename)))
+
     def test_active_plank_profiles_are_centered_without_horizontal_offset(self):
         for opener, marker in (
             ('cat > "${plank_dir}/settings" << \'PLANKSETTINGS\'', "PLANKSETTINGS"),

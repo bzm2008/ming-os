@@ -1988,9 +1988,9 @@ configure_ming_mint_desktop_icons() {
         [ming-store.desktop]=ming-store
         [xiahai-xiaoming.desktop]=ming-xiahai
     )
-    local desktop_file icon
+    local desktop_file icon user_target temporary
     for desktop_file in "${!icons[@]}"; do
-        [[ -f "${app_dir}/${desktop_file}" ]] || continue
+        [[ -f "${app_dir}/${desktop_file}" && ! -L "${app_dir}/${desktop_file}" ]] || continue
         icon="${icons[$desktop_file]}"
         if grep -q '^Icon=' "${app_dir}/${desktop_file}"; then
             sed -i "s/^Icon=.*/Icon=${icon}/" "${app_dir}/${desktop_file}"
@@ -2000,10 +2000,30 @@ configure_ming_mint_desktop_icons() {
     done
     # Keep the user-level copies in lockstep with the canonical system entries
     # so an upgraded installation cannot continue resolving legacy icons.
+    [[ ! -L "${user_app_dir}" ]] || {
+        echo "[03_desktop][WARN] refusing symlinked user application directory: ${user_app_dir}" >&2
+        return 0
+    }
     install -d -m 0755 "${user_app_dir}"
+    [[ -d "${user_app_dir}" && ! -L "${user_app_dir}" ]] || return 1
     for desktop_file in "${!icons[@]}"; do
-        [[ -f "${app_dir}/${desktop_file}" ]] || continue
-        cp -f "${app_dir}/${desktop_file}" "${user_app_dir}/${desktop_file}"
+        [[ -f "${app_dir}/${desktop_file}" && ! -L "${app_dir}/${desktop_file}" ]] || continue
+        user_target="${user_app_dir}/${desktop_file}"
+        if [[ -L "${user_target}" ]]; then
+            echo "[03_desktop][WARN] preserving symlinked user launcher: ${user_target}" >&2
+            continue
+        fi
+        temporary="$(mktemp "${user_target}.tmp.XXXXXX" 2>/dev/null || true)"
+        [[ -n "${temporary}" && -f "${temporary}" && ! -L "${temporary}" ]] || {
+            echo "[03_desktop][WARN] cannot allocate temporary icon launcher: ${user_target}" >&2
+            continue
+        }
+        if ! install -m 0644 "${app_dir}/${desktop_file}" "${temporary}"; then
+            rm -f -- "${temporary}"
+            continue
+        fi
+        [[ ! -L "${user_target}" ]] || { rm -f -- "${temporary}"; continue; }
+        mv -f -- "${temporary}" "${user_target}" || rm -f -- "${temporary}"
     done
     chown -R "${MING_USER}:${MING_USER}" "${user_app_dir}" 2>/dev/null || true
     update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
@@ -4827,6 +4847,23 @@ reserve_bottom_workarea() {
         >/dev/null 2>&1 || true
 }
 
+dock_state_matches() {
+    # Read-only guard for the one-second immersive poll.  Reissuing wmctrl,
+    # xdotool and STRUT mutations on every tick causes visible Xfwm redraws on
+    # VirtualBox/XRender; only repair when the observed state actually drifted.
+    local window_id="$1" desired="$2" state
+    valid_window_id "${window_id}" || return 1
+    command -v xprop >/dev/null 2>&1 || return 1
+    state="$(x11_call xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null || true)"
+    if [[ "${desired}" == "immersive" ]]; then
+        [[ "${state}" == *'_NET_WM_STATE_HIDDEN'* || "${state}" == *'_NET_WM_STATE_BELOW'* ]] \
+            || return 1
+        [[ "${state}" != *'_NET_WM_STATE_ABOVE'* ]]
+        return $?
+    fi
+    [[ "${state}" != *'_NET_WM_STATE_HIDDEN'* && "${state}" != *'_NET_WM_STATE_BELOW'* ]]
+}
+
 apply_dock_immersive_state() {
     local desired=normal window_id state attempt
     local same_window=false
@@ -4834,6 +4871,10 @@ apply_dock_immersive_state() {
     window_id="$(dock_window_id 2>/dev/null || true)"
     valid_window_id "${window_id}" || return 0
     [[ "${window_id}" == "${dock_immersive_window_id}" ]] && same_window=true
+    if [[ "${same_window}" == "true" && "${dock_immersive_state}" == "${desired}" ]] \
+       && dock_state_matches "${window_id}" "${desired}"; then
+        return 0
+    fi
     if [[ "${desired}" == immersive ]]; then
         # Remove ABOVE first; Plank may recreate it after a remap. Reapply on
         # every coordinator tick and only record success after readback.
@@ -7917,7 +7958,7 @@ MINGFIXPARTTYPESCONF
 dontChroot: true
 timeout: 30
 script:
-  - "/usr/local/sbin/ming-installer-verify installed --receipt"
+  - "/usr/local/sbin/ming-installer-verify installed --receipt --require-desktop-profile"
 INSTALLEDDESKTOPGATECONF
 
     cat > /usr/local/sbin/ming-calamares-preflight << 'CALAMARESPREFLIGHT'
@@ -9516,9 +9557,12 @@ configure_appearance_enforcer() {
 set -u
 appearance_log="${HOME}/.cache/ming-os/appearance.log"
 mkdir -p "$(dirname "${appearance_log}")" 2>/dev/null || true
+appearance_reapply_ok=false
 if command -v ming-appearance-control >/dev/null 2>&1; then
-    timeout --foreground 8s ming-appearance-control reapply --json \
-        >>"${appearance_log}" 2>&1 || true
+    if timeout --foreground 8s ming-appearance-control reapply --json \
+        >>"${appearance_log}" 2>&1; then
+        appearance_reapply_ok=true
+    fi
 fi
 WALL_PNG="/usr/share/backgrounds/ming-os/default.png"
 WALL_1366="/usr/share/backgrounds/ming-os/default-1366x768.png"
@@ -9579,10 +9623,20 @@ else
     done
 fi
 
-# 强制主题/图标主题（防止首次会话回退到默认）
-xfconf-query -c xsettings -p /Net/ThemeName -s "Ming-Mint" 2>/dev/null || true
+# 控制器成功时保留用户选择的浅色/深色主题；只有控制器缺失或失败时
+# 才执行安全回退。旧版本在这里无条件写回 Ming-Mint，会覆盖用户的深色选择。
+fallback_theme="Ming-Mint"
+appearance_config="${HOME}/.config/ming-os/appearance.json"
+if [[ -r "${appearance_config}" ]] \
+    && grep -Eq '"theme"[[:space:]]*:[[:space:]]*"dark"' "${appearance_config}" 2>/dev/null; then
+    fallback_theme="Ming-Dark"
+fi
+if [[ "${appearance_reapply_ok}" != "true" ]]; then
+    xfconf-query -c xsettings -p /Net/ThemeName -s "${fallback_theme}" 2>/dev/null || true
+    xfconf-query -c xfwm4 -p /general/theme -s "${fallback_theme}" 2>/dev/null || true
+fi
+# 图标主题保持单一的 Ming-Mint 命名，避免旧图标资源重新出现。
 xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint" 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/theme -s "Ming-Mint" 2>/dev/null || true
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true

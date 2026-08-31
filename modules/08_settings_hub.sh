@@ -131,16 +131,40 @@ Name[zh_CN]=Ming 设置
 Comment=Ming OS 统一设置中心
 Comment[zh_CN]=账户、网络、存储、更新、显示与系统还原
 Exec=/usr/local/bin/ming-control-center
-Icon=ming-control-center
+Icon=ming-settings
 Terminal=false
 Categories=Settings;System;
+StartupNotify=true
+X-Ming-Managed=true
 SETTINGSDESKTOP
 
-    # 放入用户桌面与自启目录所属位置（seed_skel 会带给安装后用户）
-    mkdir -p "/home/${MING_USER}/.local/share/applications"
-    cp /usr/share/applications/ming-settings.desktop \
-       "/home/${MING_USER}/.local/share/applications/" 2>/dev/null || true
-    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.local/share/applications" 2>/dev/null || true
+    # 放入用户应用目录（seed_skel 会带给安装后用户）。旧安装可能把
+    # 该目录或入口做成符号链接；拒绝跟随并用同目录临时文件原子替换。
+    local user_app_dir="/home/${MING_USER}/.local/share/applications"
+    local user_target="${user_app_dir}/ming-settings.desktop"
+    local temporary=""
+    if [[ -L "${user_app_dir}" ]]; then
+        echo "[08_settings_hub][WARN] refusing symlinked user application directory: ${user_app_dir}" >&2
+        return 1
+    fi
+    mkdir -p "${user_app_dir}" || return 1
+    [[ -d "${user_app_dir}" && ! -L "${user_app_dir}" ]] || return 1
+    if [[ -L "${user_target}" ]]; then
+        echo "[08_settings_hub][WARN] preserving symlinked user launcher: ${user_target}" >&2
+        return 0
+    fi
+    temporary="$(mktemp "${user_target}.tmp.XXXXXX" 2>/dev/null || true)"
+    [[ -n "${temporary}" && -f "${temporary}" && ! -L "${temporary}" ]] || return 1
+    if ! install -m 0644 "/usr/share/applications/ming-settings.desktop" "${temporary}"; then
+        rm -f -- "${temporary}"
+        return 1
+    fi
+    [[ ! -L "${user_target}" ]] || { rm -f -- "${temporary}"; return 0; }
+    mv -f -- "${temporary}" "${user_target}" || {
+        rm -f -- "${temporary}"
+        return 1
+    }
+    chown --no-dereference "${MING_USER}:${MING_USER}" "${user_target}" 2>/dev/null || true
 }
 
 # ======================== 主流程 ========================

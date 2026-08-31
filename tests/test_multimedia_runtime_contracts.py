@@ -207,7 +207,8 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertNotIn("command -v weixin", wrapper)
 
     def test_build_gate_requires_audio_local_package_and_store_helpers(self):
-        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split("\n}", 1)[0]
+        validator = BUILD.split("validate_r4_compatibility() {", 1)[1].split(
+            "\n# ======================== 分阶段主流程", 1)[0]
         self.assertIn("usr/local/bin/ming-audio-session", validator)
         self.assertIn("usr/local/sbin/ming-package-installer", validator)
         self.assertIn("usr/local/lib/ming-os/ming-store-core.py", validator)

@@ -406,7 +406,7 @@ AUTOLOGIN
 
     cat > /etc/lightdm/lightdm-gtk-greeter.conf << GREETERCFG
 [greeter]
-theme-name = Ming-Glass
+theme-name = Ming-Mint
 icon-theme-name = Papirus
 font-name = Noto Sans CJK SC 11
 background = /usr/share/backgrounds/ming-os/default.png
@@ -1875,9 +1875,18 @@ install_xiahai_xiaoming() {
         return 1
     fi
 
-    # The supplied Electron archive has historically carried mode 0666 for
-    # its payload.  Restore executable bits only on the approved Xiahai
-    # launcher and its bundled Chromium sandbox; never chmod arbitrary files.
+    # The supplied Electron archive historically carries mode 0666 for regular
+    # files and 0777 for directories.  Normalize only the package-owned tree
+    # before restoring the small, explicitly approved executable allowlist.
+    # Reject symlinks first: find does not follow symlinked directories, but a
+    # symlinked regular file would otherwise remain a user-controlled escape.
+    if find /opt/xiahai-xiaoming -type l -print -quit 2>/dev/null | grep -q .; then
+        echo "[ERROR] Xiahai payload contains a symlink; refusing to install" >&2
+        return 1
+    fi
+    chown -R root:root /opt/xiahai-xiaoming 2>/dev/null || return 1
+    find /opt/xiahai-xiaoming -type d -exec chmod 0755 {} + || return 1
+    find /opt/xiahai-xiaoming -type f -exec chmod 0644 {} + || return 1
     chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming 2>/dev/null || return 1
     # The Debian payload may create a root-only /opt directory when unpacked.
     # Xiahai is a user-launched desktop app, so its directory and launcher
@@ -1894,6 +1903,11 @@ install_xiahai_xiaoming() {
     fi
 
     local desktop="/usr/share/applications/xiahai-xiaoming.desktop"
+    # dpkg preserves the vendor archive's permissive 0666 mode for this
+    # desktop file.  ming-launch rejects group/other-writable system entries,
+    # so normalize ownership before any activation or validation occurs.
+    chown root:root "${desktop}" 2>/dev/null || return 1
+    chmod 0644 "${desktop}" 2>/dev/null || return 1
     if [[ ! -x /opt/xiahai-xiaoming/xiahai-xiaoming || ! -s "${desktop}" ]]; then
         echo "[ERROR] Xiahai Xiaoming runtime or desktop entry is missing after installation" >&2
         return 1
@@ -1919,6 +1933,11 @@ install_xiahai_xiaoming() {
         sed -i 's/^Icon=.*/Icon=ming-xiahai/' "${desktop}"
     else
         sed -i '/^\[Desktop Entry\]/a Icon=ming-xiahai' "${desktop}"
+    fi
+    if grep -q '^StartupWMClass=' "${desktop}"; then
+        sed -i 's/^StartupWMClass=.*/StartupWMClass=xiahai-xiaoming/' "${desktop}"
+    else
+        sed -i '/^\[Desktop Entry\]/a StartupWMClass=xiahai-xiaoming' "${desktop}"
     fi
     grep -Fq 'Exec=/opt/xiahai-xiaoming/xiahai-xiaoming' "${desktop}" || return 1
     if grep -q '^X-Ming-Launch-Broker=' "${desktop}"; then

@@ -166,6 +166,82 @@ class MingStoreAppStreamTests(unittest.TestCase):
             inventory = self.core.validate_appstream_rootfs(root)
             self.assertEqual(1000, inventory["count"])
 
+    def test_strict_rootfs_gate_rejects_untrusted_metainfo_without_apt_index(self):
+        """Release inventory must come from the copied, trusted DEP-11 path."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            metainfo = root / "usr" / "share" / "metainfo"
+            metainfo.mkdir(parents=True)
+            metainfo.joinpath("fake.xml").write_text(
+                self.appstream_xml(1000), encoding="utf-8",
+            )
+            with self.assertRaises(self.core.InvalidCatalog):
+                self.core.validate_appstream_rootfs(
+                    root, strict=True, require_package_index=True,
+                )
+
+    def test_strict_rootfs_gate_intersects_dep11_with_apt_package_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            metadata = root / "var" / "cache" / "swcatalog" / "yaml"
+            metadata.mkdir(parents=True)
+            records = []
+            for index in range(1000):
+                records.append(
+                    "---\nType: desktop-application\n"
+                    "ID: org.example.Strict{0}\nPackage: strict-app-{0}\n"
+                    "Name: Strict {0}\n".format(index)
+                )
+            (metadata / "Components-amd64.yml").write_text(
+                "".join(records), encoding="utf-8",
+            )
+            package_index = root / "var" / "lib" / "ming-os"
+            package_index.mkdir(parents=True)
+            package_index.joinpath("appstream-apt-packages.txt").write_text(
+                "\n".join("strict-app-%d" % index for index in range(1000)) + "\n",
+                encoding="ascii",
+            )
+            inventory = self.core.validate_appstream_rootfs(
+                root, strict=True, require_package_index=True,
+            )
+            self.assertEqual(1000, inventory["count"])
+
+    def test_strict_rootfs_gate_ignores_metainfo_even_with_an_index(self):
+        """Only copied DEP-11 records may contribute to a release inventory."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            trusted = root / "var" / "cache" / "swcatalog" / "yaml"
+            trusted.mkdir(parents=True)
+            trusted.joinpath("Components-amd64.yml").write_text(
+                "---\nType: desktop-application\nID: org.example.Trusted\n"
+                "Package: trusted-app\nName: Trusted App\n",
+                encoding="utf-8",
+            )
+            metainfo = root / "usr" / "share" / "metainfo"
+            metainfo.mkdir(parents=True)
+            metainfo.joinpath("fake.xml").write_text(
+                self.appstream_xml(1000), encoding="utf-8",
+            )
+            package_index = root / "var" / "lib" / "ming-os"
+            package_index.mkdir(parents=True)
+            package_index.joinpath("appstream-apt-packages.txt").write_text(
+                "trusted-app\n", encoding="ascii",
+            )
+
+            inventory = self.core.validate_appstream_rootfs(
+                root, minimum=1, strict=True, require_package_index=True,
+            )
+
+        self.assertEqual({"trusted-app"}, {
+            item["package_name"] for item in inventory["items"]
+        })
+
+    def test_build_gate_requests_strict_appstream_inventory(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("strict=True", build)
+        self.assertIn("require_package_index=True", build)
+        self.assertIn("appstream-apt-packages.txt", build)
+
     def test_appstream_rejects_non_desktop_and_non_linux_architecture(self):
         xml = """
         <components>
@@ -186,6 +262,20 @@ class MingStoreAppStreamTests(unittest.TestCase):
         self.assertRegex(BASE, r"\bappstream\b")
         self.assertNotRegex(BASE, r"\bappstream-data\b")
         self.assertIn("appstreamcli refresh-cache --force", BASE)
+
+    def test_build_refreshes_dep11_after_appstream_is_installed_and_preserves_apt_list_copy(self):
+        """The first apt update happens before appstream exists; a second one is required."""
+        install_block = BASE.split("install_base_packages() {", 1)[1].split(
+            "\n}\n\ninstall_required_radio_firmware", 1
+        )[0]
+        self.assertIn("apt-get update", install_block)
+        self.assertLess(
+            install_block.index("apt install -y --no-install-recommends"),
+            install_block.index("apt-get update", install_block.index("appstream")),
+        )
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn("/var/lib/apt/lists/*_dep11_Components-*.yml.gz", build)
+        self.assertIn("dep11_Components", build)
 
     def test_build_gate_checks_actual_rootfs_appstream_inventory(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")

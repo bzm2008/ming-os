@@ -56,6 +56,14 @@ class XiahaiIntegrationContracts(unittest.TestCase):
 
     def test_xiahai_payload_permissions_are_repaired_for_execution(self):
         installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
+        # The approved Debian input ships its whole Electron tree as 0666/0777.
+        # The installer must normalize the trusted tree before fixing the few
+        # executable helpers, otherwise a fresh install can remain unreadable
+        # or expose a world-writable runtime.
+        self.assertIn("find /opt/xiahai-xiaoming -type d -exec chmod 0755", installer)
+        self.assertIn("find /opt/xiahai-xiaoming -type f -exec chmod 0644", installer)
+        self.assertIn("find /opt/xiahai-xiaoming -type l -print -quit", installer)
+        self.assertIn("chown -R root:root /opt/xiahai-xiaoming", installer)
         self.assertIn("chmod 0755 /opt/xiahai-xiaoming/xiahai-xiaoming", installer)
         self.assertIn("chown root:root /opt/xiahai-xiaoming/chrome-sandbox", installer)
         self.assertIn("chmod 4755 /opt/xiahai-xiaoming/chrome-sandbox", installer)
@@ -67,6 +75,12 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn("sed -i 's/\\r$//' \"${desktop}\"", installer)
         self.assertIn("Categories=Office;", installer)
         self.assertIn("desktop-file-validate \"${desktop}\"", installer)
+
+    def test_xiahai_desktop_publishes_stable_window_identity(self):
+        installer = APPS.split("install_xiahai_xiaoming() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("chown root:root \"${desktop}\"", installer)
+        self.assertIn("chmod 0644 \"${desktop}\"", installer)
+        self.assertIn("StartupWMClass=xiahai-xiaoming", installer)
 
     def test_build_preflights_xiahai_archive_before_chroot_work(self):
         prepare = BUILD.split("prepare_chroot_scripts() {", 1)[1].split("\n}", 1)[0]

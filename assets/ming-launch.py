@@ -390,6 +390,18 @@ def _is_system_catalog_desktop_file(path, system_dir=SYSTEM_APPLICATION_DIR):
     return candidate.parent == base and candidate.suffix == ".desktop"
 
 
+def _canonical_xiahai_system_desktop(path, system_dir=SYSTEM_APPLICATION_DIR):
+    """Resolve the fixed Xiahai desktop ID only through the system catalog."""
+    try:
+        base = pathlib.Path(system_dir).expanduser().resolve(strict=True)
+        canonical = (base / "xiahai-xiaoming.desktop").resolve(strict=True)
+    except (OSError, TypeError):
+        raise ValueError("canonical Xiahai launcher is unavailable") from None
+    if canonical.parent != base or canonical.name != "xiahai-xiaoming.desktop":
+        raise ValueError("canonical Xiahai launcher is unsafe")
+    return canonical
+
+
 def verify_package_owned_system_desktop(path, system_dir=SYSTEM_APPLICATION_DIR,
                                          command_runner=None,
                                          descriptor_revalidator=None):
@@ -559,6 +571,12 @@ def verify_desktop_proxy(path, manifest_path=DESKTOP_PROXY_MANIFEST, receipt_pat
 def request_from_desktop_file(path, source="unknown", rect=None, allowed_dirs=None,
                               system_dir=SYSTEM_APPLICATION_DIR):
     path = _allowed_desktop_path(path, allowed_dirs)
+    # A pre-upgrade user copy can shadow the package-owned Xiahai launcher.
+    # Resolve the fixed ID before parsing user content so it always receives
+    # the broker's verified desktop-app-info activation and retry policy.
+    if path.name == "xiahai-xiaoming.desktop":
+        canonical = _canonical_xiahai_system_desktop(path, system_dir)
+        return LaunchRequest((), source, rect, str(canonical), mode="desktop_app_info")
     entry = COMMON.parse_desktop_file(path)
     if entry is None:
         raise ValueError("desktop file is hidden or unavailable")

@@ -43,6 +43,52 @@ SECTION_PROVIDERS = {
     "spark": ("spark-public",),
     "sources": ("ming-official", "debian-apt", "vendor-official", "wine-official"),
 }
+# Keep remote catalog data from selecting arbitrary or missing icon names.  The
+# aliases below are names shipped by the standard Debian icon themes; unknown
+# entries intentionally use the generic executable icon.
+APP_ICON_ALIASES = {
+    "vlc": "vlc",
+    "libreoffice": "libreoffice-startcenter",
+    "gimp": "gimp",
+    "inkscape": "inkscape",
+    "audacity": "audacity",
+    "thunderbird": "thunderbird",
+    "filezilla": "filezilla",
+    "remmina": "remmina",
+    "obs-studio": "obs",
+    "qbittorrent": "qbittorrent",
+    "keepassxc": "keepassxc",
+    "flameshot": "flameshot",
+    "simple-scan": "org.gnome.SimpleScan",
+}
+SAFE_ICON_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def app_icon_name(item):
+    """Resolve a catalog item to a stable icon-theme name.
+
+    Catalogs may use either ``app_id`` or ``package_name`` and may provide an
+    optional icon hint.  Known aliases win; an otherwise well-formed hint is
+    accepted for vendor/Wine entries, while malformed or missing hints fall
+    back to the theme's generic executable icon.
+    """
+    item = item or {}
+    candidates = (
+        str(item.get("app_id") or "").strip().lower(),
+        str(item.get("package_name") or "").strip().lower(),
+    )
+    for candidate in candidates:
+        if candidate in APP_ICON_ALIASES:
+            return APP_ICON_ALIASES[candidate]
+    hint = str(item.get("icon_name") or item.get("icon") or "").strip()
+    if hint and SAFE_ICON_NAME.fullmatch(hint):
+        return hint
+    return "application-x-executable"
+# A page must never leave the user with an indeterminate spinner.  The worker
+# may continue in the background after this deadline, but its late result is
+# discarded by the generation guard below.
+STORE_PAGE_TIMEOUT_SECONDS = 20
+STORE_HOME_TIMEOUT_SECONDS = 30
 WINE_HANDOFF_COMMAND = ("/usr/local/bin/ming-toolbox", "--install-wine")
 MING_MINT_CSS = """
 window.ming-store { background: #f5faf8; color: #17332c; }
@@ -87,6 +133,59 @@ WINE_HANDOFF_TERMINAL_STATES = frozenset({
 
 def layout_mode(width):
     return "compact" if int(width) < 700 else "wide"
+
+
+def source_options_for_section(section):
+    """Return provider IDs exposed by the active top-level store section.
+
+    The UI and query layer must use the same scoped list.  In particular, the
+    public Spark directory is not a selectable source in the native-source
+    section, even though both sections share the same catalog registry.
+    """
+    try:
+        providers = SECTION_PROVIDERS[str(section)]
+    except KeyError as exc:
+        raise ValueError("商店栏目无效。") from exc
+    return ("all",) + tuple(providers)
+
+
+def source_labels_for_section(section):
+    return tuple(SOURCES[source_id] for source_id in source_options_for_section(section))
+
+
+def source_id_for_selection(section, selected):
+    options = source_options_for_section(section)
+    try:
+        index = int(selected)
+    except (TypeError, ValueError):
+        index = 0
+    if index < 0 or index >= len(options):
+        return "all"
+    return options[index]
+
+
+def page_load_presentation(error=None, timed_out=False):
+    if timed_out:
+        return "页面加载超时", "软件来源响应时间过长，请检查网络后重试。"
+    if error:
+        return "页面暂不可用", str(error)
+    return "正在读取", "正在查询软件目录和系统安装状态…"
+
+
+def home_empty_presentation(items, statuses, refreshing=False):
+    """Return a truthful empty-state title/subtitle for the store home page."""
+    if items:
+        return None
+    if refreshing:
+        return (
+            "正在读取软件目录",
+            "正在使用已有缓存或等待来源刷新结果。",
+        )
+    for status in statuses or ():
+        if not status.get("ok"):
+            message = str(status.get("message") or "网络不可用，且没有可用的目录缓存。")
+            return "来源暂不可用", message
+    return "没有找到软件", "请更换关键词或来源。"
 
 
 def operation_presentation(result):
@@ -508,7 +607,7 @@ class StoreController:
             try:
                 state = self.catalog.installed_state(
                     current["source_id"], current["app_id"])
-            except (KeyError, RuntimeError, ValueError):
+            except (KeyError, OSError, RuntimeError, subprocess.SubprocessError, ValueError):
                 state = {
                     "installed": False, "version": None,
                     "architecture": None, "state": "status_unavailable",
@@ -532,7 +631,7 @@ class StoreController:
             try:
                 state = self.catalog.installed_state(
                     current["source_id"], current["app_id"])
-            except (KeyError, RuntimeError, ValueError):
+            except (KeyError, OSError, RuntimeError, subprocess.SubprocessError, ValueError):
                 state = {
                     "installed": False, "version": None,
                     "architecture": None, "state": "status_unavailable",
@@ -576,7 +675,7 @@ class StoreController:
             try:
                 provider = self.catalog.registry.get(item["source_id"])
                 resolved = provider.resolve(item["app_id"])
-            except (KeyError, RuntimeError, ValueError):
+            except (KeyError, OSError, RuntimeError, subprocess.SubprocessError, ValueError):
                 continue
             candidate = resolved.get("resolved_version") or resolved.get("version")
             installed = item.get("installed_version")
@@ -973,7 +1072,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     header.set_title_widget(title)
     search = Gtk.SearchEntry(placeholder_text="搜索软件")
     search.set_text(initial_query)
-    source = Gtk.DropDown.new_from_strings(list(SOURCES.values()))
+    source = Gtk.DropDown.new_from_strings(list(source_labels_for_section("spark")))
     section_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
     section_spark = Gtk.ToggleButton(label=STORE_SECTION_LABELS["spark"])
     section_sources = Gtk.ToggleButton(label=STORE_SECTION_LABELS["sources"])
@@ -1044,8 +1143,33 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     def load_page_async(loader, renderer, empty_title, empty_subtitle):
         page_generation["value"] += 1
         generation = page_generation["value"]
+        finished = {"value": False}
+        timeout_id = {"value": 0}
         clear_results()
-        add_message("正在读取", "正在查询软件目录和系统安装状态…")
+        add_message(*page_load_presentation())
+
+        def cancel_timeout():
+            source_id = timeout_id["value"]
+            if source_id:
+                try:
+                    GLib.source_remove(source_id)
+                except (TypeError, ValueError):
+                    pass
+                timeout_id["value"] = 0
+
+        def on_timeout():
+            if generation != page_generation["value"] or finished["value"]:
+                return False
+            finished["value"] = True
+            # Invalidate callbacks already queued by a slow provider.
+            page_generation["value"] += 1
+            clear_results()
+            add_message(*page_load_presentation(timed_out=True))
+            timeout_id["value"] = 0
+            return False
+
+        timeout_id["value"] = GLib.timeout_add_seconds(
+            STORE_PAGE_TIMEOUT_SECONDS, on_timeout)
 
         def worker():
             try:
@@ -1055,11 +1179,13 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 payload, error = [], str(exc)
 
             def apply():
-                if generation != page_generation["value"]:
+                if generation != page_generation["value"] or finished["value"]:
                     return False
+                finished["value"] = True
+                cancel_timeout()
                 clear_results()
                 if error:
-                    add_message("页面暂不可用", error)
+                    add_message(*page_load_presentation(error=error))
                 elif not payload:
                     add_message(empty_title, empty_subtitle)
                 else:
@@ -1176,7 +1302,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         card.set_size_request(240, 218)
         card.set_hexpand(False)
         card.set_vexpand(False)
-        icon_name = str(item.get("icon_name") or item.get("icon") or "application-x-executable")
+        icon_name = app_icon_name(item)
         icon_url = str(item.get("icon_url") or "")
         icon = Gtk.Image.new_from_icon_name(icon_name)
         icon.set_pixel_size(64)
@@ -1235,45 +1361,119 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         return card
 
     def selected_source():
-        selected = source.get_selected()
-        if current_section["name"] == "spark":
-            return "spark-public"
-        return list(SOURCES)[selected] if selected < len(SOURCES) else "all"
+        return source_id_for_selection(current_section["name"], source.get_selected())
 
     def show_home():
         query = search.get_text()
         source_id = selected_source()
         section = current_section["name"]
+        page_generation["value"] += 1
+        generation = page_generation["value"]
+        finished = {"value": False}
+        timeout_id = {"value": 0}
+        clear_results()
+        add_message(*home_empty_presentation([], [], refreshing=True))
 
-        def load_home_page():
-            if section == "spark":
-                provider = controller.catalog.registry.get("spark-public")
-                if getattr(provider, "catalog_state", "unavailable") != "ready":
-                    controller.refresh_section(section)
-            page = controller.inventory_page(query, source_id, limit=80, section=section)
-            return page if page["items"] else []
+        def cancel_home_timeout():
+            source_id = timeout_id["value"]
+            if source_id:
+                try:
+                    GLib.source_remove(source_id)
+                except (TypeError, ValueError):
+                    pass
+                timeout_id["value"] = 0
 
-        def render_home_page(page):
-            statuses = controller.last_refresh_status
-            warnings = [status for status in statuses if not status.get("ok")]
+        def on_home_timeout():
+            if generation != page_generation["value"] or finished["value"]:
+                return False
+            finished["value"] = True
+            page_generation["value"] += 1
+            clear_results()
+            add_message(*page_load_presentation(timed_out=True))
+            timeout_id["value"] = 0
+            return False
+
+        timeout_id["value"] = GLib.timeout_add_seconds(
+            STORE_HOME_TIMEOUT_SECONDS, on_home_timeout)
+
+        def render_home_page(page, statuses=None, refreshing=False):
+            if generation != page_generation["value"] or finished["value"]:
+                return
+            statuses = controller.last_refresh_status if statuses is None else statuses
+            page = page if isinstance(page, dict) else {"items": []}
+            items = page.get("items") or []
+            clear_results()
+            if not items:
+                title_subtitle = home_empty_presentation(
+                    items, statuses, refreshing=refreshing)
+                if title_subtitle:
+                    add_message(*title_subtitle)
+                return
+            warnings = [status for status in statuses or () if not status.get("ok")]
+            for item in items:
+                add_software_row(item)
             if warnings:
                 add_message("来源暂不可用", warnings[0].get(
                     "message", "正在使用缓存目录，请稍后重试。"))
-            if isinstance(page, dict):
-                for item in page["items"]:
-                    add_software_row(item)
-                if page.get("has_more"):
-                    add_message(
-                        "目录较大",
-                        "已显示 %d/%d 个软件；请输入关键词继续搜索。" % (
-                            len(page["items"]), page["total"]),
-                    )
+            if refreshing:
+                add_message("正在刷新目录", "已显示缓存或本地目录，联网刷新完成后会自动更新。")
+            if page.get("has_more"):
+                add_message(
+                    "目录较大",
+                    "已显示 %d/%d 个软件；请输入关键词继续搜索。" % (
+                        len(items), page["total"]),
+                )
 
-        load_page_async(
-            load_home_page,
-            render_home_page,
-            "没有找到软件", "请更换关键词或来源。",
-        )
+        def worker():
+            try:
+                snapshot = controller.inventory_page(
+                    query, source_id, limit=80, section=section)
+                snapshot_error = None
+            except Exception as exc:
+                snapshot, snapshot_error = {"items": []}, str(exc)
+
+            def apply_snapshot():
+                if generation != page_generation["value"] or finished["value"]:
+                    return False
+                if snapshot_error:
+                    clear_results()
+                    add_message(*page_load_presentation(error=snapshot_error))
+                else:
+                    render_home_page(snapshot, statuses=(), refreshing=True)
+                return False
+
+            GLib.idle_add(apply_snapshot)
+
+            try:
+                statuses = controller.refresh_section(section)
+            except Exception as exc:
+                statuses = [{
+                    "ok": False, "using_cache": False,
+                    "message": "来源暂不可用，请稍后重试：%s" % exc,
+                }]
+                controller.last_refresh_status = statuses
+            try:
+                refreshed = controller.inventory_page(
+                    query, source_id, limit=80, section=section)
+                refresh_error = None
+            except Exception as exc:
+                refreshed, refresh_error = {"items": []}, str(exc)
+
+            def apply_refresh():
+                if generation != page_generation["value"] or finished["value"]:
+                    return False
+                if refresh_error:
+                    clear_results()
+                    add_message("来源暂不可用", str(refresh_error))
+                else:
+                    render_home_page(refreshed, statuses=statuses, refreshing=False)
+                finished["value"] = True
+                cancel_home_timeout()
+                return False
+
+            GLib.idle_add(apply_refresh)
+
+        threading.Thread(target=worker, name="ming-store-home-loader", daemon=True).start()
 
     def show_categories():
         page_generation["value"] += 1
@@ -1460,7 +1660,9 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         if not button.get_active():
             return
         current_section["name"] = section_name
-        source.set_visible(section_name == "sources")
+        source.set_model(Gtk.StringList.new(list(source_labels_for_section(section_name))))
+        source.set_selected(0)
+        source.set_visible(True)
         show_page(current_page["name"])
 
     section_spark.connect("toggled", on_section_changed, "spark")
@@ -1470,8 +1672,22 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     def refresh_current_catalog(_button):
         refresh_catalog.set_sensitive(False)
         def worker():
-            controller.refresh_section(current_section["name"])
-            GLib.idle_add(lambda: (refresh_catalog.set_sensitive(True), show_page(current_page["name"]), False)[-1])
+            error = None
+            try:
+                controller.refresh_section(current_section["name"])
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                refresh_catalog.set_sensitive(True)
+                if error:
+                    clear_results()
+                    add_message("来源暂不可用", error)
+                else:
+                    show_page(current_page["name"])
+                return False
+
+            GLib.idle_add(finish)
         threading.Thread(target=worker, name="ming-store-catalog-refresh", daemon=True).start()
     refresh_catalog.connect("clicked", refresh_current_catalog)
 
@@ -1482,7 +1698,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     toolbar.add_top_bar(header)
     toolbar.set_content(content)
     window.set_content(toolbar)
-    source.set_visible(False)
+    source.set_visible(True)
     if local_deb:
         load_local_deb_async(local_deb)
     else:

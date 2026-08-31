@@ -15,6 +15,18 @@ def load_store_ui():
 
 
 class MingStoreUiLayoutTests(unittest.TestCase):
+    def test_common_catalog_items_resolve_to_real_theme_icons(self):
+        ui = load_store_ui()
+        self.assertEqual("vlc", ui.app_icon_name({"app_id": "vlc"}))
+        self.assertEqual(
+            "libreoffice-startcenter",
+            ui.app_icon_name({"app_id": "libreoffice"}),
+        )
+        self.assertEqual(
+            "application-x-executable",
+            ui.app_icon_name({"app_id": "unknown-app"}),
+        )
+
     def test_store_uses_card_grid_with_icon_name_and_summary(self):
         source = STORE_UI.read_text(encoding="utf-8")
         self.assertRegex(source, r"Gtk\.(?:FlowBox|Grid)")

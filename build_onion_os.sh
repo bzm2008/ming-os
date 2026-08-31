@@ -38,7 +38,8 @@ readonly DEBIAN_SUITE="trixie"
 readonly DEBIAN_ARCHIVE_KEYRING="${MING_DEBIAN_ARCHIVE_KEYRING:-/usr/share/keyrings/debian-archive-keyring.gpg}"
 readonly SPARK_ARCHIVE_KEYRING="/etc/ming-os/store/spark-archive-keyring.gpg"
 readonly ARCH="amd64"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR_LEXICAL="$(cd -L -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -L)"
+readonly SCRIPT_DIR="$(cd -P -- "${SCRIPT_DIR_LEXICAL}" && pwd -P)"
 readonly LINUX_WORKDIR="/var/tmp/ming-os-build"
 readonly APT_ARCHIVES_CACHE="${MING_APT_ARCHIVES_CACHE:-${LINUX_WORKDIR}/apt-archives}"
 readonly CHROOT_CACHE_DIR="${MING_CHROOT_CACHE_DIR:-${LINUX_WORKDIR}/chroot-cache}"
@@ -227,32 +228,195 @@ acquire_build_lock() {
 }
 
 source_tree_sha256() {
-    git_build ls-tree -r --full-tree HEAD | sha256sum | awk '{print $1}'
+    local tree_digest
+    if ! tree_digest="$(git_build ls-tree -r --full-tree HEAD | sha256sum)"; then
+        return 1
+    fi
+    printf '%s\n' "${tree_digest%% *}"
+}
+
+assert_path_has_no_symlink_components() {
+    local lexical_path="$1" label="$2" component current
+    local -a components=()
+    local IFS=/
+
+    if [[ "${lexical_path}" != /* ]]; then
+        log_error "${label} must be an absolute lexical path: ${lexical_path}"
+        return 1
+    fi
+    read -r -a components <<< "${lexical_path#/}"
+    current=""
+    for component in "${components[@]}"; do
+        [[ -n "${component}" ]] || continue
+        current="${current}/${component}"
+        if [[ -L "${current}" ]]; then
+            log_error "${label} must not traverse a symlink: ${current}"
+            return 1
+        fi
+    done
+    return 0
+}
+
+assert_source_tree_has_no_symlinks() {
+    local source_root source_root_physical link script script_root_physical
+    local -a source_roots=(
+        "${MODULES_DIR}"
+        "${CONFIG_DIR}"
+        "${SCRIPT_DIR}/assets"
+        "${SCRIPT_DIR}/scripts"
+    )
+    local -a build_scripts=(
+        "${SCRIPT_DIR}/build_onion_os.sh"
+        "${SCRIPT_DIR}/resume_build.sh"
+        "${SCRIPT_DIR}/continue_build.sh"
+        "${SCRIPT_DIR}/fast_build_iso.sh"
+        "${SCRIPT_DIR}/final_build_iso.sh"
+        "${SCRIPT_DIR}/rebuild_iso.sh"
+        "${SCRIPT_DIR}/generate_final_iso.sh"
+        "${BUILD_STATE_HELPER}"
+    )
+
+    assert_path_has_no_symlink_components "${SCRIPT_DIR_LEXICAL}" "build entry path" || return 1
+
+    script_root_physical="$(cd -P -- "${SCRIPT_DIR}" && pwd -P)" || {
+        log_error "cannot resolve physical build source directory: ${SCRIPT_DIR}"
+        return 1
+    }
+
+    for source_root in "${source_roots[@]}"; do
+        [[ -e "${source_root}" || -L "${source_root}" ]] || continue
+        if [[ -L "${source_root}" ]]; then
+            log_error "build source root must not be a symlink: ${source_root}"
+            return 1
+        fi
+        source_root_physical="$(cd -P -- "${source_root}" && pwd -P)" || {
+            log_error "cannot resolve physical build source root: ${source_root}"
+            return 1
+        }
+        case "${source_root_physical}" in
+            "${script_root_physical}"|"${script_root_physical}"/*) ;;
+            *)
+                log_error "build source root escapes build directory boundary: ${source_root}"
+                return 1
+                ;;
+        esac
+        if ! link="$(find -P "${source_root}" -type l -print -quit)"; then
+            log_error "cannot scan build source root for symlinks: ${source_root}"
+            return 1
+        fi
+        if [[ -n "${link}" ]]; then
+            log_error "build source input must not contain a symlink: ${link}"
+            return 1
+        fi
+    done
+
+    for script in "${build_scripts[@]}"; do
+        [[ -e "${script}" || -L "${script}" ]] || continue
+        if [[ -L "${script}" ]]; then
+            log_error "relevant build script must not be a symlink: ${script}"
+            return 1
+        fi
+    done
+    return 0
 }
 
 build_inputs_sha256() {
-    {
-        printf '%s\0' "${MING_OS_BUILD_SUFFIX}" "${ISO_VOLUME_ID}" \
-            "${MING_SKIP_XIAHAI}" "${MING_BUILD_PROFILE}"
-        while IFS= read -r -d '' input_file; do
-            sha256sum "${input_file}"
-        done < <(find "${MODULES_DIR}" "${CONFIG_DIR}" "${SCRIPT_DIR}/assets" \
-            -type d \( -name __pycache__ -o -name .pytest_cache \) -prune -o \
-            -type f ! -name '*.pyc' ! -name '*.pyo' \
-            -print0 | sort -z)
-        printf 'xiahai-source=%s\0' \
-            "$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"
-        printf 'ota-release-key=%s\0' \
-            "$(file_sha256_or_missing "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}")"
-        sha256sum "${SCRIPT_DIR}/build_onion_os.sh" \
-            "${SCRIPT_DIR}/resume_build.sh" "${BUILD_STATE_HELPER}"
-    } | sha256sum | awk '{print $1}'
+    local input_list="" payload=""
+    local source_identity input_hash xiahai_hash ota_hash script_hashes final_digest
+
+    cleanup_build_input_hash() {
+        rm -f -- "${input_list:-}" "${payload:-}"
+    }
+
+    if ! input_list="$(mktemp "${TMPDIR:-/tmp}/ming-build-inputs.XXXXXX")"; then
+        log_error "cannot create temporary build input list"
+        return 1
+    fi
+    if ! payload="$(mktemp "${TMPDIR:-/tmp}/ming-build-input-payload.XXXXXX")"; then
+        cleanup_build_input_hash
+        log_error "cannot create temporary build input payload"
+        return 1
+    fi
+    if ! assert_source_tree_has_no_symlinks; then
+        cleanup_build_input_hash
+        return 1
+    fi
+    if ! source_identity="$(source_tree_sha256)"; then
+        cleanup_build_input_hash
+        log_error "cannot calculate source tree identity"
+        return 1
+    fi
+    if ! find "${MODULES_DIR}" "${CONFIG_DIR}" "${SCRIPT_DIR}/assets" \
+        -type d \( -name __pycache__ -o -name .pytest_cache \) -prune -o \
+        -type f ! -name '*.pyc' ! -name '*.pyo' \
+        -print0 | LC_ALL=C sort -z > "${input_list}"; then
+        cleanup_build_input_hash
+        log_error "cannot enumerate build inputs"
+        return 1
+    fi
+    : > "${payload}" || {
+        cleanup_build_input_hash
+        log_error "cannot initialize temporary build input payload"
+        return 1
+    }
+    if ! printf 'source-tree-identity=%s\0' "${source_identity}" >> "${payload}" \
+        || ! printf '%s\0' "${MING_OS_BUILD_SUFFIX}" "${ISO_VOLUME_ID}" \
+            "${MING_SKIP_XIAHAI}" "${MING_BUILD_PROFILE}" >> "${payload}"; then
+        cleanup_build_input_hash
+        log_error "cannot write build input payload"
+        return 1
+    fi
+    while IFS= read -r -d '' input_file; do
+        if ! input_hash="$(sha256sum -- "${input_file}")"; then
+            cleanup_build_input_hash
+            log_error "cannot hash build input: ${input_file}"
+            return 1
+        fi
+        if ! printf '%s\0' "${input_hash}" >> "${payload}"; then
+            cleanup_build_input_hash
+            log_error "cannot write build input payload"
+            return 1
+        fi
+    done < "${input_list}"
+    if ! xiahai_hash="$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"; then
+        cleanup_build_input_hash
+        log_error "cannot hash Xiahai build input"
+        return 1
+    fi
+    if ! ota_hash="$(file_sha256_or_missing "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}")"; then
+        cleanup_build_input_hash
+        log_error "cannot hash OTA release key input"
+        return 1
+    fi
+    if ! script_hashes="$(sha256sum -- "${SCRIPT_DIR}/build_onion_os.sh" \
+        "${SCRIPT_DIR}/resume_build.sh" "${BUILD_STATE_HELPER}")"; then
+        cleanup_build_input_hash
+        log_error "cannot hash build entry scripts"
+        return 1
+    fi
+    if ! printf 'xiahai-source=%s\0' "${xiahai_hash}" >> "${payload}" \
+        || ! printf 'ota-release-key=%s\0' "${ota_hash}" >> "${payload}" \
+        || ! printf '%s\0' "${script_hashes}" >> "${payload}"; then
+        cleanup_build_input_hash
+        log_error "cannot write build input payload"
+        return 1
+    fi
+    if ! final_digest="$(sha256sum -- "${payload}")"; then
+        cleanup_build_input_hash
+        log_error "cannot calculate build input digest"
+        return 1
+    fi
+    printf '%s\n' "${final_digest%% *}"
+    cleanup_build_input_hash
 }
 
 file_sha256_or_missing() {
-    local path="$1"
+    local path="$1" digest
     if [[ -s "${path}" ]]; then
-        sha256sum "${path}" | awk '{print $1}'
+        if ! digest="$(sha256sum -- "${path}")"; then
+            return 1
+        fi
+        printf '%s\n' "${digest%% *}"
     else
         printf 'missing'
     fi
@@ -274,6 +438,27 @@ initialize_build_state() {
         log_error "missing build state helper: ${BUILD_STATE_HELPER}"
         return 1
     }
+    local source_tree_hash modules_hash xiahai_hash keyring_hash tools_hash
+    if ! source_tree_hash="$(source_tree_sha256)"; then
+        log_error "cannot calculate source tree identity"
+        return 1
+    fi
+    if ! modules_hash="$(build_inputs_sha256)"; then
+        log_error "cannot calculate build input identity"
+        return 1
+    fi
+    if ! xiahai_hash="$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"; then
+        log_error "cannot hash Xiahai build input"
+        return 1
+    fi
+    if ! keyring_hash="$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")"; then
+        log_error "cannot hash Debian archive keyring"
+        return 1
+    fi
+    if ! tools_hash="$(tools_fingerprint)"; then
+        log_error "cannot calculate build tools fingerprint"
+        return 1
+    fi
     local state_args=(
         init
         --state-dir "${BUILD_STATE_DIR}"
@@ -281,8 +466,8 @@ initialize_build_state() {
         --build-time-utc "${BUILD_TIME_UTC}"
         --version "${MING_OS_VERSION}"
         --source-commit "${BUILD_SOURCE_COMMIT}"
-        --source-tree-sha256 "$(source_tree_sha256)"
-        --modules-sha256 "$(build_inputs_sha256)"
+        --source-tree-sha256 "${source_tree_hash}"
+        --modules-sha256 "${modules_hash}"
         --profile "${MING_BUILD_PROFILE}"
         --suite "${DEBIAN_SUITE}"
         --arch "${ARCH}"
@@ -292,10 +477,10 @@ initialize_build_state() {
         --build-suffix "${MING_OS_BUILD_SUFFIX}"
         --iso-volume-id "${ISO_VOLUME_ID}"
         --skip-xiahai "${MING_SKIP_XIAHAI}"
-        --xiahai-sha256 "$(file_sha256_or_missing "${MING_XIAHAI_DEB_SOURCE:-${SCRIPT_DIR}/assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb}")"
-        --keyring-sha256 "$(file_sha256_or_missing "${DEBIAN_ARCHIVE_KEYRING}")"
+        --xiahai-sha256 "${xiahai_hash}"
+        --keyring-sha256 "${keyring_hash}"
         --apt-snapshot-sha256 "pending"
-        --tools-fingerprint "$(tools_fingerprint)"
+        --tools-fingerprint "${tools_hash}"
     )
     [[ "${MING_BUILD_FRESH}" == "1" ]] && state_args+=(--fresh)
     [[ "${MING_BUILD_RESUME}" == "1" ]] && state_args+=(--resume)
@@ -455,6 +640,7 @@ capture_build_identity() {
     require_cmd git "apt install git"
     resolve_git_invocation
     assert_clean_source_tree
+    assert_source_tree_has_no_symlinks
     BUILD_SOURCE_COMMIT="$(git_build rev-parse HEAD)"
     if ! git_build cat-file -e "${BUILD_SOURCE_COMMIT}^{commit}"; then
         log_error "当前源码提交无法解析为 Git commit 对象，拒绝构建。"
@@ -778,6 +964,7 @@ settle_chroot_dpkg() {
 # 将模块脚本和配置文件复制到 chroot 中
 prepare_chroot_scripts() {
     log_info "准备 chroot 内执行环境"
+    assert_source_tree_has_no_symlinks || return 1
     if [[ ! -s "${SCRIPT_DIR}/assets/wallpaper-ming-2640-abstract.png" ]]; then
         log_error "missing required build asset: assets/wallpaper-ming-2640-abstract.png"
         return 1
@@ -948,27 +1135,181 @@ clean_chroot() {
     else
         chroot_exec bash -c "apt clean"
     fi
-    # Debian Trixie stores the signed AppStream DEP-11 catalog in apt lists
-    # and exposes it through swcatalog symlinks.  Preserve real copies inside
-    # the rootfs before removing apt lists so the store remains searchable
-    # offline and the release gate can inspect authentic metadata.
+    # Debian Trixie stores signed AppStream DEP-11 metadata in apt lists.  Do
+    # not read swcatalog here: it can link to a cache left by an earlier build.
+    # Preserve only the current APT list records before cleaning the lists.
     chroot_exec bash -c '
-        set -u
-        destination=/var/cache/swcatalog/yaml
-        mkdir -p "${destination}"
-        for source in /var/lib/swcatalog/yaml/*.yml /var/lib/swcatalog/yaml/*.yaml \
-                      /var/lib/swcatalog/yaml/*.yml.gz /var/lib/swcatalog/yaml/*.yaml.gz; do
+        set -eu -o pipefail
+        destination_parent=/var/cache/swcatalog
+        destination="${destination_parent}/yaml"
+        metadata_stage=
+        destination_parent_info=
+        # A fresh debootstrap may not have either cache directory yet.  Check
+        # existing components before creation, create only inside /var/cache,
+        # then read back the canonical path and check again.
+        for boundary in /var /var/cache "${destination_parent}"; do
+            if [ -L "${boundary}" ]; then
+                echo "ERROR: AppStream cache destination must not traverse a symlink: ${boundary}" >&2
+                exit 1
+            fi
+        done
+        mkdir -p /var/cache "${destination_parent}"
+        for boundary in /var /var/cache "${destination_parent}"; do
+            if [ -L "${boundary}" ]; then
+                echo "ERROR: AppStream cache destination became a symlink: ${boundary}" >&2
+                exit 1
+            fi
+        done
+        destination_parent_info=$(readlink -f -- "${destination_parent}") || {
+            echo "ERROR: AppStream cache destination cannot be resolved: ${destination_parent}" >&2
+            exit 1
+        }
+        case "${destination_parent_info}" in
+            /var/cache/swcatalog) ;;
+            *)
+                echo "ERROR: AppStream cache destination parent escapes target rootfs: ${destination_parent}" >&2
+                exit 1
+                ;;
+        esac
+        mkdir -p "${destination_parent}"
+        metadata_stage="$(mktemp -d "${destination_parent}/.ming-appstream-yaml.XXXXXX")"
+        for source in /var/lib/apt/lists/*_dep11_Components-*.yml \
+                      /var/lib/apt/lists/*_dep11_Components-*.yml.gz \
+                      /var/lib/apt/lists/*_dep11_Components-*.yaml \
+                      /var/lib/apt/lists/*_dep11_Components-*.yaml.gz; do
+            if [ -L "${source}" ]; then
+                echo "ERROR: refusing linked APT DEP-11 metadata: ${source}" >&2
+                exit 1
+            fi
             [ -e "${source}" ] || continue
-            resolved=$(readlink -f -- "${source}" 2>/dev/null || true)
+            resolved=$(readlink -f -- "${source}")
             case "${resolved}" in
-                /var/lib/apt/lists/*|/var/lib/swcatalog/*|/var/cache/swcatalog/*) ;;
-                *) continue ;;
+                /var/lib/apt/lists/*_dep11_Components-*.yml|\
+                /var/lib/apt/lists/*_dep11_Components-*.yml.gz|\
+                /var/lib/apt/lists/*_dep11_Components-*.yaml|\
+                /var/lib/apt/lists/*_dep11_Components-*.yaml.gz) ;;
+                *)
+                    echo "ERROR: APT DEP-11 metadata resolves outside current lists: ${source}" >&2
+                    exit 1
+                    ;;
             esac
             [ -f "${resolved}" ] || continue
-            target="${destination}/$(basename "${source}")"
+            target="${metadata_stage}/$(basename "${source}")"
             cp -f -- "${resolved}" "${target}"
             chmod 0644 "${target}"
         done
+        # Keep a small, immutable-by-construction package identity index after
+        # apt lists are removed.  It is derived only from the copied, signed
+        # DEP-11 records and replaced atomically so a resumed build cannot use
+        # a half-written index.
+        index_dir=/var/lib/ming-os
+        index="${index_dir}/appstream-apt-packages.txt"
+        index_parent=/var/lib
+        # The package index is written into a reused rootfs.  Refuse any
+        # symlinked component (including a pre-existing index) and verify the
+        # resolved paths stay at their exact in-root locations before creating
+        # or replacing files.
+        for boundary in /var "${index_parent}" "${index_dir}"; do
+            if [ -L "${boundary}" ]; then
+                echo "ERROR: AppStream index path must not traverse a symlink: ${boundary}" >&2
+                exit 1
+            fi
+        done
+        mkdir -p "${index_dir}"
+        for boundary in /var "${index_parent}" "${index_dir}"; do
+            if [ -L "${boundary}" ]; then
+                echo "ERROR: AppStream index path became a symlink: ${boundary}" >&2
+                exit 1
+            fi
+        done
+        index_parent_info=$(readlink -f -- "${index_parent}") || {
+            echo "ERROR: AppStream index parent cannot be resolved: ${index_parent}" >&2
+            exit 1
+        }
+        if [ "${index_parent_info}" != "${index_parent}" ]; then
+            echo "ERROR: AppStream index parent escapes target rootfs: ${index_parent}" >&2
+            exit 1
+        fi
+        index_dir_info=$(readlink -f -- "${index_dir}") || {
+            echo "ERROR: AppStream index directory cannot be resolved: ${index_dir}" >&2
+            exit 1
+        }
+        if [ "${index_dir_info}" != "${index_dir}" ]; then
+            echo "ERROR: AppStream index directory escapes target rootfs: ${index_dir}" >&2
+            exit 1
+        fi
+        if [ -L "${index}" ]; then
+            echo "ERROR: AppStream package index must not be a symlink: ${index}" >&2
+            exit 1
+        fi
+        if [ -e "${index}" ] && [ ! -f "${index}" ]; then
+            echo "ERROR: AppStream package index is not a regular file: ${index}" >&2
+            exit 1
+        fi
+        dep11_packages=
+        apt_packages=
+        index_partial=
+        cleanup_appstream_index() {
+            rm -f -- "${dep11_packages:-}" "${apt_packages:-}" "${index_partial:-}"
+            if [ -n "${metadata_stage:-}" ]; then
+                rm -rf -- "${metadata_stage}"
+            fi
+        }
+        appstream_signal_exit() {
+            local signal="$1"
+            local exit_status=$((128 + signal))
+            trap - EXIT HUP INT TERM
+            cleanup_appstream_index || true
+            exit "${exit_status}"
+        }
+        trap cleanup_appstream_index EXIT
+        trap "appstream_signal_exit 1" HUP
+        trap "appstream_signal_exit 2" INT
+        trap "appstream_signal_exit 15" TERM
+        dep11_packages="$(mktemp "${index_dir}/.appstream-dep11-packages.XXXXXX")"
+        apt_packages="$(mktemp "${index_dir}/.appstream-apt-packages.XXXXXX")"
+        index_partial="$(mktemp "${index_dir}/.appstream-apt-packages-output.XXXXXX")"
+
+        # APT DEP-11 copies retain their source-list basename (for example,
+        # *_dep11_Components-amd64.yml.gz), so inspect every copied YAML file
+        # rather than only the Components-* names exposed by swcatalog.
+        find -P "${metadata_stage}" -maxdepth 1 -type f \
+            \( -name "*.yml" -o -name "*.yaml" -o -name "*.yml.gz" -o -name "*.yaml.gz" \) \
+            -print0 \
+            | while IFS= read -r -d "" metadata; do
+                case "${metadata}" in
+                    *.gz) gzip -cd -- "${metadata}" ;;
+                    *) cat -- "${metadata}" ;;
+                esac
+            done \
+            | awk -F": *" "\$1 == \"Package\" && tolower(\$2) ~ /^[a-z0-9][a-z0-9+.-]*$/ {print tolower(\$2)}" \
+            | LC_ALL=C sort -u > "${dep11_packages}"
+        apt-cache dumpavail \
+            | awk -F": *" "\$1 == \"Package\" && tolower(\$2) ~ /^[a-z0-9][a-z0-9+.-]*$/ {print tolower(\$2)}" \
+            | LC_ALL=C sort -u > "${apt_packages}"
+        LC_ALL=C comm -12 "${dep11_packages}" "${apt_packages}" > "${index_partial}"
+        if [ ! -s "${index_partial}" ]; then
+            echo "ERROR: copied DEP-11 metadata has no package identity in APT" >&2
+            exit 1
+        fi
+        chmod 0644 "${index_partial}"
+        chmod 0755 "${metadata_stage}"
+        rm -rf -- "${destination}"
+        mv -- "${metadata_stage}" "${destination}"
+        metadata_stage=
+        for boundary in /var "${index_parent}" "${index_dir}"; do
+            if [ -L "${boundary}" ]; then
+                echo "ERROR: AppStream index path changed to a symlink: ${boundary}" >&2
+                exit 1
+            fi
+        done
+        if [ -L "${index}" ]; then
+            echo "ERROR: AppStream package index became a symlink: ${index}" >&2
+            exit 1
+        fi
+        mv -f -- "${index_partial}" "${index}"
+        trap - EXIT HUP INT TERM
+        cleanup_appstream_index
     '
     chroot_exec bash -c "rm -rf /var/lib/apt/lists/*"
     chroot_exec bash -c "rm -rf /tmp/ming-build"
@@ -1354,7 +1695,12 @@ for marker in ("find_auto_esp_partition", "claim_auto_esp_as_ming_esp", "Calamar
 
 desktop_gate = load_yaml("etc/calamares/modules/ming-installed-desktop-gate.conf")
 if desktop_gate.get("dontChroot") is not True or \
-        "/usr/local/sbin/ming-installer-verify installed --receipt" not in (desktop_gate.get("script") or []):
+        not any(
+            isinstance(item, str)
+            and item.startswith("/usr/local/sbin/ming-installer-verify installed --receipt")
+            and "--require-desktop-profile" in item
+            for item in (desktop_gate.get("script") or [])
+        ):
     errors.append("installed desktop gate must use the authoritative target receipt")
 receipt_reset = load_yaml("etc/calamares/modules/ming-installer-target-receipt-reset.conf")
 if receipt_reset.get("dontChroot") is not True or \
@@ -2089,6 +2435,162 @@ def require_absent(relative_path, reason):
     if path.exists() or path.is_symlink():
         errors.append(f"{relative_path} must not be preinstalled: {reason}")
 
+RETIRED_PACKAGE_BASES = (
+    "spark-store",
+    "spark-update-notifier",
+    "ming-spark-package-control",
+    "ming-package-install-gui",
+    "ming-spark-backend-status",
+    "ming-spark-aria2c",
+    "ming-spark-store",
+    "ssinstall",
+    "aptss",
+    "apm",
+    "amber-ce",
+    "ace-client",
+    "bookworm-run",
+    "trixie-run",
+    "cn.flamescion.bookworm-compatibility-mode",
+)
+RETIRED_RESIDUE_MARKER = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"spark-store|spark-update-notifier|spark-store-refresh|"
+    r"ming-spark-package-control|ming-package-install-gui|"
+    r"ming-spark-backend-status|ming-spark-aria2c|"
+    r"ssinstall|aptss|apm|amber-ce|ace-client|"
+    r"bookworm-run|trixie-run|cn\.flamescion\.bookworm-compatibility-mode"
+    r")(?:[-_.:]|$)",
+    re.IGNORECASE,
+)
+RETIRED_RESIDUE_TEXT_MARKER = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"spark[-_ ]store|spark[-_ ]update[-_ ]notifier|"
+    r"spark[-_ ]store[-_ ]refresh|ming[-_ ]spark[-_ ]package[-_ ]control|"
+    r"ming[-_ ]package[-_ ]install[-_ ]gui|ming[-_ ]spark[-_ ]backend[-_ ]status|"
+    r"ming[-_ ]spark[-_ ]aria2c|ssinstall|aptss|apm|amber[-_ ]ce|ace[-_ ]client|"
+    r"bookworm[-_ ]run|trixie[-_ ]run|"
+    r"cn\.flamescion\.bookworm[-_ ]compatibility[-_ ]mode"
+    r")(?:[-_.:/ ]|$)",
+    re.IGNORECASE,
+)
+# The public source adapter is not the retired Spark client.  These two
+# artifacts establish its trusted provider identity and must remain present.
+RETIRED_RESIDUE_ALLOWLIST = frozenset({
+    "usr/share/ming-os/store/catalog/spark-public.json",
+    "etc/ming-os/store/spark-archive-keyring.gpg",
+})
+RETIRED_RESIDUE_SCAN_ROOTS = (
+    ("usr/bin", False),
+    ("usr/sbin", False),
+    ("usr/local/bin", False),
+    ("usr/local/sbin", False),
+    ("usr/local/libexec", False),
+    ("usr/share/applications", True),
+    ("etc/xdg/autostart", True),
+    ("usr/lib/systemd/system", True),
+    ("etc/systemd/system", True),
+    ("usr/share/polkit-1/actions", True),
+    ("etc/polkit-1", True),
+    ("etc/apt", True),
+    ("etc/ming-os/store", True),
+    ("usr/share/ming-os/store", True),
+    ("usr/share/ming-os/vendor", True),
+)
+
+def _is_retired_package_name(package):
+    package = str(package or "").strip().casefold().split(":", 1)[0]
+    return any(package == base or package.startswith(base + "-")
+               for base in RETIRED_PACKAGE_BASES)
+
+def find_retired_residue():
+    """Return retired client residue without touching user or app data."""
+    findings = set()
+    status_path, status_info = _rootfs_lstat("var/lib/dpkg/status")
+    if status_info is None or not stat.S_ISREG(status_info.st_mode):
+        errors.append("cannot inspect var/lib/dpkg/status for retired packages")
+    else:
+        try:
+            status_text = status_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            errors.append(f"cannot read var/lib/dpkg/status: {error}")
+        else:
+            for paragraph in re.split(r"\n\s*\n", status_text):
+                fields = {}
+                for line in paragraph.splitlines():
+                    if line[:1].isspace():
+                        continue
+                    key, separator, value = line.partition(":")
+                    if separator:
+                        fields[key.casefold()] = value.strip()
+                package = fields.get("package", "")
+                status_value = fields.get("status", "").casefold()
+                state_fields = status_value.split()
+                installed = len(state_fields) >= 3 and state_fields[-1] == "installed"
+                retained_config = len(state_fields) >= 3 and state_fields[-1] == "config-files"
+                if _is_retired_package_name(package) and (installed or retained_config):
+                    findings.add(f"dpkg status: {package} ({status_value})")
+
+    def record_walk_error(error):
+        errors.append(f"cannot inspect retired residue path {error.filename}: {error}")
+
+    for scan_root, inspect_text in RETIRED_RESIDUE_SCAN_ROOTS:
+        scan_path = _rootfs_path(scan_root)
+        if scan_path is None:
+            errors.append(f"retired residue scan root escapes target rootfs: {scan_root}")
+            continue
+        try:
+            scan_info = scan_path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            errors.append(f"cannot inspect retired residue scan root {scan_root}: {error}")
+            continue
+        if stat.S_ISLNK(scan_info.st_mode) or not stat.S_ISDIR(scan_info.st_mode):
+            errors.append(f"retired residue scan root is not a safe directory: {scan_root}")
+            continue
+        for current, directory_names, file_names in os.walk(
+                scan_path, topdown=True, followlinks=False, onerror=record_walk_error):
+            current_path = Path(current)
+            retained_directories = []
+            for directory_name in sorted(directory_names):
+                candidate = current_path / directory_name
+                relative_path = candidate.relative_to(root).as_posix()
+                try:
+                    candidate_info = candidate.lstat()
+                except OSError as error:
+                    errors.append(f"cannot inspect retired residue {relative_path}: {error}")
+                    continue
+                if relative_path not in RETIRED_RESIDUE_ALLOWLIST and RETIRED_RESIDUE_MARKER.search(relative_path):
+                    findings.add(relative_path)
+                if not stat.S_ISLNK(candidate_info.st_mode):
+                    retained_directories.append(directory_name)
+            directory_names[:] = retained_directories
+            for file_name in sorted(file_names):
+                candidate = current_path / file_name
+                relative_path = candidate.relative_to(root).as_posix()
+                if relative_path in RETIRED_RESIDUE_ALLOWLIST:
+                    continue
+                try:
+                    candidate_info = candidate.lstat()
+                except OSError as error:
+                    errors.append(f"cannot inspect retired residue {relative_path}: {error}")
+                    continue
+                if RETIRED_RESIDUE_MARKER.search(relative_path):
+                    findings.add(relative_path)
+                    continue
+                if (not inspect_text or stat.S_ISLNK(candidate_info.st_mode)
+                        or not stat.S_ISREG(candidate_info.st_mode)
+                        or candidate_info.st_size > 1024 * 1024):
+                    continue
+                try:
+                    payload = candidate.read_text(encoding="utf-8", errors="replace")
+                except OSError as error:
+                    errors.append(f"cannot read retired residue {relative_path}: {error}")
+                    continue
+                if RETIRED_RESIDUE_TEXT_MARKER.search(payload):
+                    findings.add(relative_path)
+    return sorted(findings)
+
 for private_key in [
     *root.glob("etc/ssh/ssh_host_*_key"),
     root / "etc/ssl/private/ssl-cert-snakeoil.key",
@@ -2480,7 +2982,8 @@ if store_core_path.is_file():
         appstream_inventory = module.scan_appstream_rootfs(root)
         try:
             module.validate_appstream_rootfs(
-                root, minimum=MIN_ROOTFS_APPSTREAM_APPS, inventory=appstream_inventory)
+                 root, minimum=MIN_ROOTFS_APPSTREAM_APPS, inventory=appstream_inventory,
+                 strict=True, require_package_index=True)
         except Exception as error:
             errors.append(f"rootfs AppStream metadata gate failed: {error}")
         try:
@@ -2518,6 +3021,9 @@ for residue in [
     "usr/share/ming-os/vendor/spark-store",
 ]:
     require_absent(residue, "Spark/APM residue")
+
+for residue in find_retired_residue():
+    errors.append(f"{residue} must not be preinstalled: Spark/APM/ACE residue")
 
 # AppFinder and managed desktop history can survive an in-place upgrade even
 # after the old launchers have been removed.  Reject only the known state files
