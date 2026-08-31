@@ -232,6 +232,63 @@ def _process_exit_error(process, returncode):
     return RuntimeError("application exited with status {}{}".format(returncode, suffix))
 
 
+def _process_stderr_snapshot(process, limit=8192):
+    """Read captured startup diagnostics without consuming the stream."""
+    capture = getattr(process, "_ming_stderr_capture", None)
+    if capture is None:
+        return ""
+    try:
+        position = capture.tell()
+        capture.seek(0)
+        data = capture.read(limit)
+        capture.seek(position)
+        return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data or "")
+    except (OSError, ValueError, UnicodeError):
+        return ""
+
+
+def _live_startup_failure(process):
+    """Return a known Electron startup error even when its parent stays alive."""
+    detail = _process_stderr_snapshot(process)
+    folded = detail.casefold()
+    signatures = tuple(dict.fromkeys(
+        marker.casefold()
+        for marker in (*XIAHAI_GPU_RETRY_SIGNATURES, *SANDBOX_RETRY_SIGNATURES)
+    ))
+    if detail and any(marker in folded for marker in signatures):
+        return detail.strip()[-2048:]
+    return ""
+
+
+def _stop_failed_process(process):
+    """Best-effort cleanup before replacing a live failed launch."""
+    if process is None:
+        return
+    try:
+        if hasattr(process, "poll") and process.poll() is not None:
+            _close_stderr_capture(process)
+            return
+    except (OSError, ValueError):
+        pass
+    for method_name in ("terminate", "kill"):
+        method = getattr(process, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        if method_name == "terminate":
+            waiter = getattr(process, "wait", None)
+            if callable(waiter):
+                try:
+                    waiter(timeout=1)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    continue
+        break
+    _close_stderr_capture(process)
+
+
 def record_launch_event(request, status, detail="", path=None):
     event_path = pathlib.Path(path) if path else COMMON.runtime_path("launch-events.jsonl")
     event = {
@@ -633,13 +690,25 @@ def probe_window_async(
         returncode = process.poll() if hasattr(process, "poll") else None
         if returncode not in (None, 0) and on_failure:
             on_failure(_process_exit_error(process, returncode))
-        elif returncode is None and on_ready:
+        elif returncode is None:
             # Some valid launchers intentionally stay in the tray or expose a
-            # window through a detached child.  A process that survived the
-            # complete probe window is a successful launch even when wmctrl
-            # cannot observe a matching window class.
-            _close_stderr_capture(process)
-            on_ready()
+            # window through a detached child.  Do not call those launches
+            # successful when the captured stderr contains a known Electron
+            # startup failure: the parent can remain alive while its GPU or
+            # sandbox child is already unusable, which otherwise suppresses
+            # the bounded compatibility retry.
+            startup_error = _live_startup_failure(process)
+            if startup_error and on_failure:
+                _close_stderr_capture(process)
+                on_failure(RuntimeError(startup_error))
+            elif on_ready:
+                _close_stderr_capture(process)
+                on_ready()
+            elif on_timeout:
+                _close_stderr_capture(process)
+                on_timeout()
+            else:
+                _close_stderr_capture(process)
         elif on_timeout:
             _close_stderr_capture(process)
             on_timeout()
@@ -709,6 +778,7 @@ class LaunchBroker:
                     request.desktop_file, launch_argv, error
                 ) if launch_argv else None
                 if retry_argv is not None:
+                    _stop_failed_process(process)
                     if callable(finish):
                         finish()
                     retry_kind = (
@@ -736,6 +806,7 @@ class LaunchBroker:
                         retry_process, retry_kind + "_exit", launch_argv=retry_argv
                     )
                     return
+                _stop_failed_process(process)
                 self._recent.pop(key, None)
                 if callable(finish):
                     finish()

@@ -266,6 +266,43 @@ class LaunchResultTests(unittest.TestCase):
         self.assertTrue(ready.wait(2))
         self.assertFalse(timed_out.is_set())
 
+    def test_window_probe_reports_live_gpu_failure_instead_of_false_success(self):
+        """An Electron parent can stay alive while its GPU child repeatedly fails."""
+        failed = []
+        ready = threading.Event()
+        failure = threading.Event()
+
+        class Process:
+            pid = 999997
+
+            @staticmethod
+            def poll():
+                return None
+
+        class EmptyWindows:
+            stdout = ""
+
+        process = Process()
+        process._ming_stderr_capture = tempfile.TemporaryFile(mode="w+b")
+        process._ming_stderr_capture.write(
+            b"ERROR:gpu_process_host.cc(976)] GPU process launch failed: error_code=1002\n"
+        )
+        process._ming_stderr_capture.flush()
+        with mock.patch.object(self.launch.subprocess, "run", return_value=EmptyWindows()):
+            self.launch.probe_window_async(
+                process,
+                desktop_file="/usr/share/applications/xiahai-xiaoming.desktop",
+                attempts=1,
+                interval=0,
+                on_ready=ready.set,
+                on_failure=lambda error: (failed.append(str(error)), failure.set()),
+                on_timeout=lambda: self.fail("GPU failure must not become a timeout"),
+            )
+
+        self.assertTrue(failure.wait(2))
+        self.assertFalse(ready.is_set())
+        self.assertIn("GPU process launch failed", failed[0])
+
     def test_window_probe_reports_timeout_when_process_exits_zero_without_window(self):
         timed_out = threading.Event()
 
@@ -349,6 +386,41 @@ class LaunchResultTests(unittest.TestCase):
         self.assertTrue(broker.launch(request))
         self.assertEqual([("sample-app",), ("sample-app",)], launches)
         self.assertEqual(["spawned", "window_timeout", "spawned", "window_timeout"], events)
+
+    def test_broker_reaps_live_process_after_unrecoverable_startup_failure(self):
+        terminated = threading.Event()
+
+        class Process:
+            pid = 999996
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def terminate():
+                terminated.set()
+
+            @staticmethod
+            def wait(timeout=1):
+                return 0
+
+        def probe(_process, _desktop_file, on_ready=None, on_failure=None, on_timeout=None):
+            del on_ready, on_timeout
+            on_failure(RuntimeError("application startup failed"))
+
+        broker = self.launch.LaunchBroker(
+            spawn=lambda _argv: Process(),
+            animate=lambda *_args: None,
+            reduced_motion=lambda: True,
+            probe=probe,
+            report_error=lambda *_args: None,
+            record_event=lambda *_args: None,
+        )
+        request = self.launch.LaunchRequest(("sample-app",), source="drawer")
+
+        self.assertTrue(broker.launch(request))
+        self.assertTrue(terminated.wait(2))
 
     def test_window_probe_treats_detached_startup_wm_class_as_ready(self):
         ready = threading.Event()
