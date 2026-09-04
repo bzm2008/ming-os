@@ -4,6 +4,10 @@ Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, fami
 
 开发者请先阅读 [Ming OS 开发者全方位手册](docs/MING_OS_DEVELOPER_GUIDE.md)，其中包含仓库结构、分支边界、构建续跑、安全约束、测试门禁和发布验收流程。
 
+## 参与协作
+
+志愿者请先阅读 [贡献指南](CONTRIBUTING.md)、[行为准则](CODE_OF_CONDUCT.md) 和 [安全策略](SECURITY.md)。普通贡献使用 Fork + Pull Request，默认提交到 `integration/rc4-next`；稳定发布由维护者从集成线合并到 `master`。不要直接推送受保护分支，也不要提交 ISO、虚拟机磁盘、凭据或生产日志。
+
 ## Current Release
 
 | Item | Value |
