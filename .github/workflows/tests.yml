@@ -21,6 +21,9 @@ concurrency:
 jobs:
   unit-and-contract-tests:
     name: unit-and-contract-tests
+    # The contract suite models the target Debian/X11 environment.  Keep the
+    # required check on Linux; Windows/WSL-specific probes are explicitly
+    # skipped when their runtime is unavailable instead of failing the gate.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -36,10 +39,17 @@ jobs:
         run: python -m unittest discover -s tests
 
       - name: Compile Python
-        run: python -m py_compile assets/*.py tests/*.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          for root in (Path('assets'), Path('tests')):
+              for path in root.rglob('*.py'):
+                  py_compile.compile(str(path), doraise=True)
+          PY
 
       - name: Check Shell syntax
-        shell: bash
         run: |
           find . -type f -name '*.sh' \
             -not -path './.git/*' \

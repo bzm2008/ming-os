@@ -208,12 +208,13 @@ class DesktopSourceTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
         with tempfile.TemporaryDirectory() as temp_dir:
             launcher = pathlib.Path(temp_dir) / "terminal.desktop"
+            executable = "python" if shutil.which("python") else "python3"
             launcher.write_text(
-                "[Desktop Entry]\nType=Application\nName=Terminal\nExec=python -V %U\n",
+                "[Desktop Entry]\nType=Application\nName=Terminal\nExec=%s -V %%U\n" % executable,
                 encoding="utf-8",
             )
             entry = namespace["legacy_desktop_entry"](launcher)
-        self.assertEqual(["python", "-V"], entry["argv"])
+        self.assertEqual([executable, "-V"], entry["argv"])
         self.assertEqual("", entry["diagnostic"])
         self.assertIn('legacy_argv = item.get("legacy_argv")', self.phone)
 

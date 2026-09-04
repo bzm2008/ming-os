@@ -30,7 +30,10 @@ __pycache__/
 *.pyc
 
 # Codex/desktop inspection artifacts and one-off local helpers
-/scratch/
+# Most scratch material is local-only, but the release smoke contract is a
+# reviewed fixture consumed by tests and must remain available in CI.
+/scratch/*
+!/scratch/ming-release-smoke.sh
 /.superpowers/
 /_tmp_*
 /rebrand_to_ming.py

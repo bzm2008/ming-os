@@ -2449,15 +2449,15 @@ window_manager_snapshot() {
         return 0
     fi
     status="$(/usr/local/bin/ming-window-control status --json 2>>"${log_file}" || true)"
-    if grep -Fq '"xfwm":{"running":true' <<<"${status}"; then
+    if grep -Eq '"xfwm"[[:space:]]*:[[:space:]]*\{[[:space:]]*"running"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_running=true
         window_manager_visible=true
     fi
-    if grep -Fq '"ewmh":true' <<<"${status}"; then
+    if grep -Eq '"ewmh"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_ewmh=true
         window_manager_stacking="ewmh"
     fi
-    if grep -Fq '"healthy":true' <<<"${status}"; then
+    if grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true' <<<"${status}"; then
         window_manager_healthy=true
     fi
 }
