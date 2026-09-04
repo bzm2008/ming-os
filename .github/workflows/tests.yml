@@ -21,7 +21,9 @@ concurrency:
 jobs:
   unit-and-contract-tests:
     name: unit-and-contract-tests
-    runs-on: ubuntu-24.04
+    # The repository's contract suite includes Windows/WSL and Git Bash
+    # regressions; Linux rootfs and VM checks stay in the release gates.
+    runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -33,10 +35,20 @@ jobs:
           python-version: "3.11"
 
       - name: Run unittest suite
+        shell: bash
         run: python -m unittest discover -s tests
 
       - name: Compile Python
-        run: python -m py_compile assets/*.py tests/*.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          for root in (Path('assets'), Path('tests')):
+              for path in root.rglob('*.py'):
+                  py_compile.compile(str(path), doraise=True)
+          PY
 
       - name: Check Shell syntax
         shell: bash
@@ -48,6 +60,7 @@ jobs:
             -print0 | xargs -0 -r -n1 bash -n
 
       - name: Check whitespace
+        shell: bash
         run: git diff --check
 
       - name: Scan obvious credential markers
