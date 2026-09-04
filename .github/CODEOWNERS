@@ -1,0 +1,17 @@
+# Ming OS code ownership
+# 默认由仓库维护者审核；志愿者加入后，请把对应 GitHub 用户名添加到具体路径。
+* @bzm2008
+
+/modules/01_base.sh @bzm2008
+/modules/06_ota_update.sh @bzm2008
+/build_onion_os.sh @bzm2008
+/resume_build.sh @bzm2008
+/continue_build.sh @bzm2008
+/config/security/ @bzm2008
+/assets/ming-authorized-action* @bzm2008
+/assets/ming-store* @bzm2008
+/assets/ming-wine* @bzm2008
+/assets/ming-android* @bzm2008
+/assets/ming-ota* @bzm2008
+/tests/test_release_gate.py @bzm2008
+/tests/test_ota* @bzm2008

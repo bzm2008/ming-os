@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/bzm2008/ming-os/security/advisories/new
+    about: 请使用私密漏洞报告，不要在公开 Issue 中发布敏感细节。
+  - name: 开发者手册
+    url: https://github.com/bzm2008/ming-os/blob/master/docs/MING_OS_DEVELOPER_GUIDE.md
+    about: 先查看分支、测试、构建和验收约定。

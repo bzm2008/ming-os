@@ -1,0 +1,61 @@
+name: Ming OS tests
+
+on:
+  push:
+    branches:
+      - master
+      - integration/rc4-next
+  pull_request:
+    branches:
+      - master
+      - integration/rc4-next
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ming-os-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-and-contract-tests:
+    name: unit-and-contract-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run unittest suite
+        run: python -m unittest discover -s tests
+
+      - name: Compile Python
+        run: python -m py_compile assets/*.py tests/*.py
+
+      - name: Check Shell syntax
+        shell: bash
+        run: |
+          find . -type f -name '*.sh' \
+            -not -path './.git/*' \
+            -not -path './output/*' \
+            -not -path './chroot/*' \
+            -print0 | xargs -0 -r -n1 bash -n
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Scan obvious credential markers
+        shell: bash
+        run: |
+          if git grep -n -I -E \
+            'BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}' \
+            -- ':!tests/fixtures/release-vault/**'; then
+            echo "credential marker found outside test fixtures" >&2
+            exit 1
+          fi

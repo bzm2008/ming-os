@@ -1,0 +1,67 @@
+name: 缺陷报告
+description: 报告可复现的功能、安装、桌面或兼容性问题
+title: "[Bug] "
+labels:
+  - type:bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有 Issue。不要在此提交密码、私钥、Token、Cookie 或未经脱敏的诊断包。
+  - type: input
+    id: version
+    attributes:
+      label: 版本、分支或提交
+      placeholder: "例如：master @ 2a0a0b1，或 RC4 @ 4c03109"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响区域
+      options:
+        - 桌面、小组件、Dock 或应用抽屉
+        - Ming 应用商店
+        - Windows/Wine
+        - Android/Waydroid
+        - 设置、无线、音频或输入法
+        - 安装器、GRUB 或 OTA
+        - 构建和测试
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请按实际点击或命令顺序描述。
+      placeholder: |
+        1. 启动方式和分辨率
+        2. 点击或执行的操作
+        3. 观察到的结果
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果和错误信息
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 日志、截图和退出码
+      description: 只提交已脱敏的内容；请注明哪些项目未能验证。
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: "例如：VirtualBox BIOS/UEFI、Live/硬盘安装、内存、GPU、网络"
+    validations:
+      required: true
