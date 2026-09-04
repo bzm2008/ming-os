@@ -2,6 +2,8 @@
 
 Ming OS is a Debian 13 / Trixie based Chinese desktop system for older PCs, family machines, and users who prefer buttons over terminal commands. The current candidate release is `26.3.2`, focused on reliable BIOS/UEFI boot, a branded installer, Chinese defaults, old 64-bit PC compatibility, and a small but polished desktop experience.
 
+开发者请先阅读 [Ming OS 开发者全方位手册](docs/MING_OS_DEVELOPER_GUIDE.md)，其中包含仓库结构、分支边界、构建续跑、安全约束、测试门禁和发布验收流程。
+
 ## Current Release
 
 | Item | Value |

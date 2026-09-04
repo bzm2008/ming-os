@@ -2477,6 +2477,29 @@ boot_disk=""
 resolve_boot_disk "${root_source}" || exit 20
 echo "boot_disk=${boot_disk}"
 
+# The identity helper runs before this final bootloader stage and may not see
+# Calamares' target mount in every installation environment. Resolve the UUID
+# from the verified root block device here, immediately before GRUB generation.
+root_uuid="$(blkid -s UUID -o value "${root_source}" 2>/dev/null | head -n 1 || true)"
+if [[ ! "${root_uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]]; then
+    root_uuid="$(awk '$2 == "/" && $1 ~ /^UUID=/ {sub(/^UUID=/, "", $1); print $1; exit}' "${root}/etc/fstab" 2>/dev/null || true)"
+fi
+if [[ ! "${root_uuid}" =~ ^[A-Fa-f0-9-]{4,128}$ ]]; then
+    echo "ERROR: cannot resolve installed root UUID for GRUB"
+    exit 22
+fi
+grub_custom_entry="${root}/etc/grub.d/09_ming_os"
+if [ ! -f "${grub_custom_entry}" ]; then
+    echo "ERROR: Ming custom GRUB entry is missing"
+    exit 22
+fi
+sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_custom_entry}"
+if grep -Fq '__MING_ROOT_UUID__' "${grub_custom_entry}"; then
+    echo "ERROR: Ming custom GRUB entry still contains a root UUID placeholder"
+    exit 22
+fi
+echo "root_uuid=${root_uuid}"
+
 for mountpoint in dev proc sys run; do
     mkdir -p "${root}/${mountpoint}"
 done

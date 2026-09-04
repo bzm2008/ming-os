@@ -48,6 +48,23 @@ class GrubThemeContractTests(unittest.TestCase):
         self.assertIn("/boot/grub/fonts/unicode.pf2", self.build)
         self.assertIn("required GRUB unicode font is missing", self.build)
 
+    def test_installer_bootloader_finalizes_target_root_uuid_before_generating_grub(self):
+        """The installed disk must never retain the Live-image UUID placeholder."""
+        bootloader = self.base.split(
+            "cat > /usr/local/sbin/ming-install-bootloader << 'MINGBOOTLOADER'\n", 1
+        )[1].split("\nMINGBOOTLOADER\n", 1)[0]
+        self.assertIn('root_uuid="$(blkid -s UUID -o value "${root_source}"', bootloader)
+        self.assertIn('grub_custom_entry="${root}/etc/grub.d/09_ming_os"', bootloader)
+        self.assertIn('sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_custom_entry}"', bootloader)
+        self.assertIn(
+            'grep -Fq \'__MING_ROOT_UUID__\' "${grub_custom_entry}"',
+            bootloader,
+        )
+        self.assertLess(
+            bootloader.index('root_uuid="$(blkid -s UUID -o value "${root_source}"'),
+            bootloader.index('chroot "${root}" /usr/sbin/update-grub'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
