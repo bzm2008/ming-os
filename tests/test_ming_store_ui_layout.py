@@ -48,6 +48,9 @@ class MingStoreUiLayoutTests(unittest.TestCase):
         self.assertIn('"使用本地 DEB"', source)
         self.assertIn('"选择 Wine 安装包"', source)
         self.assertIn('"local_artifact_required"', source)
+        self.assertIn("def choose_user_artifact", source)
+        self.assertIn('controller.process_spawner(command, shell=False)', source)
+        self.assertIn('load_local_deb_async(path)', source)
 
     def test_store_manual_install_guidance_is_chinese_and_explicit(self):
         source = STORE_UI.read_text(encoding="utf-8")

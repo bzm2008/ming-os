@@ -1287,7 +1287,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 else "使用本地 DEB")
             button.set_tooltip_text(str(item.get("installation_note") or
                                         "请先从官方渠道取得安装文件，再从本地安装入口确认。"))
-            button.connect("clicked", run_item_action, row, button, item)
+            button.connect("clicked", choose_user_artifact, row, button, item)
         elif item.get("source_id") == "wine-official":
             if installed.get("installed"):
                 button.set_sensitive(False)
@@ -1305,6 +1305,39 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         else:
             row.add_suffix(button)
         return button
+
+    def choose_user_artifact(row, button, item):
+        """Open the native picker and route the selected file to its owner."""
+        dialog = Gtk.FileDialog(title=(
+            "选择 Wine 安装包" if item.get("source_id") == "wine-official"
+            else "选择本地 DEB 软件包"))
+
+        def finish(_dialog, result):
+            try:
+                selected = dialog.open_finish(result)
+                path = selected.get_path()
+            except GLib.Error:
+                return
+            if not path:
+                return
+            button.set_sensitive(False)
+            if item.get("source_id") == "wine-official":
+                command = (
+                    "/usr/local/bin/ming-toolbox", "--install-windows", path)
+                try:
+                    controller.process_spawner(command, shell=False)
+                    set_row_result(row, button, {
+                        "ok": True, "state": "toolbox_handoff_pending",
+                        "message": "已打开 Ming 工具箱，请继续确认安装。",
+                    })
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    set_row_result(row, button, {
+                        "ok": False, "state": "failed", "message": str(exc),
+                    })
+            else:
+                load_local_deb_async(path)
+
+        dialog.open(window, None, finish)
 
     def build_detail(item):
         clear_results()
