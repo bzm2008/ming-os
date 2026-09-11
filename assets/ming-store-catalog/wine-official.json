@@ -21,8 +21,9 @@
       "desktop_ids": [],
       "wine_app_id": "wechat-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -39,8 +40,9 @@
       "desktop_ids": [],
       "wine_app_id": "qq-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -57,8 +59,9 @@
       "desktop_ids": [],
       "wine_app_id": "dingtalk-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -75,8 +78,9 @@
       "desktop_ids": [],
       "wine_app_id": "wps-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -93,8 +97,9 @@
       "desktop_ids": [],
       "wine_app_id": "7zip-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -111,8 +116,9 @@
       "desktop_ids": [],
       "wine_app_id": "notepad-plus-plus-wine",
       "identity": {"type": "minisign", "signature": null, "trusted_comment": null},
-      "enabled": false,
-      "disabled_reason": "等待固定官方 Windows 安装包、SHA256 和 Ming 清单签名。",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     }
   ]

@@ -32,6 +32,37 @@ class StatusWidgetLayoutV2Tests(unittest.TestCase):
         )
         self.assertGreaterEqual(geometry["panel"]["y"], 0)
 
+    def test_compact_geometry_respects_screen_margins_on_very_narrow_displays(self):
+        source = PHONE.read_text(encoding="utf-8")
+        prefix = source.split("\nimport gi\n", 1)[0]
+        namespace = {"__file__": str(PHONE)}
+        exec(compile(prefix, str(PHONE), "exec"), namespace)
+
+        geometry = namespace["status_widget_compact_geometry"](
+            {"width": 240, "height": 180})
+
+        self.assertLessEqual(
+            geometry["width"], 240 - 2 * 26)
+
+    def test_expanded_panel_never_overlaps_capsule_when_screen_is_short(self):
+        source = PHONE.read_text(encoding="utf-8")
+        prefix = source.split("\nimport gi\n", 1)[0]
+        namespace = {"__file__": str(PHONE)}
+        exec(compile(prefix, str(PHONE), "exec"), namespace)
+
+        pill = {"x": 24, "y": 8, "width": 240, "height": 58}
+        screen = {"width": 320, "height": 180}
+        geometry = namespace["status_widget_overlay_geometry"](
+            pill, {"width": 330, "height": 220}, screen)
+        panel = geometry["panel"]
+
+        self.assertLessEqual(panel["width"], screen["width"])
+        self.assertTrue(
+            panel["y"] >= pill["y"] + pill["height"]
+            or panel["y"] + panel["height"] <= pill["y"])
+        self.assertGreaterEqual(panel["y"], 0)
+        self.assertLessEqual(panel["y"] + panel["height"], screen["height"])
+
     def test_revealer_animation_is_visible_before_expand_and_finishes_before_hide(self):
         source = PHONE.read_text(encoding="utf-8")
         self.assertIn("def _complete_collapse", source)
@@ -43,7 +74,7 @@ class StatusWidgetLayoutV2Tests(unittest.TestCase):
 
     def test_compact_pill_keeps_only_required_status_fields(self):
         source = PHONE.read_text(encoding="utf-8")
-        compact = source[source.index("self.compact_button"):source.index("header = Gtk.Box")]
+        compact = source[source.index("self.compact_button"):source.index("self.time_label = self.compact_time_label")]
         for marker in (
             "compact_time_label",
             "compact_date_label",
@@ -54,6 +85,16 @@ class StatusWidgetLayoutV2Tests(unittest.TestCase):
         ):
             self.assertIn(marker, compact)
         self.assertNotIn("compact_network_label", compact)
+
+    def test_status_widget_does_not_construct_legacy_header_duplicates(self):
+        source = PHONE.read_text(encoding="utf-8")
+        status = source[source.index("class StatusWidget"):source.index("class WallpaperCanvas")]
+        init = status[status.index("    def __init__"):status.index("    def on_destroy")]
+        self.assertNotIn("        header = Gtk.Box(", init)
+        self.assertNotIn("header_details =", init)
+        self.assertIn("self.time_label = self.compact_time_label", init)
+        self.assertIn("self.date_label = self.compact_date_label", init)
+        self.assertIn("self.header_battery_label = self.compact_battery_label", init)
 
     def test_expanded_panel_matches_the_approved_three_column_preview(self):
         source = PHONE.read_text(encoding="utf-8")
@@ -87,7 +128,8 @@ class StatusWidgetLayoutV2Tests(unittest.TestCase):
             self.assertIn('("%s",' % mode, status)
         self.assertIn("results = self.metric_sampler.sample_all()", status)
         self.assertIn("def apply_resource_metrics", status)
-        self.assertIn("if self.collapsed or self.metric_refreshing:", status)
+        self.assertIn("if self.collapsed:", status)
+        self.assertIn("if self.metric_refreshing:", status)
 
     def test_expanding_requests_an_immediate_resource_sample(self):
         source = PHONE.read_text(encoding="utf-8")

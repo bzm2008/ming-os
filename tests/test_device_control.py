@@ -259,6 +259,26 @@ class DeviceControlTests(unittest.TestCase):
             ("pactl", "set-sink-volume", "@DEFAULT_SINK@", "63%"),
             runner.commands)
 
+    def test_volume_readback_mismatch_is_reported_as_a_failed_write(self):
+        runner = FakeRunner({
+            ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "80%"): (0, "", ""),
+            ("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"): (0, "", ""),
+            ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"): [
+                (0, "Volume: 0.80", ""),
+                (0, "Volume: 0.50", ""),
+            ],
+        })
+        controller = self.device.DeviceController(
+            runner=runner, executable=lambda name: name == "wpctl")
+
+        result = controller.set_volume(80)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("error", result["state"])
+        self.assertEqual("wpctl", result["backend"])
+        self.assertEqual(50, result["value"])
+        self.assertIn("读回", result["error"])
+
     def test_wpctl_muted_readback_falls_through_instead_of_claiming_success(self):
         runner = FakeRunner({
             ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "40%"): (0, "", ""),

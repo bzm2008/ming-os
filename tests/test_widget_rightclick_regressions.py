@@ -1,4 +1,6 @@
+import ast
 import pathlib
+import types
 import unittest
 
 
@@ -70,6 +72,34 @@ class DesktopContextMenuRegressionTests(unittest.TestCase):
         for method in (blank, folder):
             self.assertIn("result = self._desktop_action_result", method)
             self.assertIn("if result[\"ok\"]:", method)
+
+    def test_right_click_does_not_move_tile_before_opening_context_menu(self):
+        tree = ast.parse(self.source)
+        desktop_node = next(node for node in tree.body
+                            if isinstance(node, ast.ClassDef) and node.name == "PhoneDesktop")
+        names = {"on_fixed_button_press", "on_fixed_motion", "on_fixed_button_release"}
+        methods = [node for node in desktop_node.body
+                   if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {"DRAG_THRESHOLD": 12}
+        exec(compile(ast.Module(body=methods, type_ignores=[]), str(PHONE), "exec"), namespace)
+        item = {"id": "terminal", "x": 0, "y": 0}
+        previews, menus = [], []
+        desktop = types.SimpleNamespace(
+            fixed_press_item=None, fixed_press_origin=None, fixed_press_button=None,
+            fixed_press_moved=False, drag_positions={},
+            fixed_event_coords=lambda event: (event.x, event.y),
+            item_at=lambda *_args: item, item_position=lambda _item: (0, 0),
+            item_by_id=lambda item_id: item if item_id == item["id"] else None,
+            preview_drag=lambda *args: previews.append(args),
+            show_context_menu=lambda *args: menus.append(args),
+        )
+        event = types.SimpleNamespace(button=3, x=5, y=5, time=100)
+        namespace["on_fixed_button_press"](desktop, None, event)
+        event.x = 40
+        namespace["on_fixed_motion"](desktop, None, event)
+        namespace["on_fixed_button_release"](desktop, None, event)
+        self.assertEqual([], previews, "right-click movement must not drag the tile")
+        self.assertEqual([(item, event)], menus)
 
 
 def cls_slice(source, start, end):

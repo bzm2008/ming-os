@@ -273,6 +273,13 @@ class DockLifecycleContracts(unittest.TestCase):
         self.assertIn("_NET_WM_STRUT_PARTIAL", self.watchdog)
         self.assertIn("-remove _NET_WM_STRUT", self.source)
 
+    def test_appearance_enforcer_does_not_kill_xfce_panel_in_compatibility_mode(self):
+        appearance = self.source.split(
+            "cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'", 1
+        )[1].split("APPLYAPPEARANCE", 1)[0]
+        self.assertIn('if [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]]', appearance)
+        self.assertIn('&& pgrep -u "$(id -u)" -x xfce4-panel', appearance)
+
     def test_window_selector_prefers_dock_type_over_first_helper_window(self):
         selector = re.search(
             r"plank_window_id\(\) \{(.*?)\n\}", self.watchdog, re.S

@@ -9674,7 +9674,8 @@ xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。
 mkdir -p "${HOME}/.cache/sessions"
 rm -f "${HOME}/.cache/sessions/xfce4-session-"* 2>/dev/null || true
-if pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
+if [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] \
+    && pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1; then
     pkill -TERM -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 || true
 fi
 

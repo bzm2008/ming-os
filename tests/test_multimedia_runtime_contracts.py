@@ -86,13 +86,13 @@ class MultimediaRuntimeContracts(unittest.TestCase):
         self.assertLess(execute.index('self._journal(request, "readback")'),
                         execute.rindex('self._journal(request, "succeeded")'))
 
-    def test_vendor_catalog_stays_disabled_until_version_url_and_hash_are_pinned(self):
+    def test_vendor_catalog_stays_actionable_until_version_url_and_hash_are_pinned(self):
         catalog = json.loads((
             ROOT / "assets" / "ming-store-catalog" / "vendor-official.json"
         ).read_text(encoding="utf-8"))
         for item in catalog["applications"]:
-            self.assertFalse(item["enabled"])
-            self.assertEqual("identity_not_pinned", item["disabled_reason"])
+            self.assertTrue(item["enabled"])
+            self.assertEqual("user-provided", item["installation_mode"])
         resolve = STORE_CORE.split("class VendorOfficialProvider", 1)[1].split(
             "class DebianAptProvider", 1
         )[0]

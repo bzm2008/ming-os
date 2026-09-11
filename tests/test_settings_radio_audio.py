@@ -347,6 +347,100 @@ class SettingsRadioAudioContracts(unittest.TestCase):
         self.assertIn("audio_failure_summary(", repair)
         self.assertNotIn('self.toast("声音播放未恢复：%s" % (reason', repair)
 
+    def test_appearance_readback_failure_preserves_last_confirmed_controls(self):
+        class StyleManager:
+            def __init__(self):
+                self.calls = []
+
+            def set_color_scheme(self, value):
+                self.calls.append(value)
+
+        class Control:
+            def __init__(self):
+                self.selected = None
+
+            def set_selected(self, value):
+                self.selected = value
+
+        for result in ((1, "", "read failed"), (0, "not-json", ""),
+                       (0, "[]", ""), (0, "{}", "")):
+            with self.subTest(result=result):
+                jobs, toasts = [], []
+                refresh = executable_function("refresh_appearance_status", {
+                    "json": json,
+                    "Adw": types.SimpleNamespace(ColorScheme=types.SimpleNamespace(
+                        DEFAULT=0, FORCE_DARK=1, FORCE_LIGHT=2)),
+                    "APPEARANCE_THEMES": ["system", "light", "dark"],
+                    "APPEARANCE_FONT_SIZES": [10, 11, 12, 14, 16],
+                    "APPEARANCE_WALLPAPERS": ["default"],
+                    "run_capture_async": lambda _command, timeout, on_done: jobs.append(on_done),
+                }, "MingSettings")
+                controls = [Control(), Control()]
+                window = types.SimpleNamespace(
+                    appearance_controls=controls, appearance_loading=True,
+                    style_manager=StyleManager(),
+                    appearance_command=lambda *_args: ("appearance", "status"),
+                    apply_settings_theme=lambda _theme: None,
+                    toast=lambda *args: toasts.append(args),
+                )
+                refresh(window)
+                jobs[0](*result)
+                self.assertFalse(window.appearance_loading)
+                self.assertEqual([], window.style_manager.calls)
+                self.assertEqual([None, None], [control.selected for control in controls])
+                self.assertTrue(toasts)
+
+    def test_wifi_refresh_rejects_malformed_snapshot_without_crashing(self):
+        generation_state = generation_state_type()
+        jobs = []
+        refresh = executable_function("on_wifi_status_refresh", {
+            "run_task_async": lambda _task, done: jobs.append(done),
+            "wifi_diagnostic_snapshot": lambda: None,
+        }, "MingSettings")
+        window = types.SimpleNamespace(
+            wifi_probe_state=generation_state(),
+            wifi_diagnostic_row=Recorder(),
+            wifi_switch=Recorder(),
+            wifi_scan_btn=Recorder(),
+            wifi_diagnostic={},
+            wifi_list_state_row=None,
+            network_page=Page(),
+        )
+        window.network_page.root = window
+
+        refresh(window, None)
+        try:
+            jobs[0](["not", "a", "mapping"], None)
+        except (AttributeError, KeyError, TypeError) as exc:
+            self.fail("invalid Wi-Fi readback crashed the UI callback: %s" % exc)
+
+        self.assertIn(("title", "无线网络检测失败"), window.wifi_diagnostic_row.calls)
+        self.assertFalse(window.wifi_switch.calls[-1][1])
+
+    def test_input_method_readback_ignores_callback_after_page_close(self):
+        callbacks = []
+        refresh = executable_function("refresh_input_method_status", {
+            "json": json,
+            "INPUT_CONTROL_PATH": "/usr/local/sbin/ming-input-control",
+            "run_capture_async": lambda _command, timeout, on_done: callbacks.append(on_done),
+        }, "MingSettings")
+        window = types.SimpleNamespace(
+            input_method_probe_state=generation_state_type()(),
+            input_method_status_row=Recorder(),
+            advanced_page=Page(),
+        )
+        window.advanced_page.root = window
+
+        refresh(window)
+        window.advanced_page.root = None
+        callbacks[0](0, json.dumps({
+            "framework": {"available": True},
+            "current_engine": "rime",
+            "rime": {"available": True},
+        }), "")
+
+        self.assertEqual([], window.input_method_status_row.calls)
+
 
 class SettingsAsyncBehaviorTests(unittest.TestCase):
     @staticmethod

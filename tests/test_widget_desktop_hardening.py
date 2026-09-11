@@ -27,6 +27,7 @@ class WidgetGeometryContracts(unittest.TestCase):
             "STATUS_WIDGET_COMPACT_WIDTH": 252,
             "STATUS_WIDGET_COMPACT_NARROW_WIDTH": 242,
             "STATUS_WIDGET_COMPACT_HEIGHT": 58,
+            "CLOCK_MARGIN_X": 26,
         }
         module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
         exec(compile(module, "<phone-layout>", "exec"), namespace)

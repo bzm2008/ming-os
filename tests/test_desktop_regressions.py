@@ -1552,7 +1552,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("controller.battery_status", status)
         self.assertIn("controller.wifi_status", status)
         self.assertIn("controller.ethernet_status", status)
-        self.assertIn("self.compact_network_label", status)
+        self.assertIn("self.compact_network_text", status)
 
     def test_collapsed_status_keeps_partial_results_when_one_probe_fails(self):
         status = self.phone[self.phone.index("class StatusWidget"):

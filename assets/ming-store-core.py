@@ -11,6 +11,7 @@ import email.utils
 import gzip
 import hashlib
 import json
+import lzma
 import os
 import pathlib
 import re
@@ -635,6 +636,10 @@ class CatalogProvider(Provider):
         if not isinstance(item["enabled"], bool) or not isinstance(item["protected"], bool):
             raise InvalidCatalog("软件启用或保护状态无效。")
         identity_type = str(item["identity"].get("type") or "")
+        installation_mode = str(item.get("installation_mode") or "catalog")
+        if installation_mode not in {"catalog", "user-provided"}:
+            raise InvalidCatalog("软件安装方式不受支持。")
+        item["installation_mode"] = installation_mode
         if self.source_id == "debian-apt" and identity_type != "apt-repository-signature":
             raise InvalidCatalog("APT 软件必须使用仓库签名身份。")
         if self.source_id == "vendor-official" and identity_type != "sha256":
@@ -691,6 +696,13 @@ class VendorOfficialProvider(CatalogProvider):
 
     def resolve(self, app_id):
         item = self.get(app_id)
+        if item.get("installation_mode") == "user-provided":
+            resolved = copy.deepcopy(item)
+            resolved["requires_user_artifact"] = True
+            resolved["installation_note"] = (
+                "请从软件厂商官方渠道下载 DEB，再通过 Ming Store 的本地安装入口确认安装。"
+            )
+            return resolved
         digest = item.get("identity", {}).get("sha256")
         url = item.get("download_url")
         if (
@@ -768,6 +780,12 @@ class WineOfficialProvider(CatalogProvider):
         identity = item.get("identity") or {}
         if str(identity.get("type") or "") != "minisign":
             raise InvalidCatalog("Wine 软件必须使用 Minisign 清单身份。")
+        if item.get("installation_mode") == "user-provided":
+            item["requires_user_artifact"] = True
+            item["installation_note"] = (
+                "请从软件厂商官方渠道下载 EXE 或 MSI，再通过 Ming Wine 工具箱确认安装。"
+            )
+            return item
         if item.get("enabled"):
             version = str(item.get("version") or "")
             artifact = item.get("artifact")
@@ -808,6 +826,10 @@ class WineOfficialProvider(CatalogProvider):
 
     def resolve(self, app_id):
         item = self.get(app_id)
+        if item.get("installation_mode") == "user-provided":
+            resolved = copy.deepcopy(item)
+            resolved["requires_user_artifact"] = True
+            return resolved
         if not item.get("enabled"):
             raise ProviderUnavailable(
                 str(item.get("disabled_reason") or "Wine 软件尚未完成来源校验，暂不可安装。"))
@@ -955,15 +977,17 @@ def parse_spark_packages(document):
     return records
 
 
-def parse_spark_inrelease(document):
-    """Return the SHA256 digest advertised for ``Packages`` in InRelease."""
+def parse_spark_inrelease(document, filename="Packages"):
+    """Return the SHA256 digest advertised for one index in InRelease."""
     text = str(document or "")
+    expected_filename = re.escape(str(filename or "Packages"))
     match = re.search(
-        r"(?ms)^SHA256:\s*.*?^\s*([0-9a-f]{64})\s+\d+\s+Packages\s*$",
+        r"(?ms)^SHA256:\s*.*?^\s*([0-9a-f]{64})\s+\d+\s+"
+        + expected_filename + r"\s*$",
         text,
     )
     if not match:
-        raise InvalidCatalog("星火仓库 InRelease 缺少 Packages SHA256。")
+        raise InvalidCatalog("星火仓库 InRelease 缺少 %s SHA256。" % filename)
     return match.group(1).lower()
 
 
@@ -1259,7 +1283,7 @@ class SparkPublicProvider(Provider):
             if status in (408, 425, 429) or 500 <= status <= 599:
                 raise DownloadFailed("星火来源暂时不可用（HTTP %s）。" % status)
             raise ProviderUnavailable("星火来源请求失败（HTTP %s）。" % status)
-        package_index = str(path).rstrip("/").casefold().endswith("/packages")
+        package_index = str(path).rstrip("/").casefold().endswith(("/packages", "/packages.xz"))
         body = response.get("body", "")
         raw_body = response.get("_raw_body")
         if raw_body is not None and not isinstance(raw_body, (bytes, bytearray)):
@@ -1609,7 +1633,28 @@ class SparkPublicProvider(Provider):
             advertised = parse_spark_inrelease(inrelease)
             actual = hashlib.sha256(bytes(packages_raw)).hexdigest()
             if actual != advertised:
-                raise IntegrityError("星火 Packages 索引 SHA256 与 InRelease 不一致。")
+                compressed_response = self._fetch_resource(
+                    "store/Packages.xz", deadline=deadline)
+                compressed_raw = compressed_response.get("raw_body")
+                if not isinstance(compressed_raw, (bytes, bytearray)):
+                    raise IntegrityError("星火 Packages.xz 原始内容无效。")
+                compressed_raw = bytes(compressed_raw)
+                advertised = parse_spark_inrelease(inrelease, "Packages.xz")
+                compressed_actual = hashlib.sha256(compressed_raw).hexdigest()
+                if compressed_actual != advertised:
+                    raise IntegrityError(
+                        "星火 Packages.xz 索引 SHA256 与 InRelease 不一致。")
+                try:
+                    decompressor = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+                    packages_raw = decompressor.decompress(
+                        compressed_raw, max_length=self.max_response_bytes + 1)
+                    if (len(packages_raw) > self.max_response_bytes
+                            or not decompressor.eof
+                            or decompressor.unused_data):
+                        raise IntegrityError("星火 Packages.xz 解压结果超过安全限制。")
+                except lzma.LZMAError as exc:
+                    raise IntegrityError("星火 Packages.xz 解压失败。") from exc
+                packages = packages_raw.decode("utf-8", errors="replace")
             package_index = self._record_index(parse_spark_packages(packages))
         # Category JSON documents are independent presentation resources. Fetch
         # them with a small bounded pool so a slow category cannot make the

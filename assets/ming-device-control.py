@@ -87,6 +87,16 @@ def parse_percent(output):
     return max(0, min(100, int(matches[-1])))
 
 
+def volume_readback_matches_request(requested, actual, tolerance=1):
+    """Accept normal mixer rounding but reject an ineffective write."""
+    if actual is None:
+        return False
+    try:
+        return abs(int(requested) - int(actual)) <= int(tolerance)
+    except (TypeError, ValueError):
+        return False
+
+
 def brightnessctl_levels(output):
     """Return the current and maximum raw levels from brightnessctl -m."""
     for line in (output or "").splitlines():
@@ -1108,6 +1118,18 @@ class DeviceController:
                     if mute_rc != 0 or re.search(r"\[MUTED\]", mute_output or "", re.I):
                         errors.append(mute_error or mute_output or "无法确认当前输出静音状态")
                         continue
+                    effective = self._wpctl_volume(mute_output)
+                if not volume_readback_matches_request(value, effective):
+                    return self._control_result(
+                        False,
+                        requested=value,
+                        value=effective,
+                        error="音量读回与请求不一致：请求 %d%%，实际 %s%%。" % (
+                            value, effective if effective is not None else "未知"),
+                        backend=backend,
+                        available=True,
+                        state="error",
+                    )
                 elif backend == "pactl":
                     mute_rc, mute_output, mute_error = self._run(
                         ["pactl", "get-sink-mute", "@DEFAULT_SINK@"])

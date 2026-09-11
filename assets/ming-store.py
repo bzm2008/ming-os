@@ -880,6 +880,28 @@ class StoreController:
             }
             self._report_progress(progress_callback, "failed", result=result)
             return result
+        if action in ("install", "update"):
+            try:
+                provider = self.catalog.registry.get(source_id)
+                getter = getattr(provider, "get", None)
+                catalog_item = getter(app_id) if callable(getter) else provider.resolve(app_id)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                result = {
+                    "ok": False, "state": "provider_unavailable", "action": action,
+                    "provider": source_id, "app_id": app_id, "message": str(exc),
+                }
+                self._report_progress(progress_callback, "failed", result=result)
+                return result
+            if catalog_item.get("installation_mode") == "user-provided":
+                result = {
+                    "ok": False, "state": "local_artifact_required", "action": action,
+                    "provider": source_id, "app_id": app_id,
+                    "message": str(catalog_item.get("installation_note") or
+                                    "请先取得安装文件，再从本地安装入口继续。"),
+                }
+                self._report_progress(progress_callback, "failed", result=result)
+                return result
+
         if source_id == "wine-official" and action in ("install", "update"):
             try:
                 item = self.catalog.registry.get(source_id).resolve(app_id)
@@ -895,7 +917,7 @@ class StoreController:
             expected_version = item.get("resolved_version") or item.get("version")
             try:
                 self._write_wine_handoff_request(
-                    request_id, action, item["app_id"], expected_version)
+                    request_id, action, item.get("app_id", app_id), expected_version)
             except (OSError, ValueError, TypeError) as exc:
                 result = {
                     "ok": False, "state": "toolbox_unavailable", "action": action,
@@ -904,7 +926,7 @@ class StoreController:
                 }
                 self._report_progress(progress_callback, "failed", result=result)
                 return result
-            command = self.wine_handoff_command(item["app_id"], request_id=request_id)
+            command = self.wine_handoff_command(item.get("app_id", app_id), request_id=request_id)
             try:
                 self.process_spawner(command, shell=False)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -1253,10 +1275,19 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         if controller.live_mode():
             button.set_sensitive(False)
             button.set_tooltip_text("Live 模式只能浏览，请先安装系统并完成账户设置。")
-        elif not item.get("enabled", True):
+        elif (not item.get("enabled", True)
+              and item.get("installation_mode") != "user-provided"):
             button.set_sensitive(False)
             button.set_label("暂不可安装")
-            button.set_tooltip_text(str(item.get("disabled_reason") or "来源身份尚未固定，暂不上架。"))
+            button.set_tooltip_text(str(item.get("disabled_reason") or "来源身份尚未固定。"))
+        elif (item.get("installation_mode") == "user-provided"
+              and not installed.get("installed")):
+            button.set_label(
+                "选择 Wine 安装包" if item.get("source_id") == "wine-official"
+                else "使用本地 DEB")
+            button.set_tooltip_text(str(item.get("installation_note") or
+                                        "请先从官方渠道取得安装文件，再从本地安装入口确认。"))
+            button.connect("clicked", run_item_action, row, button, item)
         elif item.get("source_id") == "wine-official":
             if installed.get("installed"):
                 button.set_sensitive(False)
@@ -1292,6 +1323,8 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             ),
         )
         add_message("许可说明", str(item.get("license") or "请查看软件厂商许可协议。"))
+        if item.get("installation_note"):
+            add_message("安装说明", str(item["installation_note"]))
 
     def add_software_row(item, forced_action=None):
         source_name = SOURCES.get(item.get("source_id"), item.get("source_id", ""))

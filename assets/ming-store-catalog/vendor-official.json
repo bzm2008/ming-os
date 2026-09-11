@@ -18,8 +18,9 @@
       "license": "厂商许可协议",
       "vendor_homepage": "https://linux.weixin.qq.com/",
       "identity": {"type": "sha256", "sha256": null},
-      "enabled": false,
-      "disabled_reason": "identity_not_pinned",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -33,8 +34,9 @@
       "license": "厂商许可协议",
       "vendor_homepage": "https://linux.wps.cn/",
       "identity": {"type": "sha256", "sha256": null},
-      "enabled": false,
-      "disabled_reason": "identity_not_pinned",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -48,8 +50,9 @@
       "license": "厂商许可协议",
       "vendor_homepage": "https://im.qq.com/linuxqq/index.shtml",
       "identity": {"type": "sha256", "sha256": null},
-      "enabled": false,
-      "disabled_reason": "identity_not_pinned",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     },
     {
@@ -63,8 +66,9 @@
       "license": "厂商许可协议",
       "vendor_homepage": "https://www.dingtalk.com/",
       "identity": {"type": "sha256", "sha256": null},
-      "enabled": false,
-      "disabled_reason": "identity_not_pinned",
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "请从官方渠道取得安装文件后，通过 Ming Store 或 Ming Wine 工具箱确认安装。",
       "protected": false
     }
   ]

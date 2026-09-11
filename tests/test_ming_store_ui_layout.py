@@ -42,6 +42,18 @@ class MingStoreUiLayoutTests(unittest.TestCase):
         self.assertIn("background: #ffffff", source)
         self.assertIn("set_size_request", source)
 
+    def test_user_provided_vendor_and_wine_entries_are_not_greyed_out(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        self.assertIn('item.get("installation_mode") == "user-provided"', source)
+        self.assertIn('"使用本地 DEB"', source)
+        self.assertIn('"选择 Wine 安装包"', source)
+        self.assertIn('"local_artifact_required"', source)
+
+    def test_store_manual_install_guidance_is_chinese_and_explicit(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        self.assertIn("Live 模式只能浏览", source)
+        self.assertIn("请先从官方渠道取得安装文件", source)
+
     def test_stale_index_warning_is_exposed_to_the_store_status(self):
         ui = load_store_ui()
 

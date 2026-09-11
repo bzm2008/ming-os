@@ -72,18 +72,17 @@ class MingStoreCatalogTests(unittest.TestCase):
             self.assertEqual(["amd64"], item["architectures"])
             self.assertEqual("apt-repository-signature", item["identity"]["type"])
 
-    def test_vendor_entries_stay_disabled_without_pinned_identity(self):
+    def test_vendor_entries_remain_actionable_for_user_provided_packages(self):
         provider = self.core.VendorOfficialProvider(catalog_root=CATALOG_ROOT)
         entries = provider.refresh_catalog()
         self.assertEqual({"wechat", "wps", "qq", "dingtalk"}, {item["app_id"] for item in entries})
         for item in entries:
-            self.assertFalse(item["enabled"])
-            self.assertEqual("identity_not_pinned", item["disabled_reason"])
+            self.assertTrue(item["enabled"])
+            self.assertEqual("user-provided", item["installation_mode"])
             self.assertIsNone(item["version"])
             self.assertIsNone(item["identity"]["sha256"])
             self.assertTrue(item["vendor_homepage"].startswith("https://"))
-            with self.assertRaises(self.core.ProviderUnavailable):
-                provider.resolve(item["app_id"])
+            self.assertTrue(provider.resolve(item["app_id"])["requires_user_artifact"])
 
     def test_provider_interface_has_required_operations(self):
         required = {"refresh_catalog", "search", "get", "resolve", "installed_state"}

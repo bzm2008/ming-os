@@ -1931,6 +1931,8 @@ class MingSettings(Adw.ApplicationWindow):
                 return False
             if self.network_page.get_root() is not self:
                 return False
+            if not isinstance(snapshot, dict):
+                snapshot = None
             self.wifi_diagnostic = snapshot or {
                 "state": "no_hardware", "present": False, "available": False,
                 "title": "无线网络检测失败", "detail": error or "未知错误"}
@@ -2434,8 +2436,13 @@ class MingSettings(Adw.ApplicationWindow):
                 status = json.loads(output) if rc == 0 else {}
             except (TypeError, ValueError):
                 status = {}
-            if not isinstance(status, dict):
-                status = {}
+            if (rc != 0 or not isinstance(status, dict)
+                    or status.get("theme") not in APPEARANCE_THEMES
+                    or status.get("font_size") not in APPEARANCE_FONT_SIZES
+                    or status.get("wallpaper") not in APPEARANCE_WALLPAPERS):
+                self.appearance_loading = False
+                self.toast(error or "无法读取外观设置。", "warning")
+                return False
             values = [status.get("theme", "system"), status.get("font_size", 11),
                       status.get("wallpaper", "default")]
             if values[0] == "dark":
@@ -2451,8 +2458,6 @@ class MingSettings(Adw.ApplicationWindow):
                 self.appearance_loading = True
                 control.set_selected(choices.index(value) if value in choices else 0)
             self.appearance_loading = False
-            if rc != 0:
-                self.toast(error or "无法读取外观设置。", "warning")
             return False
         run_capture_async(self.appearance_command("status", "--json"), timeout=8, on_done=done)
         return False
@@ -3160,8 +3165,15 @@ class MingSettings(Adw.ApplicationWindow):
         row = getattr(self, "input_method_status_row", None)
         if row is None:
             return
+        probe_state = getattr(self, "input_method_probe_state", None)
+        generation = probe_state.begin() if probe_state is not None else None
 
         def done(rc, output, error):
+            if probe_state is not None and not probe_state.accept(generation):
+                return False
+            page = getattr(self, "advanced_page", None)
+            if page is not None and page.get_root() is not self:
+                return False
             try:
                 status = json.loads(output) if rc == 0 else {}
             except (TypeError, ValueError):
@@ -3171,9 +3183,9 @@ class MingSettings(Adw.ApplicationWindow):
                 row.set_subtitle(error or "Fcitx5 未运行，请点击修复输入法。")
                 return
             engine = status.get("current_engine") or status.get("profile", {}).get("default")
-            label = {"pinyin": "拼音", "rime": "Rime"}.get(engine, engine or "未知")
+            label = {"pinyin": "拼音", "rime": "中州韵"}.get(engine, engine or "未知")
             rime = status.get("rime", {}).get("available")
-            suffix = "，Rime 已就绪" if rime else "，Rime 组件未就绪"
+            suffix = "，中州韵已就绪" if rime else "，中州韵组件未就绪"
             row.set_title("当前输入法：%s" % label)
             row.set_subtitle("可用快捷键：Ctrl+Space；也可在此页直接切换%s。" % suffix)
 
@@ -3181,7 +3193,7 @@ class MingSettings(Adw.ApplicationWindow):
 
     def set_input_method_engine(self, button, engine):
         button.set_sensitive(False)
-        label = {"pinyin": "拼音", "rime": "Rime"}.get(engine, engine)
+        label = {"pinyin": "拼音", "rime": "中州韵"}.get(engine, engine)
 
         def done(rc, output, error):
             button.set_sensitive(True)
@@ -3234,19 +3246,19 @@ class MingSettings(Adw.ApplicationWindow):
 
         input_grp = Adw.PreferencesGroup(
             title="输入法",
-            description="默认使用 Fcitx5。可直接切换拼音和 Rime，切换结果会读回确认。")
+            description="默认使用 Fcitx5。可直接切换拼音和中州韵，切换结果会读回确认。")
         box.append(input_grp)
         self.input_method_status_row = Adw.ActionRow(
             title="正在读取输入法状态", subtitle="正在检查 Fcitx5 和 Rime...")
         input_grp.add(self.input_method_status_row)
         pinyin_button = Gtk.Button(label="拼音")
-        rime_button = Gtk.Button(label="Rime")
+        rime_button = Gtk.Button(label="中州韵（Rime）")
         config_button = Gtk.Button(label="输入法设置")
         pinyin_button.connect("clicked", self.set_input_method_engine, "pinyin")
         rime_button.connect("clicked", self.set_input_method_engine, "rime")
         config_button.connect("clicked", self.open_input_method_settings)
         input_grp.add(self.button_row("切换输入法", "拼音适合普通中文输入，Rime 适合自定义词库。", pinyin_button))
-        input_grp.add(self.button_row("切换输入法", "需要扩展词库时选择 Rime；组件未就绪会明确提示。", rime_button))
+        input_grp.add(self.button_row("切换输入法", "需要扩展词库时选择中州韵；组件未就绪会明确提示。", rime_button))
         input_grp.add(self.button_row("高级输入法设置", "打开 Fcitx5 图形配置工具，不再误报已成功启动的窗口。", config_button))
         self.refresh_input_method_status()
 
@@ -3332,7 +3344,7 @@ class MingSettings(Adw.ApplicationWindow):
             "文件管理器", "用于文件夹和磁盘位置。",
             ["default-app", "list", "files"], ["default-app", "set", "files"]))
 
-        dock_grp = Adw.PreferencesGroup(title="Dock")
+        dock_grp = Adw.PreferencesGroup(title="Ming 程序坞")
         box.append(dock_grp)
         dock_grp.add(self.backend_scale_row(
             "图标大小", "调整 Dock 的基础图标尺寸。",
@@ -3764,7 +3776,7 @@ class MingSettings(Adw.ApplicationWindow):
         diag_grp.add(self.button_row("上报问题", "仅在你确认后上传脱敏设备和错误日志，服务器会返回报告编号。", upload))
         diag_grp.add(self.button_row("经典轻量模式", "关闭模糊和重动画，更适合机械硬盘与老 CPU。", classic))
         diag_grp.add(self.button_row("磁盘健康", "按需读取 SATA、SAS 和 NVMe 磁盘的 SMART 状态，不开启常驻监控。", disk_health))
-        diag_grp.add(self.button_row("修复输入法", "备份旧 .xinputrc，恢复 Fcitx5 拼音/Rime 配置并避免 im-config 冲突。", input_repair))
+        diag_grp.add(self.button_row("修复输入法", "备份旧 .xinputrc，恢复 Fcitx5 拼音/中州韵配置并避免 im-config 冲突。", input_repair))
         diag_grp.add(self.button_row("Surface 支持", "仅 Surface 设备需要；会添加 linux-surface 第三方源。", surface))
 
         raw_grp = Adw.PreferencesGroup(

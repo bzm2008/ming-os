@@ -66,7 +66,7 @@ class MingStoreWineProviderTests(unittest.TestCase):
         item.update(overrides)
         return item
 
-    def test_wine_provider_is_registered_and_catalog_has_disabled_safe_entries(self):
+    def test_wine_provider_is_registered_and_catalog_keeps_user_install_entries(self):
         self.assertIn("wine-official", self.core.ALLOWED_PROVIDERS)
         self.assertTrue(CATALOG_PATH.is_file())
         document = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -77,7 +77,8 @@ class MingStoreWineProviderTests(unittest.TestCase):
         entries = provider.refresh_catalog()
         self.assertGreaterEqual(len(entries), 3)
         self.assertTrue(all(item["install_method"] == "wine-managed" for item in entries))
-        self.assertTrue(any(not item["enabled"] for item in entries))
+        self.assertTrue(all(item["enabled"] for item in entries))
+        self.assertTrue(all(item["installation_mode"] == "user-provided" for item in entries))
 
     def test_wine_provider_requires_fixed_https_artifact_and_manifest_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -200,11 +201,25 @@ class MingStoreWineProviderTests(unittest.TestCase):
                 self.assertFalse(provider._verify_signature(
                     "{}", "RWSIG", "Ming Wine manifest demo 1.0", public_key))
 
-    def test_disabled_wine_entry_cannot_be_resolved_or_installed(self):
+    def test_vendor_and_wine_entries_remain_actionable_for_user_artifacts(self):
+        wine_provider = self.core.WineOfficialProvider(catalog_root=CATALOG_PATH.parent)
+        wine_entries = wine_provider.refresh_catalog()
+        self.assertTrue(all(item["enabled"] for item in wine_entries))
+        wine_item = wine_provider.resolve(wine_entries[0]["app_id"])
+        self.assertTrue(wine_item["requires_user_artifact"])
+
+        vendor_path = CATALOG_PATH.parent / "vendor-official.json"
+        vendor_provider = self.core.VendorOfficialProvider(catalog_root=vendor_path.parent)
+        vendor_entries = vendor_provider.refresh_catalog()
+        self.assertTrue(all(item["enabled"] for item in vendor_entries))
+        vendor_item = vendor_provider.resolve(vendor_entries[0]["app_id"])
+        self.assertTrue(vendor_item["requires_user_artifact"])
+    def test_user_artifact_wine_entry_resolves_without_catalog_download(self):
         provider = self.core.WineOfficialProvider(catalog_root=CATALOG_PATH.parent)
-        disabled = next(item for item in provider.refresh_catalog() if not item["enabled"])
-        with self.assertRaises(self.core.ProviderUnavailable):
-            provider.resolve(disabled["app_id"])
+        entry = provider.refresh_catalog()[0]
+        resolved = provider.resolve(entry["app_id"])
+        self.assertTrue(resolved["requires_user_artifact"])
+        self.assertNotIn("download_url", resolved)
 
     def test_installed_state_does_not_trust_metadata_alone(self):
         with tempfile.TemporaryDirectory() as directory:

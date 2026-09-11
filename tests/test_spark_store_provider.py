@@ -2,6 +2,7 @@ import email.utils
 import hashlib
 import importlib.util
 import json
+import lzma
 import pathlib
 import tempfile
 import threading
@@ -184,6 +185,54 @@ signature
         self.assertEqual(1, len(items))
         self.assertTrue(items[0]["enabled"])
         self.assertEqual(digest, provider.index_digest)
+
+    def test_provider_uses_signed_compressed_packages_when_plain_index_is_stale(self):
+        packages = self._packages().encode("utf-8")
+        compressed = lzma.compress(packages)
+        plain_digest = "c" * 64
+        compressed_digest = hashlib.sha256(compressed).hexdigest()
+        inrelease = """-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Date: {date}
+SHA256:
+ {plain_digest} {plain_size} Packages
+ {compressed_digest} {compressed_size} Packages.xz
+-----BEGIN PGP SIGNATURE-----
+signature
+-----END PGP SIGNATURE-----
+""".format(
+            date=self.test_release_date,
+            plain_digest=plain_digest,
+            plain_size=len(packages) + 1,
+            compressed_digest=compressed_digest,
+            compressed_size=len(compressed),
+        )
+        responses = {
+            "/store/InRelease": inrelease,
+            "/store/Packages": b"stale plain index",
+            "/store/Packages.xz": compressed,
+            "/store/tools/applist.json": json.dumps(self._applist()),
+        }
+        requested = []
+
+        def fetch(url, _headers=None):
+            path = urllib.parse.urlsplit(url).path
+            requested.append(path)
+            return {"status": 200, "headers": {}, "body": responses[path]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = self.core.SparkPublicProvider(
+                cache_root=pathlib.Path(directory), categories=("tools",),
+                fetcher=fetch, release_verifier=lambda *_args: True,
+                config_path=self._policy(directory, True),
+                clock=lambda: self.test_now,
+            )
+            items = provider.refresh_catalog()
+
+        self.assertEqual(1, len(items))
+        self.assertTrue(items[0]["enabled"])
+        self.assertIn("/store/Packages.xz", requested)
 
     def test_invalid_utf8_packages_survive_cache_and_offline_browse(self):
         """A successful binary index must remain readable after a network loss."""

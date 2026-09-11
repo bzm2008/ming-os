@@ -37,6 +37,7 @@ STATUS_WIDGET_COMPACT_WIDTH = 252
 STATUS_WIDGET_COMPACT_HEIGHT = 58
 STATUS_WIDGET_COMPACT_NARROW_WIDTH = 242
 STATUS_TOGGLE_DEDUP_SECONDS = 0.65
+CLOCK_MARGIN_X = 26
 
 
 def is_status_widget_toggle_key(keyval):
@@ -49,6 +50,8 @@ def is_status_widget_toggle_key(keyval):
         getattr(gdk, "KEY_Super_R", 0),
         getattr(gdk, "KEY_Meta_L", 0),
         getattr(gdk, "KEY_Meta_R", 0),
+        getattr(gdk, "KEY_Win_L", 0),
+        getattr(gdk, "KEY_Win_R", 0),
     }
 
 
@@ -103,6 +106,24 @@ def save_widget_state(collapsed, path=None, metric_mode="memory"):
             pass
 
 
+def preserve_confirmed_control_value(previous, value, available, minimum=0):
+    """Keep the last trusted control value across a transient readback failure."""
+    if available and not isinstance(value, bool):
+        try:
+            normalized = int(round(float(value)))
+        except (TypeError, ValueError):
+            normalized = None
+        if normalized is not None and minimum <= normalized <= 100:
+            return normalized
+    if isinstance(previous, bool):
+        return None
+    try:
+        normalized_previous = int(round(float(previous)))
+    except (TypeError, ValueError):
+        return None
+    return normalized_previous if minimum <= normalized_previous <= 100 else None
+
+
 def system_prefers_dark():
     try:
         completed = subprocess.run(
@@ -125,17 +146,30 @@ def status_widget_overlay_geometry(pill_geometry, panel_size, screen_size):
     pill = dict(pill_geometry or {})
     screen_w = max(1, int((screen_size or {}).get("width", 1)))
     screen_h = max(1, int((screen_size or {}).get("height", 1)))
-    panel_w = max(1, int((panel_size or {}).get("width", 1)))
-    panel_h = max(1, int((panel_size or {}).get("height", 1)))
+    panel_w = min(screen_w, max(1, int((panel_size or {}).get("width", 1))))
+    panel_h = min(screen_h, max(1, int((panel_size or {}).get("height", 1))))
     pill_x = int(pill.get("x", 0))
     pill_y = int(pill.get("y", 0))
     pill_w = int(pill.get("width", 0))
     pill_h = int(pill.get("height", 0))
     panel_x = min(max(0, pill_x + pill_w - panel_w), max(0, screen_w - panel_w))
-    panel_y = pill_y + pill_h
-    if panel_y + panel_h > screen_h:
-        panel_y = pill_y - panel_h
-    panel_y = min(max(0, panel_y), max(0, screen_h - panel_h))
+    pill_top = min(max(0, pill_y), screen_h)
+    pill_bottom = min(max(pill_top, pill_y + pill_h), screen_h)
+    space_below = max(0, screen_h - pill_bottom)
+    space_above = max(0, pill_top)
+    if panel_h <= space_below and space_below:
+        panel_y = pill_bottom
+    elif panel_h <= space_above and space_above:
+        panel_y = pill_top - panel_h
+    elif space_below >= space_above and space_below:
+        panel_h = space_below
+        panel_y = pill_bottom
+    elif space_above:
+        panel_h = space_above
+        panel_y = pill_top - panel_h
+    else:
+        panel_y = 0
+        panel_h = screen_h
     return {
         "pill": pill,
         "panel": {"x": panel_x, "y": panel_y, "width": panel_w, "height": panel_h},
@@ -145,10 +179,12 @@ def status_widget_overlay_geometry(pill_geometry, panel_size, screen_size):
 def status_widget_compact_geometry(screen_size):
     """Return a fixed-size capsule that fits narrow monitors without growth."""
     screen_w = max(1, int((screen_size or {}).get("width", 1)))
-    if screen_w >= 900:
-        width = STATUS_WIDGET_COMPACT_WIDTH
-    else:
-        width = max(220, min(STATUS_WIDGET_COMPACT_NARROW_WIDTH, screen_w - 48))
+    available_width = max(1, screen_w - 2 * CLOCK_MARGIN_X)
+    width = min(
+        STATUS_WIDGET_COMPACT_WIDTH,
+        STATUS_WIDGET_COMPACT_NARROW_WIDTH,
+        available_width,
+    )
     return {"width": width, "height": STATUS_WIDGET_COMPACT_HEIGHT}
 
 
@@ -542,7 +578,6 @@ DESKTOP_LABEL_FONT = "Noto Sans CJK SC Medium 10"
 DRAG_THRESHOLD = 12
 ACTIVATION_DEDUP_MS = 650
 LAUNCH_FEEDBACK_TIMEOUT_MS = 4000
-CLOCK_MARGIN_X = 26
 # Keep the status widget close to the top edge in both compact and expanded
 # layouts; the desktop coordinator owns the remaining vertical spacing.
 CLOCK_MARGIN_Y = 8
@@ -675,7 +710,7 @@ window.ming-desktop {
 .status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
 .status-compact-arrow { font-size: 15px; font-weight: 700; color: #2F8A7D; }
 .status-expanded-panel {
-  min-width: 330px;
+  min-width: 0;
   padding: 11px;
   border-radius: 14px;
   background: #FFFFFF;
@@ -2643,6 +2678,9 @@ class StatusWidget(Gtk.Box):
         self.metric_sampler = ResourceMetricSampler()
         self.metric_generation = 0
         self.metric_refreshing = False
+        self._destroyed = False
+        self._summary_timer_source = 0
+        self._resource_timer_source = 0
         self.battery_text = ""
         self.battery_refreshing = False
         self.battery_next_refresh_at = 0.0
@@ -2742,32 +2780,10 @@ class StatusWidget(Gtk.Box):
         self.compact_button.connect(
             "clicked", lambda _button: self.set_collapsed(not self.collapsed))
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.time_label = Gtk.Label()
-        self.time_label.get_style_context().add_class("clock-time")
-        self.time_label.set_halign(Gtk.Align.START)
-        header.pack_start(self.time_label, True, True, 0)
-
-        header_details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        header_details.set_halign(Gtk.Align.END)
-        self.date_label = Gtk.Label()
-        self.date_label.get_style_context().add_class("clock-date")
-        self.date_label.set_halign(Gtk.Align.END)
-        header_details.pack_start(self.date_label, False, False, 0)
-        self.header_battery_label = Gtk.Label()
-        self.header_battery_label.get_style_context().add_class("clock-battery")
-        self.header_battery_label.set_halign(Gtk.Align.END)
-        self.header_battery_label.set_no_show_all(True)
-        self.header_battery_label.set_visible(False)
-        header_details.pack_start(self.header_battery_label, False, False, 0)
-        header.pack_start(header_details, False, False, 0)
-        # Kept as a detail field for the expanded panel; network status is not
-        # rendered in the fixed compact pill.
-        self.compact_network_label = Gtk.Label(label="网络 --")
-        self.compact_network_label.get_style_context().add_class("status-compact-date")
-        self.compact_network_label.set_no_show_all(True)
-        self.compact_network_label.set_visible(False)
-        header_details.pack_start(self.compact_network_label, False, False, 0)
+        self.time_label = self.compact_time_label
+        self.date_label = self.compact_date_label
+        self.header_battery_label = self.compact_battery_label
+        self.compact_network_text = "网络 --"
         self.collapse_button = Gtk.Button()
         self.collapse_button.get_style_context().add_class("status-button")
         collapse_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
@@ -2813,7 +2829,7 @@ class StatusWidget(Gtk.Box):
         # Keep old callers working while displaying battery independently from
         # the resource sampler, which regularly replaces its label text.
         self.battery_button = self.resource_button
-        self.battery_label = self.header_battery_label
+        self.battery_label = self.compact_battery_label
         self.notification_label = self.notification_button.ming_label
         self.settings_label = self.settings_button.ming_label
         self.power_label = self.power_button.ming_label
@@ -2936,8 +2952,35 @@ class StatusWidget(Gtk.Box):
         self.apply_collapsed_state(animate=False)
         self.refresh()
         self.refresh_resource_metric()
-        GLib.timeout_add_seconds(STATUS_SUMMARY_REFRESH_SECONDS, self.refresh)
-        GLib.timeout_add_seconds(STATUS_RESOURCE_REFRESH_SECONDS, self.refresh_resource_metric_timer)
+        self._summary_timer_source = GLib.timeout_add_seconds(
+            STATUS_SUMMARY_REFRESH_SECONDS, self.refresh)
+        self._resource_timer_source = GLib.timeout_add_seconds(
+            STATUS_RESOURCE_REFRESH_SECONDS, self.refresh_resource_metric_timer)
+        self.connect("destroy", self.on_destroy)
+
+    def on_destroy(self, *_args):
+        if self._destroyed:
+            return False
+        self._destroyed = True
+        self.metric_generation += 1
+        self.metric_refreshing = False
+        for attribute in (
+                "_summary_timer_source", "_resource_timer_source",
+                "_collapse_hide_source", "_height_animation_source"):
+            source = getattr(self, attribute, 0)
+            if source:
+                try:
+                    GLib.source_remove(source)
+                except Exception as exc:
+                    log("could not remove status widget source %s: %s" % (source, exc))
+                setattr(self, attribute, 0)
+        popup = getattr(self, "expanded_window", None)
+        if popup is not None:
+            try:
+                popup.destroy()
+            except Exception as exc:
+                log("could not destroy status widget popup: %s" % exc)
+        return False
 
     def geometry_snapshot(self):
         outer = self.get_allocation()
@@ -3060,6 +3103,8 @@ class StatusWidget(Gtk.Box):
             if self.expanded_window.get_realized():
                 self.expanded_window.resize(
                     geometry["panel"]["width"], geometry["panel"]["height"])
+            self.expanded_panel.set_size_request(
+                geometry["panel"]["width"], geometry["panel"]["height"])
             self.expanded_window.move(geometry["panel"]["x"], geometry["panel"]["y"])
             return True
         except Exception as exc:
@@ -3084,7 +3129,10 @@ class StatusWidget(Gtk.Box):
         self.refresh_resource_metric()
 
     def refresh_resource_metric(self):
-        if self.collapsed or self.metric_refreshing:
+        if self._destroyed or self.collapsed:
+            self.metric_refreshing = False
+            return False
+        if self.metric_refreshing:
             return True
         self.metric_refreshing = True
         generation = self.metric_generation
@@ -3103,13 +3151,16 @@ class StatusWidget(Gtk.Box):
         return True
 
     def refresh_resource_metric_timer(self):
+        if getattr(self, "_destroyed", False) or self.collapsed:
+            self.metric_refreshing = False
+            return False
         return bool(self.refresh_resource_metric())
 
     def apply_resource_metric(self, generation, result):
         return self.apply_resource_metrics(generation, {result.get("mode", self.metric_mode): result})
 
     def apply_resource_metrics(self, generation, results):
-        if generation != self.metric_generation or self.collapsed:
+        if self._destroyed or generation != self.metric_generation or self.collapsed:
             self.metric_refreshing = False
             return False
         self.metric_refreshing = False
@@ -3125,12 +3176,6 @@ class StatusWidget(Gtk.Box):
                 metric_label.set_text(value)
             log("resource metric %s" % json.dumps(
                 dict(result, label=label), ensure_ascii=False, sort_keys=True))
-        # Preserve a readable legacy label for callers and accessibility tools.
-        memory = (results or {}).get("memory") or {}
-        if memory.get("available"):
-            self.resource_label.set_text("内存 %s%s" % (memory.get("value"), memory.get("unit", "")))
-        else:
-            self.resource_label.set_text("内存 %s" % ("采样中" if memory.get("reason") else "不可用"))
         return False
 
     def animate_collapsed_state(self, target_height):
@@ -3355,7 +3400,9 @@ class StatusWidget(Gtk.Box):
                     self.volume_label.set_text("音量设置失败，点击重试")
             else:
                 self.brightness_backend = result.get("backend", self.brightness_backend)
-                fallback_value = value if value is not None else state.confirmed_value
+                fallback_value = (state.confirmed_value if state.confirmed_value is not None else value)
+                if state.confirmed_value is None:
+                    fallback_value = value if value is not None else state.confirmed_value
                 if fallback_value is not None:
                     state.settle(generation, fallback_value)
                     self.brightness_scale.set_value(fallback_value)
@@ -3778,8 +3825,9 @@ class StatusWidget(Gtk.Box):
             and str(device.get("state", "")).casefold().startswith("connected")
             for device in ethernet_devices
         )
-        self.compact_network_label.set_text(
-            "网络 在线" if ethernet_ready else "网络 可用" if wifi_ready else "网络 --"
+        self.compact_network_text = (
+            "网络 在线" if ethernet_ready else
+            "网络 可用" if wifi_ready else "网络 --"
         )
         wifi_icon = (
             "network-wired-symbolic" if ethernet_ready else
@@ -3840,10 +3888,16 @@ class StatusWidget(Gtk.Box):
         self.volume_scale.set_sensitive(audio_available)
         volume_state = self.control_states["volume"]
         if not volume_state.should_hold_status():
-            self.volume_scale.set_value(max(0, min(100, volume or 0)))
-            volume_state.confirmed_value = volume if audio_available else None
-            self.volume_label.set_text(
-                "音量 %d%%" % volume if audio_available else "未检测到输出设备")
+            confirmed_volume = preserve_confirmed_control_value(
+                volume_state.confirmed_value, volume, audio_available, minimum=0)
+            self.volume_scale.set_value(confirmed_volume if confirmed_volume is not None else 0)
+            volume_state.confirmed_value = confirmed_volume
+            if audio_available and confirmed_volume is not None:
+                self.volume_label.set_text("音量 %d%%" % confirmed_volume)
+            elif confirmed_volume is not None:
+                self.volume_label.set_text("音量 %d%%（读回暂时失败）" % confirmed_volume)
+            else:
+                self.volume_label.set_text("未检测到输出设备")
         elif volume_state.optimistic_value is not None:
             self.volume_scale.set_value(volume_state.optimistic_value)
             self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)
@@ -3855,11 +3909,23 @@ class StatusWidget(Gtk.Box):
         self.brightness_scale.set_sensitive(brightness_available)
         brightness_state = self.control_states["brightness"]
         if not brightness_state.should_hold_status():
-            self.brightness_scale.set_value(max(1, min(100, brightness_value or 1)))
-            brightness_state.confirmed_value = brightness_value if brightness_available else None
-            self.brightness_label.set_text(
-                "%s %d%%" % (brightness_name, brightness_value)
-                if brightness_available else "当前设备不支持")
+            confirmed_brightness = preserve_confirmed_control_value(
+                brightness_state.confirmed_value,
+                brightness_value,
+                brightness_available,
+                minimum=1,
+            )
+            self.brightness_scale.set_value(
+                confirmed_brightness if confirmed_brightness is not None else 1)
+            brightness_state.confirmed_value = confirmed_brightness
+            if brightness_available and confirmed_brightness is not None:
+                self.brightness_label.set_text(
+                    "%s %d%%" % (brightness_name, confirmed_brightness))
+            elif confirmed_brightness is not None:
+                self.brightness_label.set_text(
+                    "%s %d%%（读回暂时失败）" % (brightness_name, confirmed_brightness))
+            else:
+                self.brightness_label.set_text("当前设备不支持")
         elif brightness_state.optimistic_value is not None:
             self.brightness_scale.set_value(brightness_state.optimistic_value)
             self.brightness_label.set_text(
@@ -3916,7 +3982,7 @@ class WallpaperCanvas(Gtk.DrawingArea):
 
 class PhoneDesktop(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Ming Desktop")
+        super().__init__(title="Ming 桌面")
         try:
             READY_MARKER.unlink()
         except FileNotFoundError:
@@ -4353,6 +4419,7 @@ class PhoneDesktop(Gtk.Window):
         x, y = self.fixed_event_coords(event)
         item = self.item_at(x, y)
         self.fixed_press_item = item.get("id") if item else None
+        self.fixed_press_button = getattr(event, "button", 0)
         self.fixed_press_origin = (x, y)
         if item:
             item_x, item_y = self.item_position(item)
@@ -4370,7 +4437,7 @@ class PhoneDesktop(Gtk.Window):
         return True
 
     def on_fixed_motion(self, _widget, event):
-        if not self.fixed_press_origin:
+        if not self.fixed_press_origin or self.fixed_press_button != 1:
             return False
         x, y = self.fixed_event_coords(event)
         dx = x - self.fixed_press_origin[0]
@@ -4394,6 +4461,7 @@ class PhoneDesktop(Gtk.Window):
         item = self.item_at(x, y)
         preview = self.drag_positions.pop(press_item, None) if press_item else None
         self.fixed_press_item = None
+        self.fixed_press_button = None
         self.fixed_press_origin = None
         self.fixed_press_offset = (0, 0)
         self.fixed_press_moved = False
