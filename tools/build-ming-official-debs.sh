@@ -4,10 +4,10 @@ set -euo pipefail
 version="${1:-}"
 output_dir="${2:-}"
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+~rc[0-9]+$ ]] || {
-    echo "用法：build-ming-official-debs.sh VERSION OUTPUT_DIR" >&2
+    echo "用法：build-ming-official-debs.sh VERSION OUTPUT_DIR package|description|source ..." >&2
     exit 2
 }
-[[ -n "${output_dir}" && $# -ge 4 ]] || exit 2
+[[ -n "${output_dir}" && $# -ge 3 ]] || exit 2
 command -v dpkg-deb >/dev/null 2>&1 || { echo "缺少 dpkg-deb。" >&2; exit 127; }
 mkdir -p "${output_dir}"
 
