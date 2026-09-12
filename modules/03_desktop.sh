@@ -336,7 +336,8 @@ install_ming_shell_components() {
         for official_asset in \
             "${asset_dir}/ming-store-catalog/ming-official.json" \
             "${asset_dir}/ming-store-catalog/ming-official.json.minisig" \
-            "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub"; do
+            "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub" \
+            "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub.sha256"; do
             [[ -f "${official_asset}" && ! -L "${official_asset}" ]] || {
                 echo "ERROR: Ming official signed catalog asset is missing: ${official_asset}" >&2
                 return 1
@@ -4669,8 +4670,11 @@ mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 mkdir -p "${log_dir}" 2>/dev/null || true
 health_log="${log_dir}/session-health.log"
 metrics_file="${log_dir}/session-startup.json"
-lock_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.lock"
-pid_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-healthcheck.pid"
+session_runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+session_lock_file="${session_runtime_dir}/ming-session-healthcheck.lock"
+session_pid_file="${session_runtime_dir}/ming-session-healthcheck.pid"
+session_ready_file="${session_runtime_dir}/ming-session-healthcheck.ready"
+phone_ready_file="${HOME}/.cache/ming-os/ming-phone-desktop.ready"
 picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
 picom_cooldown_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-cooldown"
 drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
@@ -4727,6 +4731,30 @@ process_count() {
     printf '%s\n' "${count}"
 }
 
+process_pids() {
+    case "$1" in
+        phone)
+            probe_timeout pgrep -u "$(id -u)" -f \
+                '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' 2>/dev/null || true
+            ;;
+        plank|picom)
+            probe_timeout pgrep -u "$(id -u)" -x "$1" 2>/dev/null || true
+            ;;
+    esac
+}
+
+keep_one_process() {
+    local kind="$1" pids keeper pid
+    pids="$(process_pids "${kind}")"
+    keeper="$(awk 'NF { print $1; exit }' <<<"${pids}")"
+    [[ "${keeper}" =~ ^[0-9]+$ ]] || return 0
+    while read -r pid; do
+        [[ "${pid}" =~ ^[0-9]+$ && "${pid}" != "${keeper}" ]] || continue
+        log "stopping duplicate ${kind} process pid=${pid}; keeping pid=${keeper}"
+        probe_timeout kill -TERM "${pid}" >/dev/null 2>&1 || true
+    done <<<"${pids}"
+}
+
 stop_legacy_ming_dock() {
     local legacy_pattern='(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)'
     local watchdog_pattern='(^|[[:space:]])/usr/local/bin/ming-dock-watchdog([[:space:]]|$)'
@@ -4751,9 +4779,16 @@ stop_duplicate_phone_desktops() {
     [[ "${processes}" -eq 1 ]] && return 0
     [[ "${processes}" -gt 1 ]] || return 0
     log "stopping duplicate Ming Phone Desktop processes (${processes})"
-    probe_timeout pkill -TERM -u "$(id -u)" -f \
-        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-phone-desktop([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-phone-desktop([[:space:]]|$)' \
-        >/dev/null 2>&1 || true
+    keep_one_process phone
+    sleep 0.2
+}
+
+stop_duplicate_plank() {
+    local processes
+    processes="$(process_count plank)"
+    [[ "${processes}" -gt 1 ]] || return 0
+    log "stopping duplicate Plank processes (${processes})"
+    keep_one_process plank
     sleep 0.2
 }
 
@@ -4763,7 +4798,8 @@ stop_duplicate_picom() {
     [[ "${processes}" -eq 1 ]] && return 0
     [[ "${processes}" -gt 1 ]] || return 0
     log "stopping duplicate Picom processes (${processes})"
-    stop_picom_and_wait
+    keep_one_process picom
+    sleep 0.2
 }
 
 xfce_panel_running() {
@@ -5202,6 +5238,7 @@ start_phone_desktop() {
 
 start_plank_dock() {
     local started_at finished_at deadline_at was_running=false
+    stop_duplicate_plank
     plank_running && was_running=true
     command -v ming-plank-watchdog >/dev/null 2>&1 || {
         log 'ming-plank-watchdog is unavailable'
@@ -5397,6 +5434,7 @@ payload = {
         "picom": integer("MING_PICOM_DUPLICATES"),
     },
 }
+
 payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
@@ -5411,6 +5449,34 @@ path.parent.mkdir(parents=True, exist_ok=True)
 tmp = path.with_name(path.name + ".tmp")
 tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 tmp.replace(path)
+PY
+}
+
+sample_processes() {
+    local sample="[]"
+    command -v ps >/dev/null 2>&1 || { printf '%s\n' "${sample}"; return 0; }
+    MING_SAMPLE_PIDS="$(printf '%s\n' "$(process_pids phone)" "$(process_pids plank)" "$(process_pids picom)" | awk 'NF && !seen[$1]++ { print $1 }')" \
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+pids = [pid for pid in os.environ.get("MING_SAMPLE_PIDS", "").split() if pid.isdigit()]
+if not pids:
+    print("[]")
+    raise SystemExit(0)
+result = subprocess.run(
+    ["ps", "-o", "pid=,comm=,rss=,args=", "-p", ",".join(pids)],
+    capture_output=True, text=True, check=False,
+)
+items = []
+for line in result.stdout.splitlines():
+    fields = line.split(None, 3)
+    if len(fields) < 3 or not fields[0].isdigit() or not fields[2].isdigit():
+        continue
+    items.append({"pid": int(fields[0]), "command": fields[1], "rss_kib": int(fields[2]),
+                  "args": fields[3] if len(fields) == 4 else ""})
+print(json.dumps(items, ensure_ascii=False, sort_keys=True))
 PY
 }
 
@@ -5444,23 +5510,43 @@ supervise_once() {
     log 'session supervisor check complete'
 }
 
+cleanup_stale_session_state() {
+    local old_pid=""
+    if [[ -s "${session_pid_file}" ]]; then
+        read -r old_pid <"${session_pid_file}" || old_pid=""
+        if [[ ! "${old_pid}" =~ ^[0-9]+$ ]] || ! kill -0 "${old_pid}" >/dev/null 2>&1; then
+            rm -f "${session_pid_file}" "${session_ready_file}" 2>/dev/null || true
+        fi
+    else
+        rm -f "${session_ready_file}" 2>/dev/null || true
+    fi
+    [[ -s "${phone_ready_file}" ]] || rm -f "${phone_ready_file}" 2>/dev/null || true
+}
+
+cleanup_session_state() {
+    local owner=""
+    read -r owner <"${session_pid_file}" 2>/dev/null || true
+    [[ "${owner}" == "$$" ]] && rm -f "${session_pid_file}" "${session_ready_file}" 2>/dev/null || true
+}
+
 acquire_coordinator_lock() {
-    exec 9>"${lock_file}" || return 1
+    cleanup_stale_session_state
+    exec 9>"${session_lock_file}" || return 1
     if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
-        log 'session coordinator already owns the lock'
+        log "session coordinator already owns ${session_lock_file}"
         return 1
     fi
-    if [[ -s "${pid_file}" ]]; then
+    if [[ -s "${session_pid_file}" ]]; then
         local old_pid
-        read -r old_pid <"${pid_file}" || old_pid=""
+        read -r old_pid <"${session_pid_file}" || old_pid=""
         if [[ "${old_pid}" =~ ^[0-9]+$ && "${old_pid}" != "$$" ]] && \
            probe_timeout kill -0 "${old_pid}" >/dev/null 2>&1; then
             log "session coordinator pid ${old_pid} is still alive"
             return 1
         fi
     fi
-    printf '%s\n' "$$" >"${pid_file}" 2>/dev/null || true
-    trap 'rm -f "${pid_file}" 2>/dev/null || true' EXIT
+    printf '%s\n' "$$" >"${session_pid_file}" 2>/dev/null || true
+    trap 'cleanup_session_state' EXIT
     return 0
 }
 
@@ -5468,6 +5554,7 @@ case "${1:---once}" in
     --session)
         acquire_coordinator_lock || exit 0
         startup_once
+        printf '%s\n' "$$" >"${session_ready_file}" 2>/dev/null || true
         while true; do
             for _immersive_tick in $(seq 1 "${SUPERVISOR_INTERVAL}"); do
                 sleep 1
@@ -5479,6 +5566,7 @@ case "${1:---once}" in
     --once)
         acquire_coordinator_lock || exit 0
         startup_once
+        printf '%s\n' "$$" >"${session_ready_file}" 2>/dev/null || true
         ;;
     --check)
         [[ -s "${metrics_file}" ]] && cat "${metrics_file}" || write_metrics check
@@ -5491,8 +5579,11 @@ case "${1:---once}" in
     --immersive)
         apply_dock_immersive_state
         ;;
+    --sample)
+        sample_processes
+        ;;
     *)
-        printf 'Usage: %s --session|--once|--check|--reload-dock\n' "$0" >&2
+        printf 'Usage: %s --session|--once|--check|--sample|--reload-dock\n' "$0" >&2
         exit 2
         ;;
 esac

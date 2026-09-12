@@ -434,6 +434,14 @@ DESKTOP_MANAGED_MARKER = "X-Ming-Managed"
 DESKTOP_MANAGED_MARKER_LINE = "X-Ming-Managed=true"
 DESKTOP_SOURCE_MARKER = "X-Ming-Source-Desktop"
 READY_MARKER = HOME / ".cache" / "ming-os" / "ming-phone-desktop.ready"
+
+
+def session_ready_file():
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ming-session-healthcheck.ready"
+
+
+def session_ready():
+    return session_ready_file().is_file()
 SYSTEM_APPLICATION_DIR = Path("/usr/share/applications")
 LOCAL_APPLICATION_DIR = Path("/usr/local/share/applications")
 APP_DIRS = [

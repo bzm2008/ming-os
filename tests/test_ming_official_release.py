@@ -56,6 +56,9 @@ class MingOfficialProviderTests(unittest.TestCase):
             }
             (root / "ming-official.json").write_text(json.dumps(catalog), encoding="utf-8")
             (root / "ming-official.json.minisig").write_text("signature", encoding="utf-8")
+            (root / "public.key").write_bytes(b"trusted public key")
+            (root / "public.key.sha256").write_text(
+                __import__("hashlib").sha256(b"trusted public key").hexdigest(), encoding="ascii")
             provider = self.core.MingOfficialProvider(
                 catalog_root=root,
                 public_key_path=root / "public.key",
@@ -66,6 +69,7 @@ class MingOfficialProviderTests(unittest.TestCase):
             self.assertEqual("v26.4.1-rc4", item["release_tag"])
             self.assertEqual("amd64", item["resolved_architecture"])
             self.assertEqual("b" * 64, item["sha256"])
+            self.assertEqual("ming-store=26.4.1~rc4", item["apt_target"])
             state = provider.installed_state("ming-store")
             self.assertEqual({
                 "installed": True, "version": "26.4.1~rc4", "architecture": "amd64",
@@ -100,6 +104,60 @@ class MingOfficialProviderTests(unittest.TestCase):
             with self.assertRaises(self.core.InvalidCatalog):
                 provider.refresh_catalog()
 
+    def test_nonempty_catalog_requires_a_public_key_hash_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = {
+                "id": "ming-official", "name": "Ming", "priority": 1,
+                "trust": "minisign-required", "release_tag": "v26.4.1-rc4",
+                "repository": "bzm2008/ming-os", "public_key_fingerprint": "A" * 40,
+            }
+            item = {
+                "app_id": "ming-store", "name": "Ming Store", "package_name": "ming-store",
+                "version": "26.4.1~rc4", "architectures": ["amd64"], "install_method": "deb",
+                "dependencies": [], "license": "GPL-3.0-or-later",
+                "identity": {"type": "minisign", "signature": "signed", "sha256": "b" * 64},
+                "download_url": "https://github.com/bzm2008/ming-os/releases/download/v26.4.1-rc4/ming-store_26.4.1~rc4_amd64.deb",
+                "sha256": "b" * 64, "release_tag": "v26.4.1-rc4",
+                "enabled": True, "protected": False,
+            }
+            (root / "ming-official.json").write_text(
+                json.dumps({"schema": "ming.store.catalog.v1", "source": source, "applications": [item]}),
+                encoding="utf-8")
+            (root / "ming-official.json.minisig").write_text("signature", encoding="utf-8")
+            (root / "public.key").write_bytes(b"unanchored key")
+            provider = self.core.MingOfficialProvider(
+                catalog_root=root, public_key_path=root / "public.key", verifier=lambda *_args: True)
+            with self.assertRaises(self.core.InvalidCatalog):
+                provider.refresh_catalog()
+
+    def test_signed_catalog_rejects_filename_not_bound_to_version_and_architecture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            document = {
+                "schema": "ming.store.catalog.v1",
+                "source": {
+                    "id": "ming-official", "name": "Ming", "priority": 1,
+                    "trust": "minisign-required", "release_tag": "v26.4.1-rc4",
+                    "repository": "bzm2008/ming-os", "public_key_fingerprint": "A" * 40,
+                },
+                "applications": [{
+                    "app_id": "ming-store", "name": "Ming Store", "package_name": "ming-store",
+                    "version": "26.4.1~rc4", "architectures": ["amd64"], "install_method": "deb",
+                    "dependencies": [], "license": "GPL-3.0-or-later",
+                    "identity": {"type": "minisign", "signature": "signed", "sha256": "b" * 64},
+                    "download_url": "https://github.com/bzm2008/ming-os/releases/download/v26.4.1-rc4/ming-store_latest_amd64.deb",
+                    "sha256": "b" * 64, "release_tag": "v26.4.1-rc4",
+                    "enabled": True, "protected": False,
+                }],
+            }
+            (root / "ming-official.json").write_text(json.dumps(document), encoding="utf-8")
+            (root / "ming-official.json.minisig").write_text("signature", encoding="utf-8")
+            provider = self.core.MingOfficialProvider(
+                catalog_root=root, public_key_path=root / "public.key", verifier=lambda *_args: True)
+            with self.assertRaises(self.core.InvalidCatalog):
+                provider.refresh_catalog()
+
 
 class MingOfficialToolingTests(unittest.TestCase):
     @classmethod
@@ -111,6 +169,7 @@ class MingOfficialToolingTests(unittest.TestCase):
         self.assertTrue(CATALOG_TOOL.is_file())
         self.assertIn("dpkg-deb", BUILD_TOOL.read_text(encoding="utf-8"))
         self.assertIn("release_tag", CATALOG_TOOL.read_text(encoding="utf-8"))
+        self.assertIn('separators=(",", ":")', CATALOG_TOOL.read_text(encoding="utf-8"))
 
     def test_release_build_requires_external_signed_catalog_inputs(self):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
@@ -130,6 +189,8 @@ class MingOfficialToolingTests(unittest.TestCase):
         build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
         self.assertIn("Ming official catalog must contain at least one application", build)
         self.assertIn("ming-official-catalog.minisign.pub", build)
+        self.assertIn("official_public_key_hash_path.read_text", build)
+        self.assertIn("hashlib.sha256(official_public_key_path.read_bytes())", build)
 
 
 if __name__ == "__main__":

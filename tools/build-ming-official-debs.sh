@@ -28,8 +28,26 @@ Maintainer: Ming OS <release@ming-os.invalid>
 Description: ${description}
  Ming OS official component.
 EOF
-    [[ -f "${source_path}" ]] || { echo "官方组件源文件不存在：${source_path}" >&2; exit 1; }
-    install -m 0644 "${source_path}" "${package_root}/usr/share/ming-os/official/"
+    if [[ -d "${source_path}" ]]; then
+        cp -a "${source_path}/." "${package_root}/"
+        rm -rf "${package_root}/DEBIAN"
+        mkdir -p "${package_root}/DEBIAN"
+        cat > "${package_root}/DEBIAN/control" <<EOF
+Package: ${package}
+Version: ${version}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Ming OS <release@ming-os.invalid>
+Description: ${description}
+ Ming OS official component.
+EOF
+    elif [[ -f "${source_path}" ]]; then
+        install -m 0644 "${source_path}" "${package_root}/usr/share/ming-os/official/"
+    else
+        echo "官方组件源路径不存在：${source_path}" >&2
+        exit 1
+    fi
     dpkg-deb --build --root-owner-group "${package_root}" "${output_dir}/${package}_${version}_amd64.deb" >/dev/null
 }
 

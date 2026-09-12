@@ -384,6 +384,14 @@ def write_drawer_state(opened):
         pass
 
 
+def session_ready_file():
+    return pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ming-session-healthcheck.ready"
+
+
+def session_ready():
+    return session_ready_file().is_file()
+
+
 def apply_dock_immersive_state(opened):
     """Publish drawer visibility for the session Dock coordinator."""
     write_drawer_state(bool(opened))

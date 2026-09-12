@@ -98,6 +98,8 @@ class StoreControl:
             max_bytes=8 * 1024 * 1024 * 1024,
             allowed_hosts=getattr(self.core, "SPARK_ALLOWED_HOSTS", ()),
         )
+        self.official_downloader = self.core.SecureDownloader(
+            max_bytes=8 * 1024 * 1024 * 1024, allowed_hosts={"github.com"})
         self.artifact_root = pathlib.Path(artifact_root)
 
     def _call(self, command, timeout=300):
@@ -499,6 +501,59 @@ class StoreControl:
             pass
         return state
 
+    def _official_install(self, request, item, resolved, action):
+        package_name = str(item.get("package_name") or "").strip().lower()
+        version = str(resolved.get("resolved_version") or resolved.get("version") or "")
+        architecture = str(resolved.get("resolved_architecture") or "").strip().casefold()
+        url = str(resolved.get("download_url") or "")
+        digest = str(resolved.get("sha256") or "").strip().lower()
+        filename = str(resolved.get("artifact_filename") or "")
+        if not package_name or not version or architecture != "amd64":
+            raise StoreControlError("provider_unavailable", "Ming 官方软件解析结果不完整。", 9)
+        if pathlib.PurePosixPath(filename).name != filename or not filename.endswith(".deb"):
+            raise StoreControlError("provider_unavailable", "Ming 官方软件包文件名不安全。", 9)
+        if not self.core.SHA256.fullmatch(digest):
+            raise StoreControlError("provider_unavailable", "Ming 官方软件包缺少 SHA256。", 9)
+        artifact_dir = self._secure_artifact_dir(request.request_id)
+        destination = artifact_dir / filename
+        self._journal(request, "downloading")
+        try:
+            self.official_downloader.download(url, destination, digest)
+        except Exception as exc:
+            raise StoreControlError("network_failed", "Ming 官方软件包下载或校验失败。", 9) from exc
+        rc, metadata_output, _error = self._call((
+            "dpkg-deb", "--field", str(destination), "Package", "Version", "Architecture",
+            "Depends", "Pre-Depends",
+        ), timeout=30)
+        if rc != 0:
+            raise StoreControlError("invalid_package", "Ming 官方软件包元数据无法读取。", 9)
+        metadata = self._deb_metadata(metadata_output)
+        if (metadata.get("package") != package_name or metadata.get("version") != version
+                or metadata.get("architecture") != architecture):
+            raise StoreControlError("identity_mismatch", "Ming 官方软件包身份与签名目录不一致。", 9)
+        if self._has_legacy_spark_dependency("\n".join(metadata.get("dependencies") or [])):
+            raise StoreControlError("legacy_dependency", "软件包依赖已退役运行时，已拒绝安装。", 9)
+        self._journal(request, "awaiting_authorization")
+        self._journal(request, "installing")
+        rc, _output, error = self._call((
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-o", "Acquire::Retries=3",
+            "--no-install-recommends", "install", str(destination),
+        ), timeout=900)
+        if rc != 0:
+            state, message = self._apt_error(error)
+            raise StoreControlError(state, message)
+        self._journal(request, "readback")
+        state = self._installed(package_name)
+        if (not state["installed"] or state["version"] != version
+                or str(state.get("architecture") or "").strip().casefold() != architecture):
+            raise StoreControlError("readback_failed", "软件操作结束，但版本或架构读回不一致。")
+        destination.unlink(missing_ok=True)
+        try:
+            artifact_dir.rmdir()
+        except OSError:
+            pass
+        return state
+
     def _is_protected(self, package):
         if package in PROTECTED_PACKAGES or package.startswith(("linux-image-", "grub-")):
             return True
@@ -636,6 +691,8 @@ class StoreControl:
                 raise StoreControlError("candidate_changed", "软件版本已变化，请刷新页面后重试。", 9)
             if request.provider == "spark-public":
                 state = self._spark_install(request, item, resolved, action)
+            elif request.provider == "ming-official":
+                state = self._official_install(request, item, resolved, action)
             else:
                 target = resolved.get("apt_target")
                 if not target:

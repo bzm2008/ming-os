@@ -743,11 +743,12 @@ class MingOfficialProvider(CatalogProvider):
         version = str(item.get("version") or "")
         package = str(item.get("package_name") or "")
         filename = match.group(2) if match else ""
+        expected_filename = "%s_%s_amd64.deb" % (package, version)
         if (
             parsed.scheme != "https" or parsed.hostname != MING_OFFICIAL_RELEASE_HOST
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or not match or match.group(1) != release_tag
-            or not release_tag or not version or package not in filename
+            or not release_tag or not version or filename != expected_filename
             or pathlib.PurePosixPath(filename).suffix != ".deb"
             or str(item.get("sha256") or "").lower() != str(item.get("identity", {}).get("sha256") or "").lower()
             or not SHA256.fullmatch(str(item.get("sha256") or "").lower())
@@ -777,6 +778,8 @@ class MingOfficialProvider(CatalogProvider):
             signature = signature_path.read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise InvalidCatalog("Ming 官方签名目录签名文件无法读取：%s" % exc) from exc
+        if not self.public_key_sha256:
+            raise InvalidCatalog("Ming 官方目录缺少公钥 SHA256 信任锚。")
         if self.public_key_sha256:
             try:
                 key_digest = hashlib.sha256(self.public_key_path.read_bytes()).hexdigest()
@@ -815,6 +818,7 @@ class MingOfficialProvider(CatalogProvider):
         resolved.update({
             "resolved_version": item["version"],
             "resolved_architecture": "amd64",
+            "apt_target": "%s=%s" % (item["package_name"], item["version"]),
             "sha256": item["sha256"],
             "download_url": item["download_url"],
         })

@@ -3046,6 +3046,14 @@ if build_profile == "release":
         errors.append("release rootfs is missing Ming official catalog public key")
     if not official_public_key_hash_path.is_file() or official_public_key_hash_path.is_symlink():
         errors.append("release rootfs is missing Ming official catalog public key hash")
+    else:
+        try:
+            expected_key_hash = official_public_key_hash_path.read_text(encoding="ascii").strip().lower()
+            actual_key_hash = hashlib.sha256(official_public_key_path.read_bytes()).hexdigest()
+            if expected_key_hash != actual_key_hash or not re.fullmatch(r"[0-9a-f]{64}", expected_key_hash):
+                errors.append("Ming official catalog public key hash does not match the key")
+        except (OSError, UnicodeError):
+            errors.append("Ming official catalog public key hash cannot be verified")
 spark_config_path = root / "usr/share/ming-os/store/catalog/spark-public.json"
 spark_config = {}
 spark_keyring_valid = verify_openpgp_keyring(

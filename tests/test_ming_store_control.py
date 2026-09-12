@@ -121,6 +121,47 @@ class MingStoreControlTests(unittest.TestCase):
                 control.execute("install", "a" * 32)
         self.assertEqual("readback_failed", caught.exception.state)
 
+    def test_ming_official_install_downloads_release_deb_and_reads_back_architecture(self):
+        payload = b"official deb"
+        digest = hashlib.sha256(payload).hexdigest()
+        request = self.request()
+        request.provider = "ming-official"
+        request.app_id = "ming-store"
+        item = {"package_name": "ming-store", "install_method": "deb"}
+        resolved = {
+            "package_name": "ming-store", "resolved_version": "26.4.1~rc4",
+            "resolved_architecture": "amd64", "apt_target": "ming-store=26.4.1~rc4",
+            "download_url": "https://github.com/bzm2008/ming-os/releases/download/v26.4.1-rc4/ming-store_26.4.1~rc4_amd64.deb",
+            "artifact_filename": "ming-store_26.4.1~rc4_amd64.deb",
+            "sha256": digest, "identity": {"sha256": digest},
+        }
+        calls = []
+
+        class Downloader:
+            def download(self, url, destination, expected_sha256):
+                calls.append((url, expected_sha256))
+                pathlib.Path(destination).write_bytes(payload)
+                return {"ok": True, "sha256": expected_sha256}
+
+        def runner(command, timeout=300):
+            calls.append(tuple(command))
+            if command[0] == "dpkg-deb":
+                return 0, "ming-store\n26.4.1~rc4\namd64\nDepends:\nPre-Depends:\n", ""
+            return 0, "", ""
+
+        control = self.make_control(runner)
+        control.downloader = Downloader()
+        control.official_downloader = Downloader()
+        control._installed = lambda _package: {
+            "installed": True, "version": "26.4.1~rc4", "architecture": "amd64",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            control.artifact_root = pathlib.Path(directory) / "artifacts"
+            result = control._official_install(request, item, resolved, "install")
+        self.assertTrue(result["installed"])
+        self.assertEqual("amd64", result["architecture"])
+        self.assertEqual(resolved["download_url"], calls[0][0])
+
     def test_changed_candidate_is_rejected_before_apt(self):
         calls = []
         def runner(command, timeout=300):
