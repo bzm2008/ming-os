@@ -556,7 +556,7 @@ class ToolboxController:
         probes = {
             "hardware": ("ming-hardware-status", "status", "--json"),
             "broadcom": ("/usr/local/sbin/ming-broadcom-driver", "status", "--json"),
-            "surface": ("test", "-x", "/usr/local/bin/ming-surface-support"),
+            "surface": ("/usr/local/bin/ming-surface-support", "status", "--json"),
         }
         for name, command in probes.items():
             try:
@@ -569,14 +569,14 @@ class ToolboxController:
                     "message": (error or output or "工具不可用").strip()[:300],
                 }
                 continue
-            if name in {"hardware", "broadcom"}:
+            if name in {"hardware", "broadcom", "surface"}:
                 try:
                     payload = json.loads(output or "")
                 except (TypeError, ValueError):
                     status[name] = {"state": "unavailable", "message": "状态格式无效。"}
                 else:
                     payload = payload if isinstance(payload, dict) else {}
-                    payload.setdefault("state", "ready")
+                    payload.setdefault("state", "ready" if name != "surface" else "unavailable")
                     status[name] = payload
             else:
                 status[name] = {"state": "available", "message": "固定工具可用。"}
@@ -588,10 +588,7 @@ class ToolboxController:
             route, operation = DRIVER_ACTIONS[action]
         except (KeyError, TypeError) as exc:
             raise ValueError("驱动操作不在白名单内。") from exc
-        if route == "broadcom":
-            command = ("/usr/local/bin/ming-authorized-action", route, operation)
-        else:
-            command = ("/usr/local/bin/ming-surface-support",)
+        command = ("/usr/local/bin/ming-authorized-action", route, operation)
         try:
             rc, output, error = self.runner(command, timeout=900)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -853,7 +850,7 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
                     "Surface 支持",
                     self._driver_status_text(surface, "未检测到 Surface 支持工具；不会报告安装成功。"),
                     (lambda _button: self._run_driver_action("surface_install"))
-                    if surface.get("state") == "available" else None,
+                    if surface.get("action") == "install" else None,
                 ))
                 page.add(group)
             else:
@@ -890,6 +887,8 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
                 return "可用：固定工具已找到。"
             if state == "ready":
                 return "已读取：硬件诊断可用。"
+            if state in {"attention", "unsupported"}:
+                return str(status.get("message") or unavailable_message)
             return "状态：未检测。"
 
         def _run_driver_action(self, action):

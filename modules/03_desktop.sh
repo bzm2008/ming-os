@@ -481,6 +481,24 @@ case "${route}" in
         }
         command=(/usr/local/sbin/ming-package-installer install "${package_file}")
         ;;
+    edit)
+        [[ "$#" -eq 1 ]] || {
+            echo "文本编辑请求无效，只允许编辑一个普通文件。" >&2
+            exit 2
+        }
+        editor_file="$1"
+        [[ "${editor_file}" == /* && -f "${editor_file}" && ! -L "${editor_file}" ]] || {
+            echo "文本文件路径无效，只允许编辑已存在的普通文件。" >&2
+            exit 2
+        }
+        case "${editor_file}" in
+            /proc/*|/sys/*|/dev/*)
+                echo "系统虚拟文件不允许通过文本编辑入口修改。" >&2
+                exit 2
+                ;;
+        esac
+        command=(/usr/bin/nano "${editor_file}")
+        ;;
     store)
         [[ "$#" -eq 2 \
             && ( "$1" == install || "$1" == update || "$1" == remove || "$1" == refresh ) \
@@ -496,6 +514,13 @@ case "${route}" in
             exit 2
         }
         command=(/usr/local/sbin/ming-broadcom-driver "$1")
+        ;;
+    surface)
+        [[ "$#" -eq 1 && "$1" == install ]] || {
+            echo "Surface 支持请求无效。" >&2
+            exit 2
+        }
+        command=(/usr/local/bin/ming-surface-support "$1")
         ;;
     radio)
         [[ "$#" -eq 1 && "$1" == bluetooth ]] || {
@@ -6886,7 +6911,7 @@ configure_thunar_uca() {
     <icon>accessories-text-editor</icon>
     <name>以管理员身份编辑</name>
     <unique-id>2</unique-id>
-    <command>pkexec mousepad %f</command>
+    <command>xfce4-terminal --disable-server --execute /usr/local/bin/ming-authorized-action edit %f</command>
     <description>使用管理员权限编辑此文件</description>
     <patterns>*</patterns>
     <text-files/>
@@ -7882,7 +7907,7 @@ MINGCREATEITEM
     <icon>accessories-text-editor</icon>
     <name>以管理员身份编辑</name>
     <submenu></submenu>
-    <command>pkexec mousepad %f</command>
+    <command>xfce4-terminal --disable-server --execute /usr/local/bin/ming-authorized-action edit %f</command>
     <description>使用管理员权限编辑文本文件</description>
     <range>*</range>
     <patterns>*</patterns>

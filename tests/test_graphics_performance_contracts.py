@@ -47,8 +47,12 @@ class GrubPerformanceContracts(unittest.TestCase):
         self.assertIn("DEFAULT ming", ISOLINUX)
         self.assertIn("ONTIMEOUT ming", ISOLINUX)
         self.assertIn("TIMEOUT 10", ISOLINUX)
-        self.assertEqual(1, ISOLINUX.count("\nLABEL "))
-        self.assertIsNone(FORBIDDEN_NORMAL.search(ISOLINUX))
+        self.assertEqual(6, ISOLINUX.count("\nLABEL "))
+        default_entry = re.search(
+            r"\nLABEL ming\n.*?(?=\nLABEL |\Z)", ISOLINUX, re.S
+        )
+        self.assertIsNotNone(default_entry)
+        self.assertIsNone(FORBIDDEN_NORMAL.search(default_entry.group(0)))
 
 
 class PicomPerformanceContracts(unittest.TestCase):

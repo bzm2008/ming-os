@@ -3765,7 +3765,7 @@ class MingSettings(Adw.ApplicationWindow):
             lambda _b: self.run_helper(
                 self.pkexec_cmd("/usr/local/bin/ming-disk-health"), "磁盘健康检查"))
         surface = Gtk.Button(label="安装 Surface 支持")
-        surface.connect("clicked", lambda _b: self.run_helper(self.pkexec_cmd("ming-surface-support"), "Surface 支持"))
+        surface.connect("clicked", self.on_surface_support)
         input_repair = Gtk.Button(label="修复输入法")
         input_repair.connect(
             "clicked",
@@ -3974,6 +3974,42 @@ class MingSettings(Adw.ApplicationWindow):
                 return False
 
             run_capture_async(cmd, timeout=120, on_done=done)
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def on_surface_support(self, _button):
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading="安装 Surface 支持？",
+            body="系统将校验 linux-surface 官方公钥，添加固定软件源并安装专用内核。安装完成后需要重启；如果校验或安装失败，页面会明确显示失败原因。")
+        dlg.add_response("cancel", "取消")
+        dlg.add_response("apply", "确认执行")
+        dlg.set_default_response("cancel")
+        dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response):
+            if response != "apply":
+                return
+            operation_generation = self.hardware_probe_state.begin()
+            surface_button = _button
+            surface_button.set_sensitive(False)
+            command = ["/usr/local/bin/ming-authorized-action", "surface", "install"]
+
+            def done(rc, output, operation_error):
+                if not self.hardware_probe_state.accept(operation_generation):
+                    return False
+                surface_button.set_sensitive(True)
+                if rc == 0:
+                    self.toast("Surface 支持安装完成，请重启电脑。", "info")
+                else:
+                    detail = operation_error or output or "系统授权或 Surface 支持安装失败。"
+                    if "/dev/tty" in detail or "textual authentication agent" in detail:
+                        detail = "请在桌面授权弹窗中确认，当前无可用图形授权代理。"
+                    self.toast("Surface 支持未安装：%s" % detail[:180], "error")
+                return False
+
+            run_capture_async(command, timeout=900, on_done=done)
 
         dlg.connect("response", on_response)
         dlg.present()

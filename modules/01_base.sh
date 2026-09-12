@@ -2419,40 +2419,268 @@ DIAGUPLOAD
     cat > /usr/local/bin/ming-surface-support << 'SURFACE'
 #!/usr/bin/env bash
 set -uo pipefail
-LOG="/tmp/ming-surface-support.log"
-exec > >(tee "${LOG}") 2>&1
+KEY_URL="https://raw.githubusercontent.com/linux-surface/linux-surface/master/pkg/keys/surface.asc"
+KEY_FINGERPRINT="87DEFA4AB94A99A4C8C3112556C464BAAC421453"
+KEY_FILE="/etc/apt/keyrings/linux-surface.gpg"
+SOURCE_FILE="/etc/apt/sources.list.d/linux-surface.list"
+PREF_FILE="/etc/apt/preferences.d/linux-surface"
+SOURCE_LINE="deb [arch=amd64 signed-by=${KEY_FILE}] https://pkg.surfacelinux.com/debian release main"
+LOG="/var/log/ming-surface-support.log"
+SURFACE_WORK=""
+SURFACE_BACKUP=""
+SURFACE_HAD_KEY=false
+SURFACE_HAD_SOURCE=false
+SURFACE_HAD_PREF=false
+SURFACE_TRANSACTION_ACTIVE=false
+SURFACE_SUPPORT_SUCCEEDED=false
 
-if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
-    zenity --question --width=680 --title="Ming OS Surface 支持" \
-        --text="此功能会添加 linux-surface 第三方软件源，并安装 Surface 专用内核与工具。\n\n只建议 Surface Pro/Book/Laptop 等设备使用。安装后需要联网和重启。\n\n是否继续？" \
-        2>/dev/null || exit 0
-fi
+surface_detected() {
+    local identity
+    identity="$(cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/board_name 2>/dev/null || true)"
+    grep -Eiq 'surface([[:space:]_-]|$)|microsoft[[:space:]_-]+surface' <<< "${identity}"
+}
 
-    echo "Installing optional linux-surface support..."
-    if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]]; then
-        apt update
+key_fingerprint() {
+    [[ -s "${KEY_FILE}" ]] || return 1
+    command -v gpg >/dev/null 2>&1 || return 1
+    gpg --batch --quiet --show-keys --with-colons "${KEY_FILE}" 2>/dev/null \
+        | awk -F: '$1 == "fpr" {print toupper($10); exit}'
+}
+
+source_configured() {
+    [[ -s "${SOURCE_FILE}" ]] && grep -Fqx "${SOURCE_LINE}" "${SOURCE_FILE}"
+}
+
+package_installed() {
+    dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -Fxq installed
+}
+
+status_json() {
+    local detected=false source=false trusted=false kernel=false headers=false ipts=false
+    local fingerprint="" state="unavailable" action=none message
+    surface_detected && detected=true
+    source_configured && source=true
+    fingerprint="$(key_fingerprint || true)"
+    [[ "${fingerprint}" == "${KEY_FINGERPRINT}" ]] && trusted=true
+    package_installed linux-image-surface && kernel=true
+    package_installed linux-headers-surface && headers=true
+    package_installed iptsd && ipts=true
+
+    if [[ "${detected}" != true ]]; then
+        state=unsupported
+        message="未检测到 Surface 设备；不会自动安装专用内核。"
+    elif [[ "${trusted}" == true && "${source}" == true && "${kernel}" == true \
+        && "${headers}" == true && "${ipts}" == true ]]; then
+        state=ready
+        message="Surface 官方内核支持已安装；请重启后使用。"
+    elif [[ "${trusted}" != true || "${source}" != true ]]; then
+        state=attention
+        action=install
+        message="检测到 Surface 设备，可安装官方 linux-surface 支持。"
+    else
+        state=attention
+        action=install
+        message="Surface 支持包尚未完整安装，可重试安装。"
     fi
-    apt install -y --no-install-recommends curl ca-certificates gnupg
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://raw.githubusercontent.com/linux-surface/linux-surface/master/pkg/keys/surface.asc | gpg --dearmor > /etc/apt/keyrings/linux-surface.gpg
-cat > /etc/apt/sources.list.d/linux-surface.list <<'EOF'
-deb [arch=amd64 signed-by=/etc/apt/keyrings/linux-surface.gpg] https://pkg.surfacelinux.com/debian release main
-EOF
-    if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]]; then
-        apt update
+
+    python3 - \
+        "${detected}" "${source}" "${trusted}" "${fingerprint}" \
+        "${kernel}" "${headers}" "${ipts}" "${state}" "${action}" \
+        "${message}" << 'PY'
+import json
+import sys
+
+def boolean(value):
+    return value == "true"
+
+payload = {
+    "detected": boolean(sys.argv[1]),
+    "source_configured": boolean(sys.argv[2]),
+    "key_trusted": boolean(sys.argv[3]),
+    "key_fingerprint": sys.argv[4],
+    "kernel_installed": boolean(sys.argv[5]),
+    "headers_installed": boolean(sys.argv[6]),
+    "iptsd_installed": boolean(sys.argv[7]),
+    "state": sys.argv[8],
+    "action": sys.argv[9],
+    "message": sys.argv[10],
+}
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
+}
+
+require_root() {
+    [[ "$(id -u)" -eq 0 ]] || {
+        echo "Surface 支持安装需要管理员授权。" >&2
+        return 1
+    }
+    mkdir -p "$(dirname "${LOG}")"
+    touch "${LOG}" || {
+        echo "无法创建 Surface 支持日志。" >&2
+        return 1
+    }
+    chmod 0600 "${LOG}" || {
+        echo "无法保护 Surface 支持日志。" >&2
+        return 1
+    }
+    exec > >(tee -a "${LOG}") 2>&1
+}
+
+rollback_configuration() {
+    [[ "${SURFACE_TRANSACTION_ACTIVE}" == true ]] || return 0
+    mkdir -p "$(dirname "${KEY_FILE}")" "$(dirname "${SOURCE_FILE}")" "$(dirname "${PREF_FILE}")"
+    if [[ "${SURFACE_HAD_KEY}" == true ]]; then
+        install -m 0644 "${SURFACE_BACKUP}/key" "${KEY_FILE}"
+    else
+        rm -f "${KEY_FILE}"
     fi
-    apt install -y --no-install-recommends linux-image-surface linux-headers-surface iptsd libwacom-surface linux-surface-secureboot-mok \
-    || apt install -y --no-install-recommends linux-image-surface linux-headers-surface \
-    || true
-apt install -y --no-install-recommends surface-control || true
+    if [[ "${SURFACE_HAD_SOURCE}" == true ]]; then
+        install -m 0644 "${SURFACE_BACKUP}/source" "${SOURCE_FILE}"
+    else
+        rm -f "${SOURCE_FILE}"
+    fi
+    if [[ "${SURFACE_HAD_PREF}" == true ]]; then
+        install -m 0644 "${SURFACE_BACKUP}/pref" "${PREF_FILE}"
+    else
+        rm -f "${PREF_FILE}"
+    fi
+}
 
-if command -v update-grub >/dev/null 2>&1; then
-    update-grub || true
-fi
+cleanup_support() {
+    local result=$?
+    if [[ "${SURFACE_TRANSACTION_ACTIVE}" == true && "${SURFACE_SUPPORT_SUCCEEDED}" != true ]]; then
+        rollback_configuration || true
+    fi
+    [[ -z "${SURFACE_WORK}" ]] || rm -rf "${SURFACE_WORK}"
+    trap - EXIT
+    exit "${result}"
+}
 
-if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
-    zenity --text-info --title="Surface 支持安装结果" --width=820 --height=620 --filename="${LOG}" 2>/dev/null || true
-fi
+install_support() {
+    local key_source key_binary source_tmp pref_tmp fingerprint optional_failed=""
+    local work backup
+    require_root || return 1
+    work="$(mktemp -d /tmp/ming-surface-support.XXXXXX)" || {
+        echo "无法创建 Surface 支持临时目录。" >&2
+        return 1
+    }
+    backup="${work}/backup"
+    mkdir -p "${backup}"
+    SURFACE_WORK="${work}"
+    SURFACE_BACKUP="${backup}"
+    SURFACE_TRANSACTION_ACTIVE=true
+    trap cleanup_support EXIT
+    if [[ -e "${KEY_FILE}" ]]; then
+        if ! cp -a "${KEY_FILE}" "${backup}/key"; then
+            echo "无法备份现有 linux-surface 公钥。" >&2
+            return 1
+        fi
+        SURFACE_HAD_KEY=true
+    fi
+    if [[ -e "${SOURCE_FILE}" ]]; then
+        if ! cp -a "${SOURCE_FILE}" "${backup}/source"; then
+            echo "无法备份现有 linux-surface 源配置。" >&2
+            return 1
+        fi
+        SURFACE_HAD_SOURCE=true
+    fi
+    if [[ -e "${PREF_FILE}" ]]; then
+        if ! cp -a "${PREF_FILE}" "${backup}/pref"; then
+            echo "无法备份现有 linux-surface 优先级配置。" >&2
+            return 1
+        fi
+        SURFACE_HAD_PREF=true
+    fi
+
+    if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]] && ! DEBIAN_FRONTEND=noninteractive apt-get update; then
+        echo "APT 索引更新失败，未安装 Surface 支持。" >&2
+        return 2
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates gnupg jq; then
+        echo "无法安装 Surface 官方源所需的校验工具。" >&2
+        return 3
+    fi
+
+    key_source="${work}/surface.asc"
+    key_binary="${work}/linux-surface.gpg"
+    source_tmp="${work}/linux-surface.list"
+    if ! curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --max-time 30 \
+        "${KEY_URL}" --output "${key_source}"; then
+        echo "无法从 linux-surface 官方地址下载公钥。" >&2
+        return 4
+    fi
+    fingerprint="$(gpg --batch --quiet --show-keys --with-colons "${key_source}" 2>/dev/null \
+        | awk -F: '$1 == "fpr" {print toupper($10); exit}')"
+    if [[ "${fingerprint}" != "${KEY_FINGERPRINT}" ]]; then
+        echo "linux-surface 公钥指纹不匹配，已拒绝添加软件源。" >&2
+        return 5
+    fi
+    if ! gpg --batch --yes --dearmor --output "${key_binary}" "${key_source}"; then
+        echo "linux-surface 公钥转换失败。" >&2
+        return 5
+    fi
+    install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d
+    if ! install -m 0644 "${key_binary}" "${KEY_FILE}"; then
+        echo "无法写入 linux-surface 公钥。" >&2
+        return 6
+    fi
+    pref_tmp="${work}/linux-surface.pref"
+    printf '%s\n' "${SOURCE_LINE}" > "${source_tmp}"
+    printf '%s\n' 'Package: *' 'Pin: origin "pkg.surfacelinux.com"' 'Pin-Priority: 100' > "${pref_tmp}"
+    if ! install -m 0644 "${source_tmp}" "${SOURCE_FILE}"; then
+        echo "无法写入 linux-surface 官方源配置。" >&2
+        return 6
+    fi
+    if ! install -d -m 0755 /etc/apt/preferences.d \
+        || ! install -m 0644 "${pref_tmp}" "${PREF_FILE}"; then
+        echo "无法写入 linux-surface 源优先级配置。" >&2
+        return 6
+    fi
+
+    if [[ "${MING_SKIP_APT_UPDATE:-0}" != "1" ]] && ! DEBIAN_FRONTEND=noninteractive apt-get update; then
+        echo "linux-surface 官方源索引更新失败，未安装核心支持。" >&2
+        return 7
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        linux-image-surface linux-headers-surface iptsd; then
+        echo "Surface 核心支持安装失败，未报告安装成功。" >&2
+        return 8
+    fi
+    for optional in libwacom-surface linux-surface-secureboot-mok surface-control; do
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${optional}"; then
+            optional_failed="${optional_failed} ${optional}"
+        fi
+    done
+    if ! package_installed linux-image-surface || ! package_installed linux-headers-surface \
+        || ! package_installed iptsd; then
+        echo "Surface 核心包安装后状态读回失败。" >&2
+        return 9
+    fi
+    if ! command -v update-grub >/dev/null 2>&1 || ! update-grub; then
+        echo "Surface 内核已安装，但更新启动菜单失败；请再次运行本工具重试。" >&2
+        return 10
+    fi
+    if [[ -n "${optional_failed}" ]]; then
+        echo "Surface 核心支持已安装；可选组件未安装：${optional_failed# }。"
+    else
+        echo "Surface 官方支持已安装，请重启电脑。"
+    fi
+    SURFACE_SUPPORT_SUCCEEDED=true
+    return 0
+}
+
+case "${1:-status}" in
+    status)
+        [[ "${2:-}" == "--json" ]] && status_json || status_json
+        ;;
+    install)
+        install_support
+        ;;
+    *)
+        echo "用法：ming-surface-support status --json | install" >&2
+        exit 64
+        ;;
+esac
 SURFACE
     chmod 0755 /usr/local/bin/ming-surface-support
 

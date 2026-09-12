@@ -112,7 +112,7 @@ class PackageRuntimeContracts(unittest.TestCase):
         opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"
         self.assertIn(opener, DESKTOP)
         bridge = DESKTOP.split(opener, 1)[1].split("\nMINGAUTHORIZE", 1)[0]
-        for route in ("package", "store", "android", "wine", "broadcom", "radio"):
+        for route in ("package", "edit", "store", "android", "wine", "broadcom", "radio"):
             self.assertIn(route + ")", bridge)
         self.assertIn("Error creating textual authentication agent", bridge)
         self.assertIn("/dev/tty", bridge)

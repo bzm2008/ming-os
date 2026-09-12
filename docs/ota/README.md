@@ -8,6 +8,8 @@ The shared `/boot` is required so BIOS and UEFI boots read and update the same
 GRUB environment regardless of which root slot is mounted.
 Each GRUB entry must load its own `/boot/ming-slots/A|B/vmlinuz` and
 `initrd.img`; updating one slot never replaces the rollback slot's kernel.
+Live ISO uses `/live/initrd` without the `.img` suffix; installed A/B slots use
+`initrd.img` and are a separate artifact naming contract.
 
 The updater derives the active slot from the mounted root UUID and writes only the
 other declared slot. It refuses missing, ambiguous, mounted or UUID-mismatched

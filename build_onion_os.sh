@@ -743,7 +743,10 @@ install_build_deps() {
             missing_bins+=("${bin}")
         fi
     done
-    if [[ ${#missing_bins[@]} -eq 0 && -s "${DEBIAN_ARCHIVE_KEYRING}" ]]; then
+    if [[ ${#missing_bins[@]} -eq 0 && -s "${DEBIAN_ARCHIVE_KEYRING}" ]] \
+        && command -v dpkg-query &>/dev/null \
+        && [[ "$(dpkg-query -W -f='${Status}' grub-efi-ia32-bin 2>/dev/null)" == "install ok installed" ]] \
+        && [[ -d /usr/lib/grub/i386-efi ]]; then
         log_info "构建依赖已存在，跳过在线安装"
         return 0
     fi
@@ -1481,7 +1484,8 @@ validate_iso_boot_layout() {
         /boot/grub/grub.cfg \
         /boot/grub/themes/ming/theme.txt \
         /boot/grub/fonts/unicode.pf2 \
-        /EFI/BOOT/BOOTX64.EFI; do
+        /EFI/BOOT/BOOTX64.EFI \
+        /EFI/BOOT/BOOTIA32.EFI; do
         if ! grep -Fxq "${required}" <<< "${files}"; then
             log_error "ISO boot layout missing ${required}"
             return 1
@@ -2020,15 +2024,39 @@ validate_isolinux_fallback() {
         log_error "isolinux fallback must use one default entry and a one-second timeout"
         return 1
     fi
-    if [[ "$(grep -c '^LABEL ' "${cfg}" || true)" -ne 1 ]]; then
-        log_error "isolinux fallback must expose exactly one boot label"
+    if [[ "$(grep -c '^LABEL ' "${cfg}" || true)" -ne 6 ]]; then
+        log_error "isolinux fallback must expose the default and five compatibility labels"
         return 1
     fi
-    if grep -Eq '^LABEL (safe|oldpc)' "${cfg}" || grep -Fq 'nomodeset' "${cfg}"; then
-        log_error "isolinux fallback must not expose separate safe/oldpc labels"
+    for marker in \
+        'LABEL ming' 'MENU LABEL 启动/安装 Ming OS' \
+        'LABEL safe' 'MENU LABEL 安全显卡模式' \
+        'LABEL radeon' 'MENU LABEL Radeon 传统显卡模式' \
+        'LABEL radeon-gcn' 'MENU LABEL Radeon GCN 尝试模式' \
+        'LABEL surface' 'MENU LABEL Surface Pro 兼容模式' \
+        'LABEL mac' 'MENU LABEL Mac EFI / MacBook 兼容模式'; do
+        if ! grep -Fq "${marker}" "${cfg}"; then
+            log_error "isolinux fallback missing compatibility marker: ${marker}"
+            return 1
+        fi
+    done
+    local default_entry
+    default_entry=$(awk '
+        /^LABEL / {
+            if (seen) exit
+            if ($2 == "ming") seen=1
+        }
+        seen { print }
+    ' "${cfg}")
+    if [[ -z "${default_entry}" ]]; then
+        log_error "isolinux fallback default LABEL ming is missing"
         return 1
     fi
-    for marker in 'LABEL ming' 'MENU LABEL Boot / Install Ming OS' 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1'; do
+    if grep -Eq '(^|[[:space:]])(nomodeset|i915\.modeset=0|pcie_aspm=off|pci=nomsi|acpi_osi=Linux)([[:space:]]|$)' <<< "${default_entry}"; then
+        log_error "isolinux fallback default entry must not force compatibility flags"
+        return 1
+    fi
+    for marker in 'KERNEL /live/vmlinuz' 'INITRD /live/initrd' 'ming.installer=1'; do
         if ! grep -Fq "${marker}" "${cfg}"; then
             log_error "isolinux fallback missing marker: ${marker}"
             return 1
@@ -3325,6 +3353,7 @@ bash_generated_helpers = [
     "usr/local/bin/ming-ota-run",
     "usr/local/bin/ming-power-action",
     "usr/local/bin/ming-authorized-action",
+    "usr/local/bin/ming-surface-support",
 ]
 for relative_path in bash_generated_helpers:
     validate_generated_executable(relative_path, "bash")
@@ -3586,6 +3615,17 @@ for marker in [
 for marker in ["ming-broadcom-driver", "安装 Broadcom 兼容驱动", "恢复开源驱动"]:
     if marker not in settings:
         errors.append(f"ming-settings missing Broadcom integration marker {marker}")
+
+surface_support = require_file("usr/local/bin/ming-surface-support", "status --json")
+for marker in [
+    "KEY_FINGERPRINT=\"87DEFA4AB94A99A4C8C3112556C464BAAC421453\"",
+    "https://raw.githubusercontent.com/linux-surface/linux-surface/master/pkg/keys/surface.asc",
+    "Pin-Priority: 100",
+    "rollback_configuration",
+    "update-grub",
+]:
+    if marker not in surface_support:
+        errors.append(f"ming-surface-support missing trusted-install marker {marker}")
 
 driver_diagnose = require_file("usr/local/bin/ming-driver-diagnose", "Ming OS driver diagnose")
 for marker in [
@@ -4223,13 +4263,43 @@ DEFAULT ming
 PROMPT 0
 TIMEOUT 10
 ONTIMEOUT ming
-MENU TITLE Ming OS Installer
+MENU TITLE Ming OS 启动菜单
 
 LABEL ming
-  MENU LABEL Boot / Install Ming OS
+  MENU LABEL 启动/安装 Ming OS
   KERNEL /live/vmlinuz
   INITRD /live/initrd
   APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1
+
+LABEL safe
+  MENU LABEL 安全显卡模式
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 nomodeset vga=791
+
+LABEL radeon
+  MENU LABEL Radeon 传统显卡模式
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 radeon.modeset=1 amdgpu.modeset=0
+
+LABEL radeon-gcn
+  MENU LABEL Radeon GCN 尝试模式
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 amdgpu.si_support=1 radeon.si_support=0 amdgpu.cik_support=1 radeon.cik_support=0
+
+LABEL surface
+  MENU LABEL Surface Pro 兼容模式
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 i8042.noloop i8042.nomux i8042.nopnp i8042.reset intel_idle.max_cstate=1 acpi_mask_gpe=0x6e
+
+LABEL mac
+  MENU LABEL Mac EFI / MacBook 兼容模式
+  KERNEL /live/vmlinuz
+  INITRD /live/initrd
+  APPEND boot=live rootdelay=10 live-media-path=/live union=overlay components live-config username=user user-fullname=Ming_OS_User hostname=ming-os locales=zh_CN.UTF-8 timezone=Asia/Shanghai keyboard-layouts=us quiet loglevel=3 systemd.show_status=false nowatchdog zswap.enabled=1 ming.installer=1 acpi_osi=Darwin reboot=pci
 ISOLINUXCFG
         log_info "isolinux direct Linux fallback written for Rufus BIOS mode"
     else

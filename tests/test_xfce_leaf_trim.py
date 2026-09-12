@@ -40,6 +40,20 @@ class XfceLeafTrimContractTests(unittest.TestCase):
         self.assertIn("mkdir -p", DESKTOP)
         self.assertIn("configure_user_templates", DESKTOP)
 
+    def test_thunar_admin_editor_uses_an_installed_terminal_editor(self):
+        self.assertNotIn("pkexec mousepad %f", DESKTOP)
+        self.assertEqual(
+            2,
+            DESKTOP.count(
+                "xfce4-terminal --disable-server --execute /usr/local/bin/ming-authorized-action edit %f"
+            ),
+        )
+        bridge = DESKTOP.split(
+            "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'", 1
+        )[1].split("\nMINGAUTHORIZE", 1)[0]
+        self.assertIn("edit)", bridge)
+        self.assertIn("/usr/bin/nano", bridge)
+
 
 if __name__ == "__main__":
     unittest.main()

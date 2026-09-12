@@ -60,18 +60,25 @@ class GrubThemeContractTests(unittest.TestCase):
         self.assertNotIn("安全显卡", visible)
         self.assertNotIn("高级兼容启动", visible)
 
-    def test_isolinux_fallback_has_one_default_entry_and_one_second_timeout(self):
+    def test_isolinux_fallback_has_default_and_visible_compatibility_entries(self):
         generated = self.build.split(
             'cat > "${iso_workdir}/isolinux/isolinux.cfg" << \'ISOLINUXCFG\'', 1
         )[1].split("\nISOLINUXCFG", 1)[0]
         self.assertIn("DEFAULT ming", generated)
         self.assertIn("ONTIMEOUT ming", generated)
         self.assertIn("TIMEOUT 10", generated)
-        self.assertEqual(1, generated.count("\nLABEL "))
+        self.assertEqual(6, generated.count("\nLABEL "))
         self.assertIn("\nLABEL ming", generated)
-        self.assertIn("MENU LABEL Boot / Install Ming OS", generated)
-        self.assertNotIn("LABEL safe", generated)
-        self.assertNotIn("LABEL oldpc", generated)
+        for marker in (
+            "MENU LABEL 启动/安装 Ming OS",
+            "LABEL safe",
+            "MENU LABEL 安全显卡模式",
+            "LABEL radeon",
+            "LABEL radeon-gcn",
+            "LABEL surface",
+            "LABEL mac",
+        ):
+            self.assertIn(marker, generated)
 
     def test_installed_grub_records_boot_mode_mismatch_diagnostics(self):
         for marker in [
