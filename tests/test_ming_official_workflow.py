@@ -33,6 +33,7 @@ class MingOfficialWorkflowTests(unittest.TestCase):
             "ming-official.json.minisig",
             "SHA256SUMS",
             "gh release upload",
+            "gh release create",
             "minisign -Vm release/ming-official.json",
             "ming-official-catalog.minisign.pub.sha256",
             "chmod +x release/staging/ming-store/usr/local/bin/ming-store",

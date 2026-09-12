@@ -75,6 +75,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
         run: |
+          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
+            gh release create "${RELEASE_TAG}" --title "Ming OS ${RELEASE_TAG} 官方组件" --prerelease
           gh release upload "${RELEASE_TAG}" release/packages/*.deb release/ming-official.json \
             release/ming-official.json.minisig release/ming-official-catalog.minisign.pub \
             release/ming-official-catalog.minisign.pub.sha256 release/SHA256SUMS --clobber
