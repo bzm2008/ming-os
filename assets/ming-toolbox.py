@@ -14,10 +14,18 @@ import threading
 
 
 SECTIONS = ("official", "toolbox", "lab")
+DRIVER_SECTION = "drivers"
+ALL_SECTIONS = SECTIONS + (DRIVER_SECTION,)
 SECTION_LABELS = {
     "official": "官方软件",
     "toolbox": "工具箱",
     "lab": "Ming 实验室",
+    "drivers": "驱动中心",
+}
+DRIVER_ACTIONS = {
+    "broadcom_install": ("broadcom", "install"),
+    "broadcom_restore": ("broadcom", "restore"),
+    "surface_install": ("surface", "install"),
 }
 LAB_ACTIONS = {
     "dxvk": "为当前应用启用 DXVK 图形兼容",
@@ -542,6 +550,60 @@ class ToolboxController:
             "detail": (completed.stdout or completed.stderr or "").strip()[:1000],
         }
 
+    def driver_center_status(self):
+        """Read only the fixed driver probes used by the Driver Center."""
+        status = {}
+        probes = {
+            "hardware": ("ming-hardware-status", "status", "--json"),
+            "broadcom": ("/usr/local/sbin/ming-broadcom-driver", "status", "--json"),
+            "surface": ("test", "-x", "/usr/local/bin/ming-surface-support"),
+        }
+        for name, command in probes.items():
+            try:
+                rc, output, error = self.runner(command, timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                rc, output, error = 1, "", str(exc)
+            if rc != 0:
+                status[name] = {
+                    "state": "unavailable",
+                    "message": (error or output or "工具不可用").strip()[:300],
+                }
+                continue
+            if name in {"hardware", "broadcom"}:
+                try:
+                    payload = json.loads(output or "")
+                except (TypeError, ValueError):
+                    status[name] = {"state": "unavailable", "message": "状态格式无效。"}
+                else:
+                    payload = payload if isinstance(payload, dict) else {}
+                    payload.setdefault("state", "ready")
+                    status[name] = payload
+            else:
+                status[name] = {"state": "available", "message": "固定工具可用。"}
+        return status
+
+    def run_driver_action(self, action):
+        """Run one fixed driver profile; UI values never become commands."""
+        try:
+            route, operation = DRIVER_ACTIONS[action]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("驱动操作不在白名单内。") from exc
+        if route == "broadcom":
+            command = ("/usr/local/bin/ming-authorized-action", route, operation)
+        else:
+            command = ("/usr/local/bin/ming-surface-support",)
+        try:
+            rc, output, error = self.runner(command, timeout=900)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "state": "action_failed", "error": str(exc)}
+        detail = (output or error or "").strip()[:1000]
+        return {
+            "ok": rc == 0,
+            "state": "completed" if rc == 0 else "action_failed",
+            "error": "" if rc == 0 else detail or "驱动操作失败。",
+            "detail": detail,
+        }
+
     def system_check(self):
         checks = {
             "network": ("nmcli", "-t", "-f", "STATE", "general"),
@@ -643,10 +705,10 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
             self.android_lab_store = _load_android_module().AndroidLabStateStore(
                 self.home / ".local/share/ming-android/lab"
             )
-            for key in SECTIONS:
+            for key in ALL_SECTIONS:
                 page = self._build_page(key)
                 tabs.add_titled(page, key, SECTION_LABELS[key])
-            tabs.set_visible_child_name(section if section in SECTIONS else "toolbox")
+            tabs.set_visible_child_name(section if section in ALL_SECTIONS else "toolbox")
             if install_file:
                 self._install_file(install_file)
             if wine_app_id:
@@ -654,7 +716,7 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
 
         def handle_request(self, requested_section="toolbox", requested_file="", requested_wine="",
                            requested_wine_request_id=""):
-            if requested_section in SECTIONS:
+            if requested_section in ALL_SECTIONS:
                 self.tabs.set_visible_child_name(requested_section)
             if requested_file:
                 self._queue_install("windows", requested_file)
@@ -765,6 +827,35 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
                     row.add_suffix(remove_button)
                     apps_group.add(row)
                 page.add(apps_group)
+            elif key == "drivers":
+                group = self._group(
+                    "驱动中心",
+                    "只显示系统已有的诊断和管理能力；没有设备或工具时会明确标记为不可用。",
+                )
+                statuses = controller.driver_center_status()
+                group.add(self._row(
+                    "硬件诊断",
+                    self._driver_status_text(statuses["hardware"], "未检测到硬件诊断工具。"),
+                ))
+                broadcom = statuses["broadcom"]
+                broadcom_action = None
+                if broadcom.get("action") == "install":
+                    broadcom_action = lambda _button: self._run_driver_action("broadcom_install")
+                elif broadcom.get("action") == "restore":
+                    broadcom_action = lambda _button: self._run_driver_action("broadcom_restore")
+                group.add(self._row(
+                    "Broadcom 无线驱动",
+                    self._driver_status_text(broadcom, "未检测到 Broadcom 驱动管理工具。"),
+                    broadcom_action,
+                ))
+                surface = statuses["surface"]
+                group.add(self._row(
+                    "Surface 支持",
+                    self._driver_status_text(surface, "未检测到 Surface 支持工具；不会报告安装成功。"),
+                    (lambda _button: self._run_driver_action("surface_install"))
+                    if surface.get("state") == "available" else None,
+                ))
+                page.add(group)
             else:
                 group = self._group("Ming 实验室", "实验选项默认关闭，只对选定应用生效，可能增加磁盘占用或降低兼容性。")
                 if not self.lab_app_id:
@@ -789,6 +880,36 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
                     android_group.add(row)
                 page.add(android_group)
             return page
+
+        @staticmethod
+        def _driver_status_text(status, unavailable_message):
+            state = status.get("state")
+            if state == "unavailable":
+                return "不可用：%s" % (status.get("message") or unavailable_message)
+            if state == "available":
+                return "可用：固定工具已找到。"
+            if state == "ready":
+                return "已读取：硬件诊断可用。"
+            return "状态：未检测。"
+
+        def _run_driver_action(self, action):
+            def worker():
+                try:
+                    result = controller.run_driver_action(action)
+                    message = "驱动操作已提交。" if result.get("ok") else str(
+                        result.get("error") or "驱动操作失败，系统状态未确认。"
+                    )
+                    error = not bool(result.get("ok"))
+                except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                    message, error = str(exc), True
+
+                def finish():
+                    _show_dialog("驱动中心", message, error=error)
+                    return False
+
+                GLib.idle_add(finish)
+
+            threading.Thread(target=worker, name="ming-toolbox-driver", daemon=True).start()
 
         def _lab_changed(self, row, _param, key_name):
             if not self.lab_app_id:
@@ -970,7 +1091,7 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
 
     def on_command_line(app, command_line):
         parser = argparse.ArgumentParser(prog="ming-toolbox", add_help=False)
-        parser.add_argument("--section", choices=SECTIONS, default="toolbox")
+        parser.add_argument("--section", choices=ALL_SECTIONS, default="toolbox")
         parser.add_argument("--install-windows", default="")
         parser.add_argument("--install-wine", default="")
         parser.add_argument("--store-request", default="")
@@ -1001,7 +1122,7 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ming-toolbox")
-    parser.add_argument("--section", choices=SECTIONS, default="toolbox")
+    parser.add_argument("--section", choices=ALL_SECTIONS, default="toolbox")
     parser.add_argument("--install-windows")
     parser.add_argument("--install-wine")
     parser.add_argument("--store-request")
@@ -1010,10 +1131,11 @@ def main(argv=None):
     if args.json:
         payload = {
             "schema": "ming.toolbox.v1",
-            "sections": [{"id": key, "label": SECTION_LABELS[key]} for key in SECTIONS],
+            "sections": [{"id": key, "label": SECTION_LABELS[key]} for key in ALL_SECTIONS],
             "official": official_catalog(),
             "toolbox": toolbox_actions(),
             "lab": default_lab_state(),
+            "drivers": {"actions": DRIVER_ACTIONS},
             "android": {"runtime": "waydroid+cage", "lab": default_android_lab_state()},
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
