@@ -282,6 +282,39 @@ MINGMIGRATEAUTO
     chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/autostart/ming-migrate-all-disks.desktop"
 }
 
+hide_trimmed_xfce_entries() {
+    local desktop_file
+    for desktop_file in \
+        /usr/share/applications/xfce4-appfinder.desktop \
+        /usr/share/applications/xfce4-taskmanager.desktop \
+        /usr/share/applications/xfce4-whiskermenu-plugin.desktop \
+        /usr/share/applications/mousepad.desktop \
+        /usr/share/applications/ristretto.desktop; do
+        [[ -f "${desktop_file}" ]] || continue
+        if grep -q '^NoDisplay=' "${desktop_file}"; then
+            sed -i 's/^NoDisplay=.*/NoDisplay=true/' "${desktop_file}"
+        else
+            sed -i '/^\[Desktop Entry\]/a NoDisplay=true' "${desktop_file}"
+        fi
+    done
+}
+
+configure_user_templates() {
+    local template_root
+    for template_root in /etc/skel/Templates "/home/${MING_USER}/Templates"; do
+        mkdir -p "${template_root}/新建文件夹"
+        [[ -e "${template_root}/新建文本文档.txt" ]] || : > "${template_root}/新建文本文档.txt"
+    done
+    if [[ -f /etc/xdg/user-dirs.defaults ]]; then
+        if grep -q '^XDG_TEMPLATES_DIR=' /etc/xdg/user-dirs.defaults; then
+            sed -i 's|^XDG_TEMPLATES_DIR=.*|XDG_TEMPLATES_DIR="\$HOME/Templates"|' /etc/xdg/user-dirs.defaults
+        else
+            printf '%s\n' 'XDG_TEMPLATES_DIR="$HOME/Templates"' >> /etc/xdg/user-dirs.defaults
+        fi
+    fi
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/Templates" 2>/dev/null || true
+}
+
 install_ming_shell_components() {
     local asset_dir="/tmp/ming-build/assets"
     local lib_dir="/usr/local/lib/ming-os"
@@ -9935,8 +9968,10 @@ main() {
     install_ming_shell_components
     install_ming_settings
     cleanup_retired_ming_entries
+    hide_trimmed_xfce_entries
     install_ota_target_guard
     install_ming_files
+    configure_user_templates
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏

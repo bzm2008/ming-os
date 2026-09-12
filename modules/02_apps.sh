@@ -94,24 +94,18 @@ install_xfce_desktop() {
         xserver-xorg-video-ati \
         xserver-xorg-video-nouveau \
         xserver-xorg-input-libinput \
-        xfce4 \
+        xfdesktop4 \
         xfce4-panel \
         xfce4-session \
         xfce4-settings \
+        xfconf \
         xfce4-terminal \
-        xfce4-appfinder \
-        xfce4-whiskermenu-plugin \
-        xfce4-taskmanager \
         xfce4-notifyd \
         python3-gi \
         gir1.2-gtk-3.0 \
         thunar \
-        thunar-archive-plugin \
-        thunar-media-tags-plugin \
         thunar-volman \
         tumbler \
-        mousepad \
-        ristretto \
         xdg-user-dirs \
         xdg-utils \
         zenity \
