@@ -159,6 +159,11 @@ class MingDriverCenterTests(unittest.TestCase):
         self.assertIn('"/usr/local/bin/ming-authorized-action", "surface", "install"', handler)
         self.assertNotIn('self.pkexec_cmd("ming-surface-support")', section)
 
+    def test_build_gate_checks_surface_authorization_route_not_retired_command_text(self):
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn('"surface", "install"', build)
+        self.assertIn("ming-surface-support", build)
+
 
 if __name__ == "__main__":
     unittest.main()

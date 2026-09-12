@@ -2765,7 +2765,7 @@ for marker in [
     "ming-network-repair",
     "ming-driver-diagnose",
     "ming-diagnostic-bundle",
-    "ming-surface-support",
+    '"surface", "install"',
     "ming-classic-mode",
     "system-config-printer",
 ]:
