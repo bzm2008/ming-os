@@ -192,6 +192,10 @@ class MingOfficialToolingTests(unittest.TestCase):
         self.assertIn("official_public_key_hash_path.read_text", build)
         self.assertIn("hashlib.sha256(official_public_key_path.read_bytes())", build)
 
+    def test_empty_development_catalog_does_not_require_signature_sidecars(self):
+        desktop = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
+        self.assertIn(".applications | length > 0", desktop)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -332,7 +332,8 @@ install_ming_shell_components() {
         echo "ERROR: missing Spark public provider configuration" >&2
         return 1
     fi
-    if [[ -s "${asset_dir}/ming-store-catalog/ming-official.json" ]]; then
+    if jq -e '.applications | length > 0' \
+        "${asset_dir}/ming-store-catalog/ming-official.json" >/dev/null 2>&1; then
         for official_asset in \
             "${asset_dir}/ming-store-catalog/ming-official.json" \
             "${asset_dir}/ming-store-catalog/ming-official.json.minisig" \
@@ -467,7 +468,8 @@ MINGPACKAGEINSTALLER
         /usr/share/ming-os/store/catalog/
     install -m 0644 "${asset_dir}/ming-store-catalog/spark-public.json" \
         /usr/share/ming-os/store/catalog/spark-public.json
-    if [[ -s "${asset_dir}/ming-store-catalog/ming-official.json" ]]; then
+    if jq -e '.applications | length > 0' \
+        "${asset_dir}/ming-store-catalog/ming-official.json" >/dev/null 2>&1; then
         install -m 0644 "${asset_dir}/ming-store-catalog/ming-official.json" \
             /usr/share/ming-os/store/catalog/ming-official.json
         install -m 0644 "${asset_dir}/ming-store-catalog/ming-official.json.minisig" \
