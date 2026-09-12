@@ -1452,10 +1452,11 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         def on_home_timeout():
             if generation != page_generation["value"] or finished["value"]:
                 return False
-            finished["value"] = True
-            page_generation["value"] += 1
-            clear_results()
-            add_message(*page_load_presentation(timed_out=True))
+            # A slow provider must not invalidate its own in-flight result:
+            # keep the generation valid and only tell the user loading is
+            # slow.  The late snapshot/refresh callbacks below still render
+            # normally and replace this notice.
+            add_message("来源响应较慢", "软件目录仍在加载，完成后会自动显示。")
             timeout_id["value"] = 0
             return False
 
@@ -1501,8 +1502,8 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             def apply_snapshot():
                 if generation != page_generation["value"] or finished["value"]:
                     return False
+                clear_results()
                 if snapshot_error:
-                    clear_results()
                     add_message(*page_load_presentation(error=snapshot_error))
                 else:
                     render_home_page(snapshot, statuses=(), refreshing=True)
@@ -1510,14 +1511,19 @@ def _build_window(application, controller, initial_query="", local_deb=None):
 
             GLib.idle_add(apply_snapshot)
 
-            try:
-                statuses = controller.refresh_section(section)
-            except Exception as exc:
-                statuses = [{
-                    "ok": False, "using_cache": False,
-                    "message": "来源暂不可用，请稍后重试：%s" % exc,
-                }]
-                controller.last_refresh_status = statuses
+            statuses = []
+            for provider_id in controller.providers_for_section(section):
+                if source_id not in (None, "", "all") and provider_id != source_id:
+                    continue
+                try:
+                    statuses.extend(controller.refresh_section(provider_id))
+                except Exception as exc:
+                    statuses.append({
+                        "source_id": provider_id, "ok": False,
+                        "using_cache": False,
+                        "message": "来源暂不可用，请稍后重试：%s" % exc,
+                    })
+            controller.last_refresh_status = statuses
             try:
                 refreshed = controller.inventory_page(
                     query, source_id, limit=80, section=section)
@@ -1772,6 +1778,25 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     return window
 
 
+def _warm_catalog(controller):
+    """Warm both sections in the background so switching tabs is instant.
+
+    The home page drives its own refresh for the active section; the other
+    section only needs its provider caches populated once.  Failures are
+    ignored here because the section pages surface their own per-source
+    status when the user actually opens them.
+    """
+
+    def warm():
+        for section in STORE_SECTIONS:
+            try:
+                controller.refresh_section(section)
+            except Exception:
+                continue
+
+    threading.Thread(target=warm, name="ming-store-catalog-warmup", daemon=True).start()
+
+
 def run_gui(initial_query="", local_deb=None):
     status = gtk_dependency_status()
     if not status["ok"]:
@@ -1792,6 +1817,7 @@ def run_gui(initial_query="", local_deb=None):
             controller = StoreController()
             window = _build_window(
                 app, controller, initial_query=initial_query, local_deb=local_deb)
+            _warm_catalog(controller)
         except Exception as exc:
             window = Adw.ApplicationWindow(application=app)
             window.set_title(APP_NAME)

@@ -75,6 +75,25 @@ class MingStoreUiLayoutTests(unittest.TestCase):
         status = controller.refresh_section("spark")[0]
         self.assertIn("2.0", status["message"])
 
+    def test_home_timeout_keeps_late_catalog_results(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        # The home page must not invalidate its own in-flight load when the
+        # spinner deadline fires: a slow network still renders the full list.
+        self.assertIn("来源响应较慢", source)
+        home_logic = source.split("def show_home():", 1)[1].split("def show_categories():", 1)[0]
+        self.assertNotIn("timed_out=True", home_logic)
+
+    def test_store_warms_both_sections_at_startup(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        self.assertIn("def _warm_catalog", source)
+        self.assertIn("for section in STORE_SECTIONS", source)
+
+    def test_home_refresh_reports_each_provider_separately(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        # A single failing source (for example Spark without network) must
+        # not hide the status of the remaining providers on the home page.
+        self.assertIn("for provider_id in controller.providers_for_section(section)", source)
+
 
 if __name__ == "__main__":
     unittest.main()
