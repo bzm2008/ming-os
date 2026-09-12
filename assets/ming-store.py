@@ -557,47 +557,53 @@ class StoreController:
     def refresh_section(self, section):
         statuses = []
         for source_id in self.providers_for_section(section):
-            provider = self.catalog.registry.get(source_id)
-            refresh = getattr(provider, "refresh_catalog", None)
-            if refresh is None:
-                continue
-            try:
-                items = refresh()
-                provider_state = str(getattr(provider, "catalog_state", "ready"))
-                using_cache = provider_state in {"stale", "browse-only"}
-                if using_cache:
-                    cache_warning = str(getattr(provider, "cache_warning", "") or "").strip()
-                    message = (
-                        "来源暂不可用，正在使用缓存目录。"
-                        if provider_state == "stale" else
-                        "来源暂不可用，当前仅提供公开目录浏览。"
-                    )
-                    if cache_warning:
-                        message = "%s %s" % (message, cache_warning)
-                    statuses.append({
-                        "source_id": source_id, "ok": False, "count": len(items),
-                        "using_cache": True, "message": message,
-                    })
-                else:
-                    statuses.append({
-                        "source_id": source_id, "ok": True, "count": len(items),
-                        "using_cache": False, "message": "",
-                    })
-            except Exception as exc:
-                provider_state = str(getattr(provider, "catalog_state", "unavailable"))
-                using_cache = provider_state in {"stale", "browse-only"}
-                statuses.append({
-                    "source_id": source_id, "ok": False, "error": str(exc),
-                    "using_cache": using_cache,
-                    "message": (
-                        ("来源暂不可用，正在使用缓存目录。 %s" % str(
-                            getattr(provider, "cache_warning", "") or "").strip()).strip()
-                        if using_cache
-                        else "来源暂不可用，请稍后重试。"
-                    ),
-                })
+            statuses.append(self.refresh_provider(source_id))
         self.last_refresh_status = statuses
         return statuses
+
+    def refresh_provider(self, source_id):
+        """Refresh one provider and return a truthful UI status record."""
+        provider = self.catalog.registry.get(source_id)
+        refresh = getattr(provider, "refresh_catalog", None)
+        if refresh is None:
+            return {
+                "source_id": source_id, "ok": True, "count": 0,
+                "using_cache": False, "message": "",
+            }
+        try:
+            items = refresh()
+            provider_state = str(getattr(provider, "catalog_state", "ready"))
+            using_cache = provider_state in {"stale", "browse-only"}
+            if using_cache:
+                cache_warning = str(getattr(provider, "cache_warning", "") or "").strip()
+                message = (
+                    "来源暂不可用，正在使用缓存目录。"
+                    if provider_state == "stale" else
+                    "来源暂不可用，当前仅提供公开目录浏览。"
+                )
+                if cache_warning:
+                    message = "%s %s" % (message, cache_warning)
+                return {
+                    "source_id": source_id, "ok": False, "count": len(items),
+                    "using_cache": True, "message": message,
+                }
+            return {
+                "source_id": source_id, "ok": True, "count": len(items),
+                "using_cache": False, "message": "",
+            }
+        except Exception as exc:
+            provider_state = str(getattr(provider, "catalog_state", "unavailable"))
+            using_cache = provider_state in {"stale", "browse-only"}
+            return {
+                "source_id": source_id, "ok": False, "error": str(exc),
+                "using_cache": using_cache,
+                "message": (
+                    ("来源暂不可用，正在使用缓存目录。 %s" % str(
+                        getattr(provider, "cache_warning", "") or "").strip()).strip()
+                    if using_cache
+                    else "来源暂不可用，请稍后重试。"
+                ),
+            }
 
     def inventory(self, query="", source_id=None, section=None):
         inventory = []
@@ -1221,7 +1227,13 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     def update_progress(row, button, event):
         state = str(event.get("state") or "failed")
         button.set_label(TRANSACTION_PHASE_LABELS.get(state, "处理中"))
-        row.set_subtitle(str(event.get("label") or TRANSACTION_PHASE_LABELS.get(state, state)))
+        message = str(event.get("label") or TRANSACTION_PHASE_LABELS.get(state, state))
+        status_label = getattr(row, "_status_label", None)
+        if status_label is not None:
+            status_label.set_text(message)
+            status_label.set_visible(True)
+        elif hasattr(row, "set_subtitle"):
+            row.set_subtitle(message)
         return False
 
     def set_row_result(row, button, result):
@@ -1306,7 +1318,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             row.add_suffix(button)
         return button
 
-    def choose_user_artifact(row, button, item):
+    def choose_user_artifact(_clicked, row, button, item):
         """Open the native picker and route the selected file to its owner."""
         dialog = Gtk.FileDialog(title=(
             "选择 Wine 安装包" if item.get("source_id") == "wine-official"
@@ -1516,7 +1528,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 if source_id not in (None, "", "all") and provider_id != source_id:
                     continue
                 try:
-                    statuses.extend(controller.refresh_section(provider_id))
+                    statuses.append(controller.refresh_provider(provider_id))
                 except Exception as exc:
                     statuses.append({
                         "source_id": provider_id, "ok": False,

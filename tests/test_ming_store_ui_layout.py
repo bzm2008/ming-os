@@ -94,6 +94,38 @@ class MingStoreUiLayoutTests(unittest.TestCase):
         # not hide the status of the remaining providers on the home page.
         self.assertIn("for provider_id in controller.providers_for_section(section)", source)
 
+    def test_home_refresh_passes_provider_ids_to_provider_refresh(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        self.assertIn("def refresh_provider(self, source_id)", source)
+        self.assertIn("controller.refresh_provider(provider_id)", source)
+
+    def test_refresh_section_calls_each_provider_once(self):
+        ui = load_store_ui()
+        calls = []
+
+        class Provider:
+            catalog_state = "ready"
+
+            def refresh_catalog(self):
+                calls.append("spark-public")
+                return [{"app_id": "demo"}]
+
+        class Registry:
+            def get(self, source_id):
+                self.source_id = source_id
+                return Provider()
+
+        controller = ui.StoreController(
+            catalog=type("Catalog", (), {"registry": Registry()})())
+        statuses = controller.refresh_section("spark")
+        self.assertEqual(["spark-public"], calls)
+        self.assertEqual(["spark-public"], [item["source_id"] for item in statuses])
+        self.assertTrue(statuses[0]["ok"])
+
+    def test_local_artifact_picker_keeps_gtk_clicked_argument(self):
+        source = STORE_UI.read_text(encoding="utf-8")
+        self.assertIn("def choose_user_artifact(_clicked, row, button, item):", source)
+
 
 if __name__ == "__main__":
     unittest.main()
