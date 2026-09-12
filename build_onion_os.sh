@@ -703,6 +703,7 @@ check_host_environment() {
     require_cmd file "apt install file"
     require_cmd rsync "apt install rsync"
     require_cmd chroot "系统内置"
+    verify_i386_efi_toolchain
     if [[ ! -d /proc/sys ]]; then
         log_error "请确保 /proc 已挂载"
         exit 1
@@ -713,6 +714,24 @@ check_host_environment() {
         log_warn "磁盘剩余空间不足 15GB (当前 ${free_gb}GB)，构建可能失败"
     fi
     log_info "宿主系统环境检查通过 (manual xorriso + grub-mkimage)"
+}
+verify_i386_efi_toolchain() {
+    local package_status=""
+    if command -v dpkg-query &>/dev/null; then
+        package_status="$(dpkg-query -W -f='${Status}' grub-efi-ia32-bin 2>/dev/null || true)"
+        if [[ "${package_status}" != "install ok installed" ]]; then
+            log_error "缺少 grub-efi-ia32-bin，无法生成 32 位 UEFI 启动文件。请安装：apt install grub-efi-ia32-bin"
+            return 1
+        fi
+    else
+        log_error "无法验证 grub-efi-ia32-bin：宿主缺少 dpkg-query；拒绝将 32 位 UEFI 标记为已支持"
+        return 1
+    fi
+    if [[ ! -d /usr/lib/grub/i386-efi ]]; then
+        log_error "grub-efi-ia32-bin 已登记但缺少 /usr/lib/grub/i386-efi，无法生成 BOOTIA32.EFI"
+        return 1
+    fi
+    log_info "32 位 UEFI GRUB 工具链已验证: grub-efi-ia32-bin"
 }
 install_build_deps() {
     log_step "安装构建依赖"
@@ -748,7 +767,7 @@ install_build_deps() {
         if ! DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none \
             apt-get "${apt_options[@]}" install -y --no-install-recommends \
             debootstrap squashfs-tools xorriso isolinux syslinux-common \
-            grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
+            grub-pc-bin grub-efi-amd64-bin grub-efi-ia32-bin grub-efi-amd64-signed shim-signed \
             mtools dosfstools file rsync python3-yaml debian-archive-keyring; then
             if [[ "${apt_ok}" -eq 0 ]]; then
                 log_error "apt 依赖安装失败且缓存不可用"
@@ -4241,13 +4260,23 @@ EOF
 
     # 32位UEFI（部分老旧平板/上网本，如Bay Trail）
     if command -v grub-mkimage &>/dev/null && [[ -d /usr/lib/grub/i386-efi ]]; then
-        grub-mkimage \
+        if ! grub-mkimage \
             -O i386-efi \
             -p /boot/grub \
             -c "${early_cfg}" \
             -o "${iso_workdir}/EFI/BOOT/BOOTIA32.EFI" \
             part_gpt part_msdos fat iso9660 udf ext2 all_video font gfxterm normal configfile \
-            search search_fs_file search_label linux linux16 chain boot 2>/dev/null || true
+            search search_fs_file search_label linux linux16 chain boot 2>/dev/null; then
+            log_error "32 位 UEFI GRUB 生成失败，拒绝继续生成未完整支持老硬件的 ISO"
+            return 1
+        fi
+        if [[ ! -s "${iso_workdir}/EFI/BOOT/BOOTIA32.EFI" ]]; then
+            log_error "未生成 BOOTIA32.EFI，拒绝将 32 位 UEFI 标记为已支持"
+            return 1
+        fi
+    else
+        log_error "缺少 i386 UEFI GRUB 工具链，无法生成 BOOTIA32.EFI；请安装 grub-efi-ia32-bin"
+        return 1
     fi
 
     if [[ ! -f "${iso_workdir}/EFI/BOOT/BOOTX64.EFI" ]] && [[ -f /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi ]]; then
