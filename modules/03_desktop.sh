@@ -332,6 +332,17 @@ install_ming_shell_components() {
         echo "ERROR: missing Spark public provider configuration" >&2
         return 1
     fi
+    if [[ -s "${asset_dir}/ming-store-catalog/ming-official.json" ]]; then
+        for official_asset in \
+            "${asset_dir}/ming-store-catalog/ming-official.json" \
+            "${asset_dir}/ming-store-catalog/ming-official.json.minisig" \
+            "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub"; do
+            [[ -f "${official_asset}" && ! -L "${official_asset}" ]] || {
+                echo "ERROR: Ming official signed catalog asset is missing: ${official_asset}" >&2
+                return 1
+            }
+        done
+    fi
 
     deploy_trusted_openpgp_key() {
         local source="$1"
@@ -455,6 +466,17 @@ MINGPACKAGEINSTALLER
         /usr/share/ming-os/store/catalog/
     install -m 0644 "${asset_dir}/ming-store-catalog/spark-public.json" \
         /usr/share/ming-os/store/catalog/spark-public.json
+    if [[ -s "${asset_dir}/ming-store-catalog/ming-official.json" ]]; then
+        install -m 0644 "${asset_dir}/ming-store-catalog/ming-official.json" \
+            /usr/share/ming-os/store/catalog/ming-official.json
+        install -m 0644 "${asset_dir}/ming-store-catalog/ming-official.json.minisig" \
+            /usr/share/ming-os/store/catalog/ming-official.json.minisig
+        install -d -m 0755 /etc/ming-os/store
+        install -m 0644 "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub" \
+            /etc/ming-os/store/ming-official-catalog.minisign.pub
+        install -m 0644 "${asset_dir}/trusted-keys/ming-official-catalog.minisign.pub.sha256" \
+            /etc/ming-os/store/ming-official-catalog.minisign.pub.sha256
+    fi
     install -m 0644 "${asset_dir}/90-ming-backlight.rules" /etc/udev/rules.d/90-ming-backlight.rules
 
     # All GUI-triggered privileged operations cross one narrow, auditable
@@ -498,6 +520,18 @@ case "${route}" in
                 ;;
         esac
         command=(/usr/bin/nano "${editor_file}")
+        ;;
+    open)
+        [[ "$#" -eq 1 ]] || {
+            echo "管理员打开请求无效，只允许打开一个文件夹。" >&2
+            exit 2
+        }
+        folder="$1"
+        [[ "${folder}" == /* && -d "${folder}" && ! -L "${folder}" ]] || {
+            echo "文件夹路径无效，只允许打开已存在的普通目录。" >&2
+            exit 2
+        }
+        command=(/usr/bin/thunar "${folder}")
         ;;
     store)
         [[ "$#" -eq 2 \
@@ -6920,7 +6954,7 @@ configure_thunar_uca() {
     <icon>folder</icon>
     <name>以管理员身份打开</name>
     <unique-id>3</unique-id>
-    <command>pkexec thunar %f</command>
+    <command>/usr/local/bin/ming-authorized-action open %f</command>
     <description>使用管理员权限打开此文件夹</description>
     <patterns>*</patterns>
     <directories/>
@@ -7917,7 +7951,7 @@ MINGCREATEITEM
     <icon>folder</icon>
     <name>以管理员身份打开</name>
     <submenu></submenu>
-    <command>pkexec thunar %f</command>
+    <command>/usr/local/bin/ming-authorized-action open %f</command>
     <description>使用管理员权限打开文件夹</description>
     <range>*</range>
     <patterns>*</patterns>

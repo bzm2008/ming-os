@@ -1256,7 +1256,7 @@ download_update() {
     log_info "正在下载 ${version}：${url}"
     rm -f -- "${iso_file}"
     if ! wget -c --https-only --secure-protocol=TLSv1_2 \
-        --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress \
+        --max-redirect=0 --tries="${retries}" --timeout=30 --read-timeout=30 --show-progress \
         -O "${tmp_file}" "${url}"; then
         log_error "OTA 下载中断；已保留临时文件供下次断点续传，但不会标记为已下载。"
         return 1
@@ -1729,21 +1729,34 @@ configure_update() {
         log_error "只允许使用 Ming OS 官方 HTTPS OTA 服务。"
         return 1
     fi
+    [[ "${channel}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+        log_error "OTA 频道格式无效。"
+        return 1
+    }
+    [[ "${auto_check}" == true || "${auto_check}" == false ]] || {
+        log_error "自动检查必须是 true 或 false。"
+        return 1
+    }
+    [[ "${auto_download}" == true || "${auto_download}" == false ]] || {
+        log_error "自动下载必须是 true 或 false。"
+        return 1
+    }
 
-    cat > "${cfg}" << CONFIGJSON
-{
-  "update_server": "${server}",
-  "api_endpoint": "${API_ENDPOINT}",
-  "channel": "${channel}",
-  "auto_check": ${auto_check},
-  "auto_download": ${auto_download},
-  "verify_checksum": true,
-  "download_retries": 3,
-  "notify_enabled": true,
-  "last_check": "$(get_config '.last_check')",
-  "current_version": "$(current_version)"
-}
-CONFIGJSON
+    local last_check current_version
+    last_check="$(get_config '.last_check')"
+    current_version="$(current_version)"
+    jq -n \
+        --arg server "${server}" \
+        --arg endpoint "${API_ENDPOINT}" \
+        --arg channel "${channel}" \
+        --argjson auto_check "${auto_check}" \
+        --argjson auto_download "${auto_download}" \
+        --arg last_check "${last_check}" \
+        --arg current_version "${current_version}" \
+        '{update_server: $server, api_endpoint: $endpoint, channel: $channel,
+          auto_check: $auto_check, auto_download: $auto_download,
+          verify_checksum: true, download_retries: 3, notify_enabled: true,
+          last_check: $last_check, current_version: $current_version}' > "${cfg}"
     chmod 644 "${cfg}"
     log_info "Config saved."
 }

@@ -99,6 +99,28 @@ class MingStoreControlTests(unittest.TestCase):
         self.assertNotIn("sh", apt)
         self.assertNotIn("-c", apt)
 
+    def test_install_rejects_architecture_mismatch_after_apt_readback(self):
+        control = self.make_control(lambda command, timeout=300: (0, "", ""))
+        request = self.request()
+        provider = types.SimpleNamespace(
+            get=lambda _app_id: {"package_name": "vlc"},
+            resolve=lambda _app_id: {
+                "package_name": "vlc", "resolved_version": "3.0.21",
+                "resolved_architecture": "amd64", "apt_target": "vlc=3.0.21",
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "request.json"
+            path.write_text("{}", encoding="utf-8")
+            self.prepare(control, request, path)
+            control._provider = lambda _request: provider
+            control._installed = lambda _package: {
+                "installed": True, "version": "3.0.21", "architecture": "i386",
+            }
+            with self.assertRaises(self.control_module.StoreControlError) as caught:
+                control.execute("install", "a" * 32)
+        self.assertEqual("readback_failed", caught.exception.state)
+
     def test_changed_candidate_is_rejected_before_apt(self):
         calls = []
         def runner(command, timeout=300):

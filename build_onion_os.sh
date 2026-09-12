@@ -59,6 +59,10 @@ readonly MING_USER_PASS="${MING_USER_PASS:-}"
 readonly ROOT_PASS="${ROOT_PASS:-}"
 readonly MING_SKIP_XIAHAI="${MING_SKIP_XIAHAI:-0}"
 readonly MING_OTA_RELEASE_PUBLIC_KEY_SOURCE="${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE:-}"
+readonly MING_OFFICIAL_CATALOG_SOURCE="${MING_OFFICIAL_CATALOG_SOURCE:-}"
+readonly MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE="${MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE:-}"
+readonly MING_OFFICIAL_PUBLIC_KEY_SOURCE="${MING_OFFICIAL_PUBLIC_KEY_SOURCE:-}"
+readonly MING_OFFICIAL_PUBLIC_KEY_SHA256="${MING_OFFICIAL_PUBLIC_KEY_SHA256:-}"
 readonly MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"
 readonly MING_CLEAN_ISO_WORKDIR="${MING_CLEAN_ISO_WORKDIR:-0}"
 readonly PROFILE_RELEASE="release"
@@ -193,6 +197,19 @@ configure_build_profile() {
                 log_error "release profile requires MING_OTA_RELEASE_PUBLIC_KEY_SOURCE pointing to a verified OTA Minisign public key"
                 return 2
             fi
+            for official_input in \
+                "${MING_OFFICIAL_CATALOG_SOURCE}" \
+                "${MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE}" \
+                "${MING_OFFICIAL_PUBLIC_KEY_SOURCE}"; do
+                if [[ -z "${official_input}" || ! -s "${official_input}" || -L "${official_input}" ]]; then
+                    log_error "release profile requires signed Ming official catalog inputs: MING_OFFICIAL_CATALOG_SOURCE, MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE, MING_OFFICIAL_PUBLIC_KEY_SOURCE"
+                    return 2
+                fi
+            done
+            if [[ ! "${MING_OFFICIAL_PUBLIC_KEY_SHA256}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+                log_error "release profile requires MING_OFFICIAL_PUBLIC_KEY_SHA256 bound to the approved catalog key"
+                return 2
+            fi
             MING_BUILD_COMPRESSION="xz"
             MING_SQUASHFS_ARGS=(-comp xz -Xbcj x86 -b 1M -no-xattrs -no-progress)
             ;;
@@ -322,7 +339,7 @@ assert_source_tree_has_no_symlinks() {
 
 build_inputs_sha256() {
     local input_list="" payload=""
-    local source_identity input_hash xiahai_hash ota_hash script_hashes final_digest
+    local source_identity input_hash xiahai_hash ota_hash official_catalog_hash official_signature_hash official_key_hash script_hashes final_digest
 
     cleanup_build_input_hash() {
         rm -f -- "${input_list:-}" "${payload:-}"
@@ -388,6 +405,13 @@ build_inputs_sha256() {
         log_error "cannot hash OTA release key input"
         return 1
     fi
+    if ! official_catalog_hash="$(file_sha256_or_missing "${MING_OFFICIAL_CATALOG_SOURCE}")" \
+        || ! official_signature_hash="$(file_sha256_or_missing "${MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE}")" \
+        || ! official_key_hash="$(file_sha256_or_missing "${MING_OFFICIAL_PUBLIC_KEY_SOURCE}")"; then
+        cleanup_build_input_hash
+        log_error "cannot hash Ming official signed catalog inputs"
+        return 1
+    fi
     if ! script_hashes="$(sha256sum -- "${SCRIPT_DIR}/build_onion_os.sh" \
         "${SCRIPT_DIR}/resume_build.sh" "${BUILD_STATE_HELPER}")"; then
         cleanup_build_input_hash
@@ -396,6 +420,8 @@ build_inputs_sha256() {
     fi
     if ! printf 'xiahai-source=%s\0' "${xiahai_hash}" >> "${payload}" \
         || ! printf 'ota-release-key=%s\0' "${ota_hash}" >> "${payload}" \
+        || ! printf 'ming-official-catalog=%s\0ming-official-signature=%s\0ming-official-public-key=%s\0' \
+            "${official_catalog_hash}" "${official_signature_hash}" "${official_key_hash}" >> "${payload}" \
         || ! printf '%s\0' "${script_hashes}" >> "${payload}"; then
         cleanup_build_input_hash
         log_error "cannot write build input payload"
@@ -1075,6 +1101,31 @@ prepare_chroot_scripts() {
         fi
         install -m 0644 "${MING_OTA_RELEASE_PUBLIC_KEY_SOURCE}" \
             "${CHROOT_DIR}/tmp/ming-build/assets/ota-release.minisign.pub"
+    fi
+    if [[ -n "${MING_OFFICIAL_CATALOG_SOURCE}" ]]; then
+        for official_input in \
+            "${MING_OFFICIAL_CATALOG_SOURCE}" \
+            "${MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE}" \
+            "${MING_OFFICIAL_PUBLIC_KEY_SOURCE}"; do
+            if [[ ! -s "${official_input}" || -L "${official_input}" ]]; then
+                log_error "Ming official signed catalog input is missing or a symlink: ${official_input}"
+                return 1
+            fi
+        done
+        install -m 0644 "${MING_OFFICIAL_CATALOG_SOURCE}" \
+            "${CHROOT_DIR}/tmp/ming-build/assets/ming-store-catalog/ming-official.json"
+        install -m 0644 "${MING_OFFICIAL_CATALOG_SIGNATURE_SOURCE}" \
+            "${CHROOT_DIR}/tmp/ming-build/assets/ming-store-catalog/ming-official.json.minisig"
+        install -d -m 0755 "${CHROOT_DIR}/tmp/ming-build/assets/trusted-keys"
+        install -m 0644 "${MING_OFFICIAL_PUBLIC_KEY_SOURCE}" \
+            "${CHROOT_DIR}/tmp/ming-build/assets/trusted-keys/ming-official-catalog.minisign.pub"
+        printf '%s\n' "${MING_OFFICIAL_PUBLIC_KEY_SHA256,,}" > \
+            "${CHROOT_DIR}/tmp/ming-build/assets/trusted-keys/ming-official-catalog.minisign.pub.sha256"
+        actual_official_key_sha256="$(sha256sum "${MING_OFFICIAL_PUBLIC_KEY_SOURCE}" | awk '{print tolower($1)}')"
+        if [[ "${actual_official_key_sha256}" != "${MING_OFFICIAL_PUBLIC_KEY_SHA256,,}" ]]; then
+            log_error "Ming official catalog public key SHA256 does not match the CI-pinned identity"
+            return 1
+        fi
     fi
     if [[ "${MING_SKIP_XIAHAI}" != "1" && "${xiahai_asset}" != "${xiahai_asset_path}" ]]; then
         install -d -m 0755 "${CHROOT_DIR}/tmp/ming-build/assets/vendor/xiahai-xiaoming"
@@ -2975,6 +3026,26 @@ for source_id in ["ming-official", "debian-apt", "vendor-official", "wine-offici
         errors.append(f"Ming Store catalog schema mismatch: {source_id}")
     if source_id == "wine-official" and catalog.get("source", {}).get("trust") != "minisign":
         errors.append("Wine manifest must declare Minisign trust")
+official_catalog_path = root / "usr/share/ming-os/store/catalog/ming-official.json"
+official_signature_path = root / "usr/share/ming-os/store/catalog/ming-official.json.minisig"
+official_public_key_path = root / "etc/ming-os/store/ming-official-catalog.minisign.pub"
+official_public_key_hash_path = root / "etc/ming-os/store/ming-official-catalog.minisign.pub.sha256"
+if build_profile == "release":
+    if not official_catalog_path.is_file():
+        errors.append("release rootfs is missing Ming official signed catalog")
+    else:
+        try:
+            official_catalog = json.loads(official_catalog_path.read_text(encoding="utf-8"))
+            if not official_catalog.get("applications"):
+                errors.append("Ming official catalog must contain at least one application")
+        except (OSError, ValueError) as error:
+            errors.append(f"Ming official catalog cannot be read: {error}")
+    if not official_signature_path.is_file():
+        errors.append("release rootfs is missing Ming official catalog signature")
+    if not official_public_key_path.is_file() or official_public_key_path.is_symlink():
+        errors.append("release rootfs is missing Ming official catalog public key")
+    if not official_public_key_hash_path.is_file() or official_public_key_hash_path.is_symlink():
+        errors.append("release rootfs is missing Ming official catalog public key hash")
 spark_config_path = root / "usr/share/ming-os/store/catalog/spark-public.json"
 spark_config = {}
 spark_keyring_valid = verify_openpgp_keyring(

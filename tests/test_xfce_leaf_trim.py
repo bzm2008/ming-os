@@ -54,6 +54,15 @@ class XfceLeafTrimContractTests(unittest.TestCase):
         self.assertIn("edit)", bridge)
         self.assertIn("/usr/bin/nano", bridge)
 
+    def test_thunar_admin_open_uses_the_authorization_bridge(self):
+        self.assertNotIn("pkexec thunar %f", DESKTOP)
+        self.assertEqual(2, DESKTOP.count("/usr/local/bin/ming-authorized-action open %f"))
+        bridge = DESKTOP.split(
+            "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'", 1
+        )[1].split("\nMINGAUTHORIZE", 1)[0]
+        self.assertIn("open)", bridge)
+        self.assertIn("/usr/bin/thunar", bridge)
+
 
 if __name__ == "__main__":
     unittest.main()

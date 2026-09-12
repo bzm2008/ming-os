@@ -128,6 +128,11 @@ SPARK_CATEGORY_WORKERS = 4
 # in tests and can be tuned by a future policy without changing the UI.
 SPARK_FETCH_TIMEOUT = 8.0
 SPARK_REFRESH_TIMEOUT = 20.0
+MING_OFFICIAL_RELEASE_HOST = "github.com"
+MING_OFFICIAL_REPOSITORY = "bzm2008/ming-os"
+MING_OFFICIAL_RELEASE_PATH = re.compile(
+    r"^/bzm2008/ming-os/releases/download/([^/]+)/([^/]+\.deb)$"
+)
 
 
 class StoreError(RuntimeError):
@@ -686,8 +691,150 @@ class CatalogProvider(Provider):
 
 
 class MingOfficialProvider(CatalogProvider):
-    def __init__(self, catalog_root=None):
+    PUBLIC_KEY_PATH = pathlib.Path("/etc/ming-os/store/ming-official-catalog.minisign.pub")
+
+    def __init__(self, catalog_root=None, public_key_path=None, verifier=None, runner=None,
+                 public_key_sha256=None):
         super().__init__("ming-official", catalog_root=catalog_root)
+        self.public_key_path = pathlib.Path(public_key_path or self.PUBLIC_KEY_PATH)
+        self.verifier = verifier or self._verify_signature
+        self.runner = runner or _default_runner
+        if public_key_sha256 is None:
+            sidecar = self.public_key_path.with_name(self.public_key_path.name + ".sha256")
+            try:
+                public_key_sha256 = sidecar.read_text(encoding="ascii").strip()
+            except OSError:
+                public_key_sha256 = ""
+        self.public_key_sha256 = str(public_key_sha256 or "").casefold()
+
+    @staticmethod
+    def _canonical_manifest(document):
+        unsigned = copy.deepcopy(document)
+        source = dict(unsigned.get("source") or {})
+        source.pop("signature", None)
+        unsigned["source"] = source
+        return json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _verify_signature(payload, signature, public_key):
+        if not public_key.is_file() or not signature:
+            return False
+        try:
+            with tempfile.TemporaryDirectory(prefix="ming-official-signature-") as directory:
+                root = pathlib.Path(directory)
+                message = root / "catalog.json"
+                detached = root / "catalog.minisig"
+                message.write_text(payload, encoding="utf-8")
+                detached.write_text(signature + "\n", encoding="utf-8")
+                result = subprocess.run(
+                    ["minisign", "-Vm", str(message), "-x", str(detached), "-p", str(public_key)],
+                    capture_output=True, text=True, timeout=15, check=False, shell=False,
+                )
+                return result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    @staticmethod
+    def _release_artifact(item):
+        url = str(item.get("download_url") or "")
+        parsed = urllib.parse.urlsplit(url)
+        match = MING_OFFICIAL_RELEASE_PATH.fullmatch(parsed.path)
+        release_tag = str(item.get("release_tag") or "")
+        version = str(item.get("version") or "")
+        package = str(item.get("package_name") or "")
+        filename = match.group(2) if match else ""
+        if (
+            parsed.scheme != "https" or parsed.hostname != MING_OFFICIAL_RELEASE_HOST
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or not match or match.group(1) != release_tag
+            or not release_tag or not version or package not in filename
+            or pathlib.PurePosixPath(filename).suffix != ".deb"
+            or str(item.get("sha256") or "").lower() != str(item.get("identity", {}).get("sha256") or "").lower()
+            or not SHA256.fullmatch(str(item.get("sha256") or "").lower())
+        ):
+            raise InvalidCatalog("Ming 官方软件必须使用固定 GitHub Release、版本和 SHA256。")
+        return {
+            "url": url,
+            "sha256": str(item["sha256"]).lower(),
+            "filename": filename,
+            "version": version,
+            "architecture": "amd64",
+        }
+
+    def _load(self):
+        path = self.catalog_root / "ming-official.json"
+        signature_path = self.catalog_root / "ming-official.json.minisig"
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise InvalidCatalog("Ming 官方签名目录无法读取：%s" % exc) from exc
+        source = document.get("source") if isinstance(document, dict) else None
+        applications = document.get("applications") if isinstance(document, dict) else None
+        if isinstance(applications, list) and not applications:
+            self._items = []
+            return []
+        try:
+            signature = signature_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise InvalidCatalog("Ming 官方签名目录签名文件无法读取：%s" % exc) from exc
+        if self.public_key_sha256:
+            try:
+                key_digest = hashlib.sha256(self.public_key_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise InvalidCatalog("Ming 官方公钥无法读取：%s" % exc) from exc
+            if key_digest != self.public_key_sha256:
+                raise InvalidCatalog("Ming 官方公钥 SHA256 与受保护身份不匹配。")
+        if (
+            not isinstance(source, dict)
+            or source.get("id") != self.source_id
+            or source.get("trust") != "minisign-required"
+            or source.get("repository") != MING_OFFICIAL_REPOSITORY
+            or not re.fullmatch(r"[0-9A-Fa-f]{40}", str(source.get("public_key_fingerprint") or ""))
+            or not self.verifier(self._canonical_manifest(document), signature, self.public_key_path)
+        ):
+            raise InvalidCatalog("Ming 官方签名目录未通过身份校验。")
+        return super()._load()
+
+    def _validate_item(self, raw):
+        item = super()._validate_item(raw)
+        if str(item.get("install_method") or "") != "deb":
+            raise InvalidCatalog("Ming 官方软件必须使用 DEB 安装方式。")
+        if str(item.get("identity", {}).get("type") or "") != "minisign":
+            raise InvalidCatalog("Ming 官方软件必须使用 Minisign 身份。")
+        artifact = self._release_artifact(item)
+        item["sha256"] = artifact["sha256"]
+        item["release_tag"] = str(item["release_tag"])
+        item["download_url"] = artifact["url"]
+        return item
+
+    def resolve(self, app_id):
+        item = self.get(app_id)
+        if not item.get("enabled"):
+            raise ProviderUnavailable("Ming 官方软件当前不可安装。")
+        resolved = copy.deepcopy(item)
+        resolved.update({
+            "resolved_version": item["version"],
+            "resolved_architecture": "amd64",
+            "sha256": item["sha256"],
+            "download_url": item["download_url"],
+        })
+        return resolved
+
+    def installed_state(self, app_id):
+        item = self.get(app_id)
+        rc, output, _error = self.runner(
+            ["dpkg-query", "-W", "-f=${db:Status-Abbrev}\t${Version}\t${Architecture}", item["package_name"]],
+            timeout=15,
+        )
+        if rc != 0:
+            return {"installed": False, "version": None, "architecture": None}
+        fields = (output or "").strip().split("\t")
+        installed = len(fields) == 3 and fields[0].strip().startswith("ii")
+        return {
+            "installed": installed,
+            "version": fields[1].strip() if installed else None,
+            "architecture": fields[2].strip() if installed else None,
+        }
 
 
 class VendorOfficialProvider(CatalogProvider):

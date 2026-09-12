@@ -659,7 +659,14 @@ class StoreControl:
                     raise StoreControlError(state, message)
                 self._journal(request, "readback")
                 state = self._installed(package)
-                if not state["installed"] or state["version"] != version:
+                expected_architecture = str(
+                    resolved.get("resolved_architecture")
+                    or (resolved.get("identity") or {}).get("architecture")
+                    or ""
+                ).strip().casefold()
+                actual_architecture = str(state.get("architecture") or "").strip().casefold()
+                if (not state["installed"] or state["version"] != version
+                        or (expected_architecture and actual_architecture != expected_architecture)):
                     raise StoreControlError("readback_failed", "软件操作结束，但版本读回不一致。")
         elif action == "remove":
             self._journal(request, "awaiting_authorization")
