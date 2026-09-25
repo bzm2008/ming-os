@@ -7,10 +7,10 @@
 - `PYTHONPYCACHEPREFIX=/tmp/ming-os-pycache python3 -m py_compile assets/*.py`: 通过。
 - Bash 语法和 `git diff --check`: 通过。
 - 远程 Debian WSL2 `fast-test`: 退出码 0。
-- Source commit: `cca00fae20cac028cd8d2ef4a8206400dbabcf27`。
-- Build ID: `2641-rc4-cca00fae20ca-20260925T130235Z`。
+- Source commit: `a8f5bcb185ef88cbfc4425238d5c21c1daab70a8`。
+- Build ID: `2641-rc4-a8f5bcb185ef-20260925T144606Z`。
 - ISO: `/var/tmp/ming-os-build/output/fast-test/ming-os-26.4.1-home-amd64-rc4-fast-test.iso`。
-- ISO SHA256: `4e0b074d8d8d18218a7ea74f0cdb86b720b15cfab3349338a455894893682ef2`。
+- ISO SHA256: `b7e4445549f829df3650916913a14a348b1c99f89735985337c3ba284b308aa4`。
 - ISO size: `2511667200` bytes。
 - Kernel hash、Calamares、BIOS isolinux、UEFI GRUB 和老硬件门禁均通过。
 - 开发 VM `MingOS-devagent-593b8ee-BIOS` 保持运行：BIOS、4GB、2 CPU；未替换其挂载 ISO。
