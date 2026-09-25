@@ -34,6 +34,7 @@ class ReleaseGateContracts(unittest.TestCase):
             "ming-settings-backend.py",
             "ming-files.py",
             "ming-files-model.py",
+            "ming-session-profile.py",
         ]:
             self.assertIn(name, self.desktop)
 
@@ -43,6 +44,17 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("rm -f /usr/local/bin/ming-disk-hub", self.desktop)
         self.assertIn("ming-migrate-all-disks", self.desktop)
         self.assertNotIn("xfce4-settings-manager'", self.desktop)
+
+    def test_visible_xfce_tools_are_hidden_behind_ming_surfaces(self):
+        hidden_block = self.desktop.split("hide_trimmed_xfce_entries() {", 1)[1].split(
+            "configure_user_templates()", 1
+        )[0]
+        for entry in (
+            "xfce4-appfinder.desktop", "xfce4-panel.desktop",
+            "xfce4-session-settings.desktop", "xfce4-settings-editor.desktop",
+            "xfce4-mime-settings.desktop", "thunar.desktop",
+        ):
+            self.assertIn(entry, hidden_block)
 
     def test_drawer_is_dock_only(self):
         self.assertIn('DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem', self.desktop)

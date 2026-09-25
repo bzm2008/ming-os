@@ -134,6 +134,8 @@ MING_MINT_CSS = """
 /* #1f8a70 remains the historical Ming accent reference for compatibility. */
 
 window.ming-store { background: @canvas; color: @text; }
+.ming-low-resource, .ming-reduced-motion { box-shadow: none; }
+.ming-reduced-motion * { transition-duration: 0ms; animation-duration: 0ms; }
 window.ming-store headerbar { background: @surface; border-bottom: 1px solid alpha(@text, .10); }
 .ming-store-sidebar { background: @sidebar; padding: 10px 8px; border-right: 1px solid alpha(@text, .08); }
 .ming-store-sidebar row { min-height: 38px; margin: 2px 0; padding: 0 10px; border-radius: 7px; color: @muted; }
@@ -1164,6 +1166,10 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     from gi.repository import Adw, GLib, Gtk
 
     window = Adw.ApplicationWindow(application=application)
+    if os.environ.get("MING_LOW_RESOURCE") == "1":
+        window.add_css_class("ming-low-resource")
+    if os.environ.get("MING_REDUCED_MOTION") == "1":
+        window.add_css_class("ming-reduced-motion")
     window.set_title(APP_NAME)
     window.set_default_size(980, 680)
     window.add_css_class("ming-store")

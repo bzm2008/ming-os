@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """File and navigation model for Ming Files.
 
 The production factory requires Gio/GVfs.  ``LocalFileBackend`` exists so the

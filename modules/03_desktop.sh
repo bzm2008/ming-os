@@ -288,6 +288,11 @@ hide_trimmed_xfce_entries() {
         /usr/share/applications/xfce4-appfinder.desktop \
         /usr/share/applications/xfce4-taskmanager.desktop \
         /usr/share/applications/xfce4-whiskermenu-plugin.desktop \
+        /usr/share/applications/xfce4-panel.desktop \
+        /usr/share/applications/xfce4-session-settings.desktop \
+        /usr/share/applications/xfce4-settings-editor.desktop \
+        /usr/share/applications/xfce4-mime-settings.desktop \
+        /usr/share/applications/thunar.desktop \
         /usr/share/applications/mousepad.desktop \
         /usr/share/applications/ristretto.desktop; do
         [[ -f "${desktop_file}" ]] || continue
@@ -323,7 +328,7 @@ install_ming_shell_components() {
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
     install -d -o root -g root -m 0700 /var/cache/ming-os/store /run/ming-store-control
-    for asset in ming-ui-tokens.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py; do
+    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -414,6 +419,7 @@ install_ming_shell_components() {
     install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
     install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
     install -m 0644 "${asset_dir}/ming-ui-tokens.py" "${lib_dir}/ming-ui-tokens.py"
+    install -m 0755 "${asset_dir}/ming-session-profile.py" /usr/local/bin/ming-session-profile
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
@@ -4674,6 +4680,7 @@ mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 mkdir -p "${log_dir}" 2>/dev/null || true
 health_log="${log_dir}/session-health.log"
 metrics_file="${log_dir}/session-startup.json"
+session_profile_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-profile.json"
 session_runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
 session_lock_file="${session_runtime_dir}/ming-session-healthcheck.lock"
 session_pid_file="${session_runtime_dir}/ming-session-healthcheck.pid"
@@ -4685,6 +4692,33 @@ drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
 dock_immersive_state=unknown
 dock_immersive_window_id=""
 touch "${health_log}" 2>/dev/null || true
+
+refresh_session_profile() {
+    command -v ming-session-profile >/dev/null 2>&1 || return 0
+    local temporary="${session_profile_file}.tmp.$$"
+    if ming-session-profile status --json >"${temporary}" 2>>"${health_log}"; then
+        mv -f -- "${temporary}" "${session_profile_file}"
+        read -r MING_LOW_RESOURCE MING_REDUCED_MOTION < <(
+            python3 - "${session_profile_file}" "${HOME}/.config/ming-os/settings.json" <<'PY'
+import json
+import pathlib
+import sys
+
+profile = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+reduced = False
+try:
+    reduced = bool(json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")).get("reduced_motion"))
+except (OSError, ValueError, TypeError):
+    pass
+print("%s %s" % ("1" if profile.get("low_memory") else "0", "1" if reduced else "0"))
+PY
+        )
+        export MING_LOW_RESOURCE MING_REDUCED_MOTION
+    else
+        rm -f -- "${temporary}" 2>/dev/null || true
+        log "session profile probe failed; keeping previous profile"
+    fi
+}
 
 # Image builds may provide a system-wide default.  An explicitly exported
 # session value still wins so MING_PHONE_DESKTOP=1/0 is honored at login.
@@ -5487,6 +5521,7 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    refresh_session_profile
     stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     start_phone_desktop || phone_fallback=true
@@ -5501,6 +5536,7 @@ startup_once() {
 supervise_once() {
     local phone_fallback=false
     log 'session supervisor check begin'
+    refresh_session_profile
     stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     if ! start_phone_desktop; then
@@ -6928,6 +6964,21 @@ gpu="$(LC_ALL=C lspci 2>/dev/null | grep -Ei 'vga|3d|display' | tr '\n' ' ' || t
 renderer=""
 if command -v glxinfo >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//')"
+fi
+
+# Prefer the shared session profile when it is available.  The legacy probes
+# below remain as a bounded fallback for upgrades where the helper is absent.
+session_profile=""
+if command -v ming-session-profile >/dev/null 2>&1; then
+    session_profile="$(ming-session-profile status --json 2>/dev/null || true)"
+fi
+if [[ -n "${session_profile}" ]]; then
+    profile_compositor="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("compositor_profile", ""))' <<<"${session_profile}" 2>/dev/null || true)"
+    case "${profile_compositor}" in
+        off) disabled_reason="session-profile" ;;
+        xrender) config="${fallback_conf}"; reason="session-profile-xrender" ;;
+        auto) : ;;
+    esac
 fi
 
 if [[ "${mem_mb}" -gt 0 && "${mem_mb}" -lt 2662 ]]; then

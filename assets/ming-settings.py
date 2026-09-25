@@ -776,6 +776,10 @@ class MingSettings(Adw.ApplicationWindow):
         window_width, window_height = responsive_window_size()
         self.set_default_size(window_width, window_height)
         self.add_css_class("ming-settings-window")
+        if os.environ.get("MING_LOW_RESOURCE") == "1":
+            self.add_css_class("ming-low-resource")
+        if os.environ.get("MING_REDUCED_MOTION") == "1":
+            self.add_css_class("ming-reduced-motion")
         self.backend_timers = {}
         self.page_built = set()
         self.page_builders = {}
@@ -1018,6 +1022,13 @@ class MingSettings(Adw.ApplicationWindow):
 
         .ming-settings-window label.dim-label {
             color: alpha(__MING_MUTED__, 0.82);
+        }
+
+        .ming-settings-window.ming-low-resource *,
+        .ming-settings-window.ming-reduced-motion * {
+            box-shadow: none;
+            transition-duration: 0ms;
+            animation-duration: 0ms;
         }
 
         .ming-settings-window.ming-settings-dark {
@@ -2870,8 +2881,8 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_action_button.set_label("检查更新")
             self.update_status.set_label(error or "此安装模式不支持该大版本 OTA。")
             self.update_detail.set_label(
-                "当前安装保留了其他系统，因此不会自动改写 A/B 系统槽。\n"
-                "已签名的 patch/minor 更新仍可使用。")
+                "当前安装保留了其他系统，因此不会自动执行需要重建系统的完整升级。\n"
+                "已签名的常规更新仍可使用。")
             self.update_detail.set_visible(True)
             return
         if available and ready and action == "apply":
@@ -2884,7 +2895,7 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_manifest_sha256 = manifest_sha256.lower()
             if update_type == "major":
                 self.update_detail.set_label(
-                    "更新说明：\n%s\n\n升级准备：%s" % (
+                    "更新说明：\n%s\n\n升级准备：系统会自动选择安全的更新方式，并在启动检查通过后完成切换。\n%s" % (
                         notes or "暂无更新说明。",
                         preservation_message or "正在检查用户文件保留条件。",
                     ))

@@ -480,6 +480,19 @@ class MingFilesUiSourceTests(unittest.TestCase):
         self.assertIn("Adw.ApplicationWindow", self.source)
         self.assertIn("Adw.NavigationSplitView", self.source)
 
+    def test_ui_uses_shared_tokens_and_stable_responsive_surface(self):
+        for marker in [
+            "ming-ui-tokens.py",
+            "MING_UI_TOKENS",
+            "set_default_size(1020, 680)",
+            "set_size_request(620, 440)",
+            "ming-window-surface",
+            "ming-reduced-motion",
+            "ming-low-resource",
+            "@media (max-width: 760px)",
+        ]:
+            self.assertIn(marker, self.source)
+
     def test_sidebar_contains_standard_locations_and_gio_mounts(self):
         for marker in [
             '"Home"',

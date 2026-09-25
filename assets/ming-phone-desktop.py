@@ -1043,6 +1043,7 @@ def legacy_desktop_entry(path):
     codes are removed, the executable is resolved first, and the returned
     argv is passed directly to ``subprocess.Popen``.
     """
+    import configparser
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
@@ -1280,6 +1281,7 @@ def normalized_desktop_exec_program(exec_line):
 
 def desktop_entry_dedup_fields(path):
     """Read non-display launcher fields; names are intentionally excluded."""
+    import configparser
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
@@ -4058,6 +4060,10 @@ class PhoneDesktop(Gtk.Window):
             pass
         self.set_name("ming-desktop-window")
         self.get_style_context().add_class("ming-desktop")
+        if os.environ.get("MING_LOW_RESOURCE") == "1":
+            self.get_style_context().add_class("ming-low-resource")
+        if os.environ.get("MING_REDUCED_MOTION") == "1":
+            self.get_style_context().add_class("ming-reduced-motion")
         self.appearance_monitor = None
         self.apply_desktop_theme(load_appearance_theme())
         self.set_decorated(False)

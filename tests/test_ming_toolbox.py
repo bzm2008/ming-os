@@ -92,6 +92,20 @@ class MingToolboxContracts(unittest.TestCase):
         self.assertIn("GLib.idle_add", source)
         self.assertIn("_queue_install", source)
 
+    def test_toolbox_uses_shared_tokens_and_stable_responsive_surface(self):
+        source = TOOLBOX.read_text(encoding="utf-8")
+        for marker in [
+            "ming-ui-tokens.py",
+            "MING_UI_TOKENS",
+            "set_default_size(820, 600)",
+            "set_size_request(560, 420)",
+            "ming-window-surface",
+            "ming-reduced-motion",
+            "ming-low-resource",
+            "@media (max-width: 760px)",
+        ]:
+            self.assertIn(marker, source)
+
 
 if __name__ == "__main__":
     unittest.main()
