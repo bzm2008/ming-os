@@ -2059,7 +2059,7 @@ configure_ming_mint_dock_profile() {
         # later applies responsive icon sizing without changing the theme.
         sed -i 's/^IconSize=.*/IconSize=40/' "${settings}"
         sed -i 's/^ZoomEnabled=.*/ZoomEnabled=true/' "${settings}"
-        sed -i 's/^ZoomPercent=.*/ZoomPercent=148/' "${settings}"
+        sed -i 's/^ZoomPercent=.*/ZoomPercent=136/' "${settings}"
         sed -i 's/^Offset=.*/Offset=0/' "${settings}"
         sed -i 's/^Theme=.*/Theme=Ming/' "${settings}"
     fi
@@ -2070,7 +2070,7 @@ settings="${HOME}/.config/plank/dock1/settings"
 [[ -f "${settings}" ]] || exit 0
 sed -i -e 's/^IconSize=.*/IconSize=40/' \
        -e 's/^ZoomEnabled=.*/ZoomEnabled=true/' \
-       -e 's/^ZoomPercent=.*/ZoomPercent=148/' \
+       -e 's/^ZoomPercent=.*/ZoomPercent=136/' \
        -e 's/^Offset=.*/Offset=0/' \
        -e 's/^Theme=.*/Theme=Ming/' "${settings}"
 MINGMINTDOCK
@@ -3003,10 +3003,10 @@ exit 0
 MINGDOCKPRESEED
     chmod 0755 /usr/local/bin/ming-dock
 
-    # Dock 行为与外观：底部居中、轻放大、磨砂白悬浮底座；避免老机动画压力过大。
+    # Dock 行为与外观：底部居中、轻放大、Calm Glass Rail 玻璃底座；避免老机动画压力过大。
     cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-responsive-centered
+# MingDockProfile=2641-calm-glass-rail
 #当前 Dock 上的启动器（顺序即显示顺序）
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
@@ -3021,7 +3021,7 @@ IconSize=40
 #悬停放大开关
 ZoomEnabled=true
 #放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
-ZoomPercent=148
+ZoomPercent=136
 #隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
 HideMode=1
 #自动隐藏延迟
@@ -3134,33 +3134,33 @@ MINGREFRESHDOCK
     /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
         echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
 
-    # Ming 26.4.0 / 26.3.2 经典底部 Dock 主题。
+    # Calm Glass Rail: semi-transparent Ming Mint rail with restrained hover feedback.
     local theme_dir
     for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
     mkdir -p "${theme_dir}"
     cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
 [PlankTheme]
 TopRoundness=14
-BottomRoundness=0
+BottomRoundness=14
 LineWidth=1
-OuterStrokeColor=31;;98;;84;;54
-FillStartColor=255;;255;;255;;226
-FillEndColor=242;;250;;247;;238
-InnerStrokeColor=255;;255;;255;;176
+OuterStrokeColor=47;;138;;125;;80
+FillStartColor=255;;255;;255;;228
+FillEndColor=231;;245;;241;;240
+InnerStrokeColor=255;;255;;255;;170
 
 [PlankDockTheme]
-HorizPadding=16
-TopPadding=6
-BottomPadding=2
+HorizPadding=14
+TopPadding=8
+BottomPadding=8
 ItemPadding=4
 IndicatorSize=4
-IconShadowSize=1
-UrgentBounceHeight=1.20
-LaunchBounceHeight=0.20
+IconShadowSize=0
+UrgentBounceHeight=1.10
+LaunchBounceHeight=0.12
 FadeOpacity=1.0
 ClickTime=160
 UrgentBounceTime=420
-LaunchBounceTime=150
+LaunchBounceTime=130
 ActiveTime=160
 SlideTime=160
 FadeTime=120
@@ -4154,7 +4154,7 @@ write_default_plank_settings() {
     local settings="$1"
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
-# MingDockProfile=2641-responsive-centered
+# MingDockProfile=2641-calm-glass-rail
 DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
 Position=3
 Alignment=3
@@ -4162,7 +4162,7 @@ Alignment=3
 Offset=0
 IconSize=40
 ZoomEnabled=true
-ZoomPercent=148
+ZoomPercent=136
 HideMode=1
 UnhideDelay=0
 HideDelay=0
@@ -4183,9 +4183,9 @@ apply_low_resource_plank_profile() {
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//' || true)"
-    # Keep the approved 26.4.0 Dock geometry on every machine.  Low-resource
-    # savings come from compositor/session policy, not a visually different Dock.
-    log "legacy Plank geometry retained (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown} cmdline=${cmdline:-none})"
+    # Keep the Calm Glass Rail geometry on every machine. Low-resource savings
+    # come from compositor/session policy, not a visually different Dock.
+    log "Calm Glass Rail geometry retained (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown} cmdline=${cmdline:-none})"
 }
 
 plank_setting_value() {
@@ -4202,8 +4202,8 @@ apply_plank_runtime_preferences() {
     theme="${theme//\'/}"
     theme_dconf="'Ming'"
     theme_dconf="'${theme:-Ming}'"
-    # Keep the approved legacy Ming theme.  Geometry is responsive so the
-    # Dock remains comfortable on both small legacy displays and wide panels.
+    # Keep the Ming theme. Geometry is responsive so the Dock remains
+    # comfortable on both small legacy displays and wide panels.
     if command -v gsettings >/dev/null 2>&1; then
         current_theme="$(gsettings get "${plank_schema}" theme 2>/dev/null || true)"
     elif command -v dconf >/dev/null 2>&1; then
@@ -4219,7 +4219,7 @@ apply_plank_runtime_preferences() {
     fi
     icon_size="$(plank_setting_value "${settings}" IconSize 40)"
     zoom_enabled="$(plank_setting_value "${settings}" ZoomEnabled true)"
-    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 148)"
+    zoom_percent="$(plank_setting_value "${settings}" ZoomPercent 136)"
     hide_mode="$(plank_setting_value "${settings}" HideMode 1)"
     offset="$(plank_setting_value "${settings}" Offset 0)"
     local screen_width screen_height short_side
@@ -4236,7 +4236,7 @@ apply_plank_runtime_preferences() {
         icon_size=40
     fi
     zoom_enabled=true
-    zoom_percent=148
+    zoom_percent=136
     # Offset=12 was the old horizontal drift; use zero with centered alignment.
     # The literal legacy offset=12 is retained here only for upgrade log
     # readers; it must never be written back to the active profile.
@@ -4259,7 +4259,7 @@ apply_plank_runtime_preferences() {
         gsettings set "${plank_schema}" theme "${theme:-Ming}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings theme"
         gsettings set "${plank_schema}" icon-size "${icon_size:-40}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings icon-size"
         gsettings set "${plank_schema}" zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-enabled"
-        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-148}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
+        gsettings set "${plank_schema}" zoom-percent "${zoom_percent:-136}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings zoom-percent"
         gsettings set "${plank_schema}" hide-mode "${hide_mode_runtime}" >>"${log_file}" 2>&1 || log "could not write Plank gsettings hide-mode"
         gsettings set "${plank_schema}" position bottom >>"${log_file}" 2>&1 || log "could not write Plank gsettings position"
         gsettings set "${plank_schema}" alignment center >>"${log_file}" 2>&1 || log "could not write Plank gsettings alignment"
@@ -4269,7 +4269,7 @@ apply_plank_runtime_preferences() {
         dconf write /net/launchpad/plank/docks/dock1/theme "${theme_dconf}" >>"${log_file}" 2>&1 || log "could not write Plank dconf theme"
         dconf write /net/launchpad/plank/docks/dock1/icon-size "${icon_size:-40}" >>"${log_file}" 2>&1 || log "could not write Plank dconf icon-size"
         dconf write /net/launchpad/plank/docks/dock1/zoom-enabled "${zoom_enabled:-true}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-enabled"
-        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-148}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
+        dconf write /net/launchpad/plank/docks/dock1/zoom-percent "${zoom_percent:-136}" >>"${log_file}" 2>&1 || log "could not write Plank dconf zoom-percent"
         dconf write /net/launchpad/plank/docks/dock1/hide-mode "${hide_mode:-1}" >>"${log_file}" 2>&1 || log "could not write Plank dconf hide-mode"
         dconf write /net/launchpad/plank/docks/dock1/alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf alignment"
         dconf write /net/launchpad/plank/docks/dock1/items-alignment "'center'" >>"${log_file}" 2>&1 || log "could not write Plank dconf item alignment"
@@ -4279,7 +4279,7 @@ apply_plank_runtime_preferences() {
 
 migrate_responsive_dock_profile() {
     local settings="$1"
-    grep -q '^# MingDockProfile=2641-responsive-centered$' "${settings}" 2>/dev/null && return 0
+    grep -q '^# MingDockProfile=2641-calm-glass-rail$' "${settings}" 2>/dev/null && return 0
 
     local dock_items='ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem'
     if grep -q '^DockItems=' "${settings}"; then
@@ -4293,9 +4293,9 @@ migrate_responsive_dock_profile() {
         printf 'IconSize=40\n' >>"${settings}"
     fi
     if grep -q '^ZoomPercent=' "${settings}"; then
-        sed -i "s/^ZoomPercent=.*/ZoomPercent=148/" "${settings}" 2>/dev/null || true
+        sed -i "s/^ZoomPercent=.*/ZoomPercent=136/" "${settings}" 2>/dev/null || true
     else
-        printf 'ZoomPercent=148\n' >>"${settings}"
+        printf 'ZoomPercent=136\n' >>"${settings}"
     fi
     if grep -q '^ZoomEnabled=' "${settings}"; then
         sed -i "s/^ZoomEnabled=.*/ZoomEnabled=true/" "${settings}" 2>/dev/null || true
@@ -4331,9 +4331,9 @@ migrate_responsive_dock_profile() {
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-1$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=2641-macos-frosted-centered-2$/d' "${settings}" 2>/dev/null || true
     sed -i '/^# MingDockProfile=/d' "${settings}" 2>/dev/null || true
-    printf '# MingDockProfile=2641-responsive-centered\n' >>"${settings}"
+    printf '# MingDockProfile=2641-calm-glass-rail\n' >>"${settings}"
     MING_PLANK_RELOAD_REQUIRED=1
-    log "migrated Dock to the responsive RC4 profile"
+    log "migrated Dock to the Calm Glass Rail profile"
 }
 
 ensure_plank_settings() {

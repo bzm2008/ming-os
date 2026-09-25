@@ -327,13 +327,13 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")',
             self.build,
         )
-        self.assertIn("OuterStrokeColor=31;;98;;84;;54", self.build)
-        self.assertIn("FillStartColor=255;;255;;255;;226", self.build)
-        self.assertIn("FillEndColor=242;;250;;247;;238", self.build)
+        self.assertIn("OuterStrokeColor=47;;138;;125;;80", self.build)
+        self.assertIn("FillStartColor=255;;255;;255;;228", self.build)
+        self.assertIn("FillEndColor=231;;245;;241;;240", self.build)
         self.assertIn("[PlankDockTheme]", self.build)
-        self.assertIn("BottomPadding=2", self.build)
-        self.assertIn("Offset=12", self.build)
-        self.assertIn("MingDockProfile=2641-responsive-centered", self.build)
+        self.assertIn("BottomPadding=8", self.build)
+        self.assertIn("Offset=0", self.build)
+        self.assertIn("MingDockProfile=2641-calm-glass-rail", self.build)
 
     def test_rootfs_gate_requires_static_dark_theme_assets(self):
         for marker in (

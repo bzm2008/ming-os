@@ -2900,15 +2900,15 @@ if "import gi" in legacy_status or "Gtk." in legacy_status:
     errors.append("retired ming-status-center must delegate to the Ming widget")
 if "import gi" in legacy_library or "Gtk." in legacy_library:
     errors.append("retired ming-app-library must delegate to the Ming drawer")
-# One responsive Dock profile owns all installed and Live sessions. Runtime
+# One Calm Glass Rail Dock profile owns all installed and Live sessions. Runtime
 # sizing selects 32/36/40 px from the screen short edge without changing the
-# centered geometry, 12 px gap, Ming theme or hover animation.
+# centered geometry, Ming theme or restrained hover animation.
 for marker in [
     # RC3's Offset=12 shifted the centered Dock; the shipped profile must use
     # the active value "Offset=0" (the legacy marker "Offset=12" is rejected).
     # zero offset and reserve the 12px bottom margin through the strut helper.
-    "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=0",
-    "ZoomEnabled=true", "ZoomPercent=148", "HideMode=1", "Theme=Ming",
+    "MingDockProfile=2641-calm-glass-rail", "Alignment=3", "Offset=0",
+    "ZoomEnabled=true", "ZoomPercent=136", "HideMode=1", "Theme=Ming",
     "ming-store.dockitem",
 ]:
     if marker not in plank_settings:
@@ -2931,17 +2931,17 @@ for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split
 plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
 plank_default_theme = require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")
 for marker in [
-        "OuterStrokeColor=31;;98;;84;;54",
-        "FillStartColor=255;;255;;255;;226",
-        "FillEndColor=242;;250;;247;;238",
+        "OuterStrokeColor=47;;138;;125;;80",
+        "FillStartColor=255;;255;;255;;228",
+        "FillEndColor=231;;245;;241;;240",
         "[PlankDockTheme]",
         "TopRoundness=14",
-        "BottomRoundness=0",
-        "BottomPadding=2",
-        "HorizPadding=16",
+        "BottomRoundness=14",
+        "BottomPadding=8",
+        "HorizPadding=14",
         "ItemPadding=4",
         "UrgentBounceTime=420",
-        "LaunchBounceTime=150",
+        "LaunchBounceTime=130",
         "ItemMoveTime=130"]:
     if marker not in plank_theme:
         errors.append(f"Plank theme missing animation marker {marker}")
