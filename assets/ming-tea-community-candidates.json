@@ -83,6 +83,18 @@
       "status": "needs-source",
       "names": ["Coding agents M1 MOS", "DSH UNI V R office", "RCHIFY", "DSH Watch Pro"],
       "reason": "未找到精确公开仓库或唯一包名，需要用户提供链接、作者或仓库地址后再审计。"
+    },
+    {
+      "id": "dsh-codex-ui",
+      "source": "https://github.com/MichengAI/dsh-codex-ui",
+      "revision": "84946e2abec910b60e1f5f8aa69e45ab34df2a04",
+      "version": "1.1.18",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": ["session.read", "workspace.read", "workspace.organize", "settings.read"],
+      "status": "ui-reference-adapted",
+      "adapter": "platform/ming-tea/apps/desktop/src/main.ts",
+      "reason": "Codex 风格工作区树、全局搜索、历史会话、项目分组和轮次导航已迁移为铭荼 Tauri UI；没有复制 Web DOM，兼容性由铭荼 IPC 管理。"
     }
   ]
 }

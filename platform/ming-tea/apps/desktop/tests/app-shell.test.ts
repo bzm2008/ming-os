@@ -22,14 +22,17 @@ describe("desktop shell", () => {
     expect(source).toContain("已锁定");
   });
 
-  it("uses a two-column workspace and removes the duplicate left scene rail", () => {
+  it("uses the community-inspired Codex workspace sidebar and inspector", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     const css = readFileSync(join(__dirname, "..", "src", "theme.css"), "utf8");
-    expect(source).toContain('<section class="workspace"><div class="main-column">');
+    expect(source).toContain('<section class="workspace"><div class="workspace-sidebar">');
+    expect(source).toContain("codex-sidebar");
+    expect(source).toContain("历史项目");
+    expect(source).toContain("本月额度");
+    expect(source).toContain("铭荼宠物");
     expect(source).toContain('<aside class="inspector">');
-    expect(source).not.toContain("scene-rail");
-    expect(css).toContain("grid-template-columns: minmax(0, 1fr) 320px");
-    expect(css).not.toContain(".scene-rail");
+    expect(css).toContain("grid-template-columns: 250px minmax(0, 1fr) 320px");
+    expect(css).toContain(".codex-sidebar");
   });
 
   it("has a standalone Tauri host for Windows and macOS", () => {
