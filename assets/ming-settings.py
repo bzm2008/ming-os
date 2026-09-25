@@ -1564,6 +1564,11 @@ class MingSettings(Adw.ApplicationWindow):
         self.security_admin_button.connect("clicked", self.on_security_admin_setup)
         self.security_summary_row.add_suffix(self.security_admin_button)
         summary.add(self.security_summary_row)
+        self.agent_runtime_row = Adw.ActionRow(
+            title="后台 AI Agent 接口",
+            subtitle="正在检查隔离会话运行时；不会控制当前桌面。",
+        )
+        summary.add(self.agent_runtime_row)
         box.append(summary)
 
         controls = Adw.PreferencesGroup(
@@ -1584,7 +1589,33 @@ class MingSettings(Adw.ApplicationWindow):
             controls.add(control)
         box.append(controls)
         GLib.idle_add(self.refresh_security_status)
+        GLib.idle_add(self.refresh_agent_runtime_status)
         return sc
+
+    def refresh_agent_runtime_status(self):
+        row = getattr(self, "agent_runtime_row", None)
+        if row is None:
+            return False
+
+        def done(rc, output, error):
+            if self.security_page.get_root() is not self:
+                return False
+            try:
+                result = json.loads(output or "{}") if rc == 0 else {}
+            except ValueError:
+                result = {}
+            if result.get("ok") and result.get("protocol") == "ming.agent.v1":
+                row.set_title("后台 AI Agent 接口已就绪")
+                row.set_subtitle("支持隔离图形会话；前台桌面操控保持关闭。")
+            else:
+                row.set_title("后台 AI Agent 接口未就绪")
+                row.set_subtitle(error or result.get("message") or "运行时依赖尚未安装。")
+            return False
+
+        run_capture_async(
+            ["/usr/local/bin/ming-agent-bridge", "capabilities"],
+            timeout=8, on_done=done)
+        return False
 
     def refresh_security_status(self):
         def admin_done(rc, output, _error):

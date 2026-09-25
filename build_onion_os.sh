@@ -2993,6 +2993,14 @@ if "socket" in agent_bridge or "http.server" in agent_bridge:
     errors.append("ming-agent-bridge must not open a network listener")
 agent_capabilities = require_file(
     "usr/lib/ming-os/agent/agent-capabilities.json", "ming.agent.v1")
+agent_service = require_file(
+    "usr/local/bin/ming-agent-service", "org.mingos.Agent1")
+if "foreground_assist = False" not in agent_service:
+    errors.append("ming-agent-service must keep foreground assist disabled")
+agent_service_unit = require_file(
+    "usr/lib/systemd/user/ming-agent.service", "org.mingos.Agent1")
+if "WantedBy=" in agent_service_unit:
+    errors.append("ming-agent.service must not be enabled by the base image")
 android_runtime = require_file(
     "usr/local/bin/ming-android-runtime", "class AndroidRuntime")
 validate_generated_executable("usr/local/bin/ming-android-runtime", "python")

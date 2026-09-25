@@ -114,6 +114,13 @@ deploy_settings_hub() {
         echo "[08_settings_hub][ERROR] 未找到 Ming OS 更新页 logo: ${logo}" >&2
         return 1
     fi
+    if [[ -f /tmp/ming-build/assets/ming-agent-service.py ]]; then
+        install -m 0755 /tmp/ming-build/assets/ming-agent-service.py /usr/local/bin/ming-agent-service
+    fi
+    if [[ -f /tmp/ming-build/config/systemd/user/ming-agent.service ]]; then
+        install -D -m 0644 /tmp/ming-build/config/systemd/user/ming-agent.service \
+            /usr/lib/systemd/user/ming-agent.service
+    fi
     install -D -m 0644 "${logo}" /usr/share/pixmaps/ming-os-logo.png
     # 构建期自检：语法 + 关键依赖（gi/Adw 不一定在 chroot 可导入，仅校验语法）
     python3 -m py_compile /usr/local/bin/ming-settings 2>/dev/null \
