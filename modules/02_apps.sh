@@ -112,7 +112,9 @@ install_xfce_desktop() {
         zenity \
         desktop-base \
         xfce4-power-manager \
-        xfce4-power-manager-plugins \
+        xfce4-power-manager-plugins || return 1
+
+    apt install -y --no-install-recommends \
         xvfb \
         dbus-x11 || return 1
 
