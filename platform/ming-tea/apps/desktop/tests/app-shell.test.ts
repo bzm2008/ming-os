@@ -11,10 +11,42 @@ describe("desktop shell", () => {
     expect(source).not.toContain("127.0.0.1:3080");
   });
 
+  it("keeps scene and thinking selection in the pre-session gate", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
+    expect(source).toContain("started: false");
+    expect(source).toContain("state.started ? conversation() : modeGate()");
+    expect(source).toContain('if (state.started) return; state.scene');
+    expect(source).toContain('if (state.started) return; state.thinking');
+    expect(source).toContain('state.started = true');
+    expect(source).toContain('data-action="start"');
+    expect(source).toContain("已锁定");
+  });
+
+  it("uses a two-column workspace and removes the duplicate left scene rail", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
+    const css = readFileSync(join(__dirname, "..", "src", "theme.css"), "utf8");
+    expect(source).toContain('<section class="workspace"><div class="main-column">');
+    expect(source).toContain('<aside class="inspector">');
+    expect(source).not.toContain("scene-rail");
+    expect(css).toContain("grid-template-columns: minmax(0, 1fr) 320px");
+    expect(css).not.toContain(".scene-rail");
+  });
+
   it("has a standalone Tauri host for Windows and macOS", () => {
     const config = JSON.parse(readFileSync(join(__dirname, "..", "src-tauri", "tauri.conf.json"), "utf8"));
     expect(config.productName).toBe("铭荼");
     expect(config.identifier).toBe("cn.mingos.mingtea");
     expect(config.app.windows[0].minWidth).toBeGreaterThanOrEqual(900);
+  });
+
+  it("keeps mode and thinking selection in the pre-session gate", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
+    expect(source).toContain("mode-gate");
+    expect(source).toContain('data-mode="${id}"');
+    expect(source).toContain('data-thinking="${id}"');
+    expect(source).toContain("state.started ? conversation() : modeGate()");
+    expect(source).toContain("if (state.started) return");
+    expect(source).not.toContain("scene-rail");
+    expect(source).not.toContain("rail-link");
   });
 });

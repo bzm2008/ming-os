@@ -47,6 +47,7 @@ __pycache__/
 /platform/ming-tea/**/node_modules/
 /platform/ming-tea/apps/desktop/dist/
 /platform/ming-tea/apps/desktop/src-tauri/target/
+/platform/ming-tea/tsconfig.tsbuildinfo
 
 # OS files
 .DS_Store
