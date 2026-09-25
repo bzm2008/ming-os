@@ -1,0 +1,11 @@
+{
+  "protocol": "ming.agent.v1",
+  "runtime": "ming-agent-bridge",
+  "mode": "isolated-session",
+  "foreground_assist": false,
+  "capabilities": {
+    "session": ["create", "status", "stop"],
+    "screen": ["status", "windows", "screenshot", "activate", "click", "type", "key"],
+    "store": ["search", "details", "inventory", "updates", "log", "install", "update", "remove", "refresh"]
+  }
+}

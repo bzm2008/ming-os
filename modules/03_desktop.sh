@@ -328,7 +328,7 @@ install_ming_shell_components() {
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
     install -d -o root -g root -m 0700 /var/cache/ming-os/store /run/ming-store-control
-    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-runtime.py; do
+    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-runtime.py ming-agent-bridge.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -472,6 +472,9 @@ MINGPACKAGEINSTALLER
     install -m 0644 "${asset_dir}/ming-store-core.py" "${lib_dir}/ming-store-core.py"
     install -m 0755 "${asset_dir}/ming-store-control.py" /usr/local/sbin/ming-store-control
     install -m 0755 "${asset_dir}/ming-agent-runtime.py" /usr/local/bin/ming-agent-runtime
+    install -m 0755 "${asset_dir}/ming-agent-bridge.py" /usr/local/bin/ming-agent-bridge
+    install -d -m 0755 /usr/lib/ming-os/agent
+    install -m 0644 "${asset_dir}/agent-capabilities.json" /usr/lib/ming-os/agent/agent-capabilities.json
     install -d -m 0755 /usr/share/ming-os/store/catalog
     install -m 0644 "${asset_dir}"/ming-store-catalog/*.json \
         /usr/share/ming-os/store/catalog/

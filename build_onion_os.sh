@@ -2987,6 +2987,12 @@ if "foreground_display_rejected" not in agent_runtime:
     errors.append("ming-agent-runtime must reject foreground display reuse")
 if "-nolisten" not in agent_runtime or "Xvfb" not in agent_runtime:
     errors.append("ming-agent-runtime must isolate Xvfb sessions")
+agent_bridge = require_file(
+    "usr/local/bin/ming-agent-bridge", "ming.agent.v1")
+if "socket" in agent_bridge or "http.server" in agent_bridge:
+    errors.append("ming-agent-bridge must not open a network listener")
+agent_capabilities = require_file(
+    "usr/lib/ming-os/agent/agent-capabilities.json", "ming.agent.v1")
 android_runtime = require_file(
     "usr/local/bin/ming-android-runtime", "class AndroidRuntime")
 validate_generated_executable("usr/local/bin/ming-android-runtime", "python")
