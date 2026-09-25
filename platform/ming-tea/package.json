@@ -8,7 +8,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "build:agent": "esbuild packages/agent/src/cli.ts --bundle --platform=node --format=esm --outfile=apps/desktop/src-tauri/resources/ming-tea-agent.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

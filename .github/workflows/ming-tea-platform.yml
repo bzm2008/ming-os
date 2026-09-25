@@ -37,6 +37,8 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
@@ -55,4 +57,5 @@ jobs:
           cache-dependency-path: platform/ming-tea/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/desktop build:agent
       - run: pnpm --filter @ming-tea/desktop tauri:build

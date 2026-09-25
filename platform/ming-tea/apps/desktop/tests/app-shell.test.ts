@@ -40,6 +40,15 @@ describe("desktop shell", () => {
     expect(config.productName).toBe("铭荼");
     expect(config.identifier).toBe("cn.mingos.mingtea");
     expect(config.app.windows[0].minWidth).toBeGreaterThanOrEqual(900);
+    expect(config.bundle.macOS.minimumSystemVersion).toBe("11.0");
+    expect(config.bundle.macOS.dmg.windowSize.width).toBe(720);
+  });
+
+  it("declares macOS automation usage text and least privilege entitlement", () => {
+    const plist = readFileSync(join(__dirname, "..", "src-tauri", "Info.plist"), "utf8");
+    const entitlements = readFileSync(join(__dirname, "..", "src-tauri", "entitlements.plist"), "utf8");
+    expect(plist).toContain("NSAppleEventsUsageDescription");
+    expect(entitlements).toContain("com.apple.security.network.client");
   });
 
   it("keeps mode and thinking selection in the pre-session gate", () => {
