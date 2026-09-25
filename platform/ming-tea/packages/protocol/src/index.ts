@@ -6,7 +6,13 @@ export type Action =
   | "session.create"
   | "session.cancel"
   | "tool.request"
-  | "approval.consume";
+  | "approval.consume"
+  | "memory.profile.get"
+  | "memory.recall"
+  | "memory.capture"
+  | "session.search"
+  | "session.recall"
+  | "discipline.status";
 
 export interface Request {
   id: string;

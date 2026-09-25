@@ -1,0 +1,88 @@
+{
+  "schema": "ming.tea.community.candidates.v1",
+  "policy": "audit-before-install",
+  "candidates": [
+    {
+      "id": "dsh-agent-identity",
+      "source": "https://github.com/xingyingyuzhui/dsh-agent-identity",
+      "revision": "cbab483bbaa7c8ee44c1bdc958b491afaee6abdd",
+      "version": "0.1.8",
+      "license": "MIT",
+      "runtime": "dsh-cordis-node",
+      "permissions": ["prompt.identity.read", "prompt.memory.read", "file.read", "file.write"],
+      "status": "adapted-local",
+      "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#IdentityMemoryAdapter -> memory.ts#LocalMemoryStore",
+      "reason": "已接入铭荼本地适配器；按 profile/session/task 分级保存，写入时脱敏并由会话权限控制，不直接复制第三方身份文件。"
+    },
+    {
+      "id": "dsh-session-workbench",
+      "source": "https://github.com/PolinniZhong/dsh-session-workbench",
+      "revision": "9312b28922e65499eed54df86d9d26eda3000e4f",
+      "version": "1.0.2",
+      "license": "MIT",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": ["session.search", "session.read", "session.reference"],
+      "status": "adapted-local",
+      "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#SessionWorkbenchAdapter -> session-library.ts#SessionLibrary",
+      "reason": "已接入铭荼本地只读检索适配器；索引和召回留在 Agent service 内，原生 UI 只消费会话引用，不复制 DSH Web UI。"
+    },
+    {
+      "id": "everos-memory",
+      "source": "https://github.com/EverMind-AI/plugins/tree/main/dsh",
+      "revision": "f76f4d06135a0b5d784d15eed133ecdcedc12d47",
+      "version": "0.1.0",
+      "license": "Apache-2.0",
+      "runtime": "everos-local-service",
+      "permissions": ["memory.read", "memory.capture", "memory.flush", "network.loopback"],
+      "status": "optional-adapter-ready",
+      "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#EverosMemoryAdapter",
+      "reason": "已提供显式 loopback 连接器适配器；默认禁用，只有用户启用本机 EverOS 服务后才捕获记忆，不进入低配 ISO 默认安装。"
+    },
+    {
+      "id": "cleverer-dsh",
+      "source": "https://github.com/Classicoke/cleverer-dsh",
+      "revision": "40bd216ea9c7a95da887aa97fb661a0e8c7b1dd2",
+      "version": "1.2.0",
+      "license": "MIT",
+      "runtime": "dsh-cordis-node",
+      "permissions": ["prompt.inject", "session.read", "skill.read", "file.read", "diagnostic.run"],
+      "status": "adapted-local",
+      "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#ClevererDshAdapter -> discipline.ts#ExecutionDiscipline",
+      "reason": "已接入安全子集：工具尝试次数上限、失败记录和成功重置；不执行第三方脚本，不改变铭荼审批策略。"
+    },
+    {
+      "id": "honcho-memory",
+      "source": "https://github.com/plastic-labs/honcho",
+      "revision": "main-unpinned",
+      "version": "3.2.1-server",
+      "license": "AGPL-3.0",
+      "runtime": "honcho-service",
+      "permissions": ["memory.read", "memory.write", "network.external"],
+      "status": "external-connector-only",
+      "reason": "记忆基础设施成熟，但 AGPL-3.0 和外部服务/自托管依赖不适合直接预装；只提供用户主动启用的连接器。"
+    },
+    {
+      "id": "dsh-data-agent",
+      "source": "https://github.com/omdsh-dev/dsh-data-agent",
+      "revision": "v0.2.0",
+      "version": "0.2.0",
+      "license": "MIT",
+      "runtime": "dsh-web-or-tui",
+      "permissions": ["database.read", "sql.execute", "report.write", "file.write"],
+      "status": "blocked-version",
+      "reason": "当前 release peerDependencies 要求 DSH 0.1.7-rc.1，铭荼当前锁定 0.1.6-alpha.2；数据库能力还必须增加只读账号和连接审批。"
+    },
+    {
+      "id": "unresolved-user-names",
+      "source": null,
+      "revision": null,
+      "version": null,
+      "license": null,
+      "runtime": null,
+      "permissions": [],
+      "status": "needs-source",
+      "names": ["Coding agents M1 MOS", "DSH UNI V R office", "RCHIFY", "DSH Watch Pro"],
+      "reason": "未找到精确公开仓库或唯一包名，需要用户提供链接、作者或仓库地址后再审计。"
+    }
+  ]
+}

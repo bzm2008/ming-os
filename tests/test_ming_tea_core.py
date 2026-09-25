@@ -8,6 +8,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "assets" / "ming-tea-core.py"
 PLUGIN_PATH = ROOT / "assets" / "ming-tea-plugins.json"
+COMMUNITY_PATH = ROOT / "assets" / "ming-tea-community-candidates.json"
 
 
 def load_core():
@@ -62,6 +63,20 @@ class MingTeaCoreTests(unittest.TestCase):
             handle.flush()
             with self.assertRaises(self.api.PluginCatalogError):
                 self.api.PluginCatalog(pathlib.Path(handle.name))
+
+    def test_community_candidates_are_audited_without_auto_installing_external_plugins(self):
+        candidates = json.loads(COMMUNITY_PATH.read_text(encoding="utf-8"))["candidates"]
+        statuses = {candidate["id"]: candidate["status"] for candidate in candidates}
+        by_id = {candidate["id"]: candidate for candidate in candidates}
+        for plugin_id in ("dsh-agent-identity", "dsh-session-workbench", "cleverer-dsh"):
+            self.assertEqual(by_id[plugin_id]["status"], "adapted-local")
+            self.assertIn("community-adapters.ts#", by_id[plugin_id]["adapter"])
+        self.assertEqual(by_id["everos-memory"]["status"], "optional-adapter-ready")
+        self.assertEqual(statuses["honcho-memory"], "external-connector-only")
+        self.assertEqual(statuses["dsh-data-agent"], "blocked-version")
+        self.assertEqual(statuses["unresolved-user-names"], "needs-source")
+        installed = {plugin["id"] for plugin in json.loads(PLUGIN_PATH.read_text(encoding="utf-8"))["plugins"]}
+        self.assertNotIn("dsh-data-agent", installed)
 
     def test_event_protocol_rejects_unknown_events_and_redacts_api_keys(self):
         runtime = self.api.MingTeaRuntime(audit_path=pathlib.Path(tempfile.mktemp()))
