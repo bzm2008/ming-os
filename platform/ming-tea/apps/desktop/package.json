@@ -1,0 +1,9 @@
+{
+  "name": "@ming-tea/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev": "vite", "build": "vite build", "tauri:dev": "tauri dev", "tauri:build": "tauri build"},
+  "dependencies": {"@ming-tea/protocol": "workspace:*"},
+  "devDependencies": {"vite": "^7.1.5", "@tauri-apps/cli": "^2.8.4"}
+}

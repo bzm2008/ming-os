@@ -41,6 +41,13 @@ __pycache__/
 /rebrand_to_ming.py
 /Calamares
 
+# Local 铭荼 DSH runtime install; reproducible package metadata lives in assets.
+/.ming-tea/
+/platform/ming-tea/node_modules/
+/platform/ming-tea/**/node_modules/
+/platform/ming-tea/apps/desktop/dist/
+/platform/ming-tea/apps/desktop/src-tauri/target/
+
 # OS files
 .DS_Store
 Thumbs.db

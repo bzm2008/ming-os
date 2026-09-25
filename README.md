@@ -69,6 +69,16 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
 - Low-memory strategy with zram, lighter effects, cleanup helpers, and optional WeChat/WPS installers instead of preinstalling them.
 - OTA update flow with readable status, checksum, size, and error messages.
 
+## 铭荼助手
+
+Ming OS now includes **铭荼**, a native GTK4/libadwaita DeepSeek Harness assistant. It is a standalone desktop application rather than a web-only DSH entry point.
+
+- Three user-facing scenes: Office, Development, and Guided Learning.
+- Local IPC boundary isolates the fast-moving DSH runtime from the Ming UI.
+- Browser, terminal, file, office, and learning-note abilities share one permission and audit layer.
+- Sudo, package installation, deletion, uploads, submissions, and system changes require confirmation.
+- Community plugin sources and compatibility notes are tracked in `docs/ming-tea-plugin-audit.md`.
+
 ## Install
 
 For most users, download the ISO from the official website and write it with Rufus, Ventoy, or `dd`.

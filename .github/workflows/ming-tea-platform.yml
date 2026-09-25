@@ -1,0 +1,58 @@
+name: ming-tea-platform
+
+on:
+  push:
+    paths:
+      - "platform/ming-tea/**"
+  pull_request:
+    paths:
+      - "platform/ming-tea/**"
+
+jobs:
+  contract:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: platform/ming-tea
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: platform/ming-tea/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: node node_modules/vitest/vitest.mjs run
+      - run: node node_modules/typescript/bin/tsc --noEmit
+
+  desktop:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: platform/ming-tea
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: platform/ming-tea/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ming-tea/desktop tauri:build

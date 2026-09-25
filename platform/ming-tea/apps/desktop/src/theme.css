@@ -1,0 +1,28 @@
+:root { font-family: Inter, "Noto Sans CJK SC", system-ui, sans-serif; color: #17333a; background: #f4f7f5; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 980px; min-height: 640px; background: #f4f7f5; }
+button, textarea { font: inherit; }
+.app-shell { min-height: 100vh; }
+.topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: #ffffffd9; border-bottom: 1px solid #dce9e5; }
+.brand-mark { font-size: 24px; font-weight: 750; letter-spacing: .08em; color: #147d78; }
+.connection { display: flex; align-items: center; gap: 8px; color: #60777a; font-size: 13px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #2da674; }
+.workspace { display: grid; grid-template-columns: 220px minmax(420px, 1fr) 260px; min-height: calc(100vh - 64px); }
+.scene-rail { padding: 28px 18px; border-right: 1px solid #dce9e5; background: #edf4f1; }
+.rail-label, .panel-title, .eyebrow { color: #6b8586; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.rail-label { margin: 0 10px 14px; }
+.scene { display: grid; gap: 5px; width: 100%; padding: 14px 12px; margin-bottom: 8px; border: 1px solid transparent; border-radius: 8px; text-align: left; color: #315458; background: transparent; cursor: pointer; }
+.scene strong { font-size: 14px; }
+.scene span { font-size: 12px; color: #799091; }
+.scene:hover, .scene.selected { border-color: #b6d9d1; background: #fff; box-shadow: 0 5px 18px #367f7512; }
+.conversation { padding: 72px 64px; background: #fbfcfa; }
+.eyebrow { color: #16857d; }
+h1 { max-width: 620px; margin: 16px 0 12px; font-size: 38px; line-height: 1.16; letter-spacing: 0; font-weight: 720; }
+.intro { max-width: 500px; color: #6e8587; line-height: 1.7; }
+.composer { display: flex; align-items: flex-end; gap: 12px; max-width: 650px; margin-top: 60px; padding: 12px; background: #fff; border: 1px solid #dbe9e5; border-radius: 10px; box-shadow: 0 10px 35px #275f5910; }
+textarea { flex: 1; min-height: 72px; resize: vertical; border: 0; outline: 0; color: #23464b; background: transparent; }
+.send { padding: 10px 16px; border: 0; border-radius: 7px; color: #fff; background: #16857d; cursor: pointer; }
+.inspector { padding: 28px 20px; border-left: 1px solid #dce9e5; background: #f7faf8; }
+.empty-state { margin-top: 28px; padding: 18px 0; color: #8aa09e; line-height: 1.8; }
+.empty-state small { color: #a2b3b0; }
+@media (max-width: 1050px) { .workspace { grid-template-columns: 190px minmax(420px, 1fr); } .inspector { display: none; } .conversation { padding: 60px 44px; } }

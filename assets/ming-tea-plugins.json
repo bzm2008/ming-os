@@ -1,0 +1,57 @@
+{
+  "schema": "ming.tea.plugins.v1",
+  "plugins": [
+    {
+      "id": "ming-browser-adapter",
+      "name": "铭荼浏览器自动化适配器",
+      "source": "https://github.com/deepseek-ai/deepseek-harness",
+      "revision": "developer-preview-review-required",
+      "license": "MIT",
+      "runtime": "dsh",
+      "permissions": ["browser.read", "browser.open", "browser.submit", "browser.upload"],
+      "debian13": true,
+      "low_resource": true,
+      "status": "adapter-planned",
+      "adaptation": "复用 DSH 工具与会话接口，通过铭荼审批层约束外部提交和上传。"
+    },
+    {
+      "id": "ming-terminal-adapter",
+      "name": "铭荼终端与系统诊断适配器",
+      "source": "https://github.com/deepseek-ai/deepseek-harness",
+      "revision": "developer-preview-review-required",
+      "license": "MIT",
+      "runtime": "dsh",
+      "permissions": ["terminal.run", "diagnostic.run", "system.status", "system.modify"],
+      "debian13": true,
+      "low_resource": true,
+      "status": "adapter-planned",
+      "adaptation": "优先调用 Ming OS 现有诊断工具，sudo、包管理和系统修改进入逐项审批。"
+    },
+    {
+      "id": "ming-office-adapter",
+      "name": "铭荼 LibreOffice 适配器",
+      "source": "https://github.com/LibreOffice/core",
+      "revision": "debian-trixie-packaged-runtime",
+      "license": "MPL-2.0",
+      "runtime": "libreoffice-uno",
+      "permissions": ["office.read", "office.write", "file.read", "file.upload"],
+      "debian13": true,
+      "low_resource": true,
+      "status": "adapter-planned",
+      "adaptation": "通过系统 LibreOffice/UNO 工作，不在 ISO 中复制第三方二进制。"
+    },
+    {
+      "id": "ming-learning-notes",
+      "name": "铭荼学习笔记适配器",
+      "source": "https://github.com/deepseek-ai/deepseek-harness",
+      "revision": "local-ming-extension",
+      "license": "MIT",
+      "runtime": "python3",
+      "permissions": ["file.read", "office.write"],
+      "debian13": true,
+      "low_resource": true,
+      "status": "local-extension",
+      "adaptation": "保存为用户目录中的 Markdown，不依赖向量数据库或常驻索引服务。"
+    }
+  ]
+}

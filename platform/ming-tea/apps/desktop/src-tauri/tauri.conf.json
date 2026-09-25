@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "铭荼",
+  "version": "0.1.0",
+  "identifier": "cn.mingos.mingtea",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{"title": "铭荼", "width": 1180, "height": 760, "minWidth": 900, "minHeight": 620}],
+    "security": {"csp": null}
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Ming OS system agent assistant"
+  }
+}

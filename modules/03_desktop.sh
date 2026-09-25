@@ -147,6 +147,65 @@ MINGXFCECOMPATDISPLAY
     chmod 0755 "${xfce_display_binary}"
 }
 
+install_ming_tea() {
+    local asset_dir="/tmp/ming-build/assets"
+    local lib_dir="/usr/local/lib/ming-os/ming-tea"
+    local app_dir="/usr/share/ming-os/ming-tea"
+    local asset
+
+    mkdir -p "${lib_dir}" "${app_dir}" /usr/local/bin /usr/share/applications
+    for asset in ming-tea-core.py ming-tea-runtime.py ming-tea.py ming-tea-plugins.json; do
+        if [[ ! -s "${asset_dir}/${asset}" ]]; then
+            echo "ERROR: missing 铭荼 asset: ${asset}" >&2
+            return 1
+        fi
+    done
+
+    install -m 0644 "${asset_dir}/ming-tea-core.py" "${lib_dir}/ming-tea-core.py"
+    install -m 0755 "${asset_dir}/ming-tea-runtime.py" /usr/local/bin/ming-tea-runtime
+    install -m 0755 "${asset_dir}/ming-tea.py" /usr/local/bin/ming-tea
+    install -m 0644 "${asset_dir}/ming-tea-plugins.json" "${app_dir}/plugins.json"
+
+    cat > /usr/local/bin/ming-tea-launch << 'MINGTEALAUNCH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+socket_path="${MING_TEA_SOCKET:-${runtime_dir}/ming-tea.sock}"
+export MING_TEA_SOCKET="${socket_path}"
+if [[ ! -S "${socket_path}" ]]; then
+    /usr/local/bin/ming-tea-runtime --socket "${socket_path}" >/tmp/ming-tea-runtime.log 2>&1 &
+    runtime_pid=$!
+    for _ in $(seq 1 25); do
+        [[ -S "${socket_path}" ]] && break
+        kill -0 "${runtime_pid}" 2>/dev/null || break
+        sleep 0.04
+    done
+fi
+exec /usr/local/bin/ming-tea "$@"
+MINGTEALAUNCH
+    chmod 0755 /usr/local/bin/ming-tea-launch
+
+    cat > /usr/share/applications/ming-tea.desktop << 'MINGTEADESKTOP'
+[Desktop Entry]
+Name=铭荼
+Name[zh_CN]=铭荼
+Comment=Ming OS 原生 DeepSeek Harness 助手
+Exec=/usr/local/bin/ming-tea-launch
+Icon=ming-os-logo
+Terminal=false
+Type=Application
+Categories=Utility;Office;Development;Education;
+StartupNotify=true
+StartupWMClass=cn.mingos.MingTea
+X-Ming-Managed=true
+X-Ming-AppRole=assistant
+MINGTEADESKTOP
+    chmod 0644 /usr/share/applications/ming-tea.desktop
+    desktop-file-validate /usr/share/applications/ming-tea.desktop
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+}
+
 cleanup_retired_ming_entries() {
     cat > /usr/local/bin/ming-migrate-all-disks << 'MINGMIGRATEDISKS'
 #!/usr/bin/env bash
@@ -3000,7 +3059,7 @@ MINGDOCKPRESEED
 [PlankDockPreferences]
 # MingDockProfile=2641-responsive-centered
 #当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem;;ming-tea.dockitem
 #停靠位置: 0=左 1=右 2=上 3=下
 Position=3
 #对齐: 3=居中
@@ -3107,7 +3166,8 @@ for launcher in \
     "ming-files:ming-files.desktop" \
     "ming-store:ming-store.desktop" \
     "ming-settings:ming-settings.desktop" \
-    "ming-terminal:ming-terminal.desktop"; do
+    "ming-terminal:ming-terminal.desktop" \
+    "ming-tea:ming-tea.desktop"; do
     _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
 done
 if ! ${skip_xiahai}; then
@@ -4147,7 +4207,7 @@ write_default_plank_settings() {
     cat >"${settings}" << 'PLANKRUNTIMESETTINGS'
 [PlankDockPreferences]
 # MingDockProfile=2641-responsive-centered
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem;;ming-tea.dockitem
 Position=3
 Alignment=3
 # Legacy RC3 Offset=12 is intentionally not active; zero keeps Alignment=3 centered.
@@ -10119,6 +10179,7 @@ main() {
     configure_ming_shell
     install_ming_shell_components
     install_ming_settings
+    install_ming_tea
     cleanup_retired_ming_entries
     hide_trimmed_xfce_entries
     install_ota_target_guard

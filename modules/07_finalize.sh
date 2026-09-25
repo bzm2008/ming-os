@@ -30,6 +30,7 @@ readonly DESKTOP_LAUNCHERS=(
     "ming-firefox.desktop"
     "ming-store.desktop"
     "ming-toolbox.desktop"
+    "ming-tea.desktop"
     "xiahai-xiaoming.desktop"
     "ming-terminal.desktop"
     "Install Ming OS.desktop"
@@ -62,7 +63,7 @@ seed_trusted_desktop_receipts() {
     install -d -m 0755 "${receipt_dir}"
     for launcher in \
         "ming-settings.desktop" "ming-files.desktop" "ming-app-library.desktop" \
-        "ming-firefox.desktop" "ming-terminal.desktop" "ming-store.desktop" "ming-toolbox.desktop" "xiahai-xiaoming.desktop" \
+        "ming-firefox.desktop" "ming-terminal.desktop" "ming-store.desktop" "ming-toolbox.desktop" "ming-tea.desktop" "xiahai-xiaoming.desktop" \
         "Install Ming OS.desktop"; do
         source="/usr/share/applications/${launcher}"
         [[ -f "${source}" ]] || continue

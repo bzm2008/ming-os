@@ -2291,6 +2291,7 @@ desktop_names = [
     "ming-firefox.desktop",
     "ming-store.desktop",
     "ming-toolbox.desktop",
+    "ming-tea.desktop",
 ]
 if os.environ.get("MING_SKIP_XIAHAI") != "1":
     desktop_names.append("xiahai-xiaoming.desktop")
@@ -2299,6 +2300,12 @@ search_path = ":".join(str(root / item) for item in (
 ))
 errors = []
 desktop_commands = {}
+# Ming Tea plugin manifest is installed by modules/03_desktop.sh and checked
+# here so the ISO cannot ship the native app without its audited catalog.
+ming_tea_plugins = require_file("usr/share/ming-os/ming-tea/plugins.json", "ming-tea-plugins.json")
+for marker in ["ming-browser-adapter", "ming-terminal-adapter", "ming-office-adapter"]:
+    if marker not in ming_tea_plugins:
+        errors.append(f"Ming Tea plugin manifest missing {marker}")
 for name in desktop_names:
     path = root / "usr/share/applications" / name
     if not path.is_file():
@@ -2825,7 +2832,7 @@ if not trusted_receipts.is_dir():
     errors.append("trusted desktop receipt directory is missing")
 for launcher in [
     "ming-settings.desktop", "ming-files.desktop", "ming-app-library.desktop",
-    "ming-firefox.desktop", "ming-terminal.desktop", "Install Ming OS.desktop",
+    "ming-firefox.desktop", "ming-terminal.desktop", "ming-tea.desktop", "Install Ming OS.desktop",
 ]:
     launcher_path = root / "usr/share/applications" / launcher
     if launcher_path.is_file() and not (trusted_receipts / launcher).is_file():

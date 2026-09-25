@@ -1,0 +1,21 @@
+{
+  "schema": "ming.tea.dsh.lock.v1",
+  "runtime": {
+    "package": "@deepseek-ai/dsh",
+    "version": "0.1.6-alpha.2",
+    "revision": "ddefc45fbc7f8e46dd73185e68295696d1297887",
+    "license": "MIT",
+    "integrity": "sha512-PHR/3ZHpJNWXlDQ3U9weFb7calWbSMJd2GD3z2iPJ8zAKL7ipuzyPy5xGbaXf2OA8hc0SAGJeoUW7nfatCNOYw=="
+  },
+  "install": {"package_manager":"npm","ignore_scripts":true,"audit":false,"fund":false,"node":">=22.19.0"},
+  "plugins": [
+    {"package":"@deepseek-ai/dsh-tool-bash","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-hyL5bvtxrRFAuapxKpudQy9oe5lxxrQU15zfQxl9MOczIvv+NFYHcO2+gNpYHu96TKdD/0yA+2uzhTyfWKOAog==","capabilities":["terminal.run","diagnostic.run"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-tool-fs","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-X5USuzyhRXhp1gFRxZiB7QaoVvjhZH+BB+al8E1H2imKEVdFX3VTQqpFCksAJBBuv/8CwCAs3zrrB0Pt5HgLkw==","capabilities":["file.read","file.list","file.delete","file.upload"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-tool-web","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-me0aJrLs/ZIWJA+wf/Pd6Jzm6DghxEcvwoZuymPo0oC22oQzA5r7vqv1jdgoZTConF4diO6r37RPKX9VQ3jiVQ==","capabilities":["browser.read","browser.open","browser.submit","browser.upload"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-browser-use","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-AAVowmKUiO6GgG+ghXiokCkCmkw9CV6rXjTCfTAJdgbWs7OyfoQhG045krzpR5Aa9/GPA/7rxGa6ClsDc0Klyw==","capabilities":["browser.read","browser.open"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-computer-use","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-+TOcjPBsOPh06b+snRqWKmER3s75vPwDhM3++TbCTArmnPX8/+D8ZCzL0rYpZ6LUTObVbqQZsoSWY2wasAJkNg==","capabilities":["app.open","browser.open"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-experimental-browser-use-playwright-mcp","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-1pvPBbVxKxcvY/F4+7wQaTTnvq6SeNzFH/16kIo8Ick4qFj0t1R+cZqPDQt8ew9baRipfBVjjcH9gbKdZ+DwTQ==","capabilities":["browser.read","browser.open","browser.submit","browser.upload"],"risk":"approval-gated"},
+    {"package":"@deepseek-ai/dsh-experimental-computer-use-cua-driver-native","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-qh3FV4WoHt2/ciY/T4iHNLoEzCrIqN6hn+WuCwODv6LVvhPpg134O+RP/dV3GQEXyvyIGbnwD4gnMsYkZnLusg==","capabilities":["app.open","browser.open"],"risk":"approval-gated","experimental":true},
+    {"package":"@deepseek-ai/dsh-skill-office","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-aJMNK0N2hvih3YR+rcAgWgwGmi1J/kHtr/x+BHyMDSycIyh5gHPnMDbtffWSGb+HaNx6jbDKRAISUvKYdFORJg==","capabilities":["office.read","office.write"],"risk":"approval-gated"}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@ming-tea/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {".": "./src/index.ts"},
+  "bin": {"ming-tea-agent": "./src/cli.ts"},
+  "dependencies": {"@ming-tea/protocol": "workspace:*"}
+}
