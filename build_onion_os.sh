@@ -2129,7 +2129,7 @@ validate_required_desktop_runtime() {
     fi
 
     local command package
-    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send zenity xprop nm-online fc-match; do
+    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send zenity xprop nm-online fc-match Xvfb dbus-daemon; do
         if ! chroot_exec /bin/sh -c "command -v '${command}' >/dev/null 2>&1"; then
             log_error "required desktop command is missing: ${command}"
             return 1
@@ -2165,7 +2165,7 @@ validate_required_desktop_runtime() {
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
         gpgv \
-        gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
+        gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill xvfb dbus-x11 \
         pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
         libspa-0.2-bluetooth pavucontrol dbus-user-session dbus-x11 libpam-systemd bluez upower pkexec polkitd \
         lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
@@ -2981,6 +2981,12 @@ require_file(
     "usr/local/lib/ming-os/ming-store-core.py", "WineOfficialProvider")
 store_control = require_file(
     "usr/local/sbin/ming-store-control", "REQUEST_ID")
+agent_runtime = require_file(
+    "usr/local/bin/ming-agent-runtime", "AgentSessionManager")
+if "foreground_display_rejected" not in agent_runtime:
+    errors.append("ming-agent-runtime must reject foreground display reuse")
+if "-nolisten" not in agent_runtime or "Xvfb" not in agent_runtime:
+    errors.append("ming-agent-runtime must isolate Xvfb sessions")
 android_runtime = require_file(
     "usr/local/bin/ming-android-runtime", "class AndroidRuntime")
 validate_generated_executable("usr/local/bin/ming-android-runtime", "python")
