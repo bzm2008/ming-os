@@ -2952,6 +2952,7 @@ require_file("usr/share/themes/Ming-Dark/xfce-notify-4.0/gtk.css", "window#XfceN
 require_file("usr/share/themes/Ming-Dark/index.theme", "GtkTheme=Ming-Dark")
 
 for path, marker in [
+    ("usr/local/lib/ming-os/ming-ui-tokens.py", "TOKENS"),
     ("usr/local/lib/ming-os/ming-shell-common.py", "DesktopEntry"),
     ("usr/local/bin/ming-app-drawer", "drawer_geometry"),
     ("usr/local/bin/ming-launch", "LaunchRequest"),

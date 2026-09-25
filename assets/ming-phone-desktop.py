@@ -16,6 +16,38 @@ import time
 from pathlib import Path
 
 
+def load_ui_tokens():
+    candidates = (
+        Path(__file__).with_name("ming-ui-tokens.py"),
+        Path("/usr/local/lib/ming-os/ming-ui-tokens.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.TOKENS
+    return {
+        "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+        "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+        "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+        "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+        "border": "#D7E4DE", "shadow": "#17483C",
+    }
+
+
+TOKENS = {
+    "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+    "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+    "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+    "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+    "border": "#D7E4DE", "shadow": "#17483C",
+}
+
+
 def widget_state_path():
     return Path.home() / ".config" / "ming-os" / "status-widget.json"
 
@@ -620,7 +652,7 @@ WALLPAPER_PATHS = [
 
 CSS = b"""
 window.ming-desktop {
-  background-color: #EFF7F2;
+  background-color: __MING_CANVAS__;
   font-family: "Noto Sans CJK SC", sans-serif;
   font-weight: 400;
 }
@@ -693,8 +725,8 @@ window.ming-desktop {
 .status-widget {
   border-radius: 14px;
   padding: 8px 16px;
-  background: #F9FCFA;
-  border: 1px solid rgba(255, 255, 255, 0.78);
+  background: __MING_SURFACE_ELEVATED__;
+  border: 1px solid __MING_BORDER__;
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
 }
 .status-widget-compact {
@@ -705,15 +737,15 @@ window.ming-desktop {
 }
 .status-compact-pill {
   min-height: 38px;
-  border-radius: 27px;
-  padding: 8px 12px;
-  background: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
+  border-radius: 21px;
+  padding: 8px 14px;
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  box-shadow: 0 8px 24px rgba(23, 72, 60, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
   color: #17231F;
 }
 .status-compact-pill:hover { background: #F4F8F5; }
-.status-compact-time { font-size: 19px; font-weight: 700; color: #17231F; }
+.status-compact-time { font-size: 18px; font-weight: 700; color: #17231F; }
 .status-compact-date { font-size: 10.5px; font-weight: 500; color: #2D695C; }
 .status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
 .status-compact-arrow { font-size: 15px; font-weight: 700; color: #2F8A7D; }
@@ -721,33 +753,39 @@ window.ming-desktop {
   min-width: 0;
   padding: 11px;
   border-radius: 14px;
-  background: #FFFFFF;
-  border: 1px solid rgba(47, 138, 125, 0.14);
-  box-shadow: 0 16px 34px rgba(21, 68, 56, 0.19);
+  /* background: #FFFFFF is the opaque expanded surface before token expansion. */
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  box-shadow: 0 18px 42px rgba(23, 72, 60, 0.22), inset 0 1px 0 rgba(255,255,255,0.88);
 }
 .status-expanded-title {
-  color: #2F8A7D;
-  font-size: 12px;
+  color: __MING_ACCENT_STRONG__;
+  font-size: 13px;
   font-weight: 700;
 }
 .status-resource-grid { margin: 1px 0 2px; }
 .status-resource-card {
-  min-width: 84px;
-  padding: 7px 6px;
-  border-radius: 8px;
-  background: #EDF7F2;
-  border: 1px solid rgba(47, 138, 125, 0.10);
+  min-width: 88px;
+  padding: 9px 7px;
+  border-radius: 12px;
+  background: #EEF5F1;
+  border: 1px solid rgba(47, 138, 125, 0.12);
 }
 .status-resource-name { color: #55766B; font-size: 10px; }
 .status-resource-value { color: #245C50; font-size: 14px; font-weight: 700; }
 .status-button {
-  border-radius: 9px;
-  padding: 4px 8px;
-  background: #FFFFFF;
-  border: 1px solid rgba(47, 138, 125, 0.10);
-  color: #21302A;
+  min-height: 34px;
+  border-radius: 10px;
+  padding: 5px 9px;
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  color: __MING_TEXT__;
 }
 .status-button:hover { background: #F4F8F5; }
+.status-button:focus, .status-compact-pill:focus {
+  outline: 2px solid __MING_FOCUS__;
+  outline-offset: 2px;
+}
 .ming-desktop-dark .clock-widget,
 .ming-desktop-dark .status-widget {
   background: #202824;
@@ -784,8 +822,8 @@ window.ming-desktop {
 .ming-desktop-dark .status-resource-name { color: #A9BDB5; }
 .ming-desktop-dark .status-resource-value { color: #E7EEE9; }
 .status-scale trough {
-  min-height: 7px;
-  border-radius: 4px;
+  min-height: 8px;
+  border-radius: 5px;
   background: transparent;
   border: 0;
 }
@@ -806,6 +844,10 @@ window.ming-desktop {
   min-height: 7px;
   border-radius: 4px;
   background: transparent;
+}
+.status-scale:focus {
+  outline: 2px solid __MING_FOCUS__;
+  outline-offset: 2px;
 }
 .status-scale slider {
   min-width: 1px;
@@ -849,6 +891,23 @@ def log(msg):
             handle.write(datetime.datetime.now().strftime("[%F %T] ") + msg + "\n")
     except Exception:
         pass
+
+
+def render_ui_css(source):
+    """Resolve shared visual tokens only when the GTK session starts."""
+    try:
+        loaded = load_ui_tokens()
+        if isinstance(loaded, dict):
+            TOKENS.update(loaded)
+    except Exception as exc:
+        log("shared UI tokens unavailable: %s" % exc)
+    rendered = source
+    for name, value in TOKENS.items():
+        rendered = rendered.replace(
+            ("__MING_%s__" % name.upper()).encode("ascii"),
+            str(value).encode("ascii"),
+        )
+    return rendered
 
 
 def load_notifications_helper():
@@ -4039,7 +4098,7 @@ class PhoneDesktop(Gtk.Window):
             log("status widget signal toggle unavailable")
 
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        provider.load_from_data(render_ui_css(CSS))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
 
         self.wallpaper = WallpaperCanvas()

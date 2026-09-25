@@ -16,6 +16,36 @@ import shutil
 import re
 import sys
 import time
+from pathlib import Path
+
+
+def load_ui_tokens():
+    """Load the shared Ming Mint palette, with an installed-path fallback."""
+    candidates = (
+        Path(__file__).with_name("ming-ui-tokens.py"),
+        Path("/usr/local/lib/ming-os/ming-ui-tokens.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if isinstance(module.TOKENS, dict):
+                return module.TOKENS
+        except (AttributeError, OSError, TypeError):
+            continue
+    return {
+        "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+        "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+        "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+        "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+        "border": "#D7E4DE", "shadow": "#17483C",
+    }
+
+
+TOKENS = load_ui_tokens()
 
 USER = getpass.getuser()
 HOME = os.path.expanduser("~")
@@ -852,10 +882,10 @@ class MingSettings(Adw.ApplicationWindow):
 
     def install_css(self):
         self.style_manager = Adw.StyleManager.get_default()
-        css = b"""
+        css = """
         window.ming-settings-window {
-            background: #F4F7F3;
-            color: #1B2320;
+            background: __MING_CANVAS__;
+            color: __MING_TEXT__;
             font-family: "Noto Sans CJK SC", sans-serif;
             font-size: 15px;
             font-weight: 400;
@@ -872,17 +902,19 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-sidebar {
-            background: #EEF3EF;
-            border-right: 1px solid alpha(#2F8A7D, 0.08);
+            background: __MING_SURFACE_SUBTLE__;
+            border-right: 1px solid alpha(__MING_ACCENT__, 0.08);
+            min-width: 220px;
         }
 
         .ming-settings-content {
-            background: linear-gradient(to bottom, #F7FAF6, #F1F5F0);
+            background: __MING_CANVAS__;
+            padding: 20px 24px 28px 24px;
         }
 
         .ming-settings-window headerbar {
-            background: #FFFFFF;
-            border-bottom: 1px solid alpha(#2F8A7D, 0.06);
+            background: __MING_SURFACE__;
+            border-bottom: 1px solid alpha(__MING_BORDER__, 0.72);
             min-height: 44px;
         }
 
@@ -898,12 +930,12 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window row.ming-nav-row:hover {
-            background: alpha(#2F8A7D, 0.06);
+            background: alpha(__MING_ACCENT__, 0.06);
         }
 
         .ming-settings-window row.ming-nav-row:selected {
-            background: alpha(#2F8A7D, 0.10);
-            color: #1B2320;
+            background: alpha(__MING_ACCENT__, 0.10);
+            color: __MING_TEXT__;
         }
 
         .ming-settings-window row.ming-time-sync-ok {
@@ -936,9 +968,9 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: #FFFFFF;
+            background: __MING_SURFACE__;
             border-radius: 14px;
-            border: 1px solid alpha(#2F8A7D, 0.06);
+            border: 1px solid alpha(__MING_BORDER__, 0.82);
             padding: 8px;
         }
 
@@ -949,18 +981,25 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window button.suggested-action {
-            background: #2F8A7D;
+            background: __MING_ACCENT__;
             color: #FFFFFF;
         }
 
         .ming-settings-window button.suggested-action:hover {
-            background: #27776C;
+            background: __MING_ACCENT_STRONG__;
+        }
+
+        .ming-settings-window button:focus-visible,
+        .ming-settings-window entry:focus-visible,
+        .ming-settings-window row:focus-visible {
+            outline: 2px solid __MING_FOCUS__;
+            outline-offset: 2px;
         }
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
-            background: #FFFFFF;
-            color: #1B2320;
+            background: __MING_SURFACE__;
+            color: __MING_TEXT__;
             border-radius: 10px;
             min-height: 40px;
             padding: 6px 12px;
@@ -969,16 +1008,16 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-settings-window progressbar trough {
             min-height: 8px;
             border-radius: 999px;
-            background: alpha(#2F8A7D, 0.08);
+            background: alpha(__MING_ACCENT__, 0.08);
         }
 
         .ming-settings-window progressbar progress {
             border-radius: 999px;
-            background: #2F8A7D;
+            background: __MING_ACCENT__;
         }
 
         .ming-settings-window label.dim-label {
-            color: alpha(#21302A, 0.66);
+            color: alpha(__MING_MUTED__, 0.82);
         }
 
         .ming-settings-window.ming-settings-dark {
@@ -1068,6 +1107,19 @@ class MingSettings(Adw.ApplicationWindow):
             color: #E7EEE9;
         }
         """
+        for marker, token_name in (
+            ("__MING_CANVAS__", "canvas"),
+            ("__MING_SURFACE__", "surface"),
+            ("__MING_SURFACE_SUBTLE__", "surface_subtle"),
+            ("__MING_ACCENT__", "accent"),
+            ("__MING_ACCENT_STRONG__", "accent_strong"),
+            ("__MING_TEXT__", "text"),
+            ("__MING_MUTED__", "muted"),
+            ("__MING_BORDER__", "border"),
+            ("__MING_FOCUS__", "focus"),
+        ):
+            css = css.replace(marker, TOKENS[token_name])
+        css = css.encode("utf-8")
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
         display = Gdk.Display.get_default()

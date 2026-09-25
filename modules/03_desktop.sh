@@ -322,7 +322,7 @@ install_ming_shell_components() {
     local asset
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
-    for asset in ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py; do
+    for asset in ming-ui-tokens.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -412,6 +412,7 @@ install_ming_shell_components() {
     # Drawer and broker load the common module beside their executable.
     install -m 0644 "${asset_dir}/ming-shell-common.py" /usr/local/bin/ming-shell-common.py
     install -m 0755 "${asset_dir}/ming-notifications.py" /usr/local/bin/ming-notifications
+    install -m 0644 "${asset_dir}/ming-ui-tokens.py" "${lib_dir}/ming-ui-tokens.py"
     install -m 0755 "${asset_dir}/ming-device-control.py" /usr/local/bin/ming-device-control
     install -m 0755 "${asset_dir}/ming-audio-session.py" /usr/local/bin/ming-audio-session
     install -m 0755 "${asset_dir}/ming-hardware-status.py" /usr/local/bin/ming-hardware-status
