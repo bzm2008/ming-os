@@ -28,6 +28,10 @@ class FakeStore:
         self.calls.append(("transaction", action, source_id, app_id))
         return {"ok": True, "state": "succeeded", "action": action, "provider": source_id, "app_id": app_id}
 
+    def refresh_provider(self, source_id):
+        self.calls.append(("refresh_provider", source_id))
+        return {"source_id": source_id, "ok": True, "count": 1}
+
 
 class StoreBridgeContracts(unittest.TestCase):
     def test_read_only_search_uses_store_controller_without_shell(self):
@@ -61,6 +65,16 @@ class StoreBridgeContracts(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("succeeded", result["state"])
         self.assertEqual(("transaction", "update", "debian-apt", "demo"), store.calls[0])
+
+    def test_refresh_delegates_to_provider_refresh_without_app_id(self):
+        store = FakeStore()
+        result = BRIDGE.dispatch(
+            ["store", "refresh", "--source", "spark-public"],
+            store_controller_factory=lambda: store,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("ready", result["state"])
+        self.assertEqual(("refresh_provider", "spark-public"), store.calls[0])
 
 
 if __name__ == "__main__":

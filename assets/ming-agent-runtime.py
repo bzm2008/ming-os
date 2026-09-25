@@ -128,6 +128,8 @@ class AgentSessionManager:
 
     def _allocate_display(self, requested: str | None) -> str:
         if requested:
+            if requested == self.foreground_display or not self._display_available(requested):
+                raise RuntimeError("display_unavailable")
             return requested
         for number in range(DISPLAY_MIN, DISPLAY_MAX + 1):
             display = f":{number}"
@@ -223,7 +225,9 @@ class AgentSessionManager:
                 session_dir.rmdir()
             except OSError:
                 pass
-            return _json_result(request_id, False, "startup_failed", str(exc))
+            message = str(exc)
+            state = "display_unavailable" if message == "display_unavailable" else "startup_failed"
+            return _json_result(request_id, False, state, message)
 
     def status(self, session_id: str) -> dict[str, Any]:
         request_id = uuid.uuid4().hex

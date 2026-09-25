@@ -78,6 +78,19 @@ class AgentRuntimeContracts(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual("foreground_display_rejected", result["state"])
 
+    def test_requested_display_collision_is_rejected_before_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner()
+            manager = RUNTIME.AgentSessionManager(
+                runtime_root=pathlib.Path(directory), runner=runner,
+                foreground_display=":0"
+            )
+            manager._display_available = lambda _display: False
+            result = manager.create("desk-a", display=":90")
+            self.assertFalse(result["ok"])
+            self.assertEqual("display_unavailable", result["state"])
+            self.assertEqual([], runner.processes)
+
     def test_invalid_session_id_and_idempotent_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = RUNTIME.AgentSessionManager(

@@ -165,11 +165,18 @@ def store_action(
             result = controller.available_updates(section=parsed.section)
         elif action == "log":
             result = controller.read_log(limit=parsed.limit)
+        elif action == "refresh":
+            if not parsed.source and not parsed.section:
+                return envelope(request_id, False, "invalid_request", "refresh 需要 --source 或 --section。")
+            if parsed.source:
+                result = controller.refresh_provider(parsed.source)
+            else:
+                result = controller.refresh_section(parsed.section)
         else:
             result = controller.run_transaction(action, parsed.source, parsed.app_id)
         if isinstance(result, list):
             result = result[: parsed.limit]
-        return envelope(request_id, True, "succeeded" if action not in {"search", "details", "inventory", "updates", "log"} else "ready", "商店操作已完成。", result=result)
+        return envelope(request_id, True, "succeeded" if action in {"install", "update", "remove"} else "ready", "商店操作已完成。", result=result)
     except (KeyError, RuntimeError, ValueError, OSError, ImportError) as exc:
         return envelope(request_id, False, "store_unavailable", str(exc))
 
