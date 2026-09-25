@@ -2995,7 +2995,7 @@ agent_capabilities = require_file(
     "usr/lib/ming-os/agent/agent-capabilities.json", "ming.agent.v1")
 agent_service = require_file(
     "usr/local/bin/ming-agent-service", "org.mingos.Agent1")
-if "foreground_assist = False" not in agent_service:
+if "FOREGROUND_ASSIST = False" not in agent_service:
     errors.append("ming-agent-service must keep foreground assist disabled")
 agent_service_unit = require_file(
     "usr/lib/systemd/user/ming-agent.service", "org.mingos.Agent1")
