@@ -1,13 +1,15 @@
 import type { Request, Response, SceneId } from "@ming-tea/protocol";
 import { createNamedPipeTransport, createUnixTransport, type JsonLineTransport } from "@ming-tea/protocol";
-import { SessionEngine } from "./session-engine.js";
+import { SessionEngine, type ThinkingLevel } from "./session-engine.js";
 import { DshAdapter } from "./dsh-adapter.js";
 import { LocalMemoryStore } from "./memory.js";
 import { SessionLibrary } from "./session-library.js";
 import { ExecutionDiscipline } from "./discipline.js";
 import { communityAdapterStatuses } from "./community-adapters.js";
+import { OtaBridge, type OtaAction } from "./ota-bridge.js";
+import { PlatformStatusAdapter } from "./platform-status.js";
 
-export interface AgentServerOptions { socketPath?: string; pipeName?: string; engine?: SessionEngine; dsh?: DshAdapter; memory?: LocalMemoryStore; sessions?: SessionLibrary; discipline?: ExecutionDiscipline; }
+export interface AgentServerOptions { socketPath?: string; pipeName?: string; engine?: SessionEngine; dsh?: DshAdapter; memory?: LocalMemoryStore; sessions?: SessionLibrary; discipline?: ExecutionDiscipline; ota?: OtaBridge; platform?: PlatformStatusAdapter; }
 export interface AgentServer { listen(): Promise<void>; close(): Promise<void>; handle(request: Request): Promise<Response>; }
 
 export function createAgentServer(options: AgentServerOptions = {}): AgentServer {
@@ -16,6 +18,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const memory = options.memory ?? new LocalMemoryStore();
   const sessions = options.sessions ?? new SessionLibrary();
   const discipline = options.discipline ?? new ExecutionDiscipline();
+  const ota = options.ota ?? new OtaBridge();
+  const platform = options.platform ?? new PlatformStatusAdapter();
   const transport: JsonLineTransport = options.pipeName
     ? createNamedPipeTransport(options.pipeName)
     : createUnixTransport(options.socketPath ?? process.env.MING_TEA_IPC_PATH ?? "/tmp/ming-tea-agent.sock");
@@ -30,6 +34,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           return {id: request.id, ok: true, result: session};
         }
         case "session.cancel": return {id: request.id, ok: true, result: engine.cancelSession(String(request.payload.sessionId))};
+        case "session.thinking.set": return {id: request.id, ok: true, result: engine.setThinking(String(request.payload.sessionId), String(request.payload.thinking) as ThinkingLevel)};
         case "tool.request": {
           const events = engine.requestTool(String(request.payload.sessionId), String(request.payload.toolId), (request.payload.arguments ?? {}) as Record<string, unknown>);
           for (const event of events) discipline.observe(String(event.toolId ?? "unknown"), event.type === "tool.failed" ? "failed" : event.type === "tool.started" ? "started" : "completed");
@@ -42,6 +47,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         case "session.search": return {id: request.id, ok: true, result: await sessions.search(String(request.payload.query ?? ""), Number(request.payload.limit ?? 20))};
         case "session.recall": return {id: request.id, ok: true, result: await sessions.recall(Array.isArray(request.payload.sessionIds) ? request.payload.sessionIds.map(String).slice(0, 3) : [])};
         case "discipline.status": return {id: request.id, ok: true, result: discipline.status()};
+        case "platform.status": return {id: request.id, ok: true, result: await platform.status()};
+        case "platform.permission.status": return {id: request.id, ok: true, result: await platform.status()};
+        case "os.update.status":
+        case "os.update.check":
+        case "os.update.prepare":
+        case "os.update.reboot": return {id: request.id, ok: true, result: await ota.run(request.action.slice("os.update.".length) as OtaAction)};
         default: return {id: request.id, ok: false, error: {code: "unknown_action", message: `Unknown action: ${request.action}`}};
       }
     } catch (error) {

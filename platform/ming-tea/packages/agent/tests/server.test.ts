@@ -9,6 +9,8 @@ describe("agent server", () => {
     expect(await server.handle({id: "1", action: "ping", payload: {}})).toMatchObject({ok: true});
     const response = await server.handle({id: "2", action: "session.create", payload: {scene: "office"}});
     expect(response).toMatchObject({ok: true, result: {scene: "office", state: "active"}});
+    const sessionId = (response.result as {sessionId: string}).sessionId;
+    expect(await server.handle({id: "3", action: "session.thinking.set", payload: {sessionId, thinking: "deep"}})).toMatchObject({ok: true, result: {thinking: "deep"}});
     await server.close();
   });
 

@@ -4,7 +4,8 @@ import { PermissionPolicy } from "./policy.js";
 import { redactSecrets } from "./redaction.js";
 import { SCENES } from "./scenes.js";
 
-export interface Session { sessionId: string; scene: SceneId; createdAt: number; state: "active" | "cancelled" | "completed"; }
+export type ThinkingLevel = "fast" | "balanced" | "deep";
+export interface Session { sessionId: string; scene: SceneId; thinking: ThinkingLevel; createdAt: number; state: "active" | "cancelled" | "completed"; }
 export type AuditWriter = (event: MingTeaEvent) => void | Promise<void>;
 
 export class SessionEngine {
@@ -13,9 +14,18 @@ export class SessionEngine {
 
   createSession(scene: SceneId): Session {
     if (!SCENES[scene]) throw new Error(`Unknown scene: ${scene}`);
-    const session = {sessionId: randomUUID(), scene, createdAt: Date.now(), state: "active" as const};
+    const session = {sessionId: randomUUID(), scene, thinking: "balanced" as ThinkingLevel, createdAt: Date.now(), state: "active" as const};
     this.sessions.set(session.sessionId, session);
     this.emit({type: "session.created", sessionId: session.sessionId, scene});
+    return {...session};
+  }
+
+  setThinking(sessionId: string, thinking: ThinkingLevel): Session {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.state !== "active") throw new Error("Session is missing, cancelled, or ended");
+    if (!["fast", "balanced", "deep"].includes(thinking)) throw new Error("Unknown thinking level");
+    session.thinking = thinking;
+    this.emit({type: "session.thinking.changed", sessionId, thinking});
     return {...session};
   }
 

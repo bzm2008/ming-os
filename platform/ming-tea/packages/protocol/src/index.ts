@@ -5,6 +5,7 @@ export type Action =
   | "status"
   | "session.create"
   | "session.cancel"
+  | "session.thinking.set"
   | "tool.request"
   | "approval.consume"
   | "memory.profile.get"
@@ -12,7 +13,13 @@ export type Action =
   | "memory.capture"
   | "session.search"
   | "session.recall"
-  | "discipline.status";
+  | "discipline.status"
+  | "platform.status"
+  | "platform.permission.status"
+  | "os.update.status"
+  | "os.update.check"
+  | "os.update.prepare"
+  | "os.update.reboot";
 
 export interface Request {
   id: string;
@@ -29,6 +36,7 @@ export interface Response {
 
 export type EventType =
   | "session.created"
+  | "session.thinking.changed"
   | "plan.updated"
   | "tool.requested"
   | "approval.requested"

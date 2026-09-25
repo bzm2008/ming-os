@@ -9,6 +9,8 @@ export * from "./computer-use-guard.js";
 export * from "./community-adapters.js";
 export * from "./dsh-adapter.js";
 export * from "./server.js";
+export * from "./platform-status.js";
+export * from "./ota-bridge.js";
 export * from "./memory.js";
 export * from "./session-library.js";
 export * from "./discipline.js";

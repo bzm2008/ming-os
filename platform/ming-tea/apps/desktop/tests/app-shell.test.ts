@@ -16,7 +16,7 @@ describe("desktop shell", () => {
     expect(source).toContain("started: false");
     expect(source).toContain("state.started ? conversation() : modeGate()");
     expect(source).toContain('if (state.started) return; state.scene');
-    expect(source).toContain('if (state.started) return; state.thinking');
+    expect(source).toContain('state.thinking = button.dataset.thinking as Thinking');
     expect(source).toContain('state.started = true');
     expect(source).toContain('data-action="start"');
     expect(source).toContain("已锁定");
@@ -48,5 +48,14 @@ describe("desktop shell", () => {
     expect(source).toContain("if (state.started) return");
     expect(source).not.toContain("scene-rail");
     expect(source).not.toContain("rail-link");
+  });
+
+  it("keeps the locked mode while exposing thinking controls during a session", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
+    expect(source).toContain("thinking-inline");
+    expect(source).toContain("state.thinking = button.dataset.thinking as Thinking");
+    expect(source).toContain("思考强度已更新 · 下一轮生效");
+    expect(source).toContain("当前工作模式已锁定");
+    expect(source).toContain("thinking-inline");
   });
 });

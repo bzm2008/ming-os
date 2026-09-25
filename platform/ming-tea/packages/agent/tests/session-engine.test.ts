@@ -34,6 +34,14 @@ describe("shared session engine", () => {
     expect(() => engine.requestTool(session.sessionId, "file.read", {})).toThrow(/ended|cancelled/i);
   });
 
+  it("changes thinking for the next turn without changing the locked scene", () => {
+    const engine = new SessionEngine();
+    const session = engine.createSession("development");
+    const changed = engine.setThinking(session.sessionId, "deep");
+    expect(changed).toMatchObject({scene: "development", thinking: "deep", state: "active"});
+    expect(() => engine.setThinking(session.sessionId, "invalid" as never)).toThrow(/Unknown thinking/);
+  });
+
   it("redacts credentials in structured values and text", () => {
     const result = redactSecrets({api_key: "private", message: "Authorization: Bearer abc123 sk-secret123"});
     expect(JSON.stringify(result)).not.toMatch(/private|abc123|sk-secret123/);
