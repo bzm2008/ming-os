@@ -2164,6 +2164,7 @@ validate_required_desktop_runtime() {
     fi
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        gpgv \
         gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
         pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
         libspa-0.2-bluetooth pavucontrol dbus-user-session dbus-x11 libpam-systemd bluez upower pkexec polkitd \

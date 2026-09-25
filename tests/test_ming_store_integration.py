@@ -30,6 +30,10 @@ class MingStoreDeploymentContracts(unittest.TestCase):
         self.assertIn("/run/ming-store-control", DESKTOP)
         self.assertIn("install -d -o root -g root -m 0700", DESKTOP)
 
+    def test_spark_signature_runtime_requires_gpgv(self):
+        self.assertIn("gpgv", APPS)
+        self.assertIn("gpgv", BUILD)
+
     def test_store_authorization_accepts_only_action_and_request_id(self):
         authorized = DESKTOP.split(
             "cat > /usr/local/bin/ming-authorized-action", 1

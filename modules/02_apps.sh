@@ -60,6 +60,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     desktop-file-utils
     zenity
     im-config
+    gpgv
     blueman
     wine
     wine64
