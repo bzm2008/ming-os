@@ -99,6 +99,13 @@ class MingStoreControlTests(unittest.TestCase):
         self.assertNotIn("sh", apt)
         self.assertNotIn("-c", apt)
 
+    def test_artifact_root_creation_failure_returns_control_error_without_apt(self):
+        control = self.make_control()
+        control.artifact_root = pathlib.Path("/path-that-cannot-be-created/ming-store")
+        with self.assertRaises(self.control_module.StoreControlError) as caught:
+            control._secure_artifact_dir("a" * 32)
+        self.assertIn(caught.exception.state, {"runtime_missing", "runtime_untrusted"})
+
     def test_install_rejects_architecture_mismatch_after_apt_readback(self):
         control = self.make_control(lambda command, timeout=300: (0, "", ""))
         request = self.request()

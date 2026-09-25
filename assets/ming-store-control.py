@@ -360,17 +360,32 @@ class StoreControl:
     def _secure_artifact_dir(self, request_id):
         if not REQUEST_ID.fullmatch(str(request_id)):
             raise StoreControlError("invalid_request", "商店请求格式无效。", 2)
-        self.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            self.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StoreControlError(
+                "runtime_missing", "软件包缓存目录不可用，请重新安装系统组件。", 2
+            ) from exc
         for directory in (self.artifact_root,):
-            info = directory.lstat()
+            try:
+                info = directory.lstat()
+            except OSError as exc:
+                raise StoreControlError(
+                    "runtime_missing", "软件包缓存目录不可用，请重新安装系统组件。", 2
+                ) from exc
             if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
                     or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077)):
                 raise StoreControlError("runtime_untrusted", "软件包缓存目录不可信。", 2)
         target = self.artifact_root / str(request_id)
         if target.exists() and target.is_symlink():
             raise StoreControlError("runtime_untrusted", "软件包事务目录不得是符号链接。", 2)
-        target.mkdir(mode=0o700, exist_ok=True)
-        info = target.lstat()
+        try:
+            target.mkdir(mode=0o700, exist_ok=True)
+            info = target.lstat()
+        except OSError as exc:
+            raise StoreControlError(
+                "runtime_missing", "软件包事务目录不可用，请重试。", 2
+            ) from exc
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise StoreControlError("runtime_untrusted", "软件包事务目录不可信。", 2)
         if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
