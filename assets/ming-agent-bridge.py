@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+import re
 from typing import Any
 
 
@@ -103,6 +104,76 @@ def _session_env(state: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def _load_store_controller():
+    candidates = [
+        pathlib.Path("/usr/local/lib/ming-os/ming-store.py"),
+        pathlib.Path("/usr/local/bin/ming-store"),
+        ROOT / "ming-store.py",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("ming_store_agent_adapter", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.StoreController()
+    raise RuntimeError("Ming StoreController 不可用。")
+
+
+STORE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$")
+
+
+def store_action(
+    args: list[str],
+    controller_factory=None,
+) -> dict[str, Any]:
+    request_id = _request_id()
+    if not args or args[0] not in {"search", "details", "inventory", "updates", "log", "install", "update", "remove", "refresh"}:
+        return envelope(request_id, False, "action_not_allowed", "不允许的商店操作。")
+    action = args[0]
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("action")
+    parser.add_argument("--query", default="")
+    parser.add_argument("--source")
+    parser.add_argument("--app-id")
+    parser.add_argument("--section")
+    parser.add_argument("--limit", type=int, default=100)
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit:
+        return envelope(request_id, False, "invalid_request", "商店操作参数无效。")
+    if parsed.limit < 1 or parsed.limit > 500:
+        return envelope(request_id, False, "invalid_request", "limit 必须在 1 到 500 之间。")
+    if action in {"details", "inventory", "install", "update", "remove", "refresh"} and parsed.source and not STORE_ID_RE.fullmatch(parsed.source):
+        return envelope(request_id, False, "invalid_request", "软件来源标识无效。")
+    if action in {"details", "install", "update", "remove"} and (
+        not parsed.source or not parsed.app_id or not STORE_ID_RE.fullmatch(parsed.app_id)
+    ):
+        return envelope(request_id, False, "invalid_request", "该商店操作需要有效的 source 和 app_id。")
+    try:
+        controller = controller_factory() if controller_factory else _load_store_controller()
+        if action == "search":
+            result = controller.search(parsed.query, source_id=parsed.source)
+        elif action == "details":
+            provider = controller.catalog.registry.get(parsed.source)
+            result = provider.get(parsed.app_id)
+        elif action == "inventory":
+            result = controller.inventory(parsed.query, source_id=parsed.source, section=parsed.section)
+        elif action == "updates":
+            result = controller.available_updates(section=parsed.section)
+        elif action == "log":
+            result = controller.read_log(limit=parsed.limit)
+        else:
+            result = controller.run_transaction(action, parsed.source, parsed.app_id)
+        if isinstance(result, list):
+            result = result[: parsed.limit]
+        return envelope(request_id, True, "succeeded" if action not in {"search", "details", "inventory", "updates", "log"} else "ready", "商店操作已完成。", result=result)
+    except (KeyError, RuntimeError, ValueError, OSError, ImportError) as exc:
+        return envelope(request_id, False, "store_unavailable", str(exc))
+
+
 def screen_action(args: list[str], runtime_root: pathlib.Path, foreground_display: str | None) -> dict[str, Any]:
     if not args or args[0] not in {"status", "windows", "screenshot", "activate", "click", "type", "key"}:
         return envelope(_request_id(), False, "action_not_allowed", "不允许的屏幕操作。")
@@ -173,7 +244,7 @@ def screen_action(args: list[str], runtime_root: pathlib.Path, foreground_displa
     return envelope(request_id, True, "ready", "屏幕操作已完成。", display=state["display"], session_id=parsed.session)
 
 
-def dispatch(argv: list[str], runtime_root: pathlib.Path | None = None, foreground_display: str | None = None) -> dict[str, Any]:
+def dispatch(argv: list[str], runtime_root: pathlib.Path | None = None, foreground_display: str | None = None, store_controller_factory=None) -> dict[str, Any]:
     runtime_root = pathlib.Path(runtime_root or (pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "ming-os" / "agent"))
     foreground_display = os.environ.get("DISPLAY", "") if foreground_display is None else foreground_display
     if not argv:
@@ -183,7 +254,7 @@ def dispatch(argv: list[str], runtime_root: pathlib.Path | None = None, foregrou
     if argv[0] == "screen":
         return screen_action(argv[1:], runtime_root, foreground_display)
     if argv[0] == "store":
-        return envelope(_request_id(), False, "not_implemented", "应用商店 agent 接口尚未启用。")
+        return store_action(argv[1:], controller_factory=store_controller_factory)
     return envelope(_request_id(), False, "action_not_allowed", "不允许的 agent 操作。")
 
 
