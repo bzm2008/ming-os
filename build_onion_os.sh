@@ -2799,7 +2799,7 @@ require_file("usr/local/sbin/ming-ota-ab-stage", "/boot/ming-slots/${target}")
 validate_generated_executable("usr/local/sbin/ming-ota-ab", "python")
 validate_generated_executable("usr/local/sbin/ming-ota-ab-stage", "bash")
 partition_config = require_file("etc/calamares/modules/partition.conf", "partitionLayout:")
-for marker in ["MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME", "requiredStorage: 48"]:
+for marker in ["MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME", "requiredStorage: 32"]:
     if marker not in partition_config:
         errors.append(f"Calamares OTA-ready layout missing {marker}")
 

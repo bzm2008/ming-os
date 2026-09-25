@@ -73,6 +73,8 @@ https://github.com/bzm2008/ming-os/releases/tag/v26.3.2
 
 For most users, download the ISO from the official website and write it with Rufus, Ventoy, or `dd`.
 
+The one-click blank-disk A/B installation requires at least a 32 GiB disk. It creates two root slots, a shared `/boot`, and a separate `/home`; disks larger than 32 GiB provide more room for applications and user data.
+
 Supported test paths:
 
 - Rufus ISO mode

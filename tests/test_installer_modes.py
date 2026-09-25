@@ -122,11 +122,22 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn('mountPoint: "/boot/efi"', partition)
         self.assertIn('name: "MING-ROOT-A"', partition)
         self.assertIn('name: "MING-ROOT-B"', partition)
-        self.assertIn("requiredStorage: 48", partition)
+        self.assertIn("requiredStorage: 32", partition)
+        self.assertIn("minSize: 10G", partition)
+        self.assertIn("minSize: 6G", partition)
         self.assertIn("allowManualPartitioning: false", partition)
         self.assertIn("enableLuksAutomatedPartitioning: false", partition)
         self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
         self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
+
+    def test_blank_ab_minimum_partition_budget_fits_32_gib_requirement(self):
+        mode = load_mode()
+        partition = mode.partition_config("blank_ab", firmware="bios")
+        self.assertIn("requiredStorage: 32", partition)
+        self.assertEqual(2, partition.count("minSize: 10G"))
+        self.assertEqual(1, partition.count("minSize: 6G"))
+        self.assertNotIn("minSize: 14G", partition)
+        self.assertNotIn("minSize: 8G", partition)
 
     def test_blank_ab_bios_uses_explicit_ming_esp_without_auto_esp_helper(self):
         mode = load_mode()

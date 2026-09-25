@@ -400,8 +400,8 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
                 if _yaml_scalar(block, "mountPoint") != mountpoint:
                     expected_mount = mountpoint if mountpoint is not None else "no mount point"
                     errors.append(f"Calamares A/B {label} must use {expected_mount}")
-            if required != "48":
-                errors.append("Calamares A/B install must require 48 GB")
+            if required != "32":
+                errors.append("Calamares A/B install must require 32 GB")
     elif install_mode == "dual_boot_preserve":
         if initial_choice != "none":
             errors.append("Calamares dual-boot mode must require manual partition selection")

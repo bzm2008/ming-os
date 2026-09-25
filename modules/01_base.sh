@@ -4852,18 +4852,18 @@ partitionLayout:
     filesystem: "ext4"
     mountPoint: "/"
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-ROOT-B"
     filesystem: "ext4"
     noEncrypt: true
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-HOME"
     filesystem: "ext4"
     mountPoint: "/home"
     size: 100%
-    minSize: 8G
-requiredStorage: 48
+    minSize: 6G
+requiredStorage: 32
 # 关闭手动分区入口——普通用户不需要也不会用，只显示"清空整个磁盘"
 allowManualPartitioning: false
 PARTITIONCONF

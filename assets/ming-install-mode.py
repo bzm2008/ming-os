@@ -93,18 +93,18 @@ BLANK_AB_LAYOUT_TAIL = """
     filesystem: "ext4"
     mountPoint: "/"
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-ROOT-B"
     filesystem: "ext4"
     noEncrypt: true
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-HOME"
     filesystem: "ext4"
     mountPoint: "/home"
     size: 100%
-    minSize: 8G
-requiredStorage: 48
+    minSize: 6G
+requiredStorage: 32
 allowManualPartitioning: false
 """
 

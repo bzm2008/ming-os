@@ -8560,18 +8560,18 @@ partitionLayout:
     filesystem: "ext4"
     mountPoint: "/"
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-ROOT-B"
     filesystem: "ext4"
     noEncrypt: true
     size: 35%
-    minSize: 14G
+    minSize: 10G
   - name: "MING-HOME"
     filesystem: "ext4"
     mountPoint: "/home"
     size: 100%
-    minSize: 8G
-requiredStorage: 48
+    minSize: 6G
+requiredStorage: 32
 allowManualPartitioning: false
 STATICPARTCONF
 
@@ -8790,7 +8790,7 @@ class InstallModeChooser(Gtk.Dialog):
         self.blank_button = self.mode_button(
             'blank_ab',
             '空白盘自动安装（支持 A/B OTA）',
-            '需要至少 48GB；会创建 MING-ESP、/boot、A/B root 和独立 /home，并支持自动回滚。'
+            '需要至少 32GB；会创建 MING-ESP、/boot、A/B root 和独立 /home，并支持自动回滚。'
         )
         self.dual_button = self.mode_button(
             'dual_boot_preserve',

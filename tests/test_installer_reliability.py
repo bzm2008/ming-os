@@ -1342,7 +1342,7 @@ class InstallerReceiptContracts(unittest.TestCase):
             self.assertIn('mountPoint: "/home"', source)
             root_b = source.split('name: "MING-ROOT-B"', 1)[1].split("- name:", 1)[0]
             self.assertNotIn("mountPoint:", root_b)
-            self.assertIn("requiredStorage: 48", source)
+            self.assertIn("requiredStorage: 32", source)
             self.assertIn("initialPartitioningChoice: none", source)
             self.assertIn("allowManualPartitioning: false", source)
 
