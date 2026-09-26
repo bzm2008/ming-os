@@ -400,7 +400,7 @@ class OtaModuleContracts(unittest.TestCase):
                 return f"/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
             return value
 
-        runner = []
+        runner = ["bash"]
         if os.name == "nt":
             git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
             if not git_bash.is_file():
