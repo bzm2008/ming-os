@@ -48,6 +48,7 @@ __pycache__/
 /platform/ming-tea/apps/desktop/dist/
 /platform/ming-tea/apps/desktop/src-tauri/target/
 /platform/ming-tea/apps/desktop/src-tauri/resources/
+/platform/ming-tea/scripts/.cache/
 /platform/ming-tea/tsconfig.tsbuildinfo
 
 # OS files

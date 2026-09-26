@@ -51,6 +51,13 @@ describe("desktop shell", () => {
     expect(entitlements).toContain("com.apple.security.network.client");
   });
 
+  it("packages the development Agent resource and uses the app-local build script", () => {
+    const desktop = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
+    const config = JSON.parse(readFileSync(join(__dirname, "..", "src-tauri", "tauri.conf.json"), "utf8"));
+    expect(desktop.scripts["build:agent"]).toContain("../..");
+    expect(config.bundle.resources["resources/ming-tea-agent.mjs"]).toBe("ming-tea-agent.mjs");
+  });
+
   it("keeps mode and thinking selection in the pre-session gate", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     expect(source).toContain("mode-gate");
