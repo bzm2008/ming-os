@@ -38,6 +38,8 @@ pnpm --filter @ming-tea/desktop tauri:build
 
 当前开发版会把 Agent bundle 为 `ming-tea-agent.mjs` 并由 Tauri host 启动；生成可分发的完全自包含 macOS 安装包还需要把 Node runtime 或 target-specific executable sidecar 一并签名、公证。CI 已覆盖 Apple Silicon 和 Intel 构建目标。
 
+macOS 权限状态通过 Agent 的 `platform.permission.status` 返回。铭荼不会尝试绕过 Accessibility 或 Automation 的 TCC 授权；缺少授权时只显示引导状态。当前本地 unsigned 版本依赖系统 Node 启动 Agent bundle，正式发行版需要替换为签名的 target-specific sidecar。
+
 ## 平台能力
 
 Agent service 只负责协议、场景、权限、审批、审计和 DSH 适配。Windows UI Automation、macOS Accessibility/Automation、浏览器和 Office 能力都必须通过平台 adapter 声明后接入。

@@ -58,6 +58,12 @@ describe("desktop shell", () => {
     expect(config.bundle.resources["resources/ming-tea-agent.mjs"]).toBe("ming-tea-agent.mjs");
   });
 
+  it("exposes a native Agent runtime status command", () => {
+    const rust = readFileSync(join(__dirname, "..", "src-tauri", "src", "lib.rs"), "utf8");
+    expect(rust).toContain("agent_runtime_status");
+    expect(rust).toContain("agent_endpoint");
+  });
+
   it("keeps mode and thinking selection in the pre-session gate", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     expect(source).toContain("mode-gate");

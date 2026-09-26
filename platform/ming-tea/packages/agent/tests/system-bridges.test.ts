@@ -21,4 +21,12 @@ describe("system bridges", () => {
     expect(status.capabilities.some((item) => item.id === "papyrus-reference")).toBe(true);
     expect(status.capabilities.some((item) => item.id === "browser-bridge")).toBe(true);
   });
+
+  it("exposes macOS automation permission state without attempting to bypass TCC", async () => {
+    const status = await new PlatformStatusAdapter().status();
+    if (status.platform === "darwin") {
+      expect(status.capabilities.find((item) => item.id === "accessibility")).toMatchObject({available: false, permissionRequired: true});
+      expect(status.capabilities.find((item) => item.id === "automation")).toMatchObject({available: false, permissionRequired: true});
+    }
+  });
 });

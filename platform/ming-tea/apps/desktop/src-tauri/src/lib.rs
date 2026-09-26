@@ -5,6 +5,12 @@ use std::sync::Mutex;
 struct AgentChild(Mutex<Option<Child>>);
 
 #[tauri::command]
+fn agent_runtime_status(state: tauri::State<'_, AgentChild>) -> String {
+    let running = state.0.lock().expect("agent lock").as_mut().map(|child| child.try_wait().map(|status| status.is_none()).unwrap_or(true)).unwrap_or(false);
+    if running { "running".to_string() } else { "unavailable".to_string() }
+}
+
+#[tauri::command]
 fn agent_endpoint() -> String {
     if cfg!(target_os = "windows") {
         r"\\.\pipe\ming-tea-agent".to_string()
@@ -28,7 +34,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![agent_endpoint])
+        .invoke_handler(tauri::generate_handler![agent_endpoint, agent_runtime_status])
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())
         .and_then(|app| {
