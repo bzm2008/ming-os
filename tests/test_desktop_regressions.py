@@ -1296,7 +1296,7 @@ class DesktopSourceTests(unittest.TestCase):
         ]
         self.assertIn("ming-live-installer-root", launcher)
         self.assertIn("/usr/local/bin/ming-install-mode-chooser", launcher)
-        self.assertIn("空白盘自动安装（支持 A/B OTA）", chooser)
+        self.assertIn("使用整块磁盘（自动配置系统与恢复布局）", chooser)
         self.assertIn("保留双系统（禁用 major A/B OTA）", chooser)
         self.assertIn("self.blank_button.grab_focus()", chooser)
         self.assertNotIn("exec pkexec calamares -d", launcher)

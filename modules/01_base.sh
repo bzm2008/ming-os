@@ -6022,10 +6022,34 @@ for record in flatten(json.load(sys.stdin).get("blockdevices", [])):
 }
 
 scan_once
+notify_update_bundle() {
+    local bundle marker digest
+    command -v notify-send >/dev/null 2>&1 || return 0
+    command -v ming-update >/dev/null 2>&1 || return 0
+    while IFS= read -r -d '' bundle; do
+        if ! ming-update offline-scan --json "${bundle}" 2>/dev/null | jq -e '.ok == true' >/dev/null 2>&1; then
+            continue
+        fi
+        digest="$(sha256sum -- "${bundle}" 2>/dev/null | awk '{print $1}')"
+        [[ "${digest}" =~ ^[A-Fa-f0-9]{64}$ ]] || continue
+        marker="/run/user/$(id -u)/.ming-offline-update-${digest}"
+        [[ -e "${marker}" ]] && continue
+        : > "${marker}" 2>/dev/null || true
+        (
+            action="$(notify-send --wait --action=open='打开系统更新' -i system-software-update \
+                "Ming OS 离线更新" "已发现已签名更新包；确认后才会暂存安装。" 2>/dev/null || true)"
+            if [[ "${action}" == open ]] && command -v ming-control-center >/dev/null 2>&1; then
+                ming-control-center --page update >/dev/null 2>&1 &
+            fi
+        ) &
+    done < <(find "/media/${MING_TARGET_USER}" "/run/media/${MING_TARGET_USER}" -type f -name '*.ming-ota' -print0 2>/dev/null)
+}
+notify_update_bundle
 if [[ "${MONITOR}" == true ]] && command -v udisksctl >/dev/null 2>&1; then
     udisksctl monitor 2>/dev/null | while IFS= read -r _event; do
         sleep 1
         scan_once
+        notify_update_bundle
     done
 fi
 VOLUMEAUTOMOUNT

@@ -8834,7 +8834,7 @@ class InstallModeChooser(Gtk.Dialog):
         root.pack_start(title, False, False, 0)
 
         help_text = Gtk.Label(
-            label='空白盘自动安装会创建完整 A/B 分区并支持大版本 OTA 回滚；保留双系统会保护另一个系统，但大版本 A/B OTA 会禁用。'
+            label='空白盘自动安装会创建完整 A/B 分区并支持大版本 OTA 回滚；默认使用整块磁盘并自动配置系统与恢复布局（会清除所选磁盘）；保留双系统会保护另一个系统，但大版本 A/B OTA 会禁用。'
         )
         help_text.set_xalign(0)
         help_text.set_line_wrap(True)
@@ -8845,8 +8845,8 @@ class InstallModeChooser(Gtk.Dialog):
         root.pack_start(cards, True, True, 0)
         self.blank_button = self.mode_button(
             'blank_ab',
-            '空白盘自动安装（支持 A/B OTA）',
-            '需要至少 32GB；会创建 MING-ESP、/boot、A/B root 和独立 /home，并支持自动回滚。'
+            '使用整块磁盘（自动配置系统与恢复布局）',
+            '使用整块磁盘；需要至少 32GB。安装器会自动配置 MING-ESP、/boot、A/B root 和独立 /home，并支持自动回滚。'
         )
         self.dual_button = self.mode_button(
             'dual_boot_preserve',

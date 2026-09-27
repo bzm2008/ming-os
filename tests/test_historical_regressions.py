@@ -43,6 +43,7 @@ class HistoricalRegressionContracts(unittest.TestCase):
         self.assertIn('"runuser", "-u", user_name, "--", "env"', refresh)
         self.assertIn('"XDG_RUNTIME_DIR=" + str(runtime)', refresh)
         self.assertIn('"/usr/local/bin/ming-phone-desktop", "--sync"', refresh)
+        self.assertIn('"/usr/local/sbin/ming-refresh-dock-launchers", user_name', refresh)
         self.assertNotIn('"--refresh-apps"', refresh)
 
     def test_store_refresh_marks_missing_graphical_runtime_as_failed(self):

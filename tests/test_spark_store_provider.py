@@ -234,6 +234,35 @@ signature
         self.assertTrue(items[0]["enabled"])
         self.assertIn("/store/Packages.xz", requested)
 
+    def test_default_fetcher_treats_compressed_packages_as_binary(self):
+        compressed = b"\xfd\x37\x7a\x58\x5a\x00"
+
+        class Response:
+            headers = {}
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://cdn.d.store.deepinos.org.cn/store/Packages.xz"
+
+            def read(self, _limit):
+                return compressed
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch.object(self.core.urllib.request, "urlopen", return_value=Response()):
+            provider = self.core.SparkPublicProvider(cache_root=pathlib.Path(tempfile.mkdtemp()))
+            response = provider._default_fetcher(
+                "https://cdn.d.store.deepinos.org.cn/store/Packages.xz")
+
+        self.assertEqual(compressed, response["_raw_body"])
+        self.assertEqual(compressed.decode("utf-8", errors="replace"), response["body"])
+
     def test_invalid_utf8_packages_survive_cache_and_offline_browse(self):
         """A successful binary index must remain readable after a network loss."""
         packages = self._packages().replace(

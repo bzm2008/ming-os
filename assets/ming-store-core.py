@@ -1371,7 +1371,7 @@ class SparkPublicProvider(Provider):
             body = response.read(self.max_response_bytes + 1)
             if len(body) > self.max_response_bytes:
                 raise DownloadRejected("星火目录响应超过大小限制。")
-            package_index = urllib.parse.urlsplit(str(url)).path.rstrip("/").casefold().endswith("/packages")
+            package_index = urllib.parse.urlsplit(str(url)).path.rstrip("/").casefold().endswith(("/packages", "/packages.xz"))
             return {
                 "status": status,
                 "headers": dict(response.headers.items()),

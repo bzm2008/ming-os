@@ -64,6 +64,17 @@ deploy_ota_ab_engine() {
     bash -n /usr/local/sbin/ming-ota-ab-stage
 }
 
+deploy_ota_bundle_engine() {
+    local source="/tmp/ming-build/assets/ming-ota-bundle.py"
+    if [[ ! -s "${source}" ]]; then
+        echo "[06_ota_update][ERROR] Missing offline OTA bundle validator: ${source}" >&2
+        return 1
+    fi
+    install -d -o root -g root -m 0755 /usr/lib/ming-os
+    install -o root -g root -m 0755 "${source}" /usr/lib/ming-os/ming-ota-bundle.py
+    python3 -m py_compile /usr/lib/ming-os/ming-ota-bundle.py
+}
+
 deploy_ota_cli() {
     echo "Deploying ming-update CLI..."
 
@@ -106,11 +117,170 @@ readonly API_ENDPOINT="/api/onion-update"
 readonly DOWNLOAD_SERVER="https://downloads.sca-hub.cn"
 readonly BACKGROUND_AVAILABILITY_FILE="${CACHE_DIR}/background-availability.json"
 readonly OTA_RELEASE_PUBLIC_KEY="/etc/ming-update/ota-release.minisign.pub"
+readonly OFFLINE_BUNDLE_TOOL="/usr/lib/ming-os/ming-ota-bundle.py"
+readonly OFFLINE_BUNDLE_CACHE="/var/lib/ming-update/offline"
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_step() { printf '\n=====> %s <=====\n\n' "$*"; }
+
+offline_bundle_scan() {
+    local bundle="${1:-}"
+    [[ -n "${bundle}" ]] || { printf '{"ok":false,"reason":"missing_bundle"}\n'; return 1; }
+    [[ -x "${OFFLINE_BUNDLE_TOOL}" || -f "${OFFLINE_BUNDLE_TOOL}" ]] || {
+        printf '{"ok":false,"reason":"bundle_tool_missing"}\n'; return 1;
+    }
+    local result
+    result="$(python3 "${OFFLINE_BUNDLE_TOOL}" "${bundle}" --current-version "$(current_version)")" || { printf '%s\n' "${result}"; return 1; }
+    if [[ "$(printf '%s' "${result}" | jq -r '.ok // false')" == true ]] && ! offline_bundle_verify_signature "${bundle}"; then
+        printf '%s\n' "${result}" | jq '.ok=false | .reason="signature_invalid"'
+        return 1
+    fi
+    printf '%s\n' "${result}"
+}
+
+offline_bundle_verify_signature() {
+    local bundle="$1" tempdir manifest signature canonical sigfile
+    [[ -r "${OTA_RELEASE_PUBLIC_KEY}" && ! -L "${OTA_RELEASE_PUBLIC_KEY}" ]] || {
+        log_error "系统 OTA 发布公钥缺失，拒绝离线更新。"
+        return 1
+    }
+    tempdir="$(mktemp -d)"
+    manifest="$(python3 "${OFFLINE_BUNDLE_TOOL}" "${bundle}" --current-version "$(current_version)" --manifest-out "${tempdir}" | jq -r '.manifest_path // empty')" || true
+    [[ -f "${manifest}" && ! -L "${manifest}" ]] || { rm -rf -- "${tempdir}"; return 1; }
+    signature="$(jq -r '.signature // empty' "${manifest}")"
+    [[ -n "${signature}" ]] || { rm -rf -- "${tempdir}"; return 1; }
+    canonical="${tempdir}/canonical.json"
+    sigfile="${tempdir}/manifest.minisig"
+    jq 'del(.signature, .minisign_signature)' "${manifest}" > "${canonical}" || { rm -rf -- "${tempdir}"; return 1; }
+    printf '%s\n' "${signature}" > "${sigfile}"
+    if ! command -v minisign >/dev/null 2>&1 || ! minisign -V -q -p "${OTA_RELEASE_PUBLIC_KEY}" -m "${canonical}" -x "${sigfile}"; then
+        rm -rf -- "${tempdir}"
+        log_error "离线更新 bundle 的 Minisign 签名验证失败。"
+        return 1
+    fi
+    rm -rf -- "${tempdir}"
+}
+
+offline_bundle_stage() {
+    local bundle="${1:-}" expected="${2:-}" result bundle_sha tempdir payload payload_sha version build_id target_iso temp_iso free_bytes payload_size
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || { log_error "离线更新暂存需要管理员权限。"; return 1; }
+    [[ -n "${bundle}" && "${expected}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        log_error "必须提供 bundle 路径和已确认的 SHA256 指纹。"
+        return 1
+    }
+    [[ -f "${bundle}" && ! -L "${bundle}" ]] || { log_error "离线更新介质已移除或路径不安全。"; return 1; }
+    bundle_sha="$(sha256sum -- "${bundle}" | awk '{print $1}')"
+    if [[ -n "${expected}" && "${bundle_sha,,}" != "${expected,,}" ]]; then
+        log_error "离线更新 bundle 已变化，拒绝继续暂存。"
+        return 1
+    fi
+    result="$(offline_bundle_scan "${bundle}")" || { printf '%s\n' "${result}"; return 1; }
+    [[ "$(printf '%s' "${result}" | jq -r '.ok // false')" == true ]] || { printf '%s\n' "${result}"; return 1; }
+    install -d -o root -g root -m 0700 "${OFFLINE_BUNDLE_CACHE}"
+    tempdir="$(mktemp -d "${OFFLINE_BUNDLE_CACHE}/.bundle.XXXXXX")"
+    if ! payload="$(python3 "${OFFLINE_BUNDLE_TOOL}" "${bundle}" --current-version "$(current_version)" --extract "${tempdir}" | jq -r '.payload_path // empty')"; then
+        rm -rf -- "${tempdir}"
+        log_error "无法安全提取离线更新 payload。"
+        return 1
+    fi
+    if [[ "$(sha256sum -- "${bundle}" | awk '{print $1}')" != "${bundle_sha,,}" ]]; then
+        rm -rf -- "${tempdir}"
+        log_error "离线介质在校验期间发生变化，请重新扫描。"
+        return 1
+    fi
+    payload_sha="$(printf '%s' "${result}" | jq -r '.payload_sha256')"
+    payload_size="$(printf '%s' "${result}" | jq -r '.payload_size')"
+    version="$(printf '%s' "${result}" | jq -r '.version')"
+    build_id="$(printf '%s' "${result}" | jq -r '.build_id')"
+    major_ota_allowed || { rm -rf -- "${tempdir}"; return 1; }
+    ota_ab_status_json >/dev/null 2>&1 || {
+        rm -rf -- "${tempdir}"
+        log_error "当前离线 bundle 仅支持具有可验证 A/B 槽的系统。"
+        return 1
+    }
+    if [[ -e /home/.ming-ota/ab-transaction.json ]]; then
+        [[ -f /home/.ming-ota/ab-transaction.json && ! -L /home/.ming-ota/ab-transaction.json ]] || {
+            rm -rf -- "${tempdir}"
+            log_error "A/B 事务记录不可信，拒绝覆盖现有更新。"
+            return 1
+        }
+        local pending_status
+        pending_status="$(jq -r '.status // ""' /home/.ming-ota/ab-transaction.json 2>/dev/null || true)"
+        if [[ "${pending_status}" == pending || "${pending_status}" == rollback_required ]]; then
+            rm -rf -- "${tempdir}"
+            log_error "已有更新正在等待启动确认或回滚；请先重启并完成该事务。"
+            return 1
+        fi
+    fi
+    [[ -f "${payload}" && ! -L "${payload}" ]] || {
+        rm -rf -- "${tempdir}"
+        log_error "离线 payload 不是常规 ISO 文件。"
+        return 1
+    }
+    [[ "$(stat -c '%s' -- "${payload}")" == "${payload_size}" &&
+       "$(sha256sum -- "${payload}" | awk '{print $1}')" == "${payload_sha,,}" ]] || {
+        rm -rf -- "${tempdir}"
+        log_error "离线 ISO 与签名清单中的大小或 SHA256 不匹配。"
+        return 1
+    }
+    install -d -o root -g root -m 0700 "${AB_STAGING_DIR}"
+    free_bytes="$(df --output=avail -B1 "${AB_STAGING_DIR}" | tail -n 1 | tr -d ' ')"
+    [[ "${free_bytes}" =~ ^[0-9]+$ && "${free_bytes}" -ge $((payload_size + 268435456)) ]] || {
+        rm -rf -- "${tempdir}"
+        log_error "系统盘空间不足，无法安全暂存离线 ISO。"
+        return 1
+    }
+    target_iso="${AB_STAGING_DIR}/ming-os-${version}-offline.iso"
+    temp_iso="${target_iso}.tmp.$$"
+    if ! install -o root -g root -m 0600 "${payload}" "${temp_iso}"; then
+        rm -rf -- "${tempdir}" "${temp_iso}"
+        log_error "复制离线 ISO 到受控暂存目录失败。"
+        return 1
+    fi
+    mv -f -- "${temp_iso}" "${target_iso}"
+    sync -f "${target_iso}"
+    rm -rf -- "${tempdir}"
+    /usr/local/sbin/ming-ota-ab-stage --iso "${target_iso}" --version "${version}" \
+        --build-id "${build_id}" --checksum "${payload_sha}" || {
+        rm -f -- "${target_iso}"
+        log_error "A/B 离线暂存失败；当前活动系统和默认启动项保持不变。"
+        return 1
+    }
+    local record_tmp="${OFFLINE_BUNDLE_CACHE}/.staging.$$.tmp"
+    jq --arg path "${bundle}" --arg sha "${bundle_sha}" --arg payload "${payload}" \
+       --argjson scan "${result}" \
+       --arg iso "${target_iso}" \
+       '{status:"staged", source_bundle:$path, bundle_sha256:$sha, payload_path:$payload, iso_path:$iso, scan:$scan, staged_at:(now|todateiso8601)}' \
+       > "${record_tmp}"
+    chmod 0600 "${record_tmp}"
+    mv -f -- "${record_tmp}" "${OFFLINE_BUNDLE_CACHE}/staging.json"
+    printf '%s\n' "${result}" | jq --arg state "${OFFLINE_BUNDLE_CACHE}/staging.json" '. + {status:"staged", state_path:$state}'
+}
+
+offline_bundle_status() {
+    local record="${OFFLINE_BUNDLE_CACHE}/staging.json" status iso expected actual
+    if [[ ! -f "${record}" || -L "${record}" ]]; then
+        printf '{"status":"none","ok":true}\n'
+        return 0
+    fi
+    status="$(jq -r '.status // ""' "${record}" 2>/dev/null || true)"
+    iso="$(jq -r '.iso_path // ""' "${record}" 2>/dev/null || true)"
+    expected="$(jq -r '.scan.payload_sha256 // ""' "${record}" 2>/dev/null || true)"
+    [[ "${status}" == staged && "${iso}" == "${AB_STAGING_DIR}/"*.iso &&
+       -f "${iso}" && ! -L "${iso}" &&
+       "$(stat -c '%u:%a' "${iso}" 2>/dev/null || true)" == "0:600" ]] || {
+        printf '{"status":"failed","ok":false,"error":"暂存状态或 ISO 不可信。"}\n'
+        return 1
+    }
+    actual="$(sha256sum -- "${iso}" | awk '{print $1}')"
+    [[ "${actual,,}" == "${expected,,}" ]] || {
+        printf '{"status":"failed","ok":false,"error":"暂存 ISO 校验失败。"}\n'
+        return 1
+    }
+    jq '{ok:true,status,version:.scan.version,build_id:.scan.build_id,bundle_sha256,iso_path}' "${record}"
+}
 
 major_ota_allowed() {
     # A preserved dual-boot install cannot safely replace a complete root
@@ -1778,6 +1948,9 @@ Commands:
   status            显示当前 OTA 状态。
   doctor            检查 APT、缓存、备份引擎和 major OTA 保留状态。
   config            配置更新源/频道。
+  offline-scan      扫描并验证 U 盘中的 .ming-ota bundle（只读）。
+  offline-stage     重新验证并暂存离线 bundle，不直接修改活动系统。
+  offline-status    读取已暂存离线更新状态。
 
 更新策略：
   patch  小修复、驱动更新、配置补丁 → apt/脚本应用，通常无需重启
@@ -2429,6 +2602,21 @@ case "${1:-help}" in
     # Backward-compatible command name.  Major OTA must reboot to continue.
     auto-shutdown) auto_restart_update ;;
     status) show_status "${2:-}" ;;
+    offline-scan)
+        shift
+        [[ "${1:-}" == --json ]] && shift
+        offline_bundle_scan "${1:-}"
+        ;;
+    offline-stage)
+        shift
+        [[ "${1:-}" == --json ]] && shift
+        offline_bundle_path="${1:-}"
+        shift || true
+        [[ "${1:-}" == --sha256 ]] && shift
+        offline_bundle_digest="${1:-}"
+        offline_bundle_stage "${offline_bundle_path}" "${offline_bundle_digest}"
+        ;;
+    offline-status) offline_bundle_status ;;
     doctor) ota_doctor ;;
     config) configure_update ;;
     help|--help|-h) show_help ;;
@@ -2788,6 +2976,7 @@ main() {
     deploy_ota_release_trust
     deploy_ota_backup_engine
     deploy_ota_ab_engine
+    deploy_ota_bundle_engine
     deploy_ota_cli
     deploy_systemd_services
     deploy_gui_tool

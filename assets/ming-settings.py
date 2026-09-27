@@ -9,6 +9,7 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, Pango
 import subprocess
 import os
 import json
+import hashlib
 import getpass
 import importlib.util
 import threading
@@ -341,6 +342,30 @@ def storage_partition_snapshot():
     if rc != 0 or not payload.get("ok"):
         payload.setdefault("error", error or "无法读取本机分区。")
     return payload
+
+
+def offline_bundle_candidates():
+    """Find visible, regular Ming OTA bundles without executing media content."""
+    roots = [Path("/media") / USER, Path("/run/media") / USER, Path("/media"), Path("/run/media")]
+    found = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("*.ming-ota"):
+                if path.is_file() and not path.is_symlink() and path not in found:
+                    found.append(path)
+        except OSError:
+            continue
+    return sorted(found, key=lambda item: str(item))
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def pointer_device_snapshot():
@@ -2850,8 +2875,146 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_margin_top(10)
         grp.add(self.update_bar)
 
+        offline = Adw.PreferencesGroup(
+            title="离线更新",
+            description="在线更新不可用时，从 U 盘读取已签名的 Ming OTA bundle。不会执行 U 盘中的脚本或任意 ISO。")
+        box.append(offline)
+        self.offline_bundle_path = ""
+        self.offline_bundle_sha256 = ""
+        self.offline_update_status = Adw.ActionRow(
+            title="未扫描离线介质", subtitle="插入包含 .ming-ota 文件的 U 盘后扫描。")
+        offline.add(self.offline_update_status)
+        offline_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        offline_actions.set_halign(Gtk.Align.END)
+        self.offline_scan_button = Gtk.Button(label="扫描 U 盘")
+        self.offline_scan_button.connect("clicked", self.on_offline_scan)
+        self.offline_stage_button = Gtk.Button(label="验证并暂存")
+        self.offline_stage_button.add_css_class("suggested-action")
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_stage_button.connect("clicked", self.on_offline_stage)
+        offline_actions.append(self.offline_scan_button)
+        offline_actions.append(self.offline_stage_button)
+        self.offline_reboot_button = Gtk.Button(label="立即重启")
+        self.offline_reboot_button.set_sensitive(False)
+        self.offline_reboot_button.connect("clicked", self.on_offline_reboot)
+        offline_actions.append(self.offline_reboot_button)
+        offline.add(offline_actions)
+
         GLib.idle_add(self.refresh_update_status)
+        GLib.idle_add(self.refresh_offline_status)
         return sc
+
+    def refresh_offline_status(self):
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("status") == "staged":
+                self.offline_update_status.set_title(
+                    "离线更新已暂存：Ming OS %s" % result.get("version", "未知"))
+                self.offline_update_status.set_subtitle(
+                    "构建 %s 已写入非活动系统；重启后由健康检查确认，失败时自动回滚。" %
+                    result.get("build_id", "未知"))
+                self.offline_reboot_button.set_sensitive(True)
+            elif rc != 0:
+                self.offline_update_status.set_title("离线暂存状态异常")
+                self.offline_update_status.set_subtitle(
+                    str(result.get("error") or error or "请重新扫描更新介质。"))
+            return False
+
+        run_capture_async(["ming-update", "offline-status", "--json"], timeout=10, on_done=done)
+        return False
+
+    def on_offline_reboot(self, _button):
+        self.offline_reboot_button.set_sensitive(False)
+        self.offline_update_status.set_subtitle("正在请求系统重启…")
+
+        def done(rc, output, error):
+            if rc != 0:
+                self.offline_update_status.set_subtitle(
+                    error or output or "重启未成功，请通过电源菜单手动重启。")
+                self.offline_reboot_button.set_sensitive(True)
+            return False
+
+        run_capture_async(["pkexec", "systemctl", "reboot"], timeout=15, on_done=done)
+
+    def on_offline_scan(self, _button):
+        self.offline_bundle_path = ""
+        self.offline_bundle_sha256 = ""
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_update_status.set_title("正在扫描可移动介质")
+        self.offline_update_status.set_subtitle("只读取 .ming-ota 文件，不会修改 U 盘。")
+
+        def scan_result(candidates, scan_error):
+            if scan_error or not candidates:
+                self.offline_update_status.set_title("未发现离线更新包")
+                self.offline_update_status.set_subtitle(
+                    scan_error or "请插入 U 盘并确认其中有 .ming-ota 文件。")
+                return False
+            path = candidates[0]
+            self.offline_update_status.set_title("正在验证离线更新包")
+            self.offline_update_status.set_subtitle(str(path))
+
+            def done(rc, output, error):
+                try:
+                    result = json.loads(output or "{}")
+                except (TypeError, ValueError):
+                    result = {}
+                if rc != 0 or not result.get("ok"):
+                    self.offline_update_status.set_title("离线更新包不可用")
+                    self.offline_update_status.set_subtitle(
+                        str(result.get("error") or result.get("reason") or error or "签名、版本或 payload 校验失败。"))
+                    return False
+                try:
+                    digest = file_sha256(path)
+                except OSError as exc:
+                    self.offline_update_status.set_title("无法读取离线更新包")
+                    self.offline_update_status.set_subtitle(str(exc))
+                    return False
+                self.offline_bundle_path = str(path)
+                self.offline_bundle_sha256 = digest
+                self.offline_update_status.set_title("可用离线更新：Ming OS %s" % result.get("version", "未知"))
+                self.offline_update_status.set_subtitle(
+                    "构建 %s · SHA256 %s · %s · %s 字节" % (
+                        result.get("build_id", "未知"), digest, result.get("trusted_comment", "已签名"),
+                        result.get("payload_size", "未知")))
+                self.offline_stage_button.set_sensitive(True)
+                return False
+
+            run_capture_async(
+                ["ming-update", "offline-scan", "--json", str(path)], timeout=30, on_done=done)
+            return False
+
+        run_task_async(offline_bundle_candidates, scan_result)
+
+    def on_offline_stage(self, _button):
+        if not self.offline_bundle_path or not self.offline_bundle_sha256:
+            return
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_update_status.set_title("正在暂存离线更新")
+        self.offline_update_status.set_subtitle("需要管理员授权；暂存不会立即切换当前系统。")
+
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.offline_update_status.set_title("离线更新已暂存")
+                self.offline_update_status.set_subtitle("更新已写入非活动系统；重启后由健康检查确认，失败时自动回滚。")
+                self.offline_reboot_button.set_sensitive(True)
+            else:
+                self.offline_update_status.set_title("离线更新暂存失败")
+                self.offline_update_status.set_subtitle(
+                    str(result.get("error") or result.get("reason") or error or output or "请重新扫描 U 盘。"))
+                self.offline_stage_button.set_sensitive(True)
+            return False
+
+        run_capture_async([
+            "pkexec", "ming-update", "offline-stage", "--json", self.offline_bundle_path,
+            "--sha256", self.offline_bundle_sha256,
+        ], timeout=60, on_done=done)
 
     @staticmethod
     def _update_status_payload(rc, output, error):

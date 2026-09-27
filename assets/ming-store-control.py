@@ -607,6 +607,14 @@ class StoreControl:
                 "/usr/local/bin/ming-phone-desktop", "--sync",
             ), timeout=45)
             checks["desktop_shell"] = rc == 0
+            rc, _output, _error = self._call((
+                "runuser", "-u", user_name, "--", "env",
+                "XDG_RUNTIME_DIR=" + str(runtime),
+                "/usr/local/sbin/ming-refresh-dock-launchers", user_name,
+            ), timeout=45)
+            checks["dock_launchers"] = rc == 0
+        else:
+            checks["dock_launchers"] = False
         return checks
 
     @staticmethod

@@ -12,7 +12,7 @@ SCHEMA = "ming-install-mode/v1"
 MODES = {
     "blank_ab": {
         "major_ota": "ab_slot",
-        "message": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
+        "message": "使用整块磁盘：安装器会清除所选磁盘，并自动配置系统与恢复布局；底层创建 A/B 系统槽，支持安全更新和自动回滚。",
     },
     "dual_boot_preserve": {
         "major_ota": "disabled_dual_boot",
@@ -21,6 +21,9 @@ MODES = {
             "大版本 A/B OTA 已禁用。"
         ),
     },
+}
+LEGACY_MESSAGES = {
+    "blank_ab": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
 }
 
 
@@ -144,6 +147,10 @@ def validate_mode_payload(payload):
         raise ValueError("install mode must be an object")
     expected = build_mode_payload(payload.get("mode"))
     if payload != expected:
+        legacy = dict(expected)
+        legacy["message"] = LEGACY_MESSAGES.get(payload.get("mode"))
+        if payload == legacy:
+            return expected
         raise ValueError("install mode fields do not match the selected policy")
     return expected
 

@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -277,6 +278,13 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("initialPartitioningChoice: none", partition)
         self.assertNotIn("initialPartitioningChoice: erase", partition)
 
+    def test_blank_ab_message_explains_whole_disk_automatic_layout(self):
+        mode = load_mode()
+        message = mode.build_mode_payload("blank_ab")["message"]
+        self.assertIn("整块磁盘", message)
+        self.assertIn("自动配置", message)
+        self.assertIn("清除", message)
+
     def test_live_session_auto_selects_blank_ab_erase_after_calamares_window(self):
         marker = "auto_select_blank_ab"
         self.assertIn(marker, DESKTOP)
@@ -319,7 +327,7 @@ class InstallerModeTests(unittest.TestCase):
             partition = pathlib.Path(directory) / "partition.conf"
             result = subprocess.run(
                 [
-                    "python", str(MODE_PATH), "write", "--mode", "blank_ab",
+                    sys.executable, str(MODE_PATH), "write", "--mode", "blank_ab",
                     "--state", str(state), "--partition", str(partition),
                 ],
                 capture_output=True,

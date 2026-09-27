@@ -88,6 +88,17 @@ class VolumeAutomountTests(unittest.TestCase):
         self.assertEqual("locked-or-encrypted", reasons["/dev/sdb2"])
         self.assertEqual("installer-or-recovery-media", reasons["/dev/sdb3"])
 
+    def test_classifies_removable_update_bundle_without_mounting_or_formatting(self):
+        row = {
+            "name": "sdb1", "type": "part", "fstype": "vfat", "uuid": "usb-uuid",
+            "label": "MING_UPDATE", "mountpoint": "", "rm": "1",
+        }
+        result = self.volume.classify_partition(row)
+        self.assertEqual((True, "eligible"), result)
+        self.assertTrue(self.volume.is_removable(row))
+        self.assertEqual("update-media", self.volume.media_kind("update.ming-ota"))
+        self.assertEqual("not-update-media", self.volume.media_kind("disk-image.iso"))
+
 
 if __name__ == "__main__":
     unittest.main()
