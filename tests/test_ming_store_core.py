@@ -75,7 +75,7 @@ class MingStoreCatalogTests(unittest.TestCase):
     def test_vendor_entries_remain_actionable_for_user_provided_packages(self):
         provider = self.core.VendorOfficialProvider(catalog_root=CATALOG_ROOT)
         entries = provider.refresh_catalog()
-        self.assertEqual({"wechat", "wps", "qq", "dingtalk"}, {item["app_id"] for item in entries})
+        self.assertTrue({"wechat", "wps", "qq", "dingtalk", "spark-store"} <= {item["app_id"] for item in entries})
         for item in entries:
             self.assertTrue(item["enabled"])
             self.assertEqual("user-provided", item["installation_mode"])

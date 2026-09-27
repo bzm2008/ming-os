@@ -72,7 +72,7 @@ class MingStoreUiLayoutTests(unittest.TestCase):
                 return Provider()
 
         controller = ui.StoreController(catalog=type("Catalog", (), {"registry": Registry()})())
-        status = controller.refresh_section("spark")[0]
+        status = controller.refresh_section("official")[0]
         self.assertIn("2.0", status["message"])
 
     def test_home_timeout_keeps_late_catalog_results(self):
@@ -107,7 +107,7 @@ class MingStoreUiLayoutTests(unittest.TestCase):
             catalog_state = "ready"
 
             def refresh_catalog(self):
-                calls.append("spark-public")
+                calls.append("official-provider")
                 return [{"app_id": "demo"}]
 
         class Registry:
@@ -117,10 +117,10 @@ class MingStoreUiLayoutTests(unittest.TestCase):
 
         controller = ui.StoreController(
             catalog=type("Catalog", (), {"registry": Registry()})())
-        statuses = controller.refresh_section("spark")
-        self.assertEqual(["spark-public"], calls)
-        self.assertEqual(["spark-public"], [item["source_id"] for item in statuses])
-        self.assertTrue(statuses[0]["ok"])
+        statuses = controller.refresh_section("official")
+        self.assertEqual(["official-provider"] * 3, calls)
+        self.assertEqual(["ming-official", "debian-apt", "vendor-official"], [item["source_id"] for item in statuses])
+        self.assertTrue(all(item["ok"] for item in statuses))
 
     def test_local_artifact_picker_keeps_gtk_clicked_argument(self):
         source = STORE_UI.read_text(encoding="utf-8")

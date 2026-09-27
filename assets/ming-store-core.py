@@ -2555,8 +2555,4 @@ def default_catalog(catalog_root=None, runner=None):
         "debian-apt": DebianAptProvider(root, runner=runner),
         "vendor-official": VendorOfficialProvider(root),
         "wine-official": WineOfficialProvider(root),
-        "spark-public": SparkPublicProvider(
-            cache_root=pathlib.Path.home() / ".cache" / "ming-os" / "store" / SPARK_SOURCE_ID,
-            config_path=root / "spark-public.json",
-        ),
     }))
