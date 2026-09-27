@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 
 def load_ui_tokens():
@@ -63,13 +64,14 @@ SOURCES = {
     "debian-apt": "Debian / Ming 仓库",
     "vendor-official": "厂商官方",
     "wine-official": "Ming Wine 兼容目录",
-    "spark-public": "星火公开目录",
 }
-STORE_SECTIONS = ("spark", "sources")
-STORE_SECTION_LABELS = {"spark": "星火应用", "sources": "源应用"}
+STORE_SECTIONS = ("official",)
+STORE_SECTION_LABELS = {"official": "官方软件与下载"}
 SECTION_PROVIDERS = {
-    "spark": ("spark-public",),
-    "sources": ("ming-official", "debian-apt", "vendor-official", "wine-official"),
+    "official": ("ming-official", "debian-apt", "vendor-official"),
+}
+OFFICIAL_LINK_HOSTS = {
+    "github.com", "linux.weixin.qq.com", "linux.wps.cn", "im.qq.com", "www.dingtalk.com",
 }
 # Keep remote catalog data from selecting arbitrary or missing icon names.  The
 # aliases below are names shipped by the standard Debian icon themes; unknown
@@ -214,15 +216,26 @@ def layout_mode(width):
 def source_options_for_section(section):
     """Return provider IDs exposed by the active top-level store section.
 
-    The UI and query layer must use the same scoped list.  In particular, the
-    public Spark directory is not a selectable source in the native-source
-    section, even though both sections share the same catalog registry.
+    The UI exposes one official catalog. Live third-party repository adapters
+    are intentionally absent from this user-facing path.
     """
     try:
         providers = SECTION_PROVIDERS[str(section)]
     except KeyError as exc:
         raise ValueError("商店栏目无效。") from exc
     return ("all",) + tuple(providers)
+
+
+def official_link(item):
+    """Return a catalog-approved HTTPS website, never an arbitrary URL."""
+    value = str((item or {}).get("vendor_homepage") or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return ""
+    return value if parsed.hostname in OFFICIAL_LINK_HOSTS else ""
 
 
 def source_labels_for_section(section):
@@ -1163,7 +1176,7 @@ class StoreController:
 
 
 def _build_window(application, controller, initial_query="", local_deb=None):
-    from gi.repository import Adw, GLib, Gtk
+    from gi.repository import Adw, Gio, GLib, Gtk
 
     window = Adw.ApplicationWindow(application=application)
     if os.environ.get("MING_LOW_RESOURCE") == "1":
@@ -1180,15 +1193,12 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     header.set_title_widget(title)
     search = Gtk.SearchEntry(placeholder_text="搜索软件")
     search.set_text(initial_query)
-    source = Gtk.DropDown.new_from_strings(list(source_labels_for_section("spark")))
+    source = Gtk.DropDown.new_from_strings(list(source_labels_for_section("official")))
     section_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
     section_box.add_css_class("ming-store-section-toggle")
-    section_spark = Gtk.ToggleButton(label=STORE_SECTION_LABELS["spark"])
-    section_sources = Gtk.ToggleButton(label=STORE_SECTION_LABELS["sources"])
-    section_sources.set_group(section_spark)
-    section_spark.set_active(True)
-    section_box.append(section_spark)
-    section_box.append(section_sources)
+    section_official = Gtk.Label(label=STORE_SECTION_LABELS["official"])
+    section_official.add_css_class("ming-store-section-label")
+    section_box.append(section_official)
     refresh_catalog = Gtk.Button(label="刷新目录")
     refresh_catalog.set_tooltip_text("重新读取当前栏目的软件目录")
     controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1226,7 +1236,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     scroller = Gtk.ScrolledWindow(child=results, hexpand=True, vexpand=True)
     split.set_content(scroller)
     current_page = {"name": "home"}
-    current_section = {"name": "spark"}
+    current_section = {"name": "official"}
     page_generation = {"value": 0}
 
     breakpoint = Adw.Breakpoint.new(
@@ -1376,6 +1386,19 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         labels = {"install": "安装", "update": "更新", "remove": "卸载", "refresh": "重试刷新"}
         button = Gtk.Button(label=labels[action], valign=Gtk.Align.CENTER)
         button.store_action = action
+        homepage = official_link(item)
+        if homepage and item.get("installation_mode") == "user-provided":
+            website_button = Gtk.Button(label="访问官网", valign=Gtk.Align.CENTER)
+            website_button.set_tooltip_text("打开软件官方页面；不会自动安装")
+            website_button.connect(
+                "clicked",
+                lambda *_args: Gio.AppInfo.launch_default_for_uri(homepage, None),
+            )
+            action_box = getattr(row, "_action_box", None)
+            if action_box is not None:
+                action_box.append(website_button)
+            else:
+                row.add_suffix(website_button)
         if controller.live_mode():
             button.set_sensitive(False)
             button.set_tooltip_text("Live 模式只能浏览，请先安装系统并完成账户设置。")
@@ -1834,17 +1857,6 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             show_page(getattr(row, "page_name", "home"))
 
     sidebar.connect("row-selected", on_navigation)
-    def on_section_changed(button, section_name):
-        if not button.get_active():
-            return
-        current_section["name"] = section_name
-        source.set_model(Gtk.StringList.new(list(source_labels_for_section(section_name))))
-        source.set_selected(0)
-        source.set_visible(True)
-        show_page(current_page["name"])
-
-    section_spark.connect("toggled", on_section_changed, "spark")
-    section_sources.connect("toggled", on_section_changed, "sources")
     search.connect("search-changed", lambda *_args: show_home() if current_page["name"] == "home" else None)
     source.connect("notify::selected", lambda *_args: show_home() if current_page["name"] == "home" else None)
     def refresh_current_catalog(_button):

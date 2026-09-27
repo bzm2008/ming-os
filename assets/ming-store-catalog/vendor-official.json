@@ -8,6 +8,22 @@
   },
   "applications": [
     {
+      "app_id": "spark-store",
+      "name": "星火应用商店（项目主页）",
+      "package_name": "spark-store",
+      "version": null,
+      "architectures": ["amd64"],
+      "install_method": "vendor-deb",
+      "dependencies": [],
+      "license": "GPL-3.0-or-later",
+      "vendor_homepage": "https://github.com/spark-store-project/spark-store/releases",
+      "identity": {"type": "sha256", "sha256": null},
+      "enabled": true,
+      "installation_mode": "user-provided",
+      "installation_note": "项目主页目前不提供 GitHub Release 二进制；请从官方文档取得安装包后，通过本地 DEB 入口确认安装。",
+      "protected": false
+    },
+    {
       "app_id": "wechat",
       "name": "微信",
       "package_name": "wechat",
