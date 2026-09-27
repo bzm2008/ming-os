@@ -1831,7 +1831,9 @@ def sync_layout(width=1366):
         layout = migrated
     catalog_paths = {str(app["path"]) for app in apps}
     previous_catalog = layout.get("catalog_paths")
-    catalog_is_initialized = isinstance(previous_catalog, list)
+    # An empty catalog is the first-run marker, not an initialized snapshot;
+    # only a non-empty prior catalog can identify newly installed apps.
+    catalog_is_initialized = isinstance(previous_catalog, list) and bool(previous_catalog)
     previous_catalog = {
         str(path) for path in previous_catalog
         if isinstance(path, (str, os.PathLike))
@@ -1894,18 +1896,39 @@ def sync_layout(width=1366):
                 items.append(restored)
                 known.add(identity)
     index = len(items)
+    existing_basenames = {
+        Path(str(item.get("path"))).name.casefold()
+        for item in items
+        if item.get("path")
+    }
+    for item in items:
+        existing_basenames.update(
+            Path(str(child)).name.casefold()
+            for child in item.get("children", [])
+            if isinstance(child, (str, os.PathLike))
+        )
+    newly_installed_paths = []
     for app in visible_apps:
         identity = layout_item_identity(app)
-        if identity in known:
+        if identity in known or (
+                (not catalog_is_initialized and items)
+                or
+                catalog_is_initialized
+                and app["basename"].casefold() in existing_basenames):
             continue
         app["x"], app["y"] = next_position(index, width)
+        # Keep the user's layout semantics while marking newly discovered
+        # applications for a desktop launcher refresh after installation.
         app["pinned"] = False
+        if catalog_is_initialized and app["basename"] not in CORE_NAMES:
+            newly_installed_paths.append(str(app["path"]))
         items.append(app)
         known.add(identity)
         index += 1
     layout["version"] = LAYOUT_VERSION
     layout["items"] = items
     layout["catalog_paths"] = sorted(catalog_paths)
+    layout["newly_installed_paths"] = sorted(newly_installed_paths)
     if items:
         save_layout(layout)
         sync_files(layout)
@@ -2215,7 +2238,10 @@ def sync_files(layout):
                     relative = _manifest_relative(copied) if copied else None
                     if relative and copied != Path(child_path).resolve():
                         managed_files.add(relative)
-        elif item.get("path") and (Path(item["path"]).name in CORE_NAMES or item.get("pinned")):
+        elif item.get("path") and (
+                Path(item["path"]).name in CORE_NAMES
+                or item.get("pinned")
+                or str(item["path"]) in set(layout.get("newly_installed_paths", []))):
             is_core = Path(item["path"]).name in CORE_NAMES
             copied = copy_desktop(
                 item["path"],

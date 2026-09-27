@@ -972,6 +972,12 @@ class DesktopSourceTests(unittest.TestCase):
                     self.assertEqual((600, 410), (restored["items"][1]["x"], restored["items"][1]["y"]))
                     self.assertEqual([str(system_papyrus)], restored["items"][1]["children"])
 
+    def test_new_catalog_apps_are_marked_for_desktop_visibility(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        fresh_block = source.split("for app in visible_apps:", 1)[1].split("items.append(app)", 1)[0]
+        self.assertIn('newly_installed_paths.append(str(app["path"]))', fresh_block)
+        self.assertIn('str(item["path"]) in set(layout.get("newly_installed_paths", []))', source)
+
     def test_layout_save_is_atomic_and_bad_primary_keeps_last_good(self):
         source = PHONE_DESKTOP.read_text(encoding="utf-8")
         tree = ast.parse(source)
