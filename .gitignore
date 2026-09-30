@@ -41,6 +41,10 @@ __pycache__/
 /rebrand_to_ming.py
 /Calamares
 
+# Agent 工具产物（只对本机/本次会话有意义，不入库）
+/.playwright-mcp/
+/platform/ming-tea/.codex/
+
 # Local 铭荼 DSH runtime install; reproducible package metadata lives in assets.
 /.ming-tea/
 /platform/ming-tea/node_modules/
