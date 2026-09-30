@@ -6,14 +6,19 @@
 
 ## 更新时间
 
-2026-09-30（Asia/Shanghai）。本轮为**接手复验 + 两件新增**：①复验开发模式强化那批改动（已在仓库内落地），更正文档里两处与实测不符的表述（`subagent_claude_code` 状态、自测项数）；②新增设置页**「用量看板」**（站点额度：Auto 赠送次数 / 付费层余额 / 档位，宿主半区纯函数 + 离线断言，自测 45 项）；③两份调研文档：官方桌面客户端可借鉴点（`ming-tea-desktop-official-lessons.md`）、用量看板插件选型（`ming-tea-usage-dashboard-survey.md`，结论是**不能复用、需自建**）。剩余待办：工作树提交策略。
+2026-09-30（Asia/Shanghai）。本轮为**接手复验 + 两件新增 + 提交**：①复验开发模式强化那批改动（已在仓库内落地），更正文档里两处与实测不符的表述（`subagent_claude_code` 状态、自测项数）；②新增设置页**「用量看板」**（站点额度：Auto 赠送次数 / 付费层余额 / 档位，宿主半区纯函数 + 离线断言，自测 45 项）；③两份调研文档：官方桌面客户端可借鉴点（`ming-tea-desktop-official-lessons.md`）、用量看板插件选型（`ming-tea-usage-dashboard-survey.md`，结论是**不能复用、需自建**）；④把这批未提交改动整理成 4 个提交，落在新分支 `feat/ming-tea-desktop-agent`（**未推送**）。**唯一未做的验证**：用量看板页的浏览器实测（见下）。
 
 ## 工作区
 
 - 主仓库：`/Users/mac/ming-os`
 - 铭荼当前功能工作树：`/Users/mac/.codex/worktrees/ming-tea-dsh-assistant/ming-os`
 - 继续修改铭荼实现时使用该工作树；不要误把主仓库当作已经包含这批跨平台改动。
-- 工作树为 detached HEAD（2026-09-26 实测 `git status -b` 显示 `## HEAD (no branch)`）。截至同日，DSH `0.1.7-rc.1` 升级与协作文档这批改动共 19 个已修改文件加若干新文件（含本文件）尚未提交；继续开发前先与对方助手确认提交策略，不要丢弃或覆盖未提交工作。
+- 工作树原为 detached HEAD（2026-09-26 实测 `## HEAD (no branch)`）。**2026-09-30 已提交**：新建本地分支 `feat/ming-tea-desktop-agent`
+  （**未推送**），把这批跨平台改动分成 4 个提交落盘，工作树现在干净：
+  `f08ad4d` 忽略本机 agent 产物（`/.playwright-mcp/`、`/platform/ming-tea/.codex/`）→
+  `13e4023` 铭荼界面层插件与三场景预设（含新设置页「用量看板」）→
+  `1f8a5b1` 协作文档、两份调研与门禁脚本 → `f90fedc` 跨平台 Agent、Tauri 壳、锁文件与安装脚本。
+  基线仍是 `f46f634`。**要继续开发就在这个分支上做；推送需要另外确认**（分支尚未 push 到 origin/nas）。
 - 本机工具链：node 位于 `/Users/mac/.local/bin/node`（v26.9.0），无全局 `pnpm`/`corepack`；运行 workspace 命令用 `export PATH="/Users/mac/.local/bin:$PATH" && npx -y pnpm@11.19.0 <command>`。
 
 ## 当前目标
@@ -640,3 +645,4 @@ GUI 协议把 Web 客户端与后端版本绑在一起，独立定版本会产�
 | 2026-09-30 | DSH 侧复验并更正开发模式那批改动的两处记录（**只读复验，未改插件行为**）：①`subagent_claude_code` 在「开发场景边界」与「验收证据」里被写成"已启用但环境不具备"/`disabled=false`，与最终配置不符——实测是**刻意保持关闭**（`tool-subagent-claude-code=true`），已按事实更正，避免后来者以为存在一个必然失败的工具；②`check_ming_tea_hub.mjs` 自测项数由 36 更正为 **38**。复验命令（均只读、退出码 0）：`DSH_HOME=<repo>/.ming-tea/runtime/dsh-home .ming-tea/runtime/node_modules/.bin/dsh --profile ming-tea --dump-config` 组合成功；`python3 scripts/verify_presets.py <dump>` 输出开发场景 `tool-subagent-codex=false, tool-subagent-claude-code=true, tool-ralph=false, workflow-ptc=false, tool-workflow=false, tool-presentation=启用`；`node scripts/check_ming_tea_hub.mjs` 38/38；`platform/ming-tea` 下 `vitest run` 37/37（9 个文件）；`node scripts/build-presets.mjs` 重新生成与仓库内 `presets/scenes.patch.yml` 逐字节一致（22944 bytes）；插件 `node scripts/build.mjs` 产物 `lib/client.js` 哈希不变。**另注**：计划文本里「ptc/minimal 的 `plugins:` 在 6 空格」是错的——三个官方预设实测都是 8 空格（子项 10），生成器按 8 断言是对的。 |
 | 2026-09-30 | DSH 侧新增设置页**「用量看板」**（用户要求「设置里加一个用量看板页面」）：①**先判该不该自建**——调研 12609 条商店目录（元数据全字段零命中 `sca-hub`/`ming-tea`/`铭荼`/`auto_free`）+ 源码级读 17 个候选包，结论是**不能复用**：生态里的「用量看板」读的是 DSH 本地会话 token，与站点额度不是同一个数；读中转站账本的 `dsh-tokenledger` 靠固定指纹，而实测 `sca-hub.cn` 是 SPA catch-all（5 条探测路由全 `200 text/html`）⇒ 判为 unknown relay、不产出数字；唯一支持自定义 HTTP 的 `dsh-credits@0.4.0` peer 经 node-semver 实测不满足 `0.1.7-rc.1`。②**落地**：扩展点用官方 `settings.section`（契约 `dsh-client-ui-settings/lib/types/client/contract/slots.d.ts`；写法与本仓库已验证的 `ming-tea-update` 同形状），`id: ming-tea-usage`、`order: 91`；新增宿主纯函数 `lib/host/usage-view.mjs` 的 `buildUsageBoard()`（未登录/过期/付费档/赠送用尽/缺字段/占比未知/到期解析共 7 条离线断言），新端点 `usage.board` **一次请求同时回传看板模型与归一后的 quota**，客户端用 `mingTeaApplyQuota()` 同步页脚圆环 ⇒ 两个界面永远同口径、不多打请求；`auto_free.configured:false` 不画 0/0、总数缺失时占比为 `null`（画斜纹显示「—」，不假装 0%）；页面**只读**，不放购买/升级入口。③**如实标注的边界**：本页**浏览器实测尚未做**，只完成静态与离线验证（`node --check`、bundle 内含注册调用、45 项自测、`--dump-config` 组合成功）。自测从 38 项增至 **45 项**。 |
 | 2026-09-30 | DSH 侧新增两份调研文档（均只读调研，未改代码）：①`docs/ming-tea-desktop-official-lessons.md`——官方第一方桌面客户端（**Electron**，`apps/desktop`，读的是 `0.2.0-rc.2` 源码，**非**我们锁的 `0.1.7-rc.1`，已注明版本折扣、且不含运行观测）可借鉴点：**别抓 stdout**（官方用 Node IPC 信道 `{type:'ready',url,injections}` + `fetch(…,{redirect:'manual'})` 换 cookie）、分级优雅关停、PID 锁 profile、**先开窗再起 Host**、三段式路由嵌官方 Web 前端（实测 `dsh-web-frontend/dist` 在**我们锁定的 0.1.7-rc.1 里就已存在**）、安装更新前「锁准入 → 排空 → 复检 → 停不干净就拒绝安装」、更新流水账只落白名单字段、macOS GUI 启动拿不到 `~/.zshrc` 的 PATH（需跑一次登录 shell）；同时列出 Tauri 下**不成立**的做法（`ELECTRON_RUN_AS_NODE`、electron-updater、asar、`registerSchemesAsPrivileged`）与我们现状差距（`lib.rs` 只有一句 `child.kill()`、启动失败静默吞掉、stderr 无人读、无单实例锁、Tauri updater 其实**根本没接**——文档此前那句 endpoint 描述的是计划而非现状）。②`docs/ming-tea-usage-dashboard-survey.md`——用量看板选型证据与不确定清单。 |
+| 2026-09-30 | DSH 侧把这批未提交改动**整理提交**（用户确认的策略：新建本地分支、**不推送**、本机 agent 产物不入库）：基线 `f46f634`（原 detached HEAD，提交会不可达）→ 新分支 `feat/ming-tea-desktop-agent`，4 个提交 `f08ad4d`（.gitignore）→ `13e4023`（界面层插件 + 三场景预设 + 用量看板）→ `1f8a5b1`（协作文档 + 两份调研 + 门禁脚本）→ `f90fedc`（跨平台 Agent + Tauri 壳 + 锁文件 + 安装脚本）。`.playwright-mcp/`（41 个快照 / 656K）与 `platform/ming-tea/.codex/` 已进 `.gitignore`。提交后工作树干净。**未推送**：`feat/ming-tea-desktop-agent` 只存在于本工作树。 |
