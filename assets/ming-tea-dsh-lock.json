@@ -2,20 +2,325 @@
   "schema": "ming.tea.dsh.lock.v1",
   "runtime": {
     "package": "@deepseek-ai/dsh",
-    "version": "0.1.6-alpha.2",
-    "revision": "ddefc45fbc7f8e46dd73185e68295696d1297887",
+    "version": "0.1.7-rc.1",
+    "revision": "0.1.7-rc.1",
     "license": "MIT",
-    "integrity": "sha512-PHR/3ZHpJNWXlDQ3U9weFb7calWbSMJd2GD3z2iPJ8zAKL7ipuzyPy5xGbaXf2OA8hc0SAGJeoUW7nfatCNOYw=="
+    "integrity": "sha512-O1K076aCmqE+h4fB5J+mi3twNSAnh26OqHepaqvS5f1tccFnxhVyGpUmjcncVM5x1SX4niznmvsGrsRo9p733A=="
   },
-  "install": {"package_manager":"npm","ignore_scripts":true,"audit":false,"fund":false,"node":">=22.19.0"},
+  "install": {
+    "package_manager": "npm",
+    "ignore_scripts": true,
+    "audit": false,
+    "fund": false,
+    "node": ">=22.19.0"
+  },
   "plugins": [
-    {"package":"@deepseek-ai/dsh-tool-bash","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-hyL5bvtxrRFAuapxKpudQy9oe5lxxrQU15zfQxl9MOczIvv+NFYHcO2+gNpYHu96TKdD/0yA+2uzhTyfWKOAog==","capabilities":["terminal.run","diagnostic.run"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-tool-fs","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-X5USuzyhRXhp1gFRxZiB7QaoVvjhZH+BB+al8E1H2imKEVdFX3VTQqpFCksAJBBuv/8CwCAs3zrrB0Pt5HgLkw==","capabilities":["file.read","file.list","file.delete","file.upload"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-tool-web","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-me0aJrLs/ZIWJA+wf/Pd6Jzm6DghxEcvwoZuymPo0oC22oQzA5r7vqv1jdgoZTConF4diO6r37RPKX9VQ3jiVQ==","capabilities":["browser.read","browser.open","browser.submit","browser.upload"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-browser-use","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-AAVowmKUiO6GgG+ghXiokCkCmkw9CV6rXjTCfTAJdgbWs7OyfoQhG045krzpR5Aa9/GPA/7rxGa6ClsDc0Klyw==","capabilities":["browser.read","browser.open"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-computer-use","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-+TOcjPBsOPh06b+snRqWKmER3s75vPwDhM3++TbCTArmnPX8/+D8ZCzL0rYpZ6LUTObVbqQZsoSWY2wasAJkNg==","capabilities":["app.open","browser.open"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-experimental-browser-use-playwright-mcp","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-1pvPBbVxKxcvY/F4+7wQaTTnvq6SeNzFH/16kIo8Ick4qFj0t1R+cZqPDQt8ew9baRipfBVjjcH9gbKdZ+DwTQ==","capabilities":["browser.read","browser.open","browser.submit","browser.upload"],"risk":"approval-gated"},
-    {"package":"@deepseek-ai/dsh-experimental-computer-use-cua-driver-native","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-qh3FV4WoHt2/ciY/T4iHNLoEzCrIqN6hn+WuCwODv6LVvhPpg134O+RP/dV3GQEXyvyIGbnwD4gnMsYkZnLusg==","capabilities":["app.open","browser.open"],"risk":"approval-gated","experimental":true},
-    {"package":"@deepseek-ai/dsh-skill-office","version":"0.1.6-alpha.2","license":"MIT","integrity":"sha512-aJMNK0N2hvih3YR+rcAgWgwGmi1J/kHtr/x+BHyMDSycIyh5gHPnMDbtffWSGb+HaNx6jbDKRAISUvKYdFORJg==","capabilities":["office.read","office.write"],"risk":"approval-gated"}
+    {
+      "package": "@deepseek-ai/dsh-tool-bash",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-e5anuuLPQLnBfAxY18cmnvikeBs2DzlBS2IjmZR16EBvee10spnSqviUYOzvLBKTVEDVQEbDZdBTSE1YsothZQ==",
+      "capabilities": [
+        "terminal.run",
+        "diagnostic.run"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-tool-str-replace-editor",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-GwWmI1JvNn0itt/ZpOd1q8VqBuGUtMYPs0AEb9xzG5P6cZvoXvR/QGEEuWS9HHSzv4t2Fsas+4C5ZUmc0/DCqg==",
+      "capabilities": [
+        "fs.read",
+        "fs.write",
+        "fs.edit"
+      ],
+      "risk": "approval-gated",
+      "note": "官方没有任何预设挂载它（孤儿包）；我们只给开发场景挂，作为「精确编辑」工具。"
+    },
+    {
+      "package": "@deepseek-ai/dsh-tool-fs",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-9ou+RmtrC6Q0RYishWXnbrB0cWt354Z6LIF/7EHntRYv6dv8SEgOkdE+IQ3kOfTa4av4sLHZDQw1KwweoTaMuA==",
+      "capabilities": [
+        "file.read",
+        "file.list",
+        "file.delete",
+        "file.upload"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-tool-web",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-ryny9wTq7aYZhFY9gCldLN5fKf24AqucX1xvXdsclWChmV5N5K8zl+Yw4S6PbMpyYdM1xXVJJR6GhDNVi+ethQ==",
+      "capabilities": [
+        "browser.read",
+        "browser.open",
+        "browser.submit",
+        "browser.upload"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-browser-use",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-3it6h+z/IK+YpL7kjDCq3ryXGSOLTg88VEBE08zj37lgkxeoItbNtlvQrseZbEkA39xUzmzHe3wEAIGPJWZZVg==",
+      "capabilities": [
+        "browser.read",
+        "browser.open"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-computer-use",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-HzihM3gU24uf7HocRF+w2CMk1LcdWjuxNM8ToHiMwOldURnDLZ7ZmpSFvZNb9oZ6EYQx5OF95gjJMQVsyLFvkg==",
+      "capabilities": [
+        "app.open",
+        "browser.open"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-experimental-browser-use-playwright-mcp",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-zQST0oALz4ia6TjvegsY1oGVkjKtiYZReXvlbCk3e7p5rp1T6iG8K//t/4MQOtRDbIe10QFmf2bTzHC3dxGOvQ==",
+      "capabilities": [
+        "browser.read",
+        "browser.open",
+        "browser.submit",
+        "browser.upload"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@deepseek-ai/dsh-experimental-computer-use-cua-driver-native",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-bBW2k183A7ACdR/sau+Z65jEueVqyaDgyk9EzRyLQDJRqdK702wsiot9sAfeLD/1Qy8Ss2EjgDKh4PFmCQvs4A==",
+      "capabilities": [
+        "app.open",
+        "browser.open"
+      ],
+      "risk": "approval-gated",
+      "experimental": true
+    },
+    {
+      "package": "@deepseek-ai/dsh-skill-office",
+      "version": "0.1.7-rc.1",
+      "license": "MIT",
+      "integrity": "sha512-ESjPx+iyfaNIlU9KxaU1udof9Qc9IpO+ebHBWC15DfsC2w/UDXjNVuHGiLRLd6QU9+e+RlV2Q8BX4ClBuy0k8w==",
+      "capabilities": [
+        "office.read",
+        "office.write"
+      ],
+      "risk": "approval-gated"
+    },
+    {
+      "package": "@michengai/dsh-agency-agents",
+      "version": "1.0.5",
+      "license": "Apache-2.0",
+      "integrity": "sha512-CNcjfs7LiLW3inl8Vj6hbX6NV+ye1CAPQvJ258nO96q8gltQ94vbb9t+6WwxAk5QECyKXVJfXrZidubV+Zxs0Q==",
+      "capabilities": [
+        "prompt.agents.read"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-agency-agents"
+    },
+    {
+      "package": "@michengai/dsh-archive-manager",
+      "version": "1.0.5",
+      "license": "Apache-2.0",
+      "integrity": "sha512-XiFk6qXHJd9N/txlyEFKuR6v0a9uxK/AvJrnyMY5ESTFumCIzbzMTi4P9NOytCCsvMnLxFsDtchiz2D+2LGbTw==",
+      "capabilities": [
+        "session.archive",
+        "session.unarchive",
+        "session.delete"
+      ],
+      "risk": "approval-gated",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-archive-manager"
+    },
+    {
+      "package": "@michengai/dsh-btw",
+      "version": "0.1.13",
+      "license": "Apache-2.0",
+      "integrity": "sha512-gkT6vqSQqqUD9KrVfa0LMRUcWihxefkp4zceXAlHZ7HqOfS7Abk5oaoJQ5+px6tjd71jxVOQwlhDyS8D0QJDmQ==",
+      "capabilities": [
+        "client.readonly",
+        "session.sideask"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-btw"
+    },
+    {
+      "package": "@michengai/dsh-code-review",
+      "version": "0.1.7",
+      "license": "Apache-2.0",
+      "integrity": "sha512-MejubNR2YTg9mPd+RYQcvTEdSePhAXQfYJtKiJwKRIi0PJ4+Cx+ArNKs3svm4vE8/Xpw2xqUhN0cv+fkgnHjpg==",
+      "capabilities": [
+        "code.read",
+        "review.write"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-code-review"
+    },
+    {
+      "package": "@michengai/dsh-codex-pet",
+      "version": "0.1.10",
+      "license": "Apache-2.0",
+      "integrity": "sha512-LTOLUZ13uNQ4UctYmysmEud0N9TTeWBmIDZ5VzVrdBoeSEyz88XzfoHssXWV50gCO1iiqTB6m9NmrfWxc6k9dQ==",
+      "capabilities": [
+        "client.pet"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-codex-pet"
+    },
+    {
+      "package": "@michengai/dsh-codex-ui",
+      "version": "1.1.18",
+      "license": "Apache-2.0",
+      "integrity": "sha512-mYmEU7tf7p8k3CFeiftaOpkuPh6s62DE+1anRCmifsIVHJG0uUXb44RZCkDZmR+vhLeKptMKTf501TpCkKdQPA==",
+      "capabilities": [
+        "client.sidebar",
+        "client.workspace",
+        "client.search",
+        "client.session.navigation"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-codex-ui"
+    },
+    {
+      "package": "@michengai/dsh-im-connect",
+      "version": "0.1.55",
+      "license": "Apache-2.0",
+      "integrity": "sha512-lt40dC9NWJn5+JkbkgeNHp+8HpHYEk68jBUVHJH02eFA5a6fyRq6ze+xJaKv1GnCVILToCMK9XuAVG4MzSvPrQ==",
+      "capabilities": [
+        "network.external",
+        "im.receive",
+        "im.send"
+      ],
+      "risk": "approval-gated",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-im-connect"
+    },
+    {
+      "package": "@michengai/dsh-simplify",
+      "version": "0.1.10",
+      "license": "Apache-2.0",
+      "integrity": "sha512-x/DPidoubwnqWMnnka24Ggv0E+8xf5dIo8VfYxEImEjvOdAmSzRcD9hVbuEiL5rd835m6D5A2ohv8OBZkL1R0Q==",
+      "capabilities": [
+        "code.read",
+        "code.modify"
+      ],
+      "risk": "approval-gated",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-simplify"
+    },
+    {
+      "package": "@michengai/dsh-skills-manager",
+      "version": "1.1.4",
+      "license": "Apache-2.0",
+      "integrity": "sha512-E85oOwdF23uNTS1u8iuvqXfvTskgBAZX0PbUFRYsePJ/qmK0hM9Mwji9BxlNn3OljcY61GBpUFUgynIHfKNChA==",
+      "capabilities": [
+        "skill.read",
+        "skill.write",
+        "skill.install"
+      ],
+      "risk": "approval-gated",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-skills-manager"
+    },
+    {
+      "package": "plugin-effort-slider",
+      "version": "1.2.2",
+      "license": "MIT",
+      "integrity": "sha512-S/hKDBh0kFwtfNKbC9z36zxbuavrbpFHuj84EYarCDnWrG+RcsHZN+wPlVCwk4TKKKLw7pViYtohrQVZ+oqFJQ==",
+      "capabilities": [
+        "client.model.select"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/mrSutivu/dsh-effort-slider"
+    },
+    {
+      "package": "@ming-tea/dsh-ui",
+      "version": "0.1.0",
+      "license": "MIT",
+      "capabilities": [
+        "client.theme"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "source": "link:platform/ming-tea/plugins/ming-tea-ui",
+      "note": "铭荼自有的界面定制层：仅在社区前端之上叠加圆润几何与柔光阴影，不 fork 社区源码，也不改写 DOM 结构。源码随本仓库版本管理，无 npm integrity。"
+    },
+    {
+      "package": "@michengai/dsh-automation",
+      "version": "0.1.51",
+      "license": "Apache-2.0",
+      "integrity": "sha512-kwfsjF8zENToZlz83C0D5RBBX+O64kq9ouKcEP7y+H3w8uf46TvUWIj+JF942sjcg5t54Zyz8fBG4zEpHv6p1g==",
+      "capabilities": [
+        "schedule.create",
+        "schedule.run",
+        "session.create"
+      ],
+      "risk": "approval-gated",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/MichengAI/dsh-automation",
+      "note": "定时任务：按计划在独立 Session 中执行编码任务。依赖 antd/luxon/zod（体积 4.7MB），其 antd 界面自动继承铭荼主题 token。排程会在无人值守时创建会话，故标 approval-gated。"
+    },
+    {
+      "package": "dsh-plugin-shop",
+      "version": "0.8.3",
+      "license": "Apache-2.0",
+      "integrity": "sha512-ifxZbcMmSREqQVPno7vSB/t5VhOsgMNJ1+okPRm0Ww15spbBMjX/SNPu6Ae48Lrz4FN29t/FBfHrzKKbG6urrA==",
+      "capabilities": [
+        "plugin.catalog.read",
+        "plugin.install"
+      ],
+      "risk": "installs-plugins",
+      "profiles": [
+        "web"
+      ],
+      "source": "https://github.com/LivXue/dsh-plugin-shop",
+      "notes": "目录源已在 profile patch 钉死；typert codec 由 scripts/patch_shop_typert_compat.mjs 做等价改写（上游对齐后还原）。"
+    }
   ]
 }

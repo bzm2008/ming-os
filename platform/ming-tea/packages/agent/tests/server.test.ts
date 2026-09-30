@@ -37,4 +37,16 @@ describe("agent server", () => {
     });
     await server.close();
   });
+
+  it("lists and selects an audited provider without returning credentials", async () => {
+    const server = createAgentServer({socketPath: "/tmp/ming-tea-agent-model-test.sock"});
+    const listed = await server.handle({id: "1", action: "model.providers", payload: {}});
+    expect(listed).toMatchObject({ok: true, result: expect.arrayContaining([
+      expect.objectContaining({id: "ming-main", label: "Ming 主站"}),
+    ])});
+    expect(JSON.stringify(listed)).not.toContain("Authorization");
+    const selected = await server.handle({id: "2", action: "model.select", payload: {provider: "ming-main", model: "ming-default"}});
+    expect(selected).toMatchObject({ok: true, result: {provider: "ming-main", model: "ming-default", label: "Ming 主站"}});
+    await server.close();
+  });
 });

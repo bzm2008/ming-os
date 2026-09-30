@@ -11,12 +11,12 @@ describe("desktop shell", () => {
     expect(source).not.toContain("127.0.0.1:3080");
   });
 
-  it("keeps scene and thinking selection in the pre-session gate", () => {
+  it("keeps scene selection in the pre-session gate", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     expect(source).toContain("started: false");
     expect(source).toContain("state.started ? conversation() : modeGate()");
     expect(source).toContain('if (state.started) return; state.scene');
-    expect(source).toContain('state.thinking = button.dataset.thinking as Thinking');
+    expect(source).toContain("thinkingLevels");
     expect(source).toContain('state.started = true');
     expect(source).toContain('data-action="start"');
     expect(source).toContain("已锁定");
@@ -68,7 +68,8 @@ describe("desktop shell", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     expect(source).toContain("mode-gate");
     expect(source).toContain('data-mode="${id}"');
-    expect(source).toContain('data-thinking="${id}"');
+    expect(source).not.toContain("初始思考强度");
+    expect(source).not.toContain("thinking-control");
     expect(source).toContain("state.started ? conversation() : modeGate()");
     expect(source).toContain("if (state.started) return");
     expect(source).not.toContain("scene-rail");
@@ -77,10 +78,25 @@ describe("desktop shell", () => {
 
   it("keeps the locked mode while exposing thinking controls during a session", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
-    expect(source).toContain("thinking-inline");
-    expect(source).toContain("state.thinking = button.dataset.thinking as Thinking");
+    expect(source).toContain("thinking-slider");
+    expect(source).toContain('type="range"');
+    expect(source).toContain('data-thinking-slider');
+    expect(source).not.toContain("thinking-inline");
+    expect(source).toContain("state.thinking = level");
     expect(source).toContain("思考强度已更新 · 下一轮生效");
     expect(source).toContain("当前工作模式已锁定");
-    expect(source).toContain("thinking-inline");
+    expect(source).toContain("balanced");
+  });
+
+  it("uses the audited community DSH Codex UI as the workspace baseline", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
+    const lock = JSON.parse(readFileSync(join(__dirname, "../../../../../assets/ming-tea-dsh-lock.json"), "utf8"));
+    expect(lock.plugins).toEqual(expect.arrayContaining([
+      expect.objectContaining({package: "@michengai/dsh-codex-ui", version: "1.1.18", license: "Apache-2.0"}),
+    ]));
+    expect(source).toContain("DSH 社区工作台");
+    expect(source).toContain("社区 Codex UI 负责会话和工作区");
+    expect(source).not.toContain("OpenCode Zen");
+    expect(source).not.toContain("big-pickle");
   });
 });

@@ -8,8 +8,9 @@ import { ExecutionDiscipline } from "./discipline.js";
 import { communityAdapterStatuses } from "./community-adapters.js";
 import { OtaBridge, type OtaAction } from "./ota-bridge.js";
 import { PlatformStatusAdapter } from "./platform-status.js";
+import { createDefaultProviderRegistry, type ModelProviderRegistry } from "./model-provider.js";
 
-export interface AgentServerOptions { socketPath?: string; pipeName?: string; engine?: SessionEngine; dsh?: DshAdapter; memory?: LocalMemoryStore; sessions?: SessionLibrary; discipline?: ExecutionDiscipline; ota?: OtaBridge; platform?: PlatformStatusAdapter; }
+export interface AgentServerOptions { socketPath?: string; pipeName?: string; engine?: SessionEngine; dsh?: DshAdapter; memory?: LocalMemoryStore; sessions?: SessionLibrary; discipline?: ExecutionDiscipline; ota?: OtaBridge; platform?: PlatformStatusAdapter; providers?: ModelProviderRegistry; }
 export interface AgentServer { listen(): Promise<void>; close(): Promise<void>; handle(request: Request): Promise<Response>; }
 
 export function createAgentServer(options: AgentServerOptions = {}): AgentServer {
@@ -20,6 +21,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const discipline = options.discipline ?? new ExecutionDiscipline();
   const ota = options.ota ?? new OtaBridge();
   const platform = options.platform ?? new PlatformStatusAdapter();
+  const providers = options.providers ?? createDefaultProviderRegistry();
+  let selectedModel = providers.select("ming-main");
   const transport: JsonLineTransport = options.pipeName
     ? createNamedPipeTransport(options.pipeName)
     : createUnixTransport(options.socketPath ?? process.env.MING_TEA_IPC_PATH ?? "/tmp/ming-tea-agent.sock");
@@ -46,6 +49,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         case "memory.capture": return {id: request.id, ok: true, result: await memory.remember(String(request.payload.content ?? ""), (request.payload.kind as "profile" | "preference" | "fact" | "note") ?? "note", Array.isArray(request.payload.tags) ? request.payload.tags.map(String) : [], "user")};
         case "session.search": return {id: request.id, ok: true, result: await sessions.search(String(request.payload.query ?? ""), Number(request.payload.limit ?? 20))};
         case "session.recall": return {id: request.id, ok: true, result: await sessions.recall(Array.isArray(request.payload.sessionIds) ? request.payload.sessionIds.map(String).slice(0, 3) : [])};
+        case "model.providers": return {id: request.id, ok: true, result: providers.list()};
+        case "model.select": {
+          selectedModel = providers.select(String(request.payload.provider) as Parameters<ModelProviderRegistry["select"]>[0], request.payload.model ? String(request.payload.model) : undefined);
+          return {id: request.id, ok: true, result: selectedModel};
+        }
         case "discipline.status": return {id: request.id, ok: true, result: discipline.status()};
         case "platform.status": return {id: request.id, ok: true, result: await platform.status()};
         case "platform.permission.status": return {id: request.id, ok: true, result: await platform.status()};

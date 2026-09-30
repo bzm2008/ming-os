@@ -1,5 +1,6 @@
+export type ModelProviderId = "ming-main" | "openai-compatible" | "kim";
 export interface ModelProvider {
-  id: "ming-main" | "openai-compatible" | "kim";
+  id: ModelProviderId;
   label: string;
   endpoint: string;
   model: string;
@@ -12,10 +13,17 @@ export interface ProviderOverrides {
   model?: string;
 }
 
+export interface SelectedModel {
+  provider: ModelProviderId;
+  model: string;
+  label: string;
+  credentialRef: string;
+}
+
 export class ModelProviderRegistry {
   private readonly providers: Map<ModelProvider["id"], ModelProvider>;
 
-  constructor(overrides: Partial<Record<ModelProvider["id"], ProviderOverrides>> = {}) {
+  constructor(overrides: Partial<Record<ModelProviderId, ProviderOverrides>> = {}) {
     this.providers = new Map([
       ["ming-main", {
         id: "ming-main", label: "Ming 主站", endpoint: overrides["ming-main"]?.endpoint ?? "https://api.ming-os.cn/v1", model: overrides["ming-main"]?.model ?? "ming-default", credentialRef: "credential:ming-main", capabilities: ["chat", "tool-use"],
@@ -29,7 +37,7 @@ export class ModelProviderRegistry {
     ]);
   }
 
-  resolve(id: ModelProvider["id"]): ModelProvider {
+  resolve(id: ModelProviderId): ModelProvider {
     const provider = this.providers.get(id);
     if (!provider) throw new Error(`Unknown model provider: ${id}`);
     return {...provider, capabilities: [...provider.capabilities]};
@@ -38,8 +46,14 @@ export class ModelProviderRegistry {
   list(): ModelProvider[] {
     return [...this.providers.values()].map((provider) => ({...provider, capabilities: [...provider.capabilities]}));
   }
+
+  select(id: ModelProviderId, model?: string): SelectedModel {
+    const provider = this.resolve(id);
+    const selectedModel = model ?? provider.model;
+    return {provider: provider.id, model: selectedModel, label: provider.label, credentialRef: provider.credentialRef};
+  }
 }
 
-export function createDefaultProviderRegistry(overrides: Partial<Record<ModelProvider["id"], ProviderOverrides>> = {}): ModelProviderRegistry {
+export function createDefaultProviderRegistry(overrides: Partial<Record<ModelProviderId, ProviderOverrides>> = {}): ModelProviderRegistry {
   return new ModelProviderRegistry(overrides);
 }

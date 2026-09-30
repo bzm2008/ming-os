@@ -8,6 +8,7 @@ describe("model providers", () => {
     expect(registry.resolve("ming-main").id).toBe("ming-main");
     expect(registry.resolve("openai-compatible").id).toBe("openai-compatible");
     expect(registry.resolve("kim").id).toBe("kim");
+    expect(registry.list()).toHaveLength(3);
   });
 
   it("keeps credentials behind references", async () => {

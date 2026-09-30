@@ -13,6 +13,8 @@ export type Action =
   | "memory.capture"
   | "session.search"
   | "session.recall"
+  | "model.providers"
+  | "model.select"
   | "discipline.status"
   | "platform.status"
   | "platform.permission.status"

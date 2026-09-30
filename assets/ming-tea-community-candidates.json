@@ -9,7 +9,12 @@
       "version": "0.1.8",
       "license": "MIT",
       "runtime": "dsh-cordis-node",
-      "permissions": ["prompt.identity.read", "prompt.memory.read", "file.read", "file.write"],
+      "permissions": [
+        "prompt.identity.read",
+        "prompt.memory.read",
+        "file.read",
+        "file.write"
+      ],
       "status": "adapted-local",
       "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#IdentityMemoryAdapter -> memory.ts#LocalMemoryStore",
       "reason": "已接入铭荼本地适配器；按 profile/session/task 分级保存，写入时脱敏并由会话权限控制，不直接复制第三方身份文件。"
@@ -21,7 +26,11 @@
       "version": "1.0.2",
       "license": "MIT",
       "runtime": "dsh-web-client-bundle",
-      "permissions": ["session.search", "session.read", "session.reference"],
+      "permissions": [
+        "session.search",
+        "session.read",
+        "session.reference"
+      ],
       "status": "adapted-local",
       "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#SessionWorkbenchAdapter -> session-library.ts#SessionLibrary",
       "reason": "已接入铭荼本地只读检索适配器；索引和召回留在 Agent service 内，原生 UI 只消费会话引用，不复制 DSH Web UI。"
@@ -33,7 +42,12 @@
       "version": "0.1.0",
       "license": "Apache-2.0",
       "runtime": "everos-local-service",
-      "permissions": ["memory.read", "memory.capture", "memory.flush", "network.loopback"],
+      "permissions": [
+        "memory.read",
+        "memory.capture",
+        "memory.flush",
+        "network.loopback"
+      ],
       "status": "optional-adapter-ready",
       "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#EverosMemoryAdapter",
       "reason": "已提供显式 loopback 连接器适配器；默认禁用，只有用户启用本机 EverOS 服务后才捕获记忆，不进入低配 ISO 默认安装。"
@@ -45,7 +59,13 @@
       "version": "1.2.0",
       "license": "MIT",
       "runtime": "dsh-cordis-node",
-      "permissions": ["prompt.inject", "session.read", "skill.read", "file.read", "diagnostic.run"],
+      "permissions": [
+        "prompt.inject",
+        "session.read",
+        "skill.read",
+        "file.read",
+        "diagnostic.run"
+      ],
       "status": "adapted-local",
       "adapter": "platform/ming-tea/packages/agent/src/community-adapters.ts#ClevererDshAdapter -> discipline.ts#ExecutionDiscipline",
       "reason": "已接入安全子集：工具尝试次数上限、失败记录和成功重置；不执行第三方脚本，不改变铭荼审批策略。"
@@ -57,7 +77,11 @@
       "version": "3.2.1-server",
       "license": "AGPL-3.0",
       "runtime": "honcho-service",
-      "permissions": ["memory.read", "memory.write", "network.external"],
+      "permissions": [
+        "memory.read",
+        "memory.write",
+        "network.external"
+      ],
       "status": "external-connector-only",
       "reason": "记忆基础设施成熟，但 AGPL-3.0 和外部服务/自托管依赖不适合直接预装；只提供用户主动启用的连接器。"
     },
@@ -68,9 +92,14 @@
       "version": "0.2.0",
       "license": "MIT",
       "runtime": "dsh-web-or-tui",
-      "permissions": ["database.read", "sql.execute", "report.write", "file.write"],
+      "permissions": [
+        "database.read",
+        "sql.execute",
+        "report.write",
+        "file.write"
+      ],
       "status": "blocked-version",
-      "reason": "当前 release peerDependencies 要求 DSH 0.1.7-rc.1，铭荼当前锁定 0.1.6-alpha.2；数据库能力还必须增加只读账号和连接审批。"
+      "reason": "DSH runtime 已锁定 0.1.7-rc.1，但尚未完成该插件的 peer/runtime 集成验收；数据库能力还必须增加只读账号和连接审批。"
     },
     {
       "id": "unresolved-user-names",
@@ -81,7 +110,12 @@
       "runtime": null,
       "permissions": [],
       "status": "needs-source",
-      "names": ["Coding agents M1 MOS", "DSH UNI V R office", "RCHIFY", "DSH Watch Pro"],
+      "names": [
+        "Coding agents M1 MOS",
+        "DSH UNI V R office",
+        "RCHIFY",
+        "DSH Watch Pro"
+      ],
       "reason": "未找到精确公开仓库或唯一包名，需要用户提供链接、作者或仓库地址后再审计。"
     },
     {
@@ -91,10 +125,181 @@
       "version": "1.1.18",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
-      "permissions": ["session.read", "workspace.read", "workspace.organize", "settings.read"],
-      "status": "ui-reference-adapted",
-      "adapter": "platform/ming-tea/apps/desktop/src/main.ts",
-      "reason": "Codex 风格工作区树、全局搜索、历史会话、项目分组和轮次导航已迁移为铭荼 Tauri UI；没有复制 Web DOM，兼容性由铭荼 IPC 管理。"
+      "permissions": [
+        "session.read",
+        "workspace.read",
+        "workspace.organize",
+        "settings.read"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-codex-ui@1.1.18 mounted by scripts/install_ming_tea_plugins.sh into profile ming-tea",
+      "reason": "Apache-2.0 DSH client bundle，已固定 integrity；2026-09-26 在隔离目录与工作树 profile ming-tea 均完成真实安装验证（bundles 登记、--dump-config 组合、页面注册并加载 client.js），先前记录的 ERESOLVE 冲突未复现。作为 web 工作区前端基线，由铭荼自有插件叠加定制。"
+    },
+    {
+      "id": "dsh-codex-pet",
+      "source": "https://github.com/MichengAI/dsh-codex-pet",
+      "revision": "0.1.10",
+      "version": "0.1.10",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "client.render",
+        "settings.read"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-codex-pet@0.1.10 mounted by scripts/install_ming_tea_plugins.sh into profile ming-tea",
+      "reason": "桌宠插件，9 只内置宠物、零依赖、peer 含 0.1.7-rc.1。2026-09-27 验证挂载并渲染，替换了原 @linxin666/dsh-pet（两者并存会出现两只宠物，故二选一）。两点须知：① 随包 assets/codex 图集来自 OpenAI Codex，其 NOTICE 明确不在 Apache-2.0 范围内——自用可以，随 Ming OS ISO 分发不行；② 桌面浮窗需要 pet 型桌面端，铭荼 Tauri 壳需自行实现，本轮只验网页内。自定义宠物需要 DSH 内配置图像生成工具。"
+    },
+    {
+      "id": "dsh-archive-manager",
+      "source": "https://github.com/MichengAI/dsh-archive-manager",
+      "revision": "1.0.5",
+      "version": "1.0.5",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "session.archive",
+        "session.unarchive",
+        "session.delete"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-archive-manager@1.0.5",
+      "reason": "归档会话的搜索、恢复、批量归档与永久删除。注意它按设计**接替**官方 workspace 与 session-projection-cache 两行（子类化实现），属本轮风险最高项；2026-09-27 实测宿主启动无错误、会话创建与工作区选择正常。官方 rc.1 无 ui-settings-unarchive-sessions 行，安装时会出现一条预期告警（插件自带说明）。永久删除属破坏性操作，已按其能力标为 approval-gated。"
+    },
+    {
+      "id": "dsh-skills-manager",
+      "source": "https://github.com/MichengAI/dsh-skills-manager",
+      "revision": "1.1.4",
+      "version": "1.1.4",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "skill.read",
+        "skill.write",
+        "skill.install"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-skills-manager@1.1.4",
+      "reason": "技能管理器：全局/项目分页、启停、导入 ZIP/文件夹、回收站、从公开 GitHub 仓库按需安装、备份回退。可从外部仓库安装技能，故标 approval-gated；技能来源需用户自行确认。"
+    },
+    {
+      "id": "dsh-agency-agents",
+      "source": "https://github.com/MichengAI/dsh-agency-agents",
+      "revision": "1.0.5",
+      "version": "1.0.5",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "prompt.agents.read"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-agency-agents@1.0.5",
+      "reason": "321 名可召唤专家（11MB 内容资产）。2026-09-27 安装成功、页面注册成功、composer 出现「专家」入口。321 份专家文本的再分发版权未逐条核实，随 ISO 分发前需做内容审计。"
+    },
+    {
+      "id": "dsh-im-connect",
+      "source": "https://github.com/MichengAI/dsh-im-connect",
+      "revision": "0.1.55",
+      "version": "0.1.55",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "network.external",
+        "im.receive",
+        "im.send"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-im-connect@0.1.55",
+      "reason": "微信/企微/钉钉/QQ/飞书接入，含 5 家厂商 SDK。安全面最大：会出网并要求平台凭据。已标 approval-gated。它的 sidebar.channels 槽由已装 codex-ui 声明（跨插件软依赖，已满足）；往官方工作区树插原生页签的路径在 rc.1 上大概率静默失效（已装侧栏「频道」页签可见，官方树内页签待实测）。账号绑定需用户自行扫码授权。"
+    },
+    {
+      "id": "dsh-btw",
+      "source": "https://github.com/MichengAI/dsh-btw",
+      "revision": "0.1.13",
+      "version": "0.1.13",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "client.readonly",
+        "session.sideask"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-btw@0.1.13",
+      "reason": "一次性只读旁问，独立气泡、不执行工具，零依赖。"
+    },
+    {
+      "id": "dsh-simplify",
+      "source": "https://github.com/MichengAI/dsh-simplify",
+      "revision": "0.1.10",
+      "version": "0.1.10",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "code.read",
+        "code.modify"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-simplify@0.1.10",
+      "reason": "限定 Git 变更范围的代码简化 /simplify，零依赖。会修改代码，故标 approval-gated。"
+    },
+    {
+      "id": "dsh-code-review",
+      "source": "https://github.com/MichengAI/dsh-code-review",
+      "revision": "0.1.7",
+      "version": "0.1.7",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "code.read",
+        "review.write"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-code-review@0.1.7",
+      "reason": "Codex 风格代码审查 /review，零依赖，peer 与 rc.1 精确对齐。"
+    },
+    {
+      "id": "plugin-effort-slider",
+      "source": "https://github.com/mrSutivu/dsh-effort-slider",
+      "revision": "1.2.2",
+      "version": "1.2.2",
+      "license": "MIT",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "client.model.select"
+      ],
+      "status": "installed-verified",
+      "adapter": "plugin-effort-slider@1.2.2",
+      "reason": "模型选择 + 思考强度的真滑块（用户要求的滑块形态）。2026-09-27 实测：挂官方 conversation.input.right（list 槽，不与官方模型座位冲突），拖动可改档（Max↔Low 已验证并写回），颜色唯一来源是 var(--dsw-alias-button-info-fill)，因此被铭荼主题的薄荷色自动跟随。其 engines 只声明 >=0.1.2-alpha，但审计确认它用到的槽与服务在 rc.1 全部存在，属跨版本可用。"
+    },
+    {
+      "id": "ming-tea-ui",
+      "source": "platform/ming-tea/plugins/ming-tea-ui",
+      "revision": "working-tree",
+      "version": "0.1.0",
+      "license": "MIT",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "client.style"
+      ],
+      "status": "local-owned",
+      "adapter": "@ming-tea/dsh-ui installed by link: into profile ming-tea",
+      "reason": "铭荼自有的界面定制层，不是社区插件。按 DSH 官方契约实现 cordis bundle + web client 插件，只在社区前端之上注入圆润几何与柔光阴影，不 fork 社区源码、不改写 DOM 结构、不触碰权限与审批。"
+    },
+    {
+      "id": "dsh-automation",
+      "source": "https://github.com/MichengAI/dsh-automation",
+      "revision": "0.1.51",
+      "version": "0.1.51",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "schedule.create",
+        "schedule.run",
+        "session.create"
+      ],
+      "status": "installed-verified",
+      "adapter": "@michengai/dsh-automation@0.1.51",
+      "reason": "定时任务：按计划在独立 Session 中执行任务，支持通过对话创建与手动触发。2026-09-27 安装并实测：侧栏「定时任务」由原来的设置页引导变为真实界面（推荐案例、我的定时任务/执行记录、新建定时任务），其 antd 组件自动继承铭荼主题（实测 --ant-color-primary = #16857d）。依赖 antd 6.6.5 + luxon + zod（约 4.7MB，引入 69 个包）。排程会在无人值守时创建会话，故能力标 approval-gated。"
     }
   ]
 }

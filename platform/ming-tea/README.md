@@ -1,5 +1,8 @@
 # 铭荼跨平台运行时
 
+- [铭荼项目说明](../../docs/ming-tea-project.md)
+- [铭荼实时协作状态](../../docs/ming-tea-live-status.md)，继续开发前请先阅读。
+
 这是 Windows、macOS 和 Ming OS 共用的 Agent service 与桌面壳基础。
 
 ## 本地验证
@@ -44,4 +47,4 @@ macOS 权限状态通过 Agent 的 `platform.permission.status` 返回。铭荼�
 
 Agent service 只负责协议、场景、权限、审批、审计和 DSH 适配。Windows UI Automation、macOS Accessibility/Automation、浏览器和 Office 能力都必须通过平台 adapter 声明后接入。
 
-模型提供方使用 `credentialRef`，不会把 API key 放进会话、IPC 或日志。内置提供方包括 Ming 主站、OpenAI-compatible 和 Kim。
+模型提供方使用 `credentialRef`，不会把 API key 放进会话、IPC 或日志。当前铭荼不内置 OpenCode/Big Pickle 端点；模型路由由 DSH profile 管理。桌面工作区基于已审计的 `@michengai/dsh-codex-ui@1.1.18` 社区插件，再由铭荼套入原生壳、权限审批和系统桥接。

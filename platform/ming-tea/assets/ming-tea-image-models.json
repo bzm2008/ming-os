@@ -1,0 +1,30 @@
+{
+  "schema": "ming.tea.image.models.v1",
+  "endpoint": "https://ea-n-qu153.xin-zhi-zhu.com",
+  "authEnv": "MING_TEA_IMAGE_API_KEY",
+  "protocol": "openai-images",
+  "defaultModel": "gpt-image-2.5-flare",
+  "fallbackModel": "gpt-image-2.5-sunburst",
+  "models": [
+    {
+      "id": "gpt-image-2.5-flare",
+      "label": "GPT Image 2.5 Flare",
+      "preferredFor": ["character-sheet", "consistent-reference"],
+      "status": "blocked-upstream-502"
+    },
+    {
+      "id": "gpt-image-2.5-sunburst",
+      "label": "GPT Image 2.5 Sunburst",
+      "preferredFor": ["character-sheet-variant", "desktop-visual"],
+      "status": "blocked-upstream-502"
+    }
+  ],
+  "lastProbe": {
+    "date": "2026-09-27",
+    "modelsPath": "GET /v1/models",
+    "modelsStatus": 200,
+    "generationPath": "POST /v1/images/generations",
+    "generationStatus": 502,
+    "message": "Service temporarily unavailable. Please retry later."
+  }
+}

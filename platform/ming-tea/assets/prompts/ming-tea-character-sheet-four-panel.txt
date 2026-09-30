@@ -1,0 +1,14 @@
+Use case: stylized-concept
+Asset type: character reference sheet for the Ming Tea desktop pet
+Primary request: Create one clean 2x2 contact sheet containing four separate full-body illustrations of the exact same young woman character from the supplied reference image. The four panels are: top-left front-facing calm idle pose, top-right three-quarter wave, bottom-left focused thinking pose at a small desk with a laptop, bottom-right cheerful completed-task pose holding the small black-and-white penguin companion. Keep each panel visually isolated with generous margins so it can be cropped later.
+Input images: the supplied Scallion/Ming Tea character sheet is the sole character reference; preserve its identity and design.
+Scene/backdrop: plain very light neutral background, no furniture except the small laptop in the thinking panel, no decorative UI.
+Subject: approximately 18-year-old girl, consistent face and body proportions in all four panels, shoulder-length wavy black hair, small orange flower hair clip, round black glasses, purple-gray eyes, navy school-style jacket, white shirt, striped tie, pleated skirt, dark knee socks, black shoes, Ming/Scallion badge; include the same small black-and-white penguin companion in the bottom-right panel.
+Style/medium: polished anime character-sheet illustration, clean controlled linework, soft cel shading, matching the supplied reference image.
+Composition/framing: a precise 2x2 grid of four equal panels, full body visible in every panel, centered subjects, consistent camera distance and scale, no overlap across panels.
+Lighting/mood: bright soft studio light, calm and friendly.
+Color palette: navy, black, white, warm orange accent, restrained turquoise accent, purple-gray eyes.
+Materials/textures: crisp fabric folds, clean hair strands, readable glasses and badge details.
+Text (verbatim): ""
+Constraints: keep the same face, hairstyle, orange hair clip, glasses, eye color, uniform, proportions, and badge in every panel; keep the image suitable for later cropping; use no text, no logo, no watermark, no frame lines.
+Avoid: different character designs, changed age, changed outfit, missing glasses, extra fingers, cropped feet, duplicated limbs, photorealism, 3D render, chibi proportions, busy background, captions, signatures, watermarks.

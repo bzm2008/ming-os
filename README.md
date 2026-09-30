@@ -78,6 +78,8 @@ Ming OS now includes **铭荼**, a native GTK4/libadwaita DeepSeek Harness assis
 - Browser, terminal, file, office, and learning-note abilities share one permission and audit layer.
 - Sudo, package installation, deletion, uploads, submissions, and system changes require confirmation.
 - Community plugin sources and compatibility notes are tracked in `docs/ming-tea-plugin-audit.md`.
+- [铭荼项目说明](docs/ming-tea-project.md) describes architecture, platforms, security, community sources, and development commands.
+- [铭荼实时协作状态](docs/ming-tea-live-status.md) is the shared current-state record for Codex and ZCode; read it before continuing work.
 
 ## Install
 

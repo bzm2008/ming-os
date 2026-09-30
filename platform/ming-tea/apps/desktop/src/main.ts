@@ -5,9 +5,15 @@ type Inspector = "plan" | "memory" | "sessions";
 type Thinking = "fast" | "balanced" | "deep";
 const scenes: Array<[SceneId, string, string, string]> = [["office", "办公模式", "文档、网页和日常任务", "▦"], ["development", "开发模式", "项目、终端和诊断", "⌘"], ["learning", "辅助学习模式", "解释、拆解和演示", "◇"]];
 const thinking: Record<Thinking, [string, string]> = {fast: ["快速", "优先响应速度"], balanced: ["均衡", "速度与深度平衡"], deep: ["深思", "更充分地拆解问题"]};
-const state: {scene?: SceneId; thinking: Thinking; inspector: Inspector; status: string; started: boolean; sent: boolean} = {thinking: "balanced", inspector: "plan", status: "本地 Agent 已就绪", started: false, sent: false};
+const thinkingLevels: Thinking[] = ["fast", "balanced", "deep"];
+const state: {scene?: SceneId; thinking: Thinking; inspector: Inspector; status: string; started: boolean; sent: boolean; reply?: string; sending: boolean; modelMenuOpen: boolean} = {thinking: "balanced", inspector: "plan", status: "本地 DSH Agent 已就绪", started: false, sent: false, sending: false, modelMenuOpen: false};
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const sceneLabel = () => scenes.find(([id]) => id === state.scene)?.[1] ?? "";
+const escapeHtml = (value: string) => value.replace(/[&<>\"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"}[character] ?? character));
+
+function modelPicker(): string {
+  return `<div class="model-picker"><button class="provider-pill" title="选择 DSH 模型" data-action="model-toggle"><span class="provider-dot"></span><span><strong>DSH 社区工作台</strong><small>Ming 主站 · 本地权限策略</small></span><span class="chevron">⌄</span></button>${state.modelMenuOpen ? `<div class="model-menu"><div class="model-menu-title">模型提供方</div><button class="model-option selected" data-action="model-select"><span class="model-option-mark">✓</span><span><strong>Ming 主站</strong><small>由 DSH profile 管理模型路由</small></span><span class="free-tag">已接入</span></button><div class="model-menu-note">社区 Codex UI 负责会话和工作区；铭荼负责原生权限与审计。</div></div>` : ""}</div>`;
+}
 
 function leftSidebar(): string {
   return `<aside class="codex-sidebar">
@@ -28,22 +34,46 @@ function rightPanel(): string {
 }
 
 function modeGate(): string {
-  return `<section class="mode-gate"><div class="eyebrow">开始新的铭荼会话</div><h1>先选择工作模式，再开始对话。</h1><p class="intro">会话开始后，工作模式保持不变；思考强度可以随时调整。</p><div class="mode-grid">${scenes.map(([id, label, hint, icon]) => `<button class="mode-card ${state.scene === id ? "selected" : ""}" data-mode="${id}"><span class="mode-icon">${icon}</span><strong>${label}</strong><small>${hint}</small>${state.scene === id ? '<span class="mode-check">✓ 已选择</span>' : ""}</button>`).join("")}</div><div class="thinking-label">初始思考强度</div><div class="thinking-control">${(Object.keys(thinking) as Thinking[]).map((id) => `<button class="thinking-option ${state.thinking === id ? "selected" : ""}" data-thinking="${id}"><strong>${thinking[id][0]}</strong><small>${thinking[id][1]}</small></button>`).join("")}</div><button class="start-session" data-action="start" ${state.scene ? "" : "disabled"}>开始对话 <span>↗</span></button></section>`;
+  return `<section class="mode-gate"><div class="eyebrow">开始新的铭荼会话</div><h1>先选择工作模式，再开始对话。</h1><p class="intro">会话开始后，工作模式保持不变；思考强度默认均衡，可在输入框内随时调整。</p><div class="mode-grid">${scenes.map(([id, label, hint, icon]) => `<button class="mode-card ${state.scene === id ? "selected" : ""}" data-mode="${id}"><span class="mode-icon">${icon}</span><strong>${label}</strong><small>${hint}</small>${state.scene === id ? '<span class="mode-check">✓ 已选择</span>' : ""}</button>`).join("")}</div><button class="start-session" data-action="start" ${state.scene ? "" : "disabled"}>开始对话 <span>↗</span></button></section>`;
 }
 
 function conversation(): string {
-  return `<section class="conversation"><div class="conversation-head"><div><div class="eyebrow">${sceneLabel()} · 当前思考强度：${thinking[state.thinking][0]}</div><h1>把复杂的事，交给铭荼一起完成。</h1><p class="intro">铭荼会先理解目标、列出计划，再调用经过授权的工具。当前工作模式已锁定。</p></div><div class="locked-badge">${sceneLabel()} · 已锁定</div></div><div class="thinking-inline"><span>思考强度</span>${(Object.keys(thinking) as Thinking[]).map((id) => `<button class="thinking-chip ${state.thinking === id ? "selected" : ""}" data-thinking="${id}">${thinking[id][0]}</button>`).join("")}</div><div class="quick-actions"><button data-quick="整理当前项目">整理当前项目</button><button data-quick="解释这段错误日志">解释错误日志</button><button data-quick="准备一份报表">准备报表</button></div>${state.sent ? '<div class="message-card"><div class="message-avatar">你</div><div><strong>整理当前项目</strong><p>已收到。我会先读取项目结构和最近日志，再给出一份可确认的计划。</p></div></div>' : ""}<div class="composer"><textarea aria-label="任务输入" placeholder="描述一个任务…"></textarea><button class="send" data-action="send" aria-label="发送任务">发送 <span>↗</span></button></div><div class="timeline"><div class="timeline-title"><span>工具时间线</span><span class="timeline-state">等待任务</span></div><div class="timeline-line"><span class="timeline-node muted"></span><div><strong>尚未调用工具</strong><small>浏览器、终端、文件和 Office 操作会显示在这里</small></div></div></div></section>`;
+   const reply = state.reply ?? "已收到。我会先读取项目结构和最近日志，再给出一份可确认的计划。";
+    return `<section class="conversation"><div class="conversation-head"><div><div class="eyebrow">${sceneLabel()} · 当前思考强度：${thinking[state.thinking][0]}</div><h1>把复杂的事，交给铭荼一起完成。</h1><p class="intro">铭荼会先理解目标、列出计划，再调用经过授权的工具。当前工作模式已锁定。</p></div><div class="locked-badge">${sceneLabel()} · 已锁定</div></div><div class="quick-actions"><button data-quick="整理当前项目">整理当前项目</button><button data-quick="解释这段错误日志">解释错误日志</button><button data-quick="准备一份报表">准备报表</button></div>${state.sent ? `<div class="message-card"><div class="message-avatar">你</div><div><strong>整理当前项目</strong><p>${escapeHtml(reply)}</p></div></div>` : ""}<div class="composer"><textarea aria-label="任务输入" placeholder="描述一个任务…"></textarea><div class="composer-footer"><label class="thinking-slider"><span>思考强度</span><input type="range" min="0" max="2" step="1" value="${thinkingLevels.indexOf(state.thinking)}" data-thinking-slider aria-label="思考强度"><span class="thinking-slider-value" data-thinking-label>${thinking[state.thinking][0]}</span></label><button class="send" data-action="send" aria-label="发送任务" ${state.sending ? "disabled" : ""}>${state.sending ? "处理中…" : "发送"} <span>↗</span></button></div></div><div class="timeline"><div class="timeline-title"><span>工具时间线</span><span class="timeline-state">等待任务</span></div><div class="timeline-line"><span class="timeline-node muted"></span><div><strong>尚未调用工具</strong><small>浏览器、终端、文件和 Office 操作会显示在这里</small></div></div></div></section>`;
+}
+
+async function sendTask(): Promise<void> {
+  const input = document.querySelector<HTMLTextAreaElement>("textarea");
+  const content = input?.value.trim() || "整理当前项目";
+  state.sent = true;
+  state.sending = true;
+  state.reply = undefined;
+  state.status = "正在提交至 DSH Agent";
+  render();
+  state.reply = `任务已交给 DSH Agent（思考强度：${thinking[state.thinking][0]}）：${content}`;
+  state.status = "DSH Agent 已接收任务";
+  state.sending = false;
+  render();
 }
 
 function render() {
-  app.innerHTML = `<main class="app-shell"><header class="topbar"><div class="brand-lockup"><span class="brand-mark">铭荼</span><span class="brand-sub">MING TEA</span></div><div class="topbar-actions"><button class="provider-pill" title="选择模型提供方"><span class="provider-dot"></span> Ming 主站 <span class="chevron">⌄</span></button><div class="connection"><span class="status-dot"></span>${state.status}</div><button class="icon-button" title="打开设置">⚙</button></div></header><section class="workspace"><div class="workspace-sidebar">${leftSidebar()}</div><div class="main-column">${state.started ? conversation() : modeGate()}</div><aside class="inspector"><div class="inspector-tabs"><button class="tab ${state.inspector === "plan" ? "active" : ""}" data-inspector="plan">计划</button><button class="tab ${state.inspector === "memory" ? "active" : ""}" data-inspector="memory">记忆</button><button class="tab ${state.inspector === "sessions" ? "active" : ""}" data-inspector="sessions">会话</button></div><div class="inspector-body">${rightPanel()}</div></aside></section></main>`;
+  app.innerHTML = `<main class="app-shell"><header class="topbar"><div class="brand-lockup"><span class="brand-mark">铭荼</span><span class="brand-sub">MING TEA</span></div><div class="topbar-actions">${modelPicker()}<div class="connection"><span class="status-dot"></span>${state.status}</div><button class="icon-button" title="打开设置">⚙</button></div></header><section class="workspace"><div class="workspace-sidebar">${leftSidebar()}</div><div class="main-column">${state.started ? conversation() : modeGate()}</div><aside class="inspector"><div class="inspector-tabs"><button class="tab ${state.inspector === "plan" ? "active" : ""}" data-inspector="plan">计划</button><button class="tab ${state.inspector === "memory" ? "active" : ""}" data-inspector="memory">记忆</button><button class="tab ${state.inspector === "sessions" ? "active" : ""}" data-inspector="sessions">会话</button></div><div class="inspector-body">${rightPanel()}</div></aside></section></main>`;
   document.querySelectorAll<HTMLElement>("[data-mode]").forEach((button) => button.addEventListener("click", () => { if (state.started) return; state.scene = button.dataset.mode as SceneId; render(); }));
-  document.querySelectorAll<HTMLElement>("[data-thinking]").forEach((button) => button.addEventListener("click", () => { state.thinking = button.dataset.thinking as Thinking; state.status = state.started ? "思考强度已更新 · 下一轮生效" : state.status; render(); }));
+  const thinkingSlider = document.querySelector<HTMLInputElement>("[data-thinking-slider]");
+  thinkingSlider?.addEventListener("input", () => {
+    const level = thinkingLevels[Number(thinkingSlider.value)] ?? "balanced";
+    state.thinking = level;
+    const label = document.querySelector<HTMLElement>("[data-thinking-label]");
+    if (label) label.textContent = thinking[level][0];
+  });
+  thinkingSlider?.addEventListener("change", () => { state.status = "思考强度已更新 · 下一轮生效"; render(); });
   document.querySelectorAll<HTMLElement>("[data-inspector]").forEach((button) => button.addEventListener("click", () => { state.inspector = button.dataset.inspector as Inspector; render(); }));
+  document.querySelector<HTMLElement>("[data-action=model-toggle]")?.addEventListener("click", () => { state.modelMenuOpen = !state.modelMenuOpen; render(); });
+  document.querySelector<HTMLElement>("[data-action=model-select]")?.addEventListener("click", () => { state.modelMenuOpen = false; state.status = "Ming 主站已选择"; render(); });
   document.querySelectorAll<HTMLButtonElement>("[data-quick]").forEach((button) => button.addEventListener("click", () => { const input = document.querySelector<HTMLTextAreaElement>("textarea"); if (input) input.value = button.dataset.quick ?? ""; input?.focus(); }));
   document.querySelector<HTMLButtonElement>("[data-action=start]")?.addEventListener("click", () => { if (!state.scene || state.started) return; state.started = true; state.status = "会话已开始 · 模式已锁定"; render(); });
-  document.querySelector<HTMLButtonElement>("[data-action=send]")?.addEventListener("click", () => { state.sent = true; state.status = "已创建任务计划"; render(); });
-  document.querySelectorAll<HTMLElement>("[data-action=new-session]").forEach((button) => button.addEventListener("click", () => { state.scene = undefined; state.started = false; state.sent = false; state.status = "本地 Agent 已就绪"; render(); }));
+  document.querySelector<HTMLButtonElement>("[data-action=send]")?.addEventListener("click", () => { void sendTask(); });
+  document.querySelectorAll<HTMLElement>("[data-action=new-session]").forEach((button) => button.addEventListener("click", () => { state.scene = undefined; state.started = false; state.sent = false; state.status = "本地 DSH Agent 已就绪"; render(); }));
 }
 
 render();
