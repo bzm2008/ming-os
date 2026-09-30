@@ -2,7 +2,7 @@
 
 铭荼首期遵循“先找社区项目，再做适配”的规则。插件清单的机器可读版本位于 `assets/ming-tea-plugins.json`，构建阶段会把它安装到 `/usr/share/ming-os/ming-tea/plugins.json` 并做内容校验。
 
-社区候选的机器可读审计表位于 `assets/ming-tea-community-candidates.json`。候选插件只有 `adapted-local`、`adaptation-review`、`optional-adapter` 或 `optional-adapter-ready` 状态时才允许进入开发环境；`blocked-version`、`external-connector-only` 和 `needs-source` 不得进入默认 ISO。
+社区候选的机器可读审计表位于 `assets/ming-tea-community-candidates.json`。候选插件只有 `adapted-local`、`adaptation-review`、`optional-adapter`、`optional-adapter-ready` 或 `installed-verified` 状态时才允许进入开发环境；`blocked-version`、`external-connector-only` 和 `needs-source` 不得进入默认 ISO。`installed-verified` 表示已在本机 profile 真实安装并验收，不等于可随 ISO 分发（分发另看许可证与素材授权）。
 
 ## 社区来源
 
@@ -20,7 +20,25 @@
 - `everos-memory`：Apache-2.0，固定审计提交 `f76f4d06135a0b5d784d15eed133ecdcedc12d47`；已提供默认关闭的 `EverosMemoryAdapter`，只允许显式本机 loopback 连接器。
 - `cleverer-dsh`：MIT，固定提交 `40bd216ea9c7a95da887aa97fb661a0e8c7b1dd2`；已由 `ClevererDshAdapter` 接入尝试次数上限、失败记录和成功重置，不执行第三方脚本。
 - `honcho-memory`：AGPL-3.0，只允许外部连接器，不直接随 Ming OS 发行。
-- `dsh-data-agent`：MIT，但 v0.2.0 要求 DSH `0.1.7-rc.1`，等待铭荼升级 DSH 适配层后再接入。
+- `dsh-data-agent`：MIT；DSH runtime 已锁定 `0.1.7-rc.1`，但该插件尚未完成 peer/runtime 集成验收，数据库只读与 SQL 执行审批也未实现。
+- `@michengai/dsh-codex-ui@1.1.18`：Apache-2.0，SHA512 已锁定；作为 DSH web profile 的客户端基线，提供侧栏、工作区会话树、搜索、会话导航和 composer。2026-09-26 完成真实安装验证：profile `ming-tea` 的 bundles 自动登记、`--dump-config` 组合通过、页面注册并加载 `client.js`。先前记录的 `ERESOLVE` peer 冲突未复现。
+- `@linxin666/dsh-pet@0.4.3`：Apache-2.0，peer 精确要求 `@deepseek-ai/dsh >=0.1.7-rc.1`，依赖仅 `clsx` 与 `schemastery`（无 Electron/原生依赖，适配 `--ignore-scripts`）。2026-09-26 验证挂载并实际渲染。随包默认宠物图集的许可见其仓库 `THIRD_PARTY_NOTICES`，不在 Apache-2.0 范围内；铭荼自有宠物素材单独授权。
+- `@ming-tea/dsh-ui@0.1.0`：铭荼**自有**界面定制层（MIT，源码随本仓库置于 `platform/ming-tea/plugins/ming-tea-ui`，以 `link:` 装入开发 profile）。按 DSH 官方契约实现 cordis bundle + web client 插件，只在社区前端之上注入圆润几何、薄荷品牌与柔光阴影；**不 fork 社区源码、不改写 DOM 结构、不触碰权限与审批**。
+
+### MichengAI 插件族（2026-09-27 安装并验收）
+
+同一作者（`MichengAI`，`dsh-codex-ui` 的来源）的插件族，全部 Apache-2.0、声明兼容 `0.1.7-rc.1`、无原生依赖、`hasInstallScript` 全为 false。已入库：`dsh-codex-pet@0.1.10`（替换原 linxin 宠物）、`dsh-archive-manager@1.0.5`、`dsh-skills-manager@1.1.4`、`dsh-agency-agents@1.0.5`、`dsh-im-connect@0.1.55`、`dsh-btw@0.1.13`、`dsh-simplify@0.1.10`、`dsh-code-review@0.1.7`、`dsh-automation@0.1.51`（定时任务，2026-09-27 补装）。
+
+安装方式：逐包装入 profile `ming-tea`，`--ignore-scripts --save-exact`，装后 `--dump-config` 校验并重启验收。**未使用** `@michengai/dsh-codex-suite-installer`（官方已标注不建议新安装，且会重写 profile 的 `dsh.profile.bundles` 与 `pnpm-workspace.yaml`）与聚合包 `@michengai/dsh-codex-suite`（依赖锁死在远古版本）。
+
+逐项风险：
+
+- **automation（后补）**：依赖 `antd 6.6.5` + `luxon` + `zod`（约 4.7MB，连带 69 个包），是本批里 UI 依赖最重的一个；它没有自己的样式体系，界面自动继承铭荼的 antd token 覆盖（实测主色 `#16857d`），因此不需要专门适配。排程会在无人值守时创建会话，能力已标 `approval-gated`。
+- **archive-manager（最高）**：按设计接替官方 `workspace` 与 `session-projection-cache` 两行。已实测宿主启动无错误、工作区选择与会话创建正常。安装时那条 `patch: entry "ui-settings-unarchive-sessions" not found` 是插件自带说明里的预期告警（rc.1 无该行）。
+- **im-connect（安全面最大）**：含 5 家 IM 厂商 SDK、需要平台凭据与出网；账号绑定需用户自行扫码。其 `sidebar.channels` 槽由 codex-ui 声明（软依赖已满足）。
+- **codex-pet 素材授权**：随包 `assets/codex` 图集来自 OpenAI Codex，NOTICE 明确不在 Apache-2.0 内 → **不可随 ISO 分发**，自用可以。
+- **agency-agents**：11MB 内容资产，321 份专家文本的再分发版权未逐条核实，随 ISO 前需内容审计。
+- **第三方思考强度滑块** `plugin-effort-slider@1.2.2`（MIT，非 MichengAI）：用户要求的滑块形态。实测挂官方 `conversation.input.right`（list 槽）、改档可用、颜色随 `--dsw-alias-button-info-fill` 被铭荼主题接管。其 `engines` 仅声明 `>=0.1.2-alpha`，但审计确认所用槽与服务在 rc.1 全部存在。
 
 ## 当前适配策略
 
@@ -50,3 +68,65 @@
 - 铭荼桌面入口、运行时和清单同时存在。
 - 桌面应用没有回退到 `127.0.0.1:3080` 网页入口。
 - 审批事件和本地审计日志仍由铭荼核心策略统一处理。
+
+## 插件商店 / 应用市场的评估（2026-09-27）
+
+用户希望应用内有"商店"让普通用户发现并安装插件，但**安全第一**。对生态内主要候选做过一次
+源码级评估后，结论是：**没有任何现成商店可以不加改造地放进面向家庭用户的产品**。
+
+| 候选 | 关键事实 | 结论 |
+| --- | --- | --- |
+| `dsh-desktop-safe-market@0.6.0` | 安全模型最贴合（市场默认关闭、插件自身**没有安装执行接口**，只把审查提示词填进输入框；展示 license；要求锁精确版本 + integrity）；有 provenance | **等版本**：要求 DSH ≥0.1.7-rc.2，与我们锁的 rc.1 不兼容；0.5.2 的 peer 范围可覆盖但作者只验证过 0.1.5 系列 |
+| `dshmarket@1.66.2` | 生态最大（月下载 42 万、4652★、provenance），有**策展目录准入**（非目录来源直接 400 拒绝）、同源 POST、自述无遥测 | **只借机制**：功能面过大 —— WebDAV/Gist 备份（接触用户配置与凭据）、重启宿主、GitHub 加速代理、桌面端注入通道 |
+| `dsh-plugin-shop@0.8.3` | 工程最干净：目录**内容寻址**（sha256 指针 + 校验）、Host/Client 权限切割、**不经 shell** 调官方 CLI、安装时校验 tarball 与声明的 registry 同源；但自述"无人审读过任何条目、无沙箱" | **已装入并实测可用**（2026-09-27，见文末落地记录）：目录源已钉死、codec 形态做了等价改写；**仍不宜作为唯一信任源**，自建白名单目录是推荐下一步 |
+| `dsh-plugin`(Hub)@1.4.8 | 会**自动写 allowBuilds 放行构建脚本**并重试，可执行 `npm install -g`；peer 锁 cordis 4.0.1 与 rc.1 不符 | **不建议** |
+| `dshhub-market@0.8.60` | 在本机开 HTTP 桥（127.0.0.1:3750-3754）、平台 zip 安装、口令付费、黑名单**fail-open** | **不建议** |
+| `dsh-store@0.5.2` | 目录靠"npm 关键词 + GitHub topic 抓取"，**无白名单**；8-16 后停滞 | **不建议**（可参考骨架） |
+| `@linxin666/dsh-client-ui-market@0.4.3` | `engines.dsh >=0.1.7-rc.2` | **版本已排除** |
+| `dsh-skin-market@0.1.55` | 皮肤非代码，但 CSS/字体仍可外带数据；无 provenance | **不建议内置** |
+
+**若自建"白名单商店"，必须补的控制**（调研结论，供后续实现）：
+
+1. 目录**自持且只读**：不用第三方目录站，用随发行版本内置、带校验的 `catalog.json`，
+   字段含精确版本、`dist.integrity`、license、仓库、能力声明、审计日期。
+2. 安装**只走官方通道**：`dsh plugin --profile <p> add <name>@<exact>`，禁止 git/URL/latest/file 目标，
+   禁止 `npm install -g`；用 argv 数组调用、`shell: false`（照抄 shop 的做法）。
+3. **禁止自动放行构建脚本**：不写 `allowBuilds`/`onlyBuiltDependencies`；含 install script 的包必须已审计。
+4. **安装前展示** license、来源仓库、精确版本、integrity 前若干位、能力声明。
+5. **不联网回传**：商店组件不得有遥测，不得上传已装列表。
+6. **可回滚**：安装前快照 profile（`package.json`/`cordis.patch.yml`/lockfile）。
+
+不要复用：Hub 的 `npm install -g` 与自动 allowBuilds、`dshhub-market` 的本机 HTTP 桥、
+`dsh-store`/`dsh-plugins-store` 的抓取式目录与硬编码第三方后端、`dshmarket` 的备份与重启宿主能力。
+
+## 落地记录：`dsh-plugin-shop@0.8.3`（2026-09-27 实测）
+
+**已装入并在浏览器里跑通**：设置 → 随应用自带 → 插件商店，列出 12225 个插件（目录构建于
+2026-09-26；指针声明 12283，去重后 12225），分类筛选（工具 5859 / 界面 3094 / 集成 1061 /
+模型服务 650 / 工作流 637 / 主题 319 / 其他 605）、搜索、刷新、安装按钮、作者/星数/占用齐备。
+商店自带「隐藏不兼容 1103」开关（默认关）——目录里 1103 个条目被判定与当前 DSH 不兼容。
+
+**我们做的两处改造**（都在 `scripts/`，不 fork 商店源码本体）：
+
+1. `patch_shop_typert_compat.mjs` —— 等价改写 codec key（`schema: X` → `create: () => X`），
+   覆盖 `typert.host.js` / `typert.remote-client.js` / `client.js` 三份产物共 48 处；幂等、
+   可 `--revert`、已接入安装脚本。**上游生成器/加载器对齐后应还原。**
+2. `install_ming_tea_plugins.sh` 把 `catalogUrl` 钉到作者官方地址并写进 **profile patch**
+   （该层在所有 bundle 层之后应用）。环境变量 `DSH_SHOP_CATALOG_URL` 因此不再能改向目录。
+
+**独立复核的目录契约**：指针 JSON（`schemaVersion: 5`、`count: 12283`）+ 内容寻址的
+`plugins.<sha256>.json`（10.46 MB，本地 sha256 与指针一致）；条目字段含 owner / repository /
+version / integrity / license / stars / downloads / tier / verified；安装走 `dist.tarball` 且
+**强制与声明的 registry 同源**（跨源直接拒绝）；商店支持 `schemaVersion ≤ 6`。
+
+**仍然欠缺、需要我们自己补的**（与上文「必须补的控制」一致）：
+
+1. 目录**不自持**：现在用的仍是作者目录，12225 个条目全部未经我们审计，且**没有任何沙箱**。
+   自建白名单目录时只改 profile patch 里那一行 URL。
+2. 「隐藏不兼容」**默认关**：建议后续把它默认打开（低配/家庭用户应只看到与当前 DSH 兼容的条目）。
+3. 安装动作**没有二次确认弹窗**：商店点「安装」即走官方 CLI 安装通道（argv、`shell: false`），
+   但没有 license / 版本 / integrity 的展示确认（商店条目里带这些字段，界面也展示了 license 与来源）。
+4. **不写 `allowBuilds`** 这条商店本身满足（用官方 CLI + `--ignore-scripts` 由我们的安装脚本保证）。
+
+结论不变：**商店可用，但仍不能当作"安全来源"** —— 它的价值是"发现 + 安装通道"，
+真正的安全边界要由我们自建白名单目录 + 安装前确认来提供。
