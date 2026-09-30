@@ -1,0 +1,40 @@
+{
+  "name": "@ming-tea/dsh-ui",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "铭荼自有界面层：在社区前端之上叠加圆润几何与柔光阴影。",
+  "exports": {
+    ".": {
+      "default": "./lib/index.mjs"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "lib",
+    "presets",
+    "theme"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/build-presets.mjs"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.1"
+    },
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/scenes.patch.yml"
+      ]
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

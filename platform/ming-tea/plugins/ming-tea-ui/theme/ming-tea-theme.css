@@ -1,0 +1,1469 @@
+/* 铭荼圆润界面层
+ *
+ * 叠加在社区前端（@michengai/dsh-codex-ui）与官方 DSH 客户端之上。
+ * 只调整几何（圆角、阴影、描边），不覆盖颜色语义，因此浅色与深色两套
+ * 官方主题都保持成立；铭荼的品牌色沿用社区侧栏已有的薄荷青绿。
+ *
+ * 选择器约定（依据 2026-09-26 对真实 DOM 的普查）：
+ *   - 社区 UI 使用稳定的 dcu-* 前缀类名，直接匹配；
+ *   - 官方组件使用 CSS Modules，类名形如 <hash>_<语义名>，哈希随构建变化
+ *     而语义名稳定，因此按 [class*="_语义名"] 匹配；
+ *   - 宿主外壳提供语义化的 data-* 钩子（data-slot、data-composer-card 等），
+ *     这些最稳定，优先使用。
+ * 所有覆盖都带 :root 前缀，确保胜过单类选择器的组件样式（0-2-0 > 0-1-0），
+ * 同时不依赖 !important。
+ */
+
+:root {
+  /* 铭荼自有变量：圆角尺度、柔光阴影、品牌色。
+     这些是**我们自己的**变量（不是官方令牌），:root 声明可以正常继承。 */
+  --mt-radius-sm: 12px;
+  --mt-radius-md: 16px;
+  --mt-radius-lg: 22px;
+  --mt-radius-xl: 26px;
+  --mt-radius-pill: 999px;
+  --mt-shadow-soft: 0 10px 30px rgb(23 51 58 / 10%);
+  --mt-shadow-lift:
+    0 2px 8px rgb(23 51 58 / 6%), 0 12px 36px rgb(23 51 58 / 10%);
+
+  /* 铭荼品牌色：薄荷青绿（浅色模式） */
+  --mt-brand: #16857d;
+  --mt-brand-strong: #0f716b;
+  --mt-brand-soft: #e6f4f0;
+  --mt-brand-ink: #147d78;
+  --mt-ink-strong: #12333a;
+  --mt-paper: #f6faf8;
+  --mt-paper-raised: #fbfdfc;
+
+  /* 官方令牌 --dsw-* / --dsh-* / --dsl-* 的覆盖**不在这里**：
+     它们由官方声明在 body 上，写在 :root 会被遮蔽（实测失效）。
+     现由 theme/palette.mjs 统一生成，作用域为 `:root body`，
+     并同时通过 ctx.theme.overrideTokens 写入 body 内联样式。 */
+}
+
+/* 宿主内容区与代码块的圆角令牌：同样必须在 body 作用域 */
+:root body {
+  --dsh-windows-content-radius: var(--mt-radius-lg);
+  --dsl-code-block-border-radius: var(--mt-radius-sm);
+}
+
+/* 深色模式：品牌色提亮，底色带一点墨绿，避免与原版的中性灰同脸 */
+body[data-ds-dark-theme] {
+  --mt-brand: #4fb3a4;
+  --mt-brand-strong: #6cc7b9;
+  --mt-brand-soft: #12312e;
+  --mt-brand-ink: #7fd0c4;
+  --mt-ink-strong: #e8f3f1;
+  --mt-paper: #171d1c;
+  --mt-paper-raised: #1d2423;
+  --mt-shadow-soft: 0 10px 30px rgb(0 0 0 / 45%);
+  --mt-shadow-lift:
+    0 2px 8px rgb(0 0 0 / 35%), 0 12px 36px rgb(0 0 0 / 45%);
+}
+
+/* ── 输入与编辑区：抬到 md ───────────────────────────────────────── */
+:root [class*="_input"],
+:root [class*="_editor"],
+:root [class*="_installField"],
+:root [class*="_registryCustomField"],
+:root [class*="_search"],
+:root [class*="_select"],
+:root [class*="_field"] {
+  border-radius: var(--mt-radius-md);
+}
+
+/* ── 小控件：抬到 sm ─────────────────────────────────────────────── */
+:root [class*="_iconButton"],
+:root [class*="_button"],
+:root [class*="_trigger"],
+:root [class*="_toggle"],
+:root [class*="_rowTag"],
+:root [class*="_badge"],
+:root [class*="_chip"],
+:root [class*="_candidate"],
+:root [class*="_wizardClose"] {
+  border-radius: var(--mt-radius-sm);
+}
+
+/* ── 卡片与条目：抬到 lg ──────────────────────────────────────────
+ * 注意：这里的 `_guide` / `_panel` / `_surface` 常常是**整列或整块结构容器**
+ * （例如右侧边栏的内容容器）。给这类元素加 30px 模糊阴影会跨过栏边界渗到
+ * 相邻栏，表现为中缝位置一条发虚的竖带——即用户报的"缝"。
+ * 因此结构容器只统一圆角，不加阴影；阴影只给真正浮动或小面积的元素。 */
+:root [class*="_card"],
+:root [class*="_addCard"],
+:root [class*="_rowCard"],
+:root [class*="_balanceCard"],
+:root [class*="_modelEntry"],
+:root [class*="_banner"],
+:root [class*="_notice"],
+:root [class*="_guide"],
+:root [class*="_panel"],
+:root [class*="_surface"] {
+  border-radius: var(--mt-radius-lg);
+}
+
+:root [class*="_card"],
+:root [class*="_addCard"],
+:root [class*="_rowCard"],
+:root [class*="_balanceCard"],
+:root [class*="_modelEntry"] {
+  box-shadow: var(--mt-shadow-soft);
+}
+
+/* ── 浮层：对话框、菜单、弹层用最大圆角 ─────────────────────────── */
+:root [class*="_dialog"],
+:root [class*="_menu"],
+:root [class*="_popover"],
+:root [class*="_tooltip"],
+:root [role="dialog"],
+:root [role="menu"],
+:root [data-slot="conversation.input.overlay"] > * {
+  border-radius: var(--mt-radius-xl);
+}
+
+:root [class*="_dialog"],
+:root [role="dialog"] {
+  box-shadow: var(--mt-shadow-lift);
+}
+
+/* ── 头像与缩略图：保持方形语汇但更圆 ───────────────────────────── */
+:root [class*="_avatar"],
+:root [class*="_thumbnail"] {
+  border-radius: var(--mt-radius-lg);
+}
+
+/* ── 宿主外壳的语义钩子（最稳定，优先） ─────────────────────────── */
+:root [data-composer-card] {
+  border-radius: var(--mt-radius-lg);
+  box-shadow: var(--mt-shadow-soft);
+}
+
+:root [data-slot="conversation.composer.bar"],
+:root [data-slot="conversation.input.dock"] > * {
+  border-radius: var(--mt-radius-lg);
+}
+
+:root [data-slot="conversation.session"] [class*="_bubble"],
+:root [class*="_bubble"] {
+  border-radius: var(--mt-radius-lg);
+}
+
+/* ── 社区工作台（dcu-*）─────────────────────────────────────────── */
+:root .dcu-home-card {
+  border-radius: var(--mt-radius-lg);
+}
+
+:root .dcu-home-task,
+:root .dcu-wb-project-head {
+  border-radius: var(--mt-radius-md);
+}
+
+:root .dcu-wb-section-head,
+:root .dcu-wb-more,
+:root .dcu-extensions-toggle,
+:root .dcu-settings-trigger {
+  border-radius: var(--mt-radius-sm);
+}
+
+/* ── 铭荼品牌：替换官方字标与首页标记 ──────────────────────────────
+ * 侧栏字标是官方插件的矢量路径（182×24，无文字），无法用 CSS 改字；
+ * 这里隐藏该 SVG，用伪元素写出铭荼自己的品牌块。首页标记同理换成
+ * 薄荷青绿的“铭”字方章。两处都只影响外观，不改变插件注册的插槽。 */
+
+:root .dcu-brand > svg {
+  display: none;
+}
+
+:root .dcu-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+:root .dcu-brand::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  background: var(--mt-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mt-brand) 20%, transparent);
+}
+
+:root .dcu-brand::after {
+  content: "铭荼";
+  font-family: "Noto Sans CJK SC", "PingFang SC", system-ui, sans-serif;
+  font-size: 19px;
+  font-weight: 760;
+  letter-spacing: 0.16em;
+  color: var(--mt-brand-ink);
+}
+
+:root [data-slot="conversation.hero.brand.mark"] > svg {
+  display: none;
+}
+
+:root [data-slot="conversation.hero.brand.mark"] {
+  display: inline-flex;
+  align-items: center;
+}
+
+:root [data-slot="conversation.hero.brand.mark"]::after {
+  content: "铭";
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 13px;
+  background: linear-gradient(
+    160deg,
+    var(--mt-brand) 0%,
+    var(--mt-brand-strong) 100%
+  );
+  color: #fff;
+  font-family: "Noto Sans CJK SC", "PingFang SC", system-ui, sans-serif;
+  font-size: 19px;
+  font-weight: 700;
+  box-shadow: var(--mt-shadow-soft);
+}
+
+/* 预设（模式）选择器：胶囊 + 薄荷底，弱化官方蓝 */
+:root [data-slot="conversation.hero.agentPreset"] button {
+  border-radius: var(--mt-radius-pill);
+  background: var(--mt-brand-soft);
+  color: var(--mt-brand-ink);
+}
+
+/* ── 首页（新任务）铭荼化 ─────────────────────────────────────────
+ * [data-phase="hero"] 是宿主提供的稳定钩子，只在未开始会话的首页出现，
+ * 因此以下替换不会影响会话页标题。 */
+:root [data-phase="hero"] [class*="_titleGroup"] > span {
+  display: none;
+}
+
+:root [data-phase="hero"] [class*="_titleGroup"]::after {
+  content: "需要我帮你做什么？";
+  font-family: "Noto Sans CJK SC", "PingFang SC", system-ui, sans-serif;
+  font-size: 34px;
+  font-weight: 730;
+  letter-spacing: 0.01em;
+  color: var(--mt-ink-strong);
+}
+
+/* 首页卡片：薄荷描边与渐隐底，区别于官方中性卡片 */
+:root .dcu-home-card {
+  border-color: color-mix(in srgb, var(--mt-brand) 26%, transparent);
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--mt-brand) 10%, transparent) 0%,
+    transparent 55%
+  );
+}
+
+:root .dcu-home-card:hover {
+  border-color: var(--mt-brand);
+  box-shadow: var(--mt-shadow-soft);
+}
+
+/* ── 思考强度滑块（plugin-effort-slider）───────────────────────────
+ * 该插件自述“所有颜色解析自 DSH 变量，accent 唯一来源是
+ * var(--dsw-alias-button-info-fill)（发送按钮同款）”，因此这里只把这一个
+ * 变量在根部与滑块作用域内指向铭荼品牌色：滑杆填充、刻度、最高档渐变与
+ * 选中勾选会整体跟随。不用 !important。 */
+:root {
+  --dsw-alias-button-info-fill: var(--mt-brand);
+}
+
+:root .efs-root {
+  --dsw-alias-button-info-fill: var(--mt-brand);
+}
+
+/* 滑块胶囊与发送按钮统一成铭荼胶囊 */
+:root .efs-slider,
+:root .efs-track,
+:root .efs-trackFill,
+:root .efs-thumb,
+:root .efs-dot {
+  border-radius: var(--mt-radius-pill);
+}
+
+/* 收窄滑块胶囊：插件默认固定 208px，装上“专家”等控件后会把 composer
+ * 底部挤成两行（实测行高 77px → 收窄后 44px 恢复单行）。模型名过长时
+ * 由插件自带的省略号逻辑截断。 */
+:root .efs-root {
+  width: 168px;
+  min-width: 168px;
+  max-width: 168px;
+}
+
+/* ── 第三方插件界面统一：antd ─────────────────────────────────────
+ * 技能 / 归档（以及任何用 antd 的插件）走的是 antd v5 的 CSS 变量模式，
+ * 实测其 token 挂在 `css-var-*` 包装元素上（如 `--ant-color-primary: #7aaaff`、
+ * `--ant-border-radius: 6px`）。所以这里只覆盖 token，不去改 antd 的类选择器：
+ * 按钮、开关、下拉、日期选择、标签、折叠面板会一并跟随，且插件升级不易碎。
+ * 只改主色与圆角，不动 antd 的文本/背景色，保证深色与浅色两套都成立。 */
+:root [class*="css-var-"] {
+  --ant-color-primary: var(--mt-brand);
+  --ant-color-primary-hover: var(--mt-brand-strong);
+  --ant-color-primary-active: var(--mt-brand-strong);
+  --ant-color-primary-bg: var(--mt-brand-soft);
+  --ant-color-primary-bg-hover: var(--mt-brand-soft);
+  --ant-color-primary-border: color-mix(in srgb, var(--mt-brand) 40%, transparent);
+  --ant-border-radius: var(--mt-radius-sm);
+  --ant-border-radius-xs: 10px;
+  --ant-border-radius-sm: var(--mt-radius-sm);
+  --ant-border-radius-lg: var(--mt-radius-md);
+}
+
+/* ── 质感细节 ───────────────────────────────────────────────────── */
+
+/* 键盘焦点：铭荼薄荷环，替代浏览器默认描边（可访问性与质感同时受益） */
+:root :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 60%, transparent);
+  outline-offset: 2px;
+  border-radius: var(--mt-radius-sm);
+}
+
+/* 文本选中：薄荷底 */
+:root ::selection {
+  background: color-mix(in srgb, var(--mt-brand) 28%, transparent);
+}
+
+/* 滚动条：跟随品牌，细而低干扰（官方 scrollbar.css 在 body 上绑定，故一并作用） */
+:root,
+:root body {
+  --dsh-scrollbar-thumb: color-mix(in srgb, var(--mt-brand) 28%, transparent);
+  --dsh-scrollbar-thumb-hover: color-mix(in srgb, var(--mt-brand) 50%, transparent);
+  --dsh-scrollbar-width: 6px;
+}
+
+/* 交互过渡：统一时长与缓动（180ms / 标准减速曲线），只作用于颜色与阴影 */
+:root [class*="_button"],
+:root [class*="_card"],
+:root .ant-btn,
+:root .ant-segmented-item,
+:root .ant-switch {
+  transition:
+    background-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 悬停抬升：卡片类元素轻微上浮，给出可点击的质感 */
+:root .dcu-home-card {
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root .dcu-home-card:hover {
+  transform: translateY(-1px);
+}
+
+/* 尊重系统的“减少动态效果” */
+@media (prefers-reduced-motion: reduce) {
+  :root .dcu-home-card:hover {
+    transform: none;
+  }
+}
+
+/* antd 分段控件（技能/归档页的标签条）的轨道与滑块 */
+:root .ant-segmented,
+:root .ant-segmented-thumb,
+:root .ant-segmented-item {
+  border-radius: var(--mt-radius-sm);
+}
+
+/* codex-pet 浮窗：给一层贴合轮廓的柔和投影，让它像浮在场景之上而不是硬贴片。
+   drop-shadow 跟随精灵图的 alpha 通道，不会给透明区域加方框。 */
+:root .dcp-floating {
+  filter: drop-shadow(0 8px 20px rgb(0 0 0 / 26%));
+}
+
+/* ── 侧栏页脚一行：账户 · 连接手机 · 剩余用量 · 设置 ─────────────────
+ * 由 ui-tweaks.js 注入到 `.dcu-footer-actions`（该容器默认空且高度为 0）。
+ * 把 `.dcu-foot` 改成横向排列，让注入项与「设置」并排在同一行。 */
+:root .dcu-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 2px;
+}
+
+:root .dcu-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+/* 设置入口（官方 .dcu-settings-seat）必须保留自己的宽度：
+ * 之前用 flex:1 1 auto + min-width:0，被相邻的页脚操作区挤成 0 宽 ⇒ 齿轮只剩 8px（用户报「设置不见了」）。 */
+:root .dcu-settings-seat {
+  flex: 0 0 auto;
+  width: 32px;
+  min-width: 32px;
+}
+
+:root .mt-foot-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--mt-radius-sm);
+  color: var(--dcu-sidebar-secondary, currentColor);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root .mt-foot-action:hover {
+  background: var(--dcu-sidebar-hover, rgb(0 0 0 / 6%));
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-foot-action:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 60%, transparent);
+  outline-offset: 1px;
+}
+
+/* 图标型入口（连接手机 / 剩余用量）只占一个方按钮 */
+:root .mt-foot-action--icon {
+  width: 30px;
+  padding: 0;
+}
+
+/* 剩余用量圆环：环（conic + 径向遮罩）与中心数值分两层，
+ * 遮罩只作用于环层，否则中心文字会被一起遮掉。无真实数据源时显示「—」，
+ * 不编造百分比；接入用量后把 ui-tweaks.js 的 MING_TEA_QUOTA_PERCENT 接上即可。 */
+:root .mt-quota-ring {
+  --mt-quota: 0;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+
+:root .mt-quota-arc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--mt-brand) calc(var(--mt-quota) * 1%),
+    color-mix(in srgb, var(--mt-brand) 24%, transparent) 0
+  );
+  -webkit-mask: radial-gradient(circle, transparent 0 58%, #000 59%);
+  mask: radial-gradient(circle, transparent 0 58%, #000 59%);
+}
+
+:root .mt-quota-value {
+  position: relative;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--mt-brand-ink);
+}
+
+/* 已有真实数值时把环加粗、数值放大一点 */
+:root .mt-foot-quota[data-has-value="1"] .mt-quota-arc {
+  -webkit-mask: radial-gradient(circle, transparent 0 52%, #000 53%);
+  mask: radial-gradient(circle, transparent 0 52%, #000 53%);
+}
+
+:root .mt-foot-quota[data-has-value="1"] .mt-quota-value {
+  font-size: 8px;
+}
+
+/* 设置页导航追加项：跟随导航项的排布 */
+:root .mt-settings-update {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 提示气泡：说明"尚未接入"，避免空点击 */
+:root .mt-foot-hint {
+  position: fixed;
+  z-index: 2147483001;
+  max-width: 220px;
+  padding: 8px 10px;
+  border-radius: var(--mt-radius-sm);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 30%, transparent);
+  background: var(--mt-paper-raised);
+  color: var(--mt-ink-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: var(--mt-shadow-lift);
+  opacity: 0;
+  transform: translate(-50%, -100%) translateY(4px);
+  transition:
+    opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+:root .mt-foot-hint[data-visible="1"] {
+  opacity: 1;
+  transform: translate(-50%, -100%) translateY(0);
+}
+
+/* codex-ui 自绘主按钮（类名形如 `<hash>_primary`，如插件配置页的「添加插件」、
+ * composer 的发送键）与 antd 主按钮统一成品牌色。限定 button 角色，
+ * 避免命中只是带 primary 字样的文字节点；排除 disabled 以免看起来可点。 */
+:root button[class*="_primary"]:not(:disabled),
+:root [role="button"][class*="_primary"]:not([aria-disabled="true"]) {
+  background: var(--mt-brand);
+  border-color: var(--mt-brand);
+  color: #fff;
+}
+
+:root button[class*="_primary"]:not(:disabled):hover,
+:root [role="button"][class*="_primary"]:not([aria-disabled="true"]):hover {
+  background: var(--mt-brand-strong);
+  border-color: var(--mt-brand-strong);
+}
+
+/* ── 清亮模式开关 ──────────────────────────────────────────────────
+ * 开关行由 ui-tweaks.js 克隆真实设置行生成，按钮是本插件自绘（薄荷）。
+ * 状态存浏览器的 localStorage，不做假的服务端同步。 */
+:root .mt-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, currentColor 20%, transparent);
+  cursor: pointer;
+  transition: background-color 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root .mt-switch[data-on="1"] {
+  background: var(--mt-brand);
+}
+
+:root .mt-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 60%, transparent);
+  outline-offset: 2px;
+}
+
+:root .mt-switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 24%);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root .mt-switch[data-on="1"] .mt-switch-knob {
+  transform: translateX(18px);
+}
+
+/* ── 清亮模式：减少动画与渲染负担 ──────────────────────────────────
+ * 只做减法：停掉过渡与动画、去掉本主题引入的阴影与滤镜。
+ * 低配置机器上这几项是主要的合成开销来源。 */
+:root[data-ming-tea-lite="1"] {
+  --mt-shadow-soft: none;
+  --mt-shadow-lift: none;
+}
+
+:root[data-ming-tea-lite="1"] *,
+:root[data-ming-tea-lite="1"] *::before,
+:root[data-ming-tea-lite="1"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+:root[data-ming-tea-lite="1"] .dcp-floating {
+  filter: none !important;
+}
+
+:root[data-ming-tea-lite="1"] [class*="_dialog"],
+:root[data-ming-tea-lite="1"] [class*="_menu"],
+:root[data-ming-tea-lite="1"] [class*="_popover"],
+:root[data-ming-tea-lite="1"] [data-composer-card] {
+  box-shadow: none !important;
+}
+
+:root[data-ming-tea-lite="1"] .mt-quota-arc {
+  background: none;
+  border: 2px solid color-mix(in srgb, var(--mt-brand) 40%, transparent);
+}
+
+/* ── 官方写死材质的修正 ───────────────────────────────────────────
+ * 这些是官方在组件类上写死、无法靠令牌覆盖的地方（有源码证据）。
+ * 类名按"哈希_语义名"的后缀匹配，语义名稳定、哈希随构建变化。 */
+
+/* 1) HoverCard：官方注释写明"表面两套主题都用 #2C2C2E（figma 值）"，
+ *    文字是写死的 #FFFFFF。浅色下是一块突兀的深卡。
+ *    这里同时改表面变量与文字色——对其他卡片等价（我们的
+ *    --mt-ink-strong 与已覆盖的 --dsw-alias-label-primary 同值），
+ *    因此安全：只有 HoverCard 会真正改变观感。 */
+:root [class*="_card"] {
+  --dsw-hovercard-bg: var(--mt-paper-raised);
+  color: var(--mt-ink-strong);
+}
+
+/* 2) macOS 侧栏：官方用蓝紫渐变（#7a9bf0 / #8f89b8），是"官方味"最重的一处，
+ *    换成铭荼薄荷的同结构渐变。 */
+:root[data-platform="darwin"] [class*="sidebarCol"] {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--mt-brand) 10%, transparent),
+    color-mix(in srgb, var(--mt-brand) 3%, transparent) 40%,
+    transparent
+  );
+}
+
+:root[data-platform="darwin"] [data-ds-dark-theme] [class*="sidebarCol"] {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--mt-brand) 12%, transparent),
+    color-mix(in srgb, var(--mt-brand) 4%, transparent) 35%,
+    transparent 68%
+  );
+}
+
+/* 3) Markdown 表格与行内码：官方分别是 8px 与 6px，抬到我们的尺度 */
+:root [class*="_tableScroll"],
+:root [class*="_tableFill"] {
+  border-radius: var(--mt-radius-sm);
+}
+
+:root [class*="_markdown"] code {
+  border-radius: var(--mt-radius-sm);
+}
+
+/* ── 首页场景卡（替换官方四张开发向卡片）──────────────────────────
+ * 官方卡片块本身隐藏，位置由 ui-tweaks.js 注入的 .mt-scene-cards 接管。
+ * 视觉语言：纸面卡 + 薄荷描边 + 悬停上浮，与设置页卡片同一套。 */
+:root .dcu-home-suggestions {
+  display: none;
+}
+
+:root .mt-scene-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  margin: 26px auto 0;
+}
+
+@media (max-width: 900px) {
+  :root .mt-scene-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+:root .mt-scene-column {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+:root .mt-scene-title {
+  color: var(--mt-brand-ink);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+:root .mt-scene-card {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 22%, transparent);
+  border-radius: var(--mt-radius-md);
+  background: var(--mt-paper-raised);
+  color: var(--mt-ink-strong);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root .mt-scene-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--mt-brand);
+  box-shadow: var(--mt-shadow-soft);
+}
+
+:root .mt-scene-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 60%, transparent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root .mt-scene-card:hover {
+    transform: none;
+  }
+}
+
+/* ── 保护：胶囊与圆形不被上面的通用规则改形 ─────────────────────── */
+:root [class*="_pill"],
+:root [class*="pill"],
+:root [class*="_circle"] {
+  border-radius: var(--mt-radius-pill);
+}
+
+
+/* ══ 侧栏页脚版式：账户（头像 + 名称）→ 剩余用量 → 连接手机 → 设置 ══════════
+ * 顺序用 order 排，因为官方「设置」在它自己的 slot 容器里（DOM 顺序排不了）。
+ * 账户 margin-right:auto 把它自己顶到最左，其余入口靠右。 */
+:root .dcu-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+:root .dcu-footer-actions > [data-slot="sidebar.footer.action"] {
+  order: 4;
+}
+
+:root .mt-foot-account {
+  order: 1;
+  margin-right: auto;
+  gap: 7px;
+  height: 32px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 8px 0 3px;
+}
+
+:root .mt-foot-quota {
+  order: 2;
+}
+
+:root [data-ming-tea-action="phone"] {
+  order: 3;
+}
+
+:root .mt-foot-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, var(--mt-brand) 18%, transparent);
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-foot-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 收起侧栏（.dcu-compact）：轨道只有 36px 宽，必须竖排 + 只留图标，
+ * 否则宽按钮会被 overflow:hidden 的根容器裁掉一半（用户报的「只显示一半的账户」）。
+ * 官方「设置」在自己的 .dcu-settings-seat 里，横向挤压时会被压成 0 宽而整块消失，
+ * 所以这一档要连它也一起改成定宽竖排。 */
+:root .dcu-compact .dcu-foot {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  height: auto;
+}
+
+:root .dcu-compact .dcu-footer-actions {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  width: 32px;
+  min-width: 32px;
+}
+
+:root .dcu-compact .dcu-settings-seat {
+  flex: 0 0 auto;
+  width: 32px;
+  min-width: 32px;
+  overflow: visible;
+}
+
+:root .dcu-compact .dcu-settings-seat > *,
+:root .dcu-compact .dcu-settings-trigger {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+}
+
+:root .dcu-compact .mt-foot-action,
+:root .dcu-compact .mt-foot-account {
+  width: 32px;
+  min-width: 0;
+  max-width: 32px;
+  padding: 0;
+  margin-right: 0;
+  justify-content: center;
+}
+
+:root .dcu-compact .mt-foot-name,
+:root .dcu-compact .mt-foot-label {
+  display: none;
+}
+
+/* ══ 输入框旁的「上下文占用」指示器 ══════════════════════════════════════ */
+:root .mt-ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 6px;
+  width: fit-content;
+  flex: 0 0 auto;
+  margin: 0 6px 0 0;
+  padding: 3px 9px 3px 4px;
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, var(--mt-brand) 7%, transparent);
+  color: color-mix(in srgb, var(--mt-ink-strong) 72%, transparent);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: default;
+  user-select: none;
+}
+
+:root .mt-ctx-ring {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+:root .mt-ctx-arc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--mt-brand) calc(var(--mt-ctx, 0) * 1%),
+    color-mix(in srgb, var(--mt-brand) 20%, transparent) 0
+  );
+  -webkit-mask: radial-gradient(circle, transparent 0 56%, #000 57%);
+  mask: radial-gradient(circle, transparent 0 56%, #000 57%);
+}
+
+:root .mt-ctx-meter[data-has-value="1"] {
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-ctx-meter[data-has-value="0"] .mt-ctx-arc {
+  background: color-mix(in srgb, var(--mt-brand) 18%, transparent);
+}
+
+/* ══ 商店（dsh-plugin-shop）：套上铭荼的卡片/按钮/徽章语言 ═══════════════
+ * 只挂在商店自己的 [data-shop-tab] 面板内，避免波及其他插件的同名类；
+ * 用 data-* 与语义后缀匹配，不依赖会随构建变化的 hash 前缀。
+ * 厂商样式表后注入，所以这里统一加 :root 前缀提高特异度，保证不被压回去。 */
+:root [data-shop-tab] {
+  gap: 10px;
+}
+
+:root [data-shop-tab] [class*="_searchInput"] {
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--mt-radius-pill);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 18%, transparent);
+  background: var(--mt-paper-raised);
+}
+
+:root [data-shop-tab] [class*="_searchInput"]:focus {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 45%, transparent);
+  outline-offset: 1px;
+}
+
+:root [data-shop-tab] [class*="_categoryButton"] {
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--mt-radius-pill);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 16%, transparent);
+  background: transparent;
+  color: color-mix(in srgb, var(--mt-ink-strong) 78%, transparent);
+  font-size: 12px;
+  transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root [data-shop-tab] [class*="_categoryButton"]:hover {
+  background: color-mix(in srgb, var(--mt-brand) 10%, transparent);
+}
+
+:root [data-shop-tab] [class*="_categoryButtonOn"] {
+  background: var(--mt-brand);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 卡片：圆角一档更大、悬停轻微上浮，和首页场景卡同一手感 */
+:root [data-shop-tab] [data-shop-entry] {
+  border-radius: var(--mt-radius-lg);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 14%, transparent);
+  background: var(--mt-paper-raised);
+  transition:
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root [data-shop-tab] [data-shop-entry]:hover {
+  border-color: color-mix(in srgb, var(--mt-brand) 32%, transparent);
+  box-shadow: var(--mt-shadow-lift);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :root [data-shop-tab] [data-shop-entry]:hover {
+    transform: translateY(-1px);
+  }
+}
+
+:root [data-shop-tab] [class*="_cardSpine"] {
+  background: linear-gradient(
+    180deg,
+    var(--mt-brand),
+    color-mix(in srgb, var(--mt-brand) 35%, transparent)
+  );
+}
+
+/* 徽章统一成胶囊形 + 品牌浅底 */
+:root [data-shop-tab] [class*="_categoryBadge"],
+:root [data-shop-tab] [class*="_sourceBadge"],
+:root [data-shop-tab] [class*="_cardVersion"],
+:root [data-shop-tab] [class*="_tierBadge"],
+:root [data-shop-tab] [class*="_starsBadge"] {
+  padding: 1px 8px;
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, var(--mt-brand) 10%, transparent);
+  color: var(--mt-brand-ink);
+  font-size: 11px;
+}
+
+/* 安装 / 更新：品牌实心主按钮 */
+:root [data-shop-tab] [data-shop-install],
+:root [data-shop-tab] [data-shop-update] {
+  height: 30px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: var(--mt-radius-pill);
+  background: var(--mt-brand);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root [data-shop-tab] [data-shop-install]:hover:not(:disabled),
+:root [data-shop-tab] [data-shop-update]:hover:not(:disabled) {
+  background: var(--mt-brand-strong);
+}
+
+:root [data-shop-tab] [data-shop-refused],
+:root [data-shop-tab] [data-shop-install]:disabled,
+:root [data-shop-tab] [data-shop-update]:disabled {
+  background: color-mix(in srgb, var(--mt-ink-strong) 12%, transparent);
+  color: color-mix(in srgb, var(--mt-ink-strong) 55%, transparent);
+  cursor: not-allowed;
+}
+
+/* 卸载 / 刷新 / 检查更新：次级按钮 */
+:root [data-shop-tab] [data-shop-uninstall],
+:root [data-shop-tab] [class*="_catalogRefreshButton"],
+:root [data-shop-tab] [class*="_checkUpdateButton"],
+:root [data-shop-tab] [class*="_actionButton"] {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--mt-radius-pill);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 22%, transparent);
+  background: transparent;
+  color: var(--mt-brand-ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+:root [data-shop-tab] [data-shop-confirm] {
+  height: 28px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: var(--mt-radius-pill);
+  background: var(--mt-brand);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* 开关：品牌色 + 胶囊滑轨 */
+:root [data-shop-tab] [class*="_switch"] {
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, var(--mt-ink-strong) 16%, transparent);
+}
+
+:root [data-shop-tab] [class*="_switchOn"] {
+  background: var(--mt-brand);
+}
+
+:root [data-shop-tab] [class*="_switchKnob"] {
+  box-shadow: 0 1px 3px rgb(23 51 58 / 22%);
+}
+
+/* ══ 安装前确认弹窗（我们自己画的，不依赖商店的类名） ══════════════════ */
+.mt-store-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483002;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mt-store-confirm[data-open="1"] {
+  opacity: 1;
+}
+
+.mt-store-confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #0b1f24 42%, transparent);
+}
+
+.mt-store-confirm-panel,
+.mt-account-panel {
+  position: relative;
+  width: min(420px, calc(100vw - 40px));
+  padding: 18px 20px 16px;
+  border-radius: var(--mt-radius-lg);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 24%, transparent);
+  background: var(--mt-paper-raised);
+  color: var(--mt-ink-strong);
+  box-shadow: var(--mt-shadow-lift);
+}
+
+.mt-store-confirm-panel h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.mt-store-confirm-name {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mt-brand-ink);
+  overflow-wrap: anywhere;
+}
+
+.mt-store-confirm-name span {
+  font-weight: 400;
+  color: color-mix(in srgb, var(--mt-ink-strong) 60%, transparent);
+}
+
+.mt-store-confirm-facts {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+
+.mt-store-row {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 8px;
+}
+
+.mt-store-row dt {
+  color: color-mix(in srgb, var(--mt-ink-strong) 58%, transparent);
+}
+
+.mt-store-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mt-store-row code {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--mt-brand) 10%, transparent);
+}
+
+.mt-store-confirm-note {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  border-radius: var(--mt-radius-sm);
+  background: color-mix(in srgb, var(--mt-brand) 7%, transparent);
+  color: color-mix(in srgb, var(--mt-ink-strong) 76%, transparent);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.mt-store-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mt-store-cancel,
+.mt-store-ok {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: var(--mt-radius-pill);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mt-store-cancel {
+  border: 1px solid color-mix(in srgb, var(--mt-ink-strong) 18%, transparent);
+  background: transparent;
+  color: var(--mt-ink-strong);
+}
+
+.mt-store-ok {
+  border: 0;
+  background: var(--mt-brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+.mt-store-cancel:focus-visible,
+.mt-store-ok:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mt-brand) 60%, transparent);
+  outline-offset: 2px;
+}
+
+/* ── 账户面板 ─────────────────────────────────────────────────────────── */
+:root .mt-account-body {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+:root .mt-account-name {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--mt-brand-ink);
+  overflow-wrap: anywhere;
+}
+
+:root .mt-account-meta {
+  margin: 0 0 6px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--mt-ink-strong) 72%, transparent);
+}
+
+:root .mt-account-code {
+  margin: 0 0 8px;
+  padding: 10px 14px;
+  border-radius: var(--mt-radius-sm);
+  background: color-mix(in srgb, var(--mt-brand) 10%, transparent);
+  color: var(--mt-brand-ink);
+  font-family: var(--ds-font-family-code, ui-monospace, monospace);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-align: center;
+  user-select: all;
+}
+
+:root .mt-account-link {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mt-brand-ink);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+:root .mt-account-note {
+  margin: 0;
+  min-height: 16px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--mt-ink-strong) 62%, transparent);
+}
+
+:root .mt-account-note[data-tone="error"] {
+  color: var(--dsw-alias-label-error, #c62828);
+}
+
+:root .mt-account-note[data-tone="ok"] {
+  color: var(--mt-brand-ink);
+}
+
+/* 气泡里带链接（例如「前往下载」）：这一档需要能点，其余仍是纯提示 */
+:root .mt-foot-hint[data-interactive="1"] {
+  pointer-events: auto;
+}
+
+:root .mt-foot-hint a {
+  color: var(--mt-brand-ink);
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+/* 手动授权码：只在需要手动打开时才用得上，视觉上弱化 */
+:root .mt-account-fallback {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--mt-ink-strong) 52%, transparent);
+  user-select: all;
+}
+
+/* ── 用量悬浮卡（免费层 + 付费层同时显示） ─────────────────────────────── */
+:root .mt-quota-tip {
+  position: fixed;
+  z-index: 2147483001;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: var(--mt-radius-sm);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 30%, transparent);
+  background: var(--mt-paper-raised);
+  color: color-mix(in srgb, var(--mt-ink-strong) 80%, transparent);
+  font-size: 11px;
+  line-height: 1.6;
+  box-shadow: var(--mt-shadow-lift);
+  opacity: 0;
+  transform: translate(-50%, -100%) translateY(4px);
+  transition:
+    opacity 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+  white-space: pre-line;
+}
+
+:root .mt-quota-tip[data-visible="1"] {
+  opacity: 1;
+  transform: translate(-50%, -100%) translateY(0);
+}
+
+:root .mt-quota-tip-strong {
+  color: var(--mt-ink-strong);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* ── 侧栏用户名旁的档位徽标（仅付费档出现） ───────────────────────────── */
+:root .mt-foot-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: var(--mt-radius-pill);
+  background: linear-gradient(135deg, var(--mt-brand), var(--mt-brand-strong));
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1.5;
+}
+
+:root .mt-foot-badge[data-plan="pro"] {
+  background: linear-gradient(135deg, #2f6fdd, #4a8bf0);
+}
+
+:root .mt-foot-badge[data-plan="ultra"] {
+  background: linear-gradient(135deg, #b8860b, #d9a520);
+}
+
+/* 收起侧栏时徽标会挤占轨道，隐藏它（展开后仍在） */
+:root .dcu-compact .mt-foot-badge {
+  display: none;
+}
+
+/* ── 「检查更新」独立页面 ─────────────────────────────────────────────── */
+:root .mt-upd-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0 8px;
+  max-width: 640px;
+}
+
+:root .mt-upd-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--mt-ink-strong);
+}
+
+:root .mt-upd-meta {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--mt-ink-strong) 66%, transparent);
+}
+
+:root .mt-upd-facts {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--mt-radius-sm);
+  background: color-mix(in srgb, var(--mt-brand) 7%, transparent);
+  font-size: 12px;
+}
+
+:root .mt-upd-facts > div {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 10px;
+}
+
+:root .mt-upd-facts dt {
+  color: color-mix(in srgb, var(--mt-ink-strong) 58%, transparent);
+}
+
+:root .mt-upd-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+:root .mt-upd-notes {
+  padding: 10px 14px;
+  border-radius: var(--mt-radius-sm);
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 20%, transparent);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+:root .mt-upd-notes h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-upd-notes p {
+  margin: 0;
+  white-space: pre-line;
+}
+
+:root .mt-upd-actions {
+  display: flex;
+  gap: 8px;
+}
+
+:root .mt-upd-primary,
+:root .mt-upd-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--mt-radius-pill);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+:root .mt-upd-primary {
+  border: 0;
+  background: var(--mt-brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+:root .mt-upd-secondary {
+  border: 1px solid color-mix(in srgb, var(--mt-brand) 24%, transparent);
+  background: transparent;
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-upd-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-error, #c62828);
+}
+
+/* ==== 设置页「用量看板」（.mt-usage-*）====
+   度量条与「检查更新」页共用 .mt-upd-page / .mt-upd-facts / .mt-upd-actions 的版式，
+   这里只加额度条自身的样式，避免两页各长一套。 */
+
+:root .mt-usage-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mt-brand-ink);
+}
+
+:root .mt-usage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: var(--mt-radius-sm);
+  background: color-mix(in srgb, var(--mt-brand) 7%, transparent);
+}
+
+:root .mt-usage-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+:root .mt-usage-meter-label {
+  font-weight: 600;
+  color: var(--mt-ink-strong);
+}
+
+:root .mt-usage-meter-figure {
+  color: color-mix(in srgb, var(--mt-ink-strong) 72%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+:root .mt-usage-bar {
+  height: 6px;
+  border-radius: var(--mt-radius-pill);
+  background: color-mix(in srgb, var(--mt-ink-strong) 12%, transparent);
+  overflow: hidden;
+}
+
+:root .mt-usage-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--mt-brand);
+  transition: width 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 站点没给总数时占比未知：不画一条假的满格，改成斜纹提示 */
+:root .mt-usage-bar-fill[data-unknown="1"] {
+  width: 100% !important;
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--mt-ink-strong) 18%, transparent) 0 6px,
+    transparent 6px 12px
+  );
+}
+
+:root .mt-usage-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--mt-ink-strong) 60%, transparent);
+}

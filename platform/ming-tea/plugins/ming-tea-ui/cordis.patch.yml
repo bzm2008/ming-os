@@ -1,0 +1,23 @@
+# 铭荼自有界面层的宿主半区补丁。
+#
+# 两件事：
+#   1. 停用内置的第四个模式 `cordis`（创造模式入口，本产品不使用），
+#      插入一行铭荼界面层。三个用户场景由 presets/scenes.patch.yml 提供，
+#      它们**覆盖** standard / ptc / minimal 的 config 而不新增 id——
+#      停用内置 preset 会让已持久化的 selectedDefault 悬空，新建会话会失败。
+#   2. 把 preset 注册表的部署默认值指向办公场景（即内置 id `standard`），
+#      这样新会话在没有显式选择时落到办公场景。
+- id: preset-cordis
+  disabled: true
+
+- id: agent-preset-registry
+  config:
+    default: standard
+
+- insert:
+    - id: ming-tea-ui
+      name: '@ming-tea/dsh-ui'
+
+# 插件商店（dsh-plugin-shop）的目录源钉死**不在这里**：我们的 patch 是 bundle 层，
+# 会先于商店自己的 bundle 层应用，按 id 覆盖会静默失效（实测）。它由
+# scripts/install_ming_tea_plugins.sh 写入 profile patch（所有 bundle 层之后）。
