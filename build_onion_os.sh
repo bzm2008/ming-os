@@ -2576,6 +2576,10 @@ RETIRED_RESIDUE_TEXT_MARKER = re.compile(
 # artifacts establish its trusted provider identity and must remain present.
 RETIRED_RESIDUE_ALLOWLIST = frozenset({
     "usr/share/ming-os/store/catalog/spark-public.json",
+    # This catalog is a display-only, user-provided artifact manifest.  It may
+    # mention spark-store as an app id, but it does not install the retired
+    # Spark/APM runtime or its privileged helpers.
+    "usr/share/ming-os/store/catalog/vendor-official.json",
     "etc/ming-os/store/spark-archive-keyring.gpg",
 })
 RETIRED_RESIDUE_SCAN_ROOTS = (

@@ -37,6 +37,9 @@ class SparkResidueContracts(unittest.TestCase):
         ):
             self.assertIn(marker, BUILD)
 
+    def test_vendor_catalog_is_allowlisted_as_display_only_manifest(self):
+        self.assertIn('"usr/share/ming-os/store/catalog/vendor-official.json"', BUILD)
+
     def test_finalize_removes_legacy_wps_entry_without_touching_user_apps(self):
         cleanup = FINALIZE.split("retire_legacy_store_runtime() {", 1)[1].split(
             "\n}", 1
