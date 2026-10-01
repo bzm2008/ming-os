@@ -226,7 +226,9 @@ class MingTaskbar(Gtk.Window):
         self.set_keep_above(True)
         self.set_accept_focus(False)
         self.set_focus_on_map(False)
-        self.set_app_paintable(True)
+        # Keep the native opaque window visual.  An app-paintable GTK window
+        # can acquire an ARGB visual and become black on X11 sessions without
+        # a compositor, even when its CSS surface is opaque.
         self.set_size_request(TASKBAR_WIDTH, TASKBAR_HEIGHT)
         self.connect("realize", self._on_realize)
         provider = Gtk.CssProvider()

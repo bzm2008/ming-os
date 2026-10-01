@@ -44,6 +44,7 @@ class MingTaskbarContracts(unittest.TestCase):
             'surface = "#f5fbf7"',
             "int(width * 0.78)",
             "TASKBAR_HEIGHT = 56",
+            "native opaque window visual",
             "Gdk.WindowTypeHint.DOCK",
             "refresh_windows",
             "refresh_status",
