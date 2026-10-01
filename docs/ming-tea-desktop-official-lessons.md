@@ -1,5 +1,10 @@
 # 官方 DSH 桌面客户端调研：铭荼可借鉴什么
 
+> **版本说明（2026-10-01 追记）**：本文写作时铭荼 runtime 锁 `0.1.7-rc.1`；此后已升到 **`0.2.0-rc.2`**。
+> 文中「官方版本」的结论仍按当时的 `0.2.0-rc.2` 源码为准；文中提到在 `0.1.7-rc.1` 上实测过的那一条
+> （`dsh-web-frontend/dist` 存在）**在 0.2.0-rc.2 上已复核，同样存在**（`index.html`、`assets/`、`favicon.svg`、
+> `favicon-dark.svg`、`manifest.webmanifest`）。其余「未验证」项保持原样，不要把本文当作 0.2 的验收记录。
+
 > **来源与折扣（先读这段）**：本文是对 `github.com/deepseek-ai/deepseek-harness` 的 `apps/desktop`
 > （包名 `@deepseek-ai/dsh-desktop`，Electron 壳）源码与第一方设计笔记（`.agents/notes/implemented/architecture/`）的
 > **只读阅读**，commit `639ed015`，该 commit 的 `package.json` 版本是 **`0.2.0-rc.2`（2026-09-29）**。

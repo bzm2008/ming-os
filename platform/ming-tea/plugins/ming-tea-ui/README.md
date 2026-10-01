@@ -17,6 +17,51 @@ client 插件机制注入自己的品牌、配色、几何与场景模式。
 | `scripts/build.mjs` | 生成 `lib/client.js` |
 | `scripts/build-presets.mjs` | 生成 `presets/scenes.patch.yml` |
 
+## 版本对齐：DSH `0.2.0-rc.2`（2026-10-01）
+
+本插件现在对齐 **`@deepseek-ai/dsh@0.2.0-rc.2`**（npm `latest`，也是官方桌面客户端的版本），
+`package.json` 的 `dsh.engines.dsh` 同步为 `>=0.2.0-rc.2`。升级记录与逐项证据见
+`docs/ming-tea-live-status.md` 的 2026-10-01 条目；这里只留对本插件有直接影响的结论。
+
+**官方契约：无破坏性变更**（逐项核对，证据见协作文档）
+
+- 四个官方 preset 文件（`standard`/`ptc`/`minimal`/`cordis`）与 0.1.7-rc.1 **逐字节相同**
+  ⇒ `scenes.patch.yml` 重新生成后无任何 diff，三个场景的行状态与升级前一致。
+- `settings.section` 槽位契约、`theme.overrideTokens`、`connection.rpc` 的 `{ok, value}` 信封、
+  `settings.mutate` 路径寻址、`credentials` 五方法、`agent-preset-registry` 的 `default` 配置键**均未变**。
+- 0.2 新增的 `product-analytics` / `desktop-product-telemetry` 两行带
+  `disabled: ctx.get('profileContext')?.name !== 'desktop'` ⇒ **`ming-tea` profile 不采集**。
+
+**插件兼容矩阵（0.2 的实际闸门：逐条 `@deepseek-ai/dsh*` peer 用 `semver.satisfies(rt, range, {includePrerelease:true})`）**
+
+- 10 个 `@michengai/*` + `plugin-effort-slider`：**全部通过**（前者升到声明兼容 `0.2.0-rc.2` 的最新版；
+  后者**没有 `peerDependencies`**，闸门直接放行）。
+- 本插件：**没有 `peerDependencies`**，永远放行（`dsh.engines` 在 DSH 里没有任何代码读它）。
+- `dsh-plugin-shop@0.8.3`：**唯一需要精确版本豁免**的一个 —— 上游 0.8.3 与 0.8.4-beta.0 的 peer 都停在
+  `^0.1.1-rc.2`。豁免由 `scripts/install_ming_tea_plugins.sh` 按锁文件 `versionExemptions`
+  在 `dsh plugin add` **之前**授予（preflight 跑在 pnpm 之前，晚一步会因 `set -e` 半途中断）。
+  实测：0.2 下商店页面正常渲染（目录 12551 条、分类、「隐藏不兼容」默认开启、无控制台错误）；
+  **「从商店安装第三方插件」这一步未实测**。
+
+**定制层适配（0.2 改写了官方中文文案）**
+
+| 我们的规则 | 0.2 的官方新文案 | 处理 |
+| --- | --- | --- |
+| `内测声明 → 使用说明` | `预览版说明` | 源串跟改（旧串在 0.2 里已 0 命中） |
+| `设置 Subagent 的递归层级、数量和模型。` | 改成「子智能体」措辞 | 源串跟改，目标仍用更口语的「子任务」；**浏览器实测命中** |
+| `开始你的创作 → 使用` | 官方已删除该句、新文案本身就是「开始使用」 | 规则删除（留着只是永不命中的死规则） |
+| `登录后即可创建…` | 换成带 DeepSeek 品牌的新句 | **新增去品牌化规则**（旧规则随之删除） |
+
+另外修了一个更根本的问题：`MutationObserver` 原本只监听 `childList`，而 React 对
+「深度求索中，用时 N 秒」这类**插值句**只改文本节点的值（`characterData` 事件），
+导致同一串在状态标签上换掉了、在消息元信息里仍是原文。补上 `characterData: true` 后
+**在真实对话里实测生效**（页面显示「深度思考中，用时 29秒」）。
+
+**本轮验证清单**：`dsh --version` = 0.2.0-rc.2；干净环境 `--dump-config` 无跳过/禁用、三场景行状态与升级前一致；
+浏览器实测首页三场景卡、场景选择芯片（办公/开发/辅助学习三种描述）、设置页 15 项、用量看板（真站点数据）、
+商店目录、思考强度滑块、真实对话（走 `ming-tea-hub`）；控制台零错误。
+**未实测**：商店的安装动作、`.dcu-home-suggestions` 之外的社区 DOM 细节、`tool-subagent-codex`（见上文更正——它本来就不产生工具）。
+
 ## 开发场景：编程能力与纪律
 
 **场景派生来源（2026-09-27 修正的坑）**：每个场景按自己的 `sourcePreset` 派生 ——
@@ -38,7 +83,7 @@ client 插件机制注入自己的品牌、配色、几何与场景模式。
 | 能力 | 之前 | 现在 | 说明 |
 | --- | --- | --- | --- |
 | `str_replace_editor` | 官方没有任何预设挂载 | 开发场景挂上 | DSH 里唯一「不整文件重写就能改代码」的工具：查看/创建/字面量精确替换/按行插入 |
-| `subagent_codex` | `disabled: true` | 打开 | 需要本机有 `codex` CLI（本机已装，可用） |
+| `subagent_codex` | `disabled: true` | 打开 | ⚠️ **2026-10-01 更正：这一行不会产生工具**。DSH 只注册了 `spawn`/`fork` 两个 subagent provider，没有任何包注册 `codex`；`dsh-tool-subagent` 在 provider 未注册时只打一行 info、不注册工具（`lib/index.js:573-577`）。本机确实装了 `codex` CLI，但那是另一回事。要真正启用需另找一个注册 `codex` provider 的包（未做）。 |
 | `subagent_claude_code` | `disabled: true` | **保持关闭** | 刻意不开：DSH 自带 `subagent`/`subagent_fork`，外部 CLI 后端是重复能力；本机也未装 `claude` |
 | `tool-ralph` | `disabled: true` | 打开 | 新鲜上下文循环重构；上游注明「完成与否是**工人自报**、非独立评估」 |
 | `tool-presentation` | 无（源自 standard） | 随 ptc 来源获得 | 官方 ptc 用它替代工作流编排 |

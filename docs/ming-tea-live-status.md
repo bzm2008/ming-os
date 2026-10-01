@@ -6,7 +6,7 @@
 
 ## 更新时间
 
-2026-09-30（Asia/Shanghai）。本轮为**接手复验 + 两件新增 + 提交**：①复验开发模式强化那批改动（已在仓库内落地），更正文档里两处与实测不符的表述（`subagent_claude_code` 状态、自测项数）；②新增设置页**「用量看板」**（站点额度：Auto 赠送次数 / 付费层余额 / 档位，宿主半区纯函数 + 离线断言，自测 45 项）；③两份调研文档：官方桌面客户端可借鉴点（`ming-tea-desktop-official-lessons.md`）、用量看板插件选型（`ming-tea-usage-dashboard-survey.md`，结论是**不能复用、需自建**）；④把这批未提交改动整理成 4 个提交，落在新分支 `feat/ming-tea-desktop-agent`（**未推送**）。**唯一未做的验证**：用量看板页的浏览器实测（见下）。
+2026-10-01（Asia/Shanghai）。本轮把 **DSH runtime 从 `0.1.7-rc.1` 升到 `0.2.0-rc.2`**（= npm `latest`，与本机 GUI 一致），并把 13 个插件的对应版本对齐：10 个 `@michengai/*` 升到声明兼容 0.2.0-rc.2 的最新版，`plugin-effort-slider@1.2.2` 不变（无 peer 声明），`dsh-plugin-shop@0.8.3` 因上游没有支持 0.2 的版本而走**精确版本豁免**。同时修掉 4 条因官方文案改写而失效的定制规则、补上 `characterData` 监听（插值句此前换不掉），并完成干净环境下的浏览器实测。详见「变更记录」2026-10-01 各条与「版本豁免」一节。
 
 ## 工作区
 
@@ -20,6 +20,20 @@
   `1f8a5b1` 协作文档、两份调研与门禁脚本 → `f90fedc` 跨平台 Agent、Tauri 壳、锁文件与安装脚本。
   基线仍是 `f46f634`。**要继续开发就在这个分支上做；推送需要另外确认**（分支尚未 push 到 origin/nas）。
 - 本机工具链：node 位于 `/Users/mac/.local/bin/node`（v26.9.0），无全局 `pnpm`/`corepack`；运行 workspace 命令用 `export PATH="/Users/mac/.local/bin:$PATH" && npx -y pnpm@11.19.0 <command>`。
+- **浏览器实测必须用干净环境**（2026-10-01 踩到）：DSH 的运行时会读 `DSH_PROFILE` / `DSH_PROFILE_DIR` 等环境变量，在这些变量存在（例如从 DSH 桌面 App 的会话里起子进程）时，即使用 `--profile ming-tea` + 自定 `DSH_HOME`，**桌面 profile 的用户层 patch 也会叠进来**（表现为默认模型变成 `deepseek-official` + `max`、需要 `DEEPSEEK_API_KEY` 而报 `MISSING_CREDENTIAL`）。起临时实例要用
+  `env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=... DSH_HOME=<home> dsh --profile ming-tea --port 19390 --no-open`。
+
+## 版本豁免（`compatibility.json`）
+
+0.2 在**安装前**（`dsh plugin add` 的 preflight，跑在 pnpm 之前）和**加载时**都会检查插件的 `@deepseek-ai/dsh*` peer；不满足就拒绝安装（退出码 1）或跳过该 bundle。唯一官方出路的「精确版本豁免」写在 profile 的 `compatibility.json`，格式 `{ "<包>@<精确版本>": ["<精确 DSH 版本>"] }`。
+
+当前工作树上的豁免**只有一条**（锁在 `assets/ming-tea-dsh-lock.json` 的 `versionExemptions`，由安装脚本在 `add` 之前自动授予）：
+
+| 包 | 版本 | DSH | 为什么 |
+| --- | --- | --- | --- |
+| `dsh-plugin-shop` | `0.8.3` | `0.2.0-rc.2` | 上游 0.8.3 与 0.8.4-beta.0 的 peer 都停在 `^0.1.1-rc.2`，**没有支持 0.2 的版本**。经审计它实际 import 的 API（`dsh-app-boot` 的 `loadOptionalPatches`/`readProfileManifest`/`resolveProfileDir`、`dsh-typert-protocol` 的 `Remote`/`TypertRemoteService`）在 0.2 都存在（`dsh-app-boot` 导出面只增不减、另两个包逐字节相同），故按官方 `allow-version` 机制**接受风险运行**。上游发布支持 0.2 的版本后应撤销豁免并删除该条目（`dsh plugin revoke-version`）。 |
+
+**实测到什么程度**：商店页面在 0.2 上正常渲染（目录列出 12551 条、分类、我们的「隐藏不兼容」默认开关都在、无控制台错误）；**「从商店安装某个第三方插件」这条动作没有实测**（会在 profile 里真的装入未审插件，留待单独验证）。其余 12 个插件在 0.2 上 peer 全部满足，不需要豁免。
 
 ## 当前目标
 
@@ -34,7 +48,7 @@
 | macOS 独立分发 | `planned` | 当前 bundle 启动 Agent 仍依赖系统 Node；target-specific 签名 sidecar 和公证未完成。 |
 | Windows 可分发版本 | `planned` | Named Pipe transport 已实现；Windows 桌面构建/实机验收未记录。 |
 | Ming OS GTK/Python 接入 | `in-progress` | 旧入口和协议/构建集成存在；跨平台 Agent 接入与整套发行验收尚需核对。 |
-| DSH runtime 0.1.7-rc.1 安装验证 | `done` | 2026-09-26 在隔离目录实测：9 个锁定包 npm 安装退出码 0，`dsh --version` 返回 `0.1.7-rc.1`，web profile 启动并可 HTTP 访问。此结论针对隔离验证，不代表工作树 `.ming-tea/runtime` 已升级（仍为 `0.1.6-alpha.2`）。 |
+| DSH runtime 0.2.0-rc.2 升级验证 | `done` | **2026-10-01 工作树实测**：runtime 与 9 个官方工具包升到 `0.2.0-rc.2`（= npm `latest`，与本机 GUI 一致），`dsh --version` 返回 `0.2.0-rc.2`；13 个社区插件升到声明兼容 0.2.0-rc.2 的版本。干净环境（`env -i`）下 `--dump-config` 1600 行、**无跳过/禁用**；浏览器实测三场景、设置页、商店目录、对话均通过。唯一例外是 `dsh-plugin-shop` 需要精确版本豁免（见「版本豁免」一节）。 |
 | 社区 dsh-codex-ui 基线 | `done` | 2026-09-26 实测 `dsh plugin --profile web add @michengai/dsh-codex-ui@1.1.18` 成功；profile `package.json` 的 `bundles` 自动加入该插件，`--dump-config` 组合通过，web 页面注册并加载其 `client.js`。先前 `ERESOLVE` 阻塞未能复现；未解已证伪。 |
 | OpenCode Zen / Big Pickle 免费端点 | `done` | 已从产品、IPC 和代码删除；上游 chat completion 返回 403，提示免费端点仅供 OpenCode 内部使用。不得重新加入。 |
 | Windows/macOS OTA 发布链 | `planned` | Ming OS 侧复用 `ming-update` bridge；桌面端签名更新清单和保留旧版本的发布验收未完成。 |
@@ -62,7 +76,7 @@
 
 ## 进行中
 
-- 把隔离目录已验证成功的 DSH `0.1.7-rc.1` + 社区 UI 安装固化进 `scripts/install_ming_tea_plugins.sh` 与工作树 `.ming-tea/runtime`（当前 runtime 仍是 `0.1.6-alpha.2`）。
+- ~~把隔离目录已验证成功的 DSH + 社区 UI 安装固化进 `scripts/install_ming_tea_plugins.sh` 与工作树 `.ming-tea/runtime`~~ **已完成（2026-10-01）**：脚本锁驱动、runtime 升到 `0.2.0-rc.2`，并新增「安装前清 `node_modules`」（否则旧包会锁死新包 peer，npm 直接 ERESOLVE）与「安装前授予精确版本豁免」两步。
 - 对照当前 Tauri 壳与社区插件实际挂载方式，准确界定 UI 哪些能力来自社区包、哪些为铭荼壳自有；不要将“参考/计划挂载”表述为“已直接复用源码”。
 - 校准 Ming OS GTK/Python 入口与跨平台 TypeScript Agent 的运行和发行边界。
 - 等待图像服务提供与 GPT Image 模型兼容的生成/编辑路径，再生成 4K 四格人物参考图。
@@ -106,9 +120,9 @@
 
 | 组件 | 固定版本/来源 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| DeepSeek Harness runtime | `@deepseek-ai/dsh@0.1.7-rc.1`，MIT | `done` | 2026-09-26 隔离目录实测：安装退出码 0、`dsh --version` 返回 `0.1.7-rc.1`、web profile 可启动。工作树 `.ming-tea/runtime` 仍是 `0.1.6-alpha.2`，需按新脚本重装。 |
-| DSH Bash、FS、Web、Browser Use、Computer Use、Playwright MCP experimental、Office skill | `assets/ming-tea-dsh-lock.json` 中均锁为 `0.1.7-rc.1`，MIT | `in-progress` | 8 个工具包已随 runtime 一起安装成功（隔离目录，退出码 0）；各插件的权限边界与系统依赖尚未逐项审计。 |
-| dsh-codex-ui | `@michengai/dsh-codex-ui@1.1.18`，Apache-2.0，revision `84946e2abec910b60e1f5f8aa69e45ab34df2a04` | `done` | npm integrity 在 `assets/ming-tea-dsh-lock.json`。2026-09-26 隔离实测与工作树 profile `ming-tea` 双重验证：bundles 自动登记、`--dump-config` 组合通过、web 页面注册并加载其 `client.js`。先前 `ERESOLVE` 阻塞未复现。 |
+| DeepSeek Harness runtime | `@deepseek-ai/dsh@0.2.0-rc.2`，MIT | `done` | **2026-10-01 工作树实测**：安装退出码 0、`dsh --version` 返回 `0.2.0-rc.2`、干净环境 web profile 可启动、`--dump-config` 组合通过。锁文件 `assets/ming-tea-dsh-lock.json` 的 `runtime.version` 与磁盘一致。 |
+| DSH Bash、FS、Web、Browser Use、Computer Use、Playwright MCP experimental、Office skill、str-replace-editor | `assets/ming-tea-dsh-lock.json` 中均锁为 `0.2.0-rc.2`，MIT | `done` | 9 个工具包随 runtime 一起安装成功（退出码 0），版本与 lock 逐项比对一致；开发场景挂载的 `str-replace-editor` 在组合树内。各插件的权限边界与系统依赖见 `docs/ming-tea-plugin-audit.md`。 |
+| dsh-codex-ui | `@michengai/dsh-codex-ui@1.1.25`，Apache-2.0 | `done` | npm integrity 在 `assets/ming-tea-dsh-lock.json`。**2026-10-01 在 0.2.0-rc.2 上实测**：`--dump-config` 无跳过、设置左导航 15 项全部渲染、首页/页脚/场景卡命中点存活、`dcu-*` 类名集合与 1.1.18 逐字节一致（273 个 token 无差异）。 |
 | dsh-pet（桌宠） | `@linxin666/dsh-pet@0.4.3`，Apache-2.0 | `done` | peer 精确要求 `@deepseek-ai/dsh >=0.1.7-rc.1`，依赖仅 `clsx` 与 `schemastery`。2026-09-26 验证已挂载并实际渲染（页面出现 3 个 `data-plugin="@linxin666/dsh-pet"` 元素）。随包默认宠物素材许可另计，铭荼自有素材待制作。 |
 | ming-tea-ui（铭荼界面层） | `@ming-tea/dsh-ui@0.1.0`，MIT，源码 `platform/ming-tea/plugins/ming-tea-ui` | `done` | 铭荼**自有**插件，非社区包：按 DSH 官方契约实现 cordis bundle + web client 插件，以 `link:` 装入。2026-09-26 量化验证圆角生效（详见“最近验证证据”）。不 fork 社区源码、不改写 DOM。 |
 | dsh-agent-identity | commit `cbab483bbaa7c8ee44c1bdc958b491afaee6abdd`，MIT | `done` | 本地 `IdentityMemoryAdapter` 安全子集，不表示上游原插件运行时已安装。 |
@@ -225,7 +239,7 @@
 - `cd platform/ming-tea && pnpm --filter @ming-tea/desktop build`：通过（vite 产物正常生成）。
 - Ming OS unittest：`tests.test_ming_tea_core`、`tests.test_ming_tea_integration`、`tests.test_xiahai_integration`、`tests.test_papyrus_integration`，30 tests OK。
 - Tauri macOS `.app` build：沿用 Codex 早前成功记录；本轮未重跑，DMG 路径仍未验证为稳定流程。
-- 社区 UI profile 安装：**已在隔离目录与工作树 profile `ming-tea` 双重实测通过**（见“已解阻塞”一节）。工作树 `.ming-tea/runtime` 已重装为 `0.1.7-rc.1`。
+- 社区 UI profile 安装：**已在隔离目录与工作树 profile `ming-tea` 双重实测通过**（见“已解阻塞”一节）。工作树 `.ming-tea/runtime` 现已升到 `0.2.0-rc.2`（2026-10-01）。
 - 图像生成：模型列表探测成功；批量生图返回 404，参考图编辑返回 502；未生成成品。
 
 2026-09-26 ZCode 建成 web 前端并验证：
@@ -512,10 +526,11 @@ curl -s https://sca-hub.cn/api/dev-api/software-auto/v1/chat/completions \
   `tool-ralph (@deepseek-ai/dsh-tool-ralph): waiting for workflowEngine`。因为 ralph 是明确要的，
   所以 `workflow-ptc`/`tool-workflow` 一并开启 —— 这是**与官方 ptc 的有意分歧**，代价是多一个 workflow 工具。
   另外上游自己注明：ralph 的完成与否是**工人自报**、不是独立评估。
-- **委派后端依赖本机 CLI**：实测本机 `codex` ✅ 已安装（`~/.local/bin/codex`）、
-  `claude` ❌ 未安装。所以只打开 `subagent_codex`（本机可用）；`subagent_claude_code` **保持关闭**，
-  本机因此不会出现「模型挑到一个必然失败的工具」的情况。
-  （2026-09-30 更正：本节早先写成「已启用但环境不具备」，与最终配置不符 —— 该行是**刻意不打开**的。）
+- **委派后端：本机 CLI 装了，但 DSH 侧没有对应 provider**（2026-10-01 更正）。本机 `codex` ✅ 已安装（`~/.local/bin/codex`）、`claude` ❌ 未安装；
+  但 0.2 的 runtime 里**只注册了 `spawn` 与 `fork` 两个 subagent provider**（`dsh-subagent-spawn-in-process` 的 `providerName` 默认 `spawn`、`-fork-in-process` 默认 `fork`），
+  **没有任何包注册名为 `codex` 的 provider**。`dsh-tool-subagent` 在 provider 未注册时只打一行 info、不注册工具（`lib/index.js:573-577`），
+  所以开发场景里 `disabled: false` 的 `tool-subagent-codex` 行**不会产生 `subagent_codex` 工具**（0.1.7 与 0.2 同样如此）。
+  `subagent_claude_code` 保持关闭。→ 上一轮文档写的「实测可用」是错的，已按事实更正；要不要另找一个注册 `codex` provider 的包属新产品决策。
 
 **判定陷阱（这轮踩到，已写成可复用校验脚本）**：`--dump-config` 里 preset 内子行的
 `disabled` 判定必须**按缩进**做：`- id:` 的横线缩进是 N，同行键的缩进是 N+2，
@@ -648,3 +663,7 @@ GUI 协议把 Web 客户端与后端版本绑在一起，独立定版本会产�
 | 2026-09-30 | DSH 侧把这批未提交改动**整理提交**（用户确认的策略：新建本地分支、**不推送**、本机 agent 产物不入库）：基线 `f46f634`（原 detached HEAD，提交会不可达）→ 新分支 `feat/ming-tea-desktop-agent`，4 个提交 `f08ad4d`（.gitignore）→ `13e4023`（界面层插件 + 三场景预设 + 用量看板）→ `1f8a5b1`（协作文档 + 两份调研 + 门禁脚本）→ `f90fedc`（跨平台 Agent + Tauri 壳 + 锁文件 + 安装脚本）。`.playwright-mcp/`（41 个快照 / 656K）与 `platform/ming-tea/.codex/` 已进 `.gitignore`。提交后工作树干净。**未推送**：`feat/ming-tea-desktop-agent` 只存在于本工作树。 |
 | 2026-09-30 | DSH 侧对用量看板做**浏览器实测**（用户同意起临时实例）：`DSH_HOME=<repo>/.ming-tea/runtime/dsh-home .ming-tea/runtime/node_modules/.bin/dsh --profile ming-tea --port 19390 --no-open`（**注意**：`--profile` 模式下不能再写 `web`，否则报 `too many arguments`；实测后已关闭该实例）。Playwright 结果：①应用标题为「铭荼」、首页三场景正常；②设置左导航出现**「用量看板」**（位于「检查更新」下方，`settings.section` 注册生效）；③点击后页面在设置内容区渲染，**无控制台错误**；④站点 `/usage` 此刻 **HTTP 500**，页面如实显示「读取用量失败：站点暂时不可用（HTTP 500）…（hub/site-error）」——**计量条为空、没有编造数字**。**仍未覆盖**：正常数据态（三条计量条/占比条/档位/到期）的真数据渲染，受站点 500 阻塞；该形态由 `buildUsageBoard` 的 7 条离线断言覆盖。截图存于本机 `/tmp/mt-1-home.png`、`mt-2-settings.png`、`mt-3-usage.png`（未入库）。 |
 | 2026-09-30 | DSH 侧补齐用量看板的**正常数据态**浏览器验证（用户同意起临时实例）：站点 `/usage` 当时仍 **HTTP 500**，因此**用本地假站点**（`127.0.0.1:19391` 重放付费档实测形态 payload）临时顶替，并**临时**把 `createHubService()` 的 hub 指向它（`createHubClient({origin, apiBaseUrl})` 本就允许注入）——**该临时改动已 `git checkout` 还原，工作树与提交一致**。Playwright 实测结果：Auto 赠送次数「剩余 199 / 200 次」进度条 100%、付费层余额「剩余 108.5 / 120 ¥」进度条 90%、事实区「Plus / 2026-10-06（6 天）/ 并发 5」、档位列表列出 Plus 与 Pro；**侧栏页脚圆环同步显示 90**，证实「`usage.board` 一次请求同时喂看板与圆环」的设计生效；控制台无错误。**证据边界（如实）**：「真站点返回正常数据」这一条**仍未实测**（站点 500 未修复），正常态的界面渲染是用 stub 验证的。**未把 hub 地址做成常驻环境变量开关**是有意为之：那等于让任何能设环境变量的人把站点凭证引到别的服务器。 |
+| 2026-10-01 | **DSH runtime 0.1.7-rc.1 → 0.2.0-rc.2 升级**（用户要求「和官方版本对齐，然后更新对应插件」；0.2.0-rc.2 就是 npm `latest`，也是本机 GUI 的版本）。改动：①`assets/ming-tea-dsh-lock.json` 的 runtime 与 9 个官方工具包升到 0.2.0-rc.2、10 个 `@michengai/*` 升到**声明兼容 0.2.0-rc.2 的最新版**、新增 `versionExemptions`（见「版本豁免」）；②`scripts/install_ming_tea_plugins.sh` 两处修复——**先清 `node_modules` 再装**（否则 0.1.7 残留包与新包互锁 peer，npm 直接 `ERESOLVE`，实测踩到）与**在 `dsh plugin add` 之前授予版本豁免**（preflight 跑在 pnpm 之前，晚一步会因 `set -e` 半途中止）；③`app-shell.test.ts` 里硬编码的 codex-ui `1.1.18` → `1.1.25`；④自有插件 `dsh.engines.dsh` 提到 `>=0.2.0-rc.2`。**验证**（干净环境）：`dsh --version` = 0.2.0-rc.2；`dsh plugin version-exemptions` 只有 shop 一条；profile 里 13 个插件版本与 lock 逐项一致；`--dump-config` 1600 行、**无 `skipping profile bundle`/`is incompatible`**；用官方同一套 `semver` 复算：11 个插件 peer 全满足、只有 shop 需要豁免；vitest 37 项、`check_ming_tea_hub.mjs` 45 项、Python 8 项、插件与 preset 生成幂等全部通过。 |
+| 2026-10-01 | **契约复核结论（两份只读调研 + 本人交叉验证）**：我们真正依赖的官方契约在 0.2 里**几乎全部稳定**——四个官方 preset 文件（`standard`/`ptc`/`minimal`/`cordis`）与 0.1.7 **逐字节相同**（unpkg 与真实安装两处各验一次，md5 一致），因此 preset 派生产物不变；`settings.section` 契约**纯新增**（只多 `settingsOpen`/`settingsShortcut`）；`theme.overrideTokens`、`connection.rpc` 的 `{ok,value}` 信封、`settings.mutate` 路径寻址、`credentials` 六方法、`agent-preset-registry` 的 `default: z.string().required()` 全部未变；`@deepseek-ai/cordis` 仍 `~4.0.4`；`tool-ralph` 仍硬依赖 `workflowEngine`（所以开发场景继续同时开 `workflow-ptc`）；0.2 新增的 `product-analytics`/`desktop-product-telemetry` 两行都带 `disabled: ctx.get('profileContext')?.name !== 'desktop'` ⇒ **ming-tea profile 自动不采集**。**同时纠正两条来自子代理的过期结论**：①「所有社区插件都会被兼容闸门禁用」不成立——那是按**旧版本** peer 推的；按本轮的**新版本** peer 复算是 11/12 通过，只有 shop 需要豁免（已实证：dump 无跳过）。②「官方 `定时任务` 改成 `自动化任务`」不准确——`定时任务` 在 `dsh-client-ui-conversation` 里仍在，`自动化任务` 属于我们**没有挂**的 schedule bundle，所以这条规则未改。 |
+| 2026-10-01 | **定制层按 0.2 官方文案改写修 4 条 + 补 1 个监听**（都是静默失效型）：官方把 `内测声明` 改成 `预览版说明`、`设置 Subagent 的递归层级、数量和模型。` 改成「子智能体」措辞、删除 `开始你的创作`、并把账号页引导句换成带 DeepSeek 品牌的新句。对应改用例：前两条更新源串（第二条目标仍用更口语的「子任务」，**浏览器实测命中**）、`开始你的创作` 规则删除（官方新文案本身就是我们要的「开始使用」）、账号页那句**新增去品牌化规则**。另修一个更根本的问题：`MutationObserver` 只监听 `childList`，而 React 对「深度求索中，用时 N 秒」这类**插值句**只改文本节点的值（`characterData`），导致同一串在状态标签上换掉了、在消息元信息里还是原文——补上 `characterData: true` 后**在真实对话里实测生效**（页面显示「深度思考中，用时 29秒」）。 |
+| 2026-10-01 | **一条对自己旧文档的更正 + 一条新发现的坑**：①旧文档（本文件与插件 README）写「`subagent_codex` 本机已装 codex CLI、实测可用」，**这与实现不符**：官方 runtime 只注册了 `spawn`/`fork` 两个 subagent provider（`dsh-subagent-spawn-in-process` 的 `providerName` 默认 `spawn`、`-fork-in-process` 默认 `fork`），**没有任何包注册名为 `codex` 的 provider**；而 `dsh-tool-subagent` 在 provider 未注册时只打一行 info、不注册工具（`lib/index.js:573-577`）。所以开发场景里 `disabled: false` 的 `tool-subagent-codex` 行**不会产生工具**（0.1.7 与 0.2 同）。已按事实改文档，不改 preset（是否要另找注册 codex provider 的包，属新产品决策）。②**模型选择的坑**：官方 DeepSeek provider 的模型展示名（`DeepSeek-V41-Flash`）与站点模型 id（`deepseek-v4.1-flash`）高度相似，若持久化的「当前选择」落在官方 provider 上，新会话会走 `deepseek-official` 并因缺 `DEEPSEEK_API_KEY` 报 `MISSING_CREDENTIAL`（实测遇到，根因是环境变量污染把桌面 profile 的默认模型写进了持久选择）。运行时的 `agent-default-model` 仍是 `ming-tea-hub`（`debug.state` 实测）；在模型选择器里选回**铭荼（站点）→ deepseek-v4.1-flash** 后会话即走 `ming-tea-hub`（已实测）。 |

@@ -20,14 +20,14 @@
 - `everos-memory`：Apache-2.0，固定审计提交 `f76f4d06135a0b5d784d15eed133ecdcedc12d47`；已提供默认关闭的 `EverosMemoryAdapter`，只允许显式本机 loopback 连接器。
 - `cleverer-dsh`：MIT，固定提交 `40bd216ea9c7a95da887aa97fb661a0e8c7b1dd2`；已由 `ClevererDshAdapter` 接入尝试次数上限、失败记录和成功重置，不执行第三方脚本。
 - `honcho-memory`：AGPL-3.0，只允许外部连接器，不直接随 Ming OS 发行。
-- `dsh-data-agent`：MIT；DSH runtime 已锁定 `0.1.7-rc.1`，但该插件尚未完成 peer/runtime 集成验收，数据库只读与 SQL 执行审批也未实现。
-- `@michengai/dsh-codex-ui@1.1.18`：Apache-2.0，SHA512 已锁定；作为 DSH web profile 的客户端基线，提供侧栏、工作区会话树、搜索、会话导航和 composer。2026-09-26 完成真实安装验证：profile `ming-tea` 的 bundles 自动登记、`--dump-config` 组合通过、页面注册并加载 `client.js`。先前记录的 `ERESOLVE` peer 冲突未复现。
-- `@linxin666/dsh-pet@0.4.3`：Apache-2.0，peer 精确要求 `@deepseek-ai/dsh >=0.1.7-rc.1`，依赖仅 `clsx` 与 `schemastery`（无 Electron/原生依赖，适配 `--ignore-scripts`）。2026-09-26 验证挂载并实际渲染。随包默认宠物图集的许可见其仓库 `THIRD_PARTY_NOTICES`，不在 Apache-2.0 范围内；铭荼自有宠物素材单独授权。
+- `dsh-data-agent`：MIT；DSH runtime 已锁定 `0.2.0-rc.2`（2026-10-01 升级），但该插件尚未完成 peer/runtime 集成验收，数据库只读与 SQL 执行审批也未实现。
+- `@michengai/dsh-codex-ui@1.1.25`：Apache-2.0，SHA512 已锁定（2026-10-01 升到声明兼容 `0.2.0-rc.2` 的版本）；作为 DSH web profile 的客户端基线，提供侧栏、工作区会话树、搜索、会话导航和 composer。2026-09-26 完成真实安装验证：profile `ming-tea` 的 bundles 自动登记、`--dump-config` 组合通过、页面注册并加载 `client.js`。先前记录的 `ERESOLVE` peer 冲突未复现。
+- `@linxin666/dsh-pet@0.4.3`：Apache-2.0，peer 精确要求 `@deepseek-ai/dsh >=0.1.7-rc.1`（历史条目：该宠物已被 `@michengai/dsh-codex-pet` 取代），依赖仅 `clsx` 与 `schemastery`（无 Electron/原生依赖，适配 `--ignore-scripts`）。2026-09-26 验证挂载并实际渲染。随包默认宠物图集的许可见其仓库 `THIRD_PARTY_NOTICES`，不在 Apache-2.0 范围内；铭荼自有宠物素材单独授权。
 - `@ming-tea/dsh-ui@0.1.0`：铭荼**自有**界面定制层（MIT，源码随本仓库置于 `platform/ming-tea/plugins/ming-tea-ui`，以 `link:` 装入开发 profile）。按 DSH 官方契约实现 cordis bundle + web client 插件，只在社区前端之上注入圆润几何、薄荷品牌与柔光阴影；**不 fork 社区源码、不改写 DOM 结构、不触碰权限与审批**。
 
 ### MichengAI 插件族（2026-09-27 安装并验收）
 
-同一作者（`MichengAI`，`dsh-codex-ui` 的来源）的插件族，全部 Apache-2.0、声明兼容 `0.1.7-rc.1`、无原生依赖、`hasInstallScript` 全为 false。已入库：`dsh-codex-pet@0.1.10`（替换原 linxin 宠物）、`dsh-archive-manager@1.0.5`、`dsh-skills-manager@1.1.4`、`dsh-agency-agents@1.0.5`、`dsh-im-connect@0.1.55`、`dsh-btw@0.1.13`、`dsh-simplify@0.1.10`、`dsh-code-review@0.1.7`、`dsh-automation@0.1.51`（定时任务，2026-09-27 补装）。
+同一作者（`MichengAI`，`dsh-codex-ui` 的来源）的插件族，全部 Apache-2.0；**2026-10-01 全部升到声明兼容 `0.2.0-rc.2` 的最新版**（此前声明的 `0.1.7-rc.1` 已过时）、无原生依赖、`hasInstallScript` 全为 false。已入库：`dsh-codex-pet@0.1.10`（替换原 linxin 宠物）、`dsh-archive-manager@1.0.5`、`dsh-skills-manager@1.1.4`、`dsh-agency-agents@1.0.5`、`dsh-im-connect@0.1.55`、`dsh-btw@0.1.13`、`dsh-simplify@0.1.10`、`dsh-code-review@0.1.7`、`dsh-automation@0.1.51`（定时任务，2026-09-27 补装）。
 
 安装方式：逐包装入 profile `ming-tea`，`--ignore-scripts --save-exact`，装后 `--dump-config` 校验并重启验收。**未使用** `@michengai/dsh-codex-suite-installer`（官方已标注不建议新安装，且会重写 profile 的 `dsh.profile.bundles` 与 `pnpm-workspace.yaml`）与聚合包 `@michengai/dsh-codex-suite`（依赖锁死在远古版本）。
 
@@ -100,6 +100,18 @@
 `dsh-store`/`dsh-plugins-store` 的抓取式目录与硬编码第三方后端、`dshmarket` 的备份与重启宿主能力。
 
 ## 落地记录：`dsh-plugin-shop@0.8.3`（2026-09-27 实测）
+
+> **2026-10-01 升级到 DSH `0.2.0-rc.2` 后的状态（必读）**：商店**没有任何声明支持 0.2 的版本**
+> （`0.8.3` 与 `0.8.4-beta.0` 的 peer 都停在 `^0.1.1-rc.2`），而 0.2 会在 `dsh plugin add` 的
+> **preflight**（跑在 pnpm 之前）与**加载时**都检查 `@deepseek-ai/dsh*` peer。因此它现在跑在
+> **精确版本豁免**上（`dsh plugin --profile ming-tea allow-version dsh-plugin-shop@0.8.3
+> --dsh-version 0.2.0-rc.2 --accept-risk`，记录写在 profile 的 `compatibility.json`，
+> 由 `scripts/install_ming_tea_plugins.sh` 按锁文件的 `versionExemptions` 自动授予）。
+> 依据：经审计它实际 import 的 API —— `dsh-app-boot` 的 `loadOptionalPatches`/`readProfileManifest`/`resolveProfileDir`
+> 与 `dsh-typert-protocol` 的 `Remote`/`TypertRemoteService` —— 在 0.2 全部存在
+> （`dsh-app-boot` 导出面**只增不减**，另两个包导出**逐字节相同**）。
+> **实测程度**：0.2 下商店页面正常渲染（目录列出 12551 条、分类、我们的「隐藏不兼容」默认开启、无控制台错误）；
+> **「从商店真的安装一个第三方插件」这一步没有实测**。上游发布支持 0.2 的版本后应撤销豁免。
 
 **已装入并在浏览器里跑通**：设置 → 随应用自带 → 插件商店，列出 12225 个插件（目录构建于
 2026-09-26；指针声明 12283，去重后 12225），分类筛选（工具 5859 / 界面 3094 / 集成 1061 /

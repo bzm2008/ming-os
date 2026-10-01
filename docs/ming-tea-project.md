@@ -13,7 +13,7 @@
 - macOS：Tauri `.app` 曾在本地成功构建；当前开发包启动 Agent bundle 时仍依赖系统 Node。签名、公证和独立分发 sidecar 尚未完成。
 - Windows：纳入目标平台；Named Pipe 协议有实现，完整打包与桌面端实机验收尚未完成。
 - Ming OS：已有 GTK 桌面入口与 Python IPC/构建集成；跨平台 Agent 与现有 Ming OS 入口的发行集成仍需逐步验证。
-- DSH：运行时和工具包锁定为 `0.1.7-rc.1`；安装流程存在，但需要通过实际安装、profile 内容和启动检查才能称为安装完成。
+- DSH：运行时和工具包锁定为 `0.2.0-rc.2`（2026-10-01 从 `0.1.7-rc.1` 升级，= npm `latest`）；安装流程为锁驱动，已按实际安装、profile 内容与启动检查验收。
 
 ## 产品场景
 
@@ -63,7 +63,7 @@ GTK4/libadwaita 入口（Ming OS） ├─ JSON-lines IPC ─ Agent service ─ 
 
 ### DSH runtime 与工具包
 
-`assets/ming-tea-dsh-lock.json` 固定 `@deepseek-ai/dsh@0.1.7-rc.1` 以及对应版本的 Bash、FS、Web、Browser Use、Computer Use、Playwright MCP 实验适配器和 Office skill。锁文件提供审计依据；安装是否成功以本地 runtime 的包清单、profile 配置和实际启动结果为证。
+`assets/ming-tea-dsh-lock.json` 固定 `@deepseek-ai/dsh@0.2.0-rc.2` 以及对应版本的 Bash、FS、Web、Browser Use、Computer Use、Playwright MCP 实验适配器、Office skill 与 str-replace-editor；另有 13 个社区/自有插件条目与一个 `versionExemptions` 段（当前只有 `dsh-plugin-shop@0.8.3`，因为上游还没有声明支持 0.2 的版本）。锁文件提供审计依据；安装是否成功以本地 runtime 的包清单、profile 配置和实际启动结果为证。安装脚本会在 `dsh plugin add` **之前**自动授予豁免，并在安装前清空 runtime 的 `node_modules`（否则旧版本残留包会锁死新包 peer）。
 
 ### 其他社区适配
 
