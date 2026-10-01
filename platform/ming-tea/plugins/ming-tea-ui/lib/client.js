@@ -49,7 +49,8 @@ window.__ModuleLoader__.load({
 		    ["赠金余额", "赠送额度"],
 		    ["查询用量", "用量"],
 		    // 设置页：把开发者措辞改平实
-		    ["内测声明", "使用说明"],
+		    // 0.2.0-rc.2 把官方原文从「内测声明」改成了「预览版说明」——旧串在 0.2 里已 0 命中，必须跟新串。
+		    ["预览版说明", "使用说明"],
 		    ["Agent 预设", "助手模式"],
 		    ["Agent 循环", "运行方式"],
 		    ["网页搜索", "联网搜索"],
@@ -60,7 +61,9 @@ window.__ModuleLoader__.load({
 		    ["随应用自带", "已安装插件"],
 		    ["第三方模型提供商", "常见模型服务"],
 		    ["自定义模型 API", "自定义接口"],
-		    ["设置 Subagent 的递归层级、数量和模型。", "设置子任务的层数、数量与所用模型。"],
+		    // 0.2.0-rc.2 上游把「Subagent」统一改称「子智能体」（settings-subagent 里 10 处），源串跟着改；
+		    // 目标仍用更口语的「子任务」。
+		    ["设置子智能体的递归层级、数量和模型。", "设置子任务的层数、数量与所用模型。"],
 		    // 「深度求索中」直译自 DeepSeek 品牌名，读着像"在搜东西"；用户要求改成「深度思考中」
 		    ["深度求索中", "深度思考中"],
 		    // 社区插件里的 DSH 残留
@@ -88,10 +91,13 @@ window.__ModuleLoader__.load({
 		    ["返回 DeepSeek Harness", "返回铭荼"],
 		    ["当前未登录 DeepSeek Harness 账号", "当前未登录铭荼账号"],
 		    ["登录 DeepSeek Harness 账号获取专属 API Key", "登录铭荼账号以获取专属 API Key"],
-		    ["开始你的创作", "开始使用"],
+		    // 「开始你的创作」在 0.2.0-rc.2 已被上游删除，官方新文案本身就是我们想要的「开始使用」，
+		    // 所以这条规则删掉即可（旧规则留着也只是永不命中的死规则）。
 		    [
-		      "登录后即可创建、编辑和分享你的设计项目，所有内容在本地保存。",
-		      "登录可使用云端模型与额度；会话内容仍保存在本机。",
+		      // 0.2.0-rc.2 把旧句「登录后即可创建、编辑和分享你的设计项目…」换成了带 DeepSeek 品牌的新句，
+		      // 旧规则因此失效且新句仍需去品牌化 —— 这是本轮唯一「必须补」的文案规则。
+		      "登录 DeepSeek 账号，或添加 API Key，即可开始使用。你的项目和文件保存在本地。",
+		      "登录铭荼账号，或添加 API Key 即可开始使用；会话与文件保存在本机。",
 		    ],
 		    // 设置页里的品牌引用
 		    ["设置 DeepSeek 的搜索提供方。", "设置网页搜索的提供方。"],
@@ -2026,7 +2032,11 @@ window.__ModuleLoader__.load({
 		    clearTimeout(timer);
 		    timer = setTimeout(applyMingTeaTweaks, 180);
 		  });
-		  observer.observe(document.body, { childList: true, subtree: true });
+		  // characterData 必须一起监听（2026-10-01 在 0.2.0-rc.2 上实测踩到）：
+		  // 像「深度求索中，用时 N 秒」这种**插值句**，React 只改已有文本节点的值、不加删节点，
+		  // 只监听 childList 时我们的替换规则拿不到这次变更 —— 表现为同一串在状态标签上换掉了、
+		  // 在消息元信息里却还是原文。规则本身是幂等的（换过就不再匹配），所以多跑一遍不会抖动。
+		  observer.observe(document.body, { childList: true, characterData: true, subtree: true });
 		  if (document.readyState === "loading") {
 		    document.addEventListener("DOMContentLoaded", applyMingTeaTweaks, { once: true });
 		  }
