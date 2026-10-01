@@ -4078,6 +4078,10 @@ class WallpaperCanvas(Gtk.DrawingArea):
 class PhoneDesktop(Gtk.Window):
     def __init__(self):
         super().__init__(title="Ming 桌面")
+        # The GTK3/X11 taskbar owns system status controls in the new shell.
+        # Keep the StatusWidget implementation available for older profiles,
+        # but do not create a second floating status surface in taskbar mode.
+        self.taskbar_mode = os.environ.get("MING_TASKBAR_MODE", "0") == "1"
         try:
             READY_MARKER.unlink()
         except FileNotFoundError:
@@ -4189,6 +4193,8 @@ class PhoneDesktop(Gtk.Window):
         command before signalling it.  A stale marker is harmless and is
         replaced by the next desktop instance.
         """
+        if self.taskbar_mode:
+            return
         pid_file = status_widget_pid_file()
         try:
             pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -4262,6 +4268,8 @@ class PhoneDesktop(Gtk.Window):
         return False
 
     def toggle_status_widget(self):
+        if self.taskbar_mode:
+            return False
         now = time.monotonic()
         # Xfce may deliver the same Super press through both the shortcut
         # command and the desktop key handler.  A single debounce window keeps
@@ -4278,6 +4286,8 @@ class PhoneDesktop(Gtk.Window):
         GLib.idle_add(self.toggle_status_widget)
 
     def on_key_press(self, _window, event):
+        if self.taskbar_mode:
+            return False
         if is_status_widget_toggle_key(getattr(event, "keyval", 0)):
             self.toggle_status_widget()
             return True
@@ -4751,6 +4761,8 @@ class PhoneDesktop(Gtk.Window):
         # the persisted widget state after rendering so compact mode never
         # leaves both the compact row and expanded controls visible.
         self.status.apply_collapsed_state()
+        if self.taskbar_mode:
+            self.status.hide()
         if not self.launch_feedback.item:
             self.launch_feedback.hide()
         self.enforce_desktop_layer()
@@ -4762,23 +4774,26 @@ class PhoneDesktop(Gtk.Window):
         })
         widget_w = widget_geometry["width"]
         widget_h = widget_geometry["height"]
-        self.status.set_size_request(widget_w, self.status.preferred_height())
-        # Keep the compact height explicit even if a future theme changes the
-        # preferred height implementation.
-        self.status.set_size_request(widget_w, widget_h)
-        # Pin the visible capsule itself as well as its outer allocation.  The
-        # expanded popup is a separate window and must never resize this pill.
-        self.status.widget_box.set_size_request(widget_w, widget_h)
-        self.status.compact_button.set_size_request(widget_w, widget_h)
-        x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
-        y = CLOCK_MARGIN_Y
-        if self.status.get_parent() is None:
-            self.fixed.put(self.status, x, y)
+        if self.taskbar_mode:
+            self.status.hide()
         else:
-            self.fixed.move(self.status, x, y)
-        if not self.status.collapsed:
-            self.status.position_expanded_window()
-        GLib.idle_add(self.status.verify_top_alignment)
+            self.status.set_size_request(widget_w, self.status.preferred_height())
+            # Keep the compact height explicit even if a future theme changes
+            # the preferred height implementation.
+            self.status.set_size_request(widget_w, widget_h)
+            # Pin the visible capsule itself as well as its outer allocation.
+            # The expanded popup is a separate window and must never resize it.
+            self.status.widget_box.set_size_request(widget_w, widget_h)
+            self.status.compact_button.set_size_request(widget_w, widget_h)
+            x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
+            y = CLOCK_MARGIN_Y
+            if self.status.get_parent() is None:
+                self.fixed.put(self.status, x, y)
+            else:
+                self.fixed.move(self.status, x, y)
+            if not self.status.collapsed:
+                self.status.position_expanded_window()
+            GLib.idle_add(self.status.verify_top_alignment)
         feedback_w = 340 if screen_w >= 900 else 250
         self.launch_feedback.set_size_request(feedback_w, 84)
         feedback_x = max(20, int((screen_w - feedback_w) / 2))

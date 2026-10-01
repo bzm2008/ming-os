@@ -1304,10 +1304,21 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/ming-install-mode-chooser", launcher)
         self.assertIn("使用整块磁盘（自动配置系统与恢复布局）", chooser)
         self.assertIn("保留双系统（禁用 major A/B OTA）", chooser)
+        self.assertIn("传统 BIOS / MBR（自动配置 A/B 布局）", chooser)
+        self.assertIn("legacy_mbr", chooser)
         self.assertIn("self.blank_button.grab_focus()", chooser)
         self.assertNotIn("exec pkexec calamares -d", launcher)
         self.assertNotIn("sudo -n /usr/local/sbin/ming-calamares-preflight", launcher)
         self.assertNotIn("--radiolist", launcher)
+
+    def test_legacy_mbr_mode_is_rejected_when_live_media_booted_as_uefi(self):
+        launcher = self.desktop[
+            self.desktop.index("cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'"):
+            self.desktop.index("\nLIVEINSTALLERROOT", self.desktop.index("cat > /usr/local/sbin/ming-live-installer-root"))
+        ]
+        self.assertIn("legacy_mbr", launcher)
+        self.assertIn("/sys/firmware/efi", launcher)
+        self.assertIn("传统 BIOS / MBR", launcher)
 
     def test_installer_session_does_not_run_a_second_preflight(self):
         session = self.desktop[

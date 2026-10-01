@@ -75,6 +75,8 @@ For most users, download the ISO from the official website and write it with Ruf
 
 The one-click blank-disk A/B installation requires at least a 32 GiB disk. It creates two root slots, a shared `/boot`, and a separate `/home`; disks larger than 32 GiB provide more room for applications and user data.
 
+The installer also offers a traditional BIOS/MBR A/B mode for older machines. Boot the ISO in Legacy/CSM mode to use it; the target disk is created with an `msdos` partition table, shared `/boot`, two root slots, and `/home`, and it keeps the same major OTA and rollback contract as GPT installs.
+
 Supported test paths:
 
 - Rufus ISO mode

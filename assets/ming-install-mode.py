@@ -21,6 +21,13 @@ MODES = {
             "大版本 A/B OTA 已禁用。"
         ),
     },
+    "legacy_mbr": {
+        "major_ota": "ab_slot",
+        "message": (
+            "传统 BIOS / MBR 安装：请以 Legacy/CSM 模式启动安装介质，"
+            "安装器会清除所选磁盘并自动创建 msdos A/B 布局；支持大版本 OTA 和自动回滚。"
+        ),
+    },
 }
 LEGACY_MESSAGES = {
     "blank_ab": "空白盘自动安装会创建完整 A/B 系统槽，支持 major OTA 和自动回滚。",
@@ -130,6 +137,44 @@ allowManualPartitioning: true
 """
 
 
+LEGACY_MBR_PARTITION = """---
+userSwapChoices:
+  - none
+drawNestedPartitions: false
+alwaysShowPartitionLabels: true
+defaultPartitionTableType: msdos
+requiredPartitionTableType: msdos
+defaultFileSystemType: "ext4"
+availableFileSystemTypes:
+  - "ext4"
+initialPartitioningChoice: none
+initialSwapChoice: none
+partitionLayout:
+  - name: "MING-BOOT"
+    filesystem: "ext4"
+    noEncrypt: true
+    mountPoint: "/boot"
+    size: 1G
+  - name: "MING-ROOT-A"
+    filesystem: "ext4"
+    mountPoint: "/"
+    size: 40%
+    minSize: 10G
+  - name: "MING-ROOT-B"
+    filesystem: "ext4"
+    noEncrypt: true
+    size: 40%
+    minSize: 10G
+  - name: "MING-HOME"
+    filesystem: "ext4"
+    mountPoint: "/home"
+    size: 100%
+    minSize: 6G
+requiredStorage: 32
+allowManualPartitioning: false
+"""
+
+
 def build_mode_payload(mode):
     if mode not in MODES:
         raise ValueError("unsupported Ming install mode")
@@ -161,8 +206,10 @@ def detect_firmware(sys_firmware_efi="/sys/firmware/efi"):
 
 def partition_config(mode, firmware=None):
     build_mode_payload(mode)
-    if mode != "blank_ab":
+    if mode == "dual_boot_preserve":
         return DUAL_BOOT_PARTITION
+    if mode == "legacy_mbr":
+        return LEGACY_MBR_PARTITION
     selected_firmware = firmware or detect_firmware()
     if selected_firmware not in {"bios", "uefi"}:
         raise ValueError("unsupported firmware mode")

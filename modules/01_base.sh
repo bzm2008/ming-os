@@ -1279,6 +1279,8 @@ deploy_service_profile() {
 MING_KEEP_MODEMMANAGER=0
 MING_DEBUG_SERIAL=0
 MING_PHONE_DESKTOP=1
+MING_TASKBAR_MODE=1
+MING_TASKBAR_LOW_RESOURCE=auto
 MINGOSDEFAULT
 
     cat > /usr/local/sbin/ming-service-profile << 'MINGSERVICEPROFILE'
@@ -2914,7 +2916,7 @@ install_mode_json="$(/usr/local/sbin/ming-install-mode show --state "${install_m
 install_mode="$(jq -er '.mode' <<<"${install_mode_json}")" || exit 30
 major_ota="$(jq -er '.major_ota' <<<"${install_mode_json}")" || exit 30
 case "${install_mode}:${major_ota}" in
-    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot) ;;
+    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot|legacy_mbr:ab_slot) ;;
     *) echo "ERROR: install mode and major OTA policy do not match" >&2; exit 30 ;;
 esac
 target="$(/usr/local/sbin/ming-installer-verify receipt --field target)" || {
@@ -2955,7 +2957,9 @@ ensure_persistent_root_fstab || exit 30
 write_ota_ready_layout() {
     local esp_device boot_device root_a_device root_b_device home_device
     local esp_uuid boot_uuid root_a_uuid root_b_uuid home_uuid unique_count target_disk candidate_disk
-    local esp_fstype esp_parttype esp_mount_source
+    local esp_fstype esp_parttype esp_mount_source partition_table mbr_partition_count parttype device
+    local require_esp=true
+    local -a layout_devices=()
     physical_disk_for_device() {
         lsblk -s -nrpo NAME,TYPE "$1" 2>/dev/null \
             | awk '$2 == "disk" {print $1}' | sort -u
@@ -2995,16 +2999,39 @@ write_ota_ready_layout() {
         done
         return 1
     }
+    partition_device_by_number() {
+        local wanted_number="$1" matches=()
+        mapfile -t matches < <(lsblk -nrpo NAME,TYPE,PARTN "${target_disk}" 2>/dev/null \
+            | awk -v wanted="${wanted_number}" '$2 == "part" && $3 == wanted {print $1}')
+        [[ "${#matches[@]}" -eq 1 ]] || return 1
+        printf '%s\n' "$(readlink -f -- "${matches[0]}" 2>/dev/null || printf '%s' "${matches[0]}")"
+    }
     udevadm settle --timeout=10 2>/dev/null || true
     target_disk="$(physical_disk_for_device "${root_source}")"
     [[ -n "${target_disk}" && "${target_disk}" != *$'\n'* ]] || {
         echo "ERROR: cannot identify one OTA-ready target disk" >&2; return 1;
     }
-    esp_device="$(partlabel_device_on_disk MING-ESP "${target_disk}" || true)"
-    boot_device="$(partlabel_device_on_disk MING-BOOT "${target_disk}" || true)"
-    root_a_device="$(partlabel_device_on_disk MING-ROOT-A "${target_disk}" || true)"
-    root_b_device="$(partlabel_device_on_disk MING-ROOT-B "${target_disk}" || true)"
-    home_device="$(partlabel_device_on_disk MING-HOME "${target_disk}" || true)"
+    if [[ "${install_mode}" == "legacy_mbr" ]]; then
+        require_esp=false
+        partition_table="$(lsblk -ndo PTTYPE "${target_disk}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+        case "${partition_table}" in
+            dos|msdos) ;;
+            *) echo "ERROR: legacy MBR A/B install must use an msdos partition table" >&2; return 1 ;;
+        esac
+        # Calamares' MBR backend cannot persist GPT PARTLABEL names. The
+        # fixed, verified primary-partition order is BOOT, root A, root B, HOME.
+        boot_device="$(partition_device_by_number 1 || true)"
+        root_a_device="$(partition_device_by_number 2 || true)"
+        root_b_device="$(partition_device_by_number 3 || true)"
+        home_device="$(partition_device_by_number 4 || true)"
+        esp_device=""
+    else
+        esp_device="$(partlabel_device_on_disk MING-ESP "${target_disk}" || true)"
+        boot_device="$(partlabel_device_on_disk MING-BOOT "${target_disk}" || true)"
+        root_a_device="$(partlabel_device_on_disk MING-ROOT-A "${target_disk}" || true)"
+        root_b_device="$(partlabel_device_on_disk MING-ROOT-B "${target_disk}" || true)"
+        home_device="$(partlabel_device_on_disk MING-HOME "${target_disk}" || true)"
+    fi
     if [[ "${esp_device}" == /dev/* ]]; then
         esp_device="$(readlink -f -- "${esp_device}" 2>/dev/null || true)"
     fi
@@ -3020,6 +3047,23 @@ write_ota_ready_layout() {
     if [[ "${home_device}" == /dev/* ]]; then
         home_device="$(readlink -f -- "${home_device}" 2>/dev/null || true)"
     fi
+    if [[ "${install_mode}" == "legacy_mbr" ]]; then
+        [[ "$(readlink -f -- "${root_source}" 2>/dev/null || true)" == "${root_a_device}" ]] || {
+            echo "ERROR: MBR target root must be partition 2 (MING-ROOT-A)" >&2; return 1;
+        }
+        mbr_partition_count="$(lsblk -nrpo TYPE "${target_disk}" 2>/dev/null | awk '$1 == "part" {count++} END {print count+0}')"
+        [[ "${mbr_partition_count}" -eq 4 ]] || {
+            echo "ERROR: MBR A/B target must contain exactly four primary partitions" >&2; return 1;
+        }
+        while IFS= read -r device; do
+            [[ -n "${device}" ]] || continue
+            parttype="$(lsblk -ndo PARTTYPE "${device}" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+            case "${parttype}" in
+                0x83|83|83h) ;;
+                *) echo "ERROR: MBR A/B partition ${device} must use DOS type 0x83 (got ${parttype:-missing})" >&2; return 1 ;;
+            esac
+        done < <(lsblk -nrpo NAME,TYPE "${target_disk}" 2>/dev/null | awk '$2 == "part" {print $1}')
+    fi
     mounted_from_device() {
         local expected_device="$1" mountpoint="$2" mounted_source
         mounted_source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
@@ -3028,46 +3072,59 @@ write_ota_ready_layout() {
         fi
         [[ "${mounted_source}" == "${expected_device}" ]]
     }
-    for device in "${esp_device}" "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+    layout_devices=("${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}")
+    if [[ "${require_esp}" == true ]]; then
+        layout_devices=("${esp_device}" "${layout_devices[@]}")
+    fi
+    for device in "${layout_devices[@]}"; do
         [[ "${device}" == /dev/* && -b "${device}" ]] || {
             echo "ERROR: OTA-ready partition labels are incomplete" >&2; return 1;
         }
     done
-    for device in "${esp_device}" "${boot_device}" "${root_a_device}" "${root_b_device}" "${home_device}"; do
+    for device in "${layout_devices[@]}"; do
         candidate_disk="$(physical_disk_for_device "${device}")"
         [[ "${candidate_disk}" == "${target_disk}" ]] || {
             echo "ERROR: OTA-ready labels resolve outside the selected target disk" >&2; return 1;
         }
     done
-    esp_fstype="$(blkid -s TYPE -o value "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
-    case "${esp_fstype}" in
-        vfat|fat|fat32) ;;
-        *) echo "ERROR: MING-ESP must be a FAT/vfat EFI System Partition" >&2; return 1 ;;
-    esac
-    esp_parttype="$(lsblk -ndo PARTTYPE "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
-    case "${esp_parttype}" in
-        c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef|ef) ;;
-        *) echo "ERROR: MING-ESP PARTTYPE is not an EFI System Partition" >&2; return 1 ;;
-    esac
-    esp_mount_source="$(findmnt -nro SOURCE --target "${target}/boot/efi" 2>/dev/null || true)"
-    if [[ "${esp_mount_source}" == /dev/* ]]; then
-        esp_mount_source="$(readlink -f -- "${esp_mount_source}" 2>/dev/null || true)"
+    if [[ "${require_esp}" == true ]]; then
+        esp_fstype="$(blkid -s TYPE -o value "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+        case "${esp_fstype}" in
+            vfat|fat|fat32) ;;
+            *) echo "ERROR: MING-ESP must be a FAT/vfat EFI System Partition" >&2; return 1 ;;
+        esac
+        esp_parttype="$(lsblk -ndo PARTTYPE "${esp_device}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
+        case "${esp_parttype}" in
+            c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef|ef) ;;
+            *) echo "ERROR: MING-ESP PARTTYPE is not an EFI System Partition" >&2; return 1 ;
+        esac
+        esp_mount_source="$(findmnt -nro SOURCE --target "${target}/boot/efi" 2>/dev/null || true)"
+        if [[ "${esp_mount_source}" == /dev/* ]]; then
+            esp_mount_source="$(readlink -f -- "${esp_mount_source}" 2>/dev/null || true)"
+        fi
+        [[ "${esp_mount_source}" == "${esp_device}" ]] || {
+            echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
+        }
     fi
-    [[ "${esp_mount_source}" == "${esp_device}" ]] || {
-        echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
-    }
     root_a_uuid="$(blkid -s UUID -o value "${root_a_device}")"
     root_b_uuid="$(blkid -s UUID -o value "${root_b_device}")"
-    esp_uuid="$(blkid -s UUID -o value "${esp_device}")"
+    esp_uuid=""
+    [[ "${require_esp}" == false ]] || esp_uuid="$(blkid -s UUID -o value "${esp_device}")"
     boot_uuid="$(blkid -s UUID -o value "${boot_device}")"
     home_uuid="$(blkid -s UUID -o value "${home_device}")"
-    for filesystem_uuid in "${root_a_uuid}" "${root_b_uuid}" "${esp_uuid}" "${boot_uuid}" "${home_uuid}"; do
+    local -a filesystem_uuids=("${root_a_uuid}" "${root_b_uuid}" "${boot_uuid}" "${home_uuid}")
+    if [[ "${require_esp}" == true ]]; then
+        filesystem_uuids=("${root_a_uuid}" "${root_b_uuid}" "${esp_uuid}" "${boot_uuid}" "${home_uuid}")
+    fi
+    for filesystem_uuid in "${filesystem_uuids[@]}"; do
         [[ "${filesystem_uuid}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
             echo "ERROR: OTA-ready filesystem UUID readback is invalid" >&2; return 1;
         }
     done
-    unique_count="$(printf '%s\n' "${root_a_uuid}" "${root_b_uuid}" "${esp_uuid}" "${boot_uuid}" "${home_uuid}" | sort -u | wc -l)"
-    [[ "${unique_count}" -eq 5 && "${root_uuid}" == "${root_a_uuid}" ]] || {
+    unique_count="$(printf '%s\n' "${filesystem_uuids[@]}" | sort -u | wc -l)"
+    expected_uuid_count=4
+    [[ "${require_esp}" == true ]] && expected_uuid_count=5
+    [[ "${unique_count}" -eq "${expected_uuid_count}" && "${root_uuid}" == "${root_a_uuid}" ]] || {
         echo "ERROR: OTA-ready UUID readback failed" >&2; return 1;
     }
     mounted_from_device "${boot_device}" "${target}/boot" || {
@@ -3076,9 +3133,11 @@ write_ota_ready_layout() {
     mounted_from_device "${home_device}" "${target}/home" || {
         echo "ERROR: target /home is not mounted from MING-HOME" >&2; return 1;
     }
-    mounted_from_device "${esp_device}" "${target}/boot/efi" || {
-        echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
-    }
+    if [[ "${require_esp}" == true ]]; then
+        mounted_from_device "${esp_device}" "${target}/boot/efi" || {
+            echo "ERROR: target /boot/efi is not mounted from MING-ESP" >&2; return 1;
+        }
+    fi
     fstab_uses_uuid() {
         local filesystem_uuid="$1" mountpoint="$2"
         awk -v source="UUID=${filesystem_uuid}" -v target_mount="${mountpoint}" '
@@ -3092,9 +3151,11 @@ write_ota_ready_layout() {
     fstab_uses_uuid "${home_uuid}" "/home" || {
         echo "ERROR: target fstab /home UUID does not match MING-HOME" >&2; return 1;
     }
-    fstab_uses_uuid "${esp_uuid}" "/boot/efi" || {
-        echo "ERROR: target fstab /boot/efi UUID does not match MING-ESP" >&2; return 1;
-    }
+    if [[ "${require_esp}" == true ]]; then
+        fstab_uses_uuid "${esp_uuid}" "/boot/efi" || {
+            echo "ERROR: target fstab /boot/efi UUID does not match MING-ESP" >&2; return 1;
+        }
+    fi
     mkdir -p "${target}/etc/ming-update"
     cat > "${target}/etc/ming-update/slots.json" <<SLOTS
 {"schema":1,"layout":"ming-ab-v1","slots":{"A":{"device":"/dev/disk/by-uuid/${root_a_uuid}","uuid":"${root_a_uuid}","grub_entry":"Ming OS 高级启动>Ming OS slot A"},"B":{"device":"/dev/disk/by-uuid/${root_b_uuid}","uuid":"${root_b_uuid}","grub_entry":"Ming OS 高级启动>Ming OS slot B"}},"boot":{"device":"/dev/disk/by-uuid/${boot_uuid}","uuid":"${boot_uuid}"},"home":{"device":"/dev/disk/by-uuid/${home_uuid}","uuid":"${home_uuid}"}}
@@ -3114,7 +3175,7 @@ mkdir -p "${target}/etc/ming-update"
 # A/B OTA is disabled. It remains root-owned and is written atomically.
 install -m 0644 "${install_mode_state}" "${target}/etc/ming-update/install-mode.json" || exit 30
 case "${install_mode}" in
-    blank_ab)
+    blank_ab|legacy_mbr)
         write_ota_ready_layout || exit 30
         ;;
     dual_boot_preserve)
@@ -3698,7 +3759,7 @@ ensure_kernel_boot_links
 kernel="$(find "${target}/boot" -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"
 initrd="$(find "${target}/boot" -maxdepth 1 -type f -name 'initrd.img-*' 2>/dev/null | sort -V | tail -n 1 || true)"
 [[ -s "${kernel}" && -s "${initrd}" ]] || { echo "ERROR: installed boot payload is missing" >&2; exit 30; }
-if [[ "${install_mode}" == "blank_ab" ]]; then
+if [[ "${install_mode}" == "blank_ab" || "${install_mode}" == "legacy_mbr" ]]; then
     # Initial installation must seed both shared-boot slot payloads.  Slot B is
     # not the default root, but it must remain bootable before the first OTA.
     install -d -m 0755 "${target}/boot/ming-slots/A" "${target}/boot/ming-slots/B"
@@ -3715,7 +3776,7 @@ fi
 # submenu so OTA can still address the named entries without top-level noise.
 # submenu 'Ming OS 高级启动' | menuentry 'Ming OS slot A' | menuentry 'Ming OS slot B'
 mkdir -p "${target}/etc/grub.d"
-if [[ "${install_mode}" == "blank_ab" ]]; then
+if [[ "${install_mode}" == "blank_ab" || "${install_mode}" == "legacy_mbr" ]]; then
 cat > "${target}/etc/grub.d/09_ming_os" <<'TARGETGRUBENTRY'
 #!/bin/sh
 set -e
@@ -3842,7 +3903,7 @@ if ! sed -i "s/__MING_ROOT_UUID__/${root_uuid}/g" "${grub_template}"; then
     echo "ERROR: failed to write the authoritative root UUID into the Ming GRUB template" >&2
     exit 30
 fi
-if [[ "${install_mode}" == "blank_ab" ]]; then
+if [[ "${install_mode}" == "blank_ab" || "${install_mode}" == "legacy_mbr" ]]; then
     sed -i "s/__MING_ROOT_A_UUID__/${OTA_ROOT_A_UUID}/g; s/__MING_ROOT_B_UUID__/${OTA_ROOT_B_UUID}/g; s/__MING_BOOT_UUID__/${OTA_BOOT_UUID}/g" "${grub_template}" || exit 30
     sed -i \
         -e "s|search --no-floppy --set=root --file /vmlinuz|search --no-floppy --fs-uuid --set=root ${OTA_BOOT_UUID}|g" \
@@ -4056,11 +4117,11 @@ root_uuid="$(/usr/local/sbin/ming-installer-verify receipt --field uuid)" || exi
 install_mode="$(jq -er '.mode' "${root}/etc/ming-update/install-mode.json")" || exit 20
 major_ota="$(jq -er '.major_ota' "${root}/etc/ming-update/install-mode.json")" || exit 20
 case "${install_mode}:${major_ota}" in
-    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot) ;;
+    blank_ab:ab_slot|dual_boot_preserve:disabled_dual_boot|legacy_mbr:ab_slot) ;;
     *) echo "ERROR: installed mode receipt is inconsistent"; exit 20 ;;
 esac
 slot_b_uuid=""
-if [[ "${install_mode}" == "blank_ab" ]]; then
+if [[ "${install_mode}" == "blank_ab" || "${install_mode}" == "legacy_mbr" ]]; then
     slot_b_uuid="$(python3 -c '
 import json
 import sys
@@ -4123,6 +4184,10 @@ mkdir -p "${root}/boot/grub"
 
 install_uefi_grub() {
     [ -d /sys/firmware/efi ] || return 1
+    if [[ "${install_mode}" == "legacy_mbr" ]]; then
+        echo "ERROR: legacy MBR mode cannot install through UEFI firmware"
+        return 1
+    fi
     local esp_source esp_fstype esp_parttype
     if ! mountpoint -q "${root}/boot/efi"; then
         echo "ERROR: UEFI firmware detected but target /boot/efi is not a real mount"
@@ -4188,6 +4253,10 @@ install_bios_grub() {
     local pttype bios_boot_count
     pttype="$(lsblk -ndo PTTYPE "${boot_disk}" 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')"
     if [[ "${pttype}" == "gpt" ]]; then
+        if [[ "${install_mode}" == "legacy_mbr" ]]; then
+            echo "ERROR: legacy MBR mode requires an msdos partition table, got GPT"
+            return 1
+        fi
         bios_boot_count="$(lsblk -nrpo NAME,TYPE,PARTTYPE,PARTLABEL "${boot_disk}" 2>/dev/null \
             | awk 'BEGIN{count=0} $2 == "part" {
                 parttype=tolower($3);
@@ -4201,6 +4270,10 @@ install_bios_grub() {
         fi
     elif [[ -n "${pttype}" && "${install_mode}" == "blank_ab" ]]; then
         echo "ERROR: blank_ab 自动安装必须使用 GPT 分区表，当前为 ${pttype}"
+        return 1
+    elif [[ "${install_mode}" == "legacy_mbr" && -n "${pttype}" \
+        && "${pttype}" != "dos" && "${pttype}" != "msdos" ]]; then
+        echo "ERROR: legacy_mbr 自动安装必须使用 msdos 分区表，当前为 ${pttype}"
         return 1
     fi
     if [ -x "${root}/usr/sbin/grub-install" ]; then
@@ -4237,7 +4310,10 @@ firmware_mode="bios"
 uefi_nvram=false
 uefi_fallback=false
 bios_grub_verified=false
-if [ -d /sys/firmware/efi ]; then
+if [ -d /sys/firmware/efi ] && [[ "${install_mode}" == "legacy_mbr" ]]; then
+    echo "ERROR: legacy MBR mode was selected but the installer is running in UEFI mode"
+    exit 23
+elif [ -d /sys/firmware/efi ]; then
     firmware_mode="uefi"
     install_uefi_grub || {
         echo "ERROR: UEFI bootloader installation failed; refusing an unusable BIOS fallback"
@@ -4338,7 +4414,7 @@ validate_final_grub_root_uuid() {
                 print "ERROR: final grub.cfg has no Ming linux stanzas" > "/dev/stderr"
                 exit 1
             }
-            if (install_mode == "blank_ab" && (slot_a_count == 0 || slot_b_count == 0)) {
+            if ((install_mode == "blank_ab" || install_mode == "legacy_mbr") && (slot_a_count == 0 || slot_b_count == 0)) {
                 print "ERROR: final grub.cfg is missing Ming A/B slot stanzas" > "/dev/stderr"
                 exit 1
             }
@@ -4360,7 +4436,7 @@ if grep -Eq 'boot=live|ming\.installer=1|安装 Ming OS' "${root}/boot/grub/grub
     echo "ERROR: installed GRUB contains Live installer arguments or labels"
     exit 22
 fi
-if [[ "${install_mode}" == "blank_ab" ]]; then
+if [[ "${install_mode}" == "blank_ab" || "${install_mode}" == "legacy_mbr" ]]; then
     for contract in \
         "Ming OS slot A" "/ming-slots/A/vmlinuz" "/ming-slots/A/initrd.img" \
         "Ming OS slot B" "/ming-slots/B/vmlinuz" "/ming-slots/B/initrd.img"; do
@@ -4465,6 +4541,41 @@ if [[ -s /run/ming-installer/install-mode.json ]] && command -v python3 >/dev/nu
     install_mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode",""))' /run/ming-installer/install-mode.json 2>>"${LOG}" || printf '')"
 fi
 [[ "${install_mode}" == "blank_ab" ]] || {
+    if [[ "${install_mode}" == "legacy_mbr" ]]; then
+        # MBR has no GPT PARTLABEL field for Calamares' partitionLayout names.
+        # The receipt-bound identity gate later binds the selected disk to its
+        # mounted /boot, root A, root B and /home devices and checks every 0x83
+        # type. Here we perform a safe read-only preflight when the new MBR disk
+        # is unambiguous; never rewrite DOS partition types on a guessed disk.
+        mbr_candidates=()
+        while IFS= read -r disk; do
+            [[ -b "${disk}" ]] || continue
+            table="$(lsblk -ndo PTTYPE "${disk}" 2>>"${LOG}" | tr '[:upper:]' '[:lower:]')"
+            [[ "${table}" == dos || "${table}" == msdos ]] || continue
+            mapfile -t partitions < <(lsblk -nrpo NAME,TYPE,PARTN,PARTTYPE "${disk}" 2>>"${LOG}" \
+                | awk '$2 == "part" {print $1, $3, tolower($4)}')
+            ((${#partitions[@]} == 4)) || continue
+            numbers=()
+            valid=true
+            for partition in "${partitions[@]}"; do
+                read -r part_device part_number part_type_value <<<"${partition}"
+                numbers+=("${part_number}")
+                case "${part_type_value}" in
+                    0x83|83|83h) ;;
+                    *) valid=false ;;
+                esac
+            done
+            [[ "${valid}" == true ]] || continue
+            [[ " $(printf '%s\n' "${numbers[@]}" | sort -n | paste -sd' ' -) " == " 1 2 3 4 " ]] || continue
+            mbr_candidates+=("${disk}")
+        done < <(lsblk -dnpo NAME,TYPE 2>>"${LOG}" | awk '$2 == "disk" {print $1}')
+        if ((${#mbr_candidates[@]} == 1)); then
+            log "verified unique msdos A/B candidate ${mbr_candidates[0]} with four primary partitions using DOS type 0x83"
+        else
+            log "msdos partition type readback deferred to receipt-bound identity gate; candidates=${#mbr_candidates[@]}"
+        fi
+        exit 0
+    fi
     log "skip: install_mode=${install_mode:-unknown}"
     exit 0
 }

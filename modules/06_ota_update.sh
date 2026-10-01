@@ -304,7 +304,7 @@ major_ota_allowed() {
     mode="$(jq -r '.mode' "${INSTALL_MODE_FILE}")"
     major_ota="$(jq -r '.major_ota' "${INSTALL_MODE_FILE}")"
     case "${mode}:${major_ota}" in
-        blank_ab:ab_slot) return 0 ;;
+        blank_ab:ab_slot|legacy_mbr:ab_slot) return 0 ;;
         dual_boot_preserve:disabled_dual_boot)
             log_error "此安装为保留双系统模式，大版本 A/B OTA 已禁用；patch/minor 仍可使用。"
             return 1

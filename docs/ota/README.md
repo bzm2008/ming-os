@@ -6,6 +6,11 @@ then writes the root-owned `/etc/ming-update/slots.json` from actual label and U
 readback. The recipe requires a 32 GiB disk and never becomes the preselected choice.
 The shared `/boot` is required so BIOS and UEFI boots read and update the same
 GRUB environment regardless of which root slot is mounted.
+
+Traditional BIOS/MBR installs use the same `ming-ab-v1` slot and rollback
+contract on an `msdos` disk with four primary ext4 partitions (`/boot`, root A,
+root B, and `/home`). They do not create an ESP or BIOS Boot partition and must
+be installed by booting the ISO in Legacy/CSM mode.
 Each GRUB entry must load its own `/boot/ming-slots/A|B/vmlinuz` and
 `initrd.img`; updating one slot never replaces the rollback slot's kernel.
 Live ISO uses `/live/initrd` without the `.img` suffix; installed A/B slots use

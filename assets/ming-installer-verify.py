@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -93,6 +94,7 @@ INSTALL_MODE_SCHEMA = "ming-install-mode/v1"
 INSTALL_MODE_POLICIES = {
     "blank_ab": "ab_slot",
     "dual_boot_preserve": "disabled_dual_boot",
+    "legacy_mbr": "ab_slot",
 }
 BIOS_BOOT_PARTITION_GUID = "21686148-6449-6e6f-744e-656564454649"
 ESP_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
@@ -195,7 +197,7 @@ def _command_stdout(args: list[str]) -> str:
 
 
 def _system_storage_info(root_source: str) -> dict[str, Any]:
-    """Return enough target-disk facts to gate BIOS+GPT GRUB installs."""
+    """Return target-disk facts needed to gate the installed boot layout."""
     if os.name == "nt":
         return {"available": False}
     if not isinstance(root_source, str) or not root_source.startswith("/dev/"):
@@ -209,16 +211,25 @@ def _system_storage_info(root_source: str) -> dict[str, Any]:
     if not disk:
         return {"available": False}
     table = _command_stdout(["lsblk", "-ndo", "PTTYPE", disk]).casefold()
-    parts = _command_stdout(["lsblk", "-nrpo", "NAME,TYPE,PARTTYPE,PARTLABEL", disk])
+    parts = _command_stdout(["lsblk", "-nrpo", "NAME,TYPE,PARTN,PARTTYPE,PARTLABEL", disk])
     bios_boot_present = False
     bios_boot_parttype = ""
     bios_boot_partlabel = ""
+    esp_present = False
+    partition_records: list[dict[str, Any]] = []
+    root_partition_number = _command_stdout(["lsblk", "-ndo", "PARTN", root_source])
+    root_partition_type = _command_stdout(["lsblk", "-ndo", "PARTTYPE", root_source]).casefold()
     for line in parts.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) < 3 or fields[1] != "part":
+        fields = line.split(None, 4)
+        if len(fields) < 4 or fields[1] != "part":
             continue
-        parttype = fields[2].casefold()
-        partlabel = fields[3] if len(fields) > 3 else ""
+        try:
+            part_number = int(fields[2])
+        except ValueError:
+            continue
+        parttype = fields[3].casefold()
+        partlabel = fields[4] if len(fields) > 4 else ""
+        partition_records.append({"number": part_number, "parttype": parttype, "partlabel": partlabel})
         if partlabel == "MING-BIOSBOOT":
             bios_boot_parttype = parttype
             bios_boot_partlabel = partlabel
@@ -227,10 +238,16 @@ def _system_storage_info(root_source: str) -> dict[str, Any]:
             if not bios_boot_parttype:
                 bios_boot_parttype = parttype
                 bios_boot_partlabel = partlabel
+        if parttype in {ESP_GUID, "0xef", "ef"}:
+            esp_present = True
     return {
         "available": True,
         "disk": disk,
         "partition_table": table,
+        "root_partition_number": int(root_partition_number) if root_partition_number.isdigit() else None,
+        "root_partition_type": root_partition_type,
+        "partitions": partition_records,
+        "esp_present": esp_present,
         "bios_boot_present": bios_boot_present,
         "bios_boot_parttype": bios_boot_parttype,
         "bios_boot_partlabel": bios_boot_partlabel,
@@ -409,6 +426,37 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
             errors.append("Calamares dual-boot mode must enable manual partitioning")
         if "MING-ROOT-B" in partition:
             errors.append("Calamares dual-boot mode must not create an A/B root slot")
+    elif install_mode == "legacy_mbr":
+        if initial_choice not in {"erase", "none"}:
+            errors.append("Calamares legacy MBR mode must use the automatic erase flow")
+        if manual_enabled is not False:
+            errors.append("Calamares legacy MBR mode must disable manual partitioning")
+        if (_yaml_scalar(partition, "defaultPartitionTableType") or "").casefold() != "msdos":
+            errors.append("Calamares legacy MBR layout must require msdos")
+        if (_yaml_scalar(partition, "requiredPartitionTableType") or "").casefold() != "msdos":
+            errors.append("Calamares legacy MBR layout must require msdos")
+        expected_layout = {
+            "MING-BOOT": "/boot",
+            "MING-ROOT-A": "/",
+            "MING-ROOT-B": None,
+            "MING-HOME": "/home",
+        }
+        for label, mountpoint in expected_layout.items():
+            if partition.count(f'name: "{label}"') != 1:
+                errors.append(f"Calamares legacy MBR layout must contain exactly one {label}")
+                continue
+            block = _partition_layout_block(partition, label)
+            if (_yaml_scalar(block, "filesystem") or "").casefold() != "ext4":
+                errors.append(f"Calamares legacy MBR {label} must use ext4")
+            if _yaml_scalar(block, "mountPoint") != mountpoint:
+                errors.append(
+                    f"Calamares legacy MBR {label} must use "
+                    f"{mountpoint if mountpoint is not None else 'no mount point'}"
+                )
+        if _yaml_scalar(partition, "requiredStorage") != "32":
+            errors.append("Calamares legacy MBR install must require 32 GB")
+        if "MING-ESP" in partition or "MING-BIOSBOOT" in partition:
+            errors.append("Calamares legacy MBR layout must not contain ESP or BIOS Boot partitions")
     unpack_source = _yaml_scalar(unpackfs, "source")
     source_path = Path(source) if source is not None else Path(unpack_source or "")
     if not unpack_source:
@@ -419,12 +467,14 @@ def verify_live(root: Path | str = "/", source: Path | str | None = None) -> dic
         errors.append("Live filesystem.squashfs source is unavailable")
     elif source_path.name != "filesystem.squashfs":
         errors.append("Live installer source must be live/filesystem.squashfs")
+    if install_mode == "legacy_mbr" and (root_path / "sys/firmware/efi").is_dir():
+        errors.append("Calamares legacy MBR mode requires the installer to boot in Legacy/CSM mode")
     return _result(
         errors,
         manual_partitioning="enabled" if manual_enabled is True else "disabled",
         full_disk_install=(
             "selected"
-            if explicit_mode and install_mode == "blank_ab" and initial_choice in {"erase", "none"}
+            if explicit_mode and install_mode in {"blank_ab", "legacy_mbr"} and initial_choice in {"erase", "none"}
             else "available" if initial_choice == "none" else "unknown"
         ),
         source=str(source_path),
@@ -1178,7 +1228,7 @@ def _validate_blank_ab_storage(
         return
     if firmware_efi is None:
         firmware_efi = _firmware_efi_detected()
-    if storage_info_provider is None and os.name == "nt":
+    if storage_info_provider is None and (os.name == "nt" or shutil.which("lsblk") is None):
         return
     provider = storage_info_provider or _system_storage_info
     try:
@@ -1198,6 +1248,118 @@ def _validate_blank_ab_storage(
             errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
         elif not info.get("bios_boot_present"):
             errors.append("Installed BIOS/GPT A/B install is missing a BIOS Boot Partition")
+
+
+def _validate_legacy_mbr_storage(
+    *,
+    root_source: str | None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None,
+    errors: list[str],
+) -> None:
+    if not root_source:
+        return
+    if storage_info_provider is None and (os.name == "nt" or shutil.which("lsblk") is None):
+        return
+    provider = storage_info_provider or _system_storage_info
+    try:
+        info = dict(provider(root_source))
+    except Exception as exc:  # pragma: no cover
+        errors.append(f"Installed MBR storage contract cannot inspect target disk: {exc}")
+        return
+    if info.get("available") is False:
+        errors.append("Installed MBR storage contract cannot inspect target disk")
+        return
+    table = str(info.get("partition_table", "")).casefold()
+    if table not in {"dos", "msdos"}:
+        errors.append("Installed legacy MBR target disk must use an msdos partition table")
+    if table not in {"dos", "msdos"}:
+        return
+    root_number = info.get("root_partition_number")
+    if root_number is None:
+        errors.append("Installed legacy MBR root A partition number is unavailable")
+    elif root_number != 2:
+        errors.append("Installed legacy MBR root A must be partition 2")
+    root_type = str(info.get("root_partition_type", "")).casefold()
+    if not root_type:
+        errors.append("Installed legacy MBR root A partition type is unavailable")
+    elif root_type not in {"0x83", "83", "83h"}:
+        errors.append("Installed legacy MBR root A must use DOS partition type 0x83")
+    partitions = info.get("partitions")
+    if not isinstance(partitions, list):
+        errors.append("Installed legacy MBR partition type readback is unavailable")
+    else:
+        by_number = {
+            item.get("number"): str(item.get("parttype", "")).casefold()
+            for item in partitions
+            if isinstance(item, Mapping)
+        }
+        if set(by_number) != {1, 2, 3, 4}:
+            errors.append("Installed legacy MBR layout must contain exactly four primary partitions")
+        for number in range(1, 5):
+            parttype = by_number.get(number, "")
+            if parttype not in {"0x83", "83", "83h"}:
+                errors.append(f"Installed legacy MBR partition {number} must use DOS partition type 0x83")
+                break
+    if info.get("esp_present"):
+        errors.append("Installed legacy MBR target disk must not contain an EFI System Partition")
+    if info.get("bios_boot_present"):
+        errors.append("Installed legacy MBR target disk must not contain a BIOS Boot Partition")
+
+
+def _validate_legacy_mbr_install(
+    root_path: Path,
+    errors: list[str],
+    *,
+    root_source: str | None = None,
+    expected_root_uuid: str | None = None,
+    storage_info_provider: Callable[[str], Mapping[str, Any]] | None = None,
+) -> None:
+    entries = list(_fstab_entries(_read_text(root_path / "etc/fstab")))
+    entries_by_mount: dict[str, list[list[str]]] = {}
+    for fields in entries:
+        entries_by_mount.setdefault(fields[1], []).append(fields)
+    by_mount = {mountpoint: values[-1] for mountpoint, values in entries_by_mount.items()}
+    for mountpoint in ("/boot", "/home"):
+        if len(entries_by_mount.get(mountpoint, [])) > 1:
+            errors.append(f"Installed legacy MBR fstab has duplicate {mountpoint} entries")
+        fields = by_mount.get(mountpoint)
+        if not fields:
+            errors.append(f"Installed legacy MBR fstab is missing {mountpoint}")
+        elif fields[2].casefold() not in {"ext2", "ext3", "ext4"}:
+            errors.append(f"Installed legacy MBR {mountpoint} must use ext4-compatible filesystem")
+    root_entries = entries_by_mount.get("/", [])
+    if len(root_entries) != 1:
+        errors.append("Installed legacy MBR fstab must contain exactly one root entry")
+    try:
+        slots = json.loads(_read_text(root_path / "etc/ming-update/slots.json"))
+        if slots.get("schema") != 1 or slots.get("layout") != "ming-ab-v1":
+            raise ValueError("invalid legacy MBR A/B layout")
+        for slot in ("A", "B"):
+            uuid = slots["slots"][slot]["uuid"]
+            if not isinstance(uuid, str) or not FILESYSTEM_UUID_PATTERN.fullmatch(uuid):
+                raise ValueError("invalid legacy MBR slot UUID")
+        if expected_root_uuid and slots["slots"]["A"]["uuid"] != expected_root_uuid:
+            errors.append("Installed legacy MBR slot A UUID does not match the authoritative receipt")
+        for volume, mountpoint in (("boot", "/boot"), ("home", "/home")):
+            volume_uuid = slots[volume]["uuid"]
+            if not isinstance(volume_uuid, str) or not FILESYSTEM_UUID_PATTERN.fullmatch(volume_uuid):
+                raise ValueError(f"invalid {volume} UUID")
+            fields = by_mount.get(mountpoint)
+            if fields and fields[0] != f"UUID={volume_uuid}":
+                errors.append(f"Installed legacy MBR {mountpoint} source UUID does not match slots.json")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        errors.append("Installed legacy MBR system has no valid ming-ab-v1 layout")
+    if entries_by_mount.get("/boot/efi"):
+        errors.append("Installed legacy MBR fstab must not mount an EFI System Partition")
+    for slot in ("A", "B"):
+        for payload in ("vmlinuz", "initrd.img"):
+            if not (root_path / "boot/ming-slots" / slot / payload).is_file():
+                errors.append(f"Installed legacy MBR slot {slot} {payload} payload is missing")
+    _validate_legacy_mbr_storage(
+        root_source=root_source,
+        storage_info_provider=storage_info_provider,
+        errors=errors,
+    )
 
 
 def _validate_blank_ab_install(
@@ -1358,7 +1520,7 @@ def _validate_final_grub(
 
     slot_a_uuid: str | None = expected_root_uuid
     slot_b_uuid: str | None = None
-    if install_mode == "blank_ab":
+    if install_mode in {"blank_ab", "legacy_mbr"}:
         slot_a_uuid, slot_b_uuid = _read_final_ab_uuids(
             root_path, expected_root_uuid, errors
         )
@@ -1382,7 +1544,7 @@ def _validate_final_grub(
         if expected is None or roots[0] != f"root=UUID={expected}":
             errors.append("Final grub.cfg Ming stanza uses the wrong root UUID")
 
-    if install_mode == "blank_ab":
+    if install_mode in {"blank_ab", "legacy_mbr"}:
         required = {
             "/ming-slots/A/vmlinuz",
             "/ming-slots/B/vmlinuz",
@@ -1492,6 +1654,14 @@ def verify_installed(
             errors,
             root_source=root_source,
             firmware_efi=firmware_efi,
+            storage_info_provider=storage_info_provider,
+        )
+    elif explicit_install_mode and install_mode == "legacy_mbr":
+        _validate_legacy_mbr_install(
+            root_path,
+            errors,
+            root_source=root_source,
+            expected_root_uuid=expected_root_uuid,
             storage_info_provider=storage_info_provider,
         )
 

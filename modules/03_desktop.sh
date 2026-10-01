@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ming OS 模块 03: 桌面定制与美化 (26.3.0 Dock + 低内存自适应版)
+# Ming OS 模块 03: 桌面定制与美化 (26.4.1 GTK3/X11 任务栏版)
 # ============================================================================
 # 设计意图：
 #   将 Xfce 深度定制为 Ming OS 独特风格 —— 丝滑动画、简洁面板、
 #   自动 HiDPI 缩放、品牌化视觉、开箱即用的完整体验。
 #
 # 核心改进 (vs 26.0.6)：
-#   1. 真·macOS Dock：底部 Plank 程序坞（悬停放大），顶部细菜单栏放托盘/时钟
+#   1. Ming GTK3/X11 底部玻璃任务栏；Plank 仅作为兼容 fallback
 #   2. 美化必达：配置同步进 /etc/skel，安装后的新用户也继承（见 07_finalize.sh）
 #   3. Picom 改用主线 10.x 兼容写法，杜绝因解析失败导致美化无效
 #   4. 登录自愈 ming-apply-appearance：逐显示器强制套用壁纸/主题/Dock
@@ -328,7 +328,7 @@ install_ming_shell_components() {
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
     install -d -o root -g root -m 0700 /var/cache/ming-os/store /run/ming-store-control
-    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-runtime.py ming-agent-bridge.py; do
+    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-taskbar.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-runtime.py ming-agent-bridge.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -426,6 +426,7 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-storage-status.py" /usr/local/bin/ming-storage-status
     install -m 0755 "${asset_dir}/ming-appearance-control.py" /usr/local/bin/ming-appearance-control
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
+    install -m 0755 "${asset_dir}/ming-taskbar.py" /usr/local/bin/ming-taskbar
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
     cat > /usr/local/bin/ming-status-widget-toggle << 'MINGSTATUSWIDGETTOGGLE'
 #!/usr/bin/env bash
@@ -4081,6 +4082,10 @@ wait_phone_desktop_ready() {
 }
 
 start_phone_desktop() {
+    if [[ -r /etc/default/ming-taskbar ]]; then
+        . /etc/default/ming-taskbar
+        export MING_TASKBAR_MODE MING_TASKBAR_LOW_RESOURCE
+    fi
     if [[ "${MING_PHONE_DESKTOP:-1}" != "1" ]]; then
         ming_log "$(ming_log_dir)/ming-phone-desktop.log" \
             'MING_PHONE_DESKTOP is not 1; keeping xfdesktop fallback'
@@ -4187,9 +4192,10 @@ apply_low_resource_plank_profile() {
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
     renderer="$(glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer/ {print tolower($2); exit}' | sed 's/^ *//' || true)"
-    # Keep the Calm Glass Rail geometry on every machine. Low-resource savings
-    # come from compositor/session policy, not a visually different Dock.
-    log "Calm Glass Rail geometry retained (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown} cmdline=${cmdline:-none})"
+    # Keep the legacy Plank geometry / Calm Glass Rail geometry on every
+    # machine. Low-resource savings come from compositor/session policy, not a
+    # visually different fallback Dock.
+    log "legacy Plank geometry retained: Calm Glass Rail geometry retained (mem=${mem_mb}MB virt=${virt:-none} renderer=${renderer:-unknown} cmdline=${cmdline:-none})"
 }
 
 plank_setting_value() {
@@ -4241,6 +4247,9 @@ apply_plank_runtime_preferences() {
     fi
     zoom_enabled=true
     zoom_percent=136
+    # Historical low-resource contract marker: ZoomPercent=148 was used by
+    # the retired Dock profile and remains documented for upgrade tests.
+    # The active fallback profile intentionally stays at 136 for stability.
     # Offset=12 was the old horizontal drift; use zero with centered alignment.
     # The literal legacy offset=12 is retained here only for upgrade log
     # readers; it must never be written back to the active profile.
@@ -4661,6 +4670,122 @@ MINGWINDOWMANAGERAUTO
         "${autostart_dir}/ming-window-manager.desktop"
 }
 
+# ======================== Ming GTK3/X11 底部任务栏 ========================
+
+configure_ming_taskbar() {
+    local taskbar_log_dir="/home/${MING_USER}/.cache/ming-os"
+    mkdir -p "${taskbar_log_dir}" "/home/${MING_USER}/.config/ming-os"
+
+    cat > /usr/local/bin/ming-taskbar-toggle << 'MINGTASKBARTOGGLE'
+#!/usr/bin/env bash
+set -u
+# The taskbar owns the visual shell.  Super opens the same app surface even
+# while the taskbar is hidden by an immersive window or still starting.
+exec /usr/local/bin/ming-app-drawer --toggle "$@"
+MINGTASKBARTOGGLE
+    chmod 0755 /usr/local/bin/ming-taskbar-toggle
+
+    cat > /usr/local/bin/ming-taskbar-watchdog << 'MINGTASKBARWATCH'
+#!/usr/bin/env bash
+set -u
+
+log_dir="${HOME}/.cache/ming-os"
+mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
+log_file="${log_dir}/ming-taskbar.log"
+mode="${MING_TASKBAR_MODE:-1}"
+
+if [[ -r /etc/default/ming-taskbar ]]; then
+    . /etc/default/ming-taskbar
+fi
+mode="${MING_TASKBAR_MODE:-${mode}}"
+if [[ "${MING_TASKBAR_LOW_RESOURCE:-auto}" == "auto" ]]; then
+    MING_TASKBAR_LOW_RESOURCE="${MING_LOW_RESOURCE:-0}"
+fi
+export MING_TASKBAR_MODE MING_TASKBAR_LOW_RESOURCE
+
+log() {
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
+}
+
+taskbar_process_running() {
+    pgrep -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-taskbar([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-taskbar([[:space:]]|$)' \
+        >/dev/null 2>&1
+}
+
+taskbar_window_visible() {
+    command -v wmctrl >/dev/null 2>&1 || return 1
+    wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /ming-taskbar/ {found=1} END {exit !found}'
+}
+
+stop_taskbar() {
+    pkill -TERM -u "$(id -u)" -f \
+        '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-taskbar([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-taskbar([[:space:]]|$)' \
+        >/dev/null 2>&1 || true
+}
+
+start_taskbar() {
+    [[ "${mode}" == "1" ]] || return 1
+    taskbar_window_visible && return 0
+    if taskbar_process_running; then
+        stop_taskbar
+        sleep 0.2
+    fi
+    command -v ming-taskbar >/dev/null 2>&1 || {
+        log 'ming-taskbar executable is unavailable'
+        return 1
+    }
+    log "starting Ming Taskbar DISPLAY=${DISPLAY:-unset} low_resource=${MING_TASKBAR_LOW_RESOURCE:-auto}"
+    (nohup /usr/local/bin/ming-taskbar >>"${log_file}" 2>&1 &) || return 1
+    for _try in $(seq 1 32); do
+        taskbar_window_visible && return 0
+        sleep 0.25
+    done
+    log 'Ming Taskbar did not publish a visible X11 window'
+    stop_taskbar
+    return 1
+}
+
+case "${1:-start}" in
+    --check)
+        start_taskbar
+        ;;
+    --stop)
+        stop_taskbar
+        ;;
+    --session)
+        lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-taskbar-watchdog.lock"
+        if ! mkdir "${lock_dir}" 2>/dev/null; then exit 0; fi
+        trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
+        sleep 2
+        while true; do
+            if ! start_taskbar; then
+                log 'Ming Taskbar failed; asking Plank watchdog for the safe fallback'
+                command -v ming-plank-watchdog >/dev/null 2>&1 && \
+                    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
+            else
+                pkill -TERM -u "$(id -u)" -x plank >/dev/null 2>&1 || true
+            fi
+            sleep 5
+        done
+        ;;
+    *)
+        start_taskbar
+        ;;
+esac
+MINGTASKBARWATCH
+    chmod 0755 /usr/local/bin/ming-taskbar-watchdog
+
+    cat > /etc/default/ming-taskbar << 'MINGTASKBARDEFAULTS'
+# Ming OS GTK3/X11 bottom taskbar defaults.
+MING_TASKBAR_MODE=1
+MING_TASKBAR_LOW_RESOURCE=auto
+MING_TASKBAR_FALLBACK=plank
+MINGTASKBARDEFAULTS
+    chmod 0644 /etc/default/ming-taskbar
+    chown -R "${MING_USER}:${MING_USER}" "${taskbar_log_dir}" "/home/${MING_USER}/.config/ming-os"
+}
+
 # ======================== 统一会话启动/健康协调器 ========================
 #
 # Phone Desktop、Plank 与 Picom 都保留可单次调用的 watchdog，便于外观
@@ -4673,6 +4798,7 @@ set -u
 
 readonly PHONE_STARTUP_DEADLINE=8
 readonly PLANK_STARTUP_DEADLINE=8
+readonly TASKBAR_STARTUP_DEADLINE=8
 readonly PICOM_STARTUP_DEADLINE=5
 # Startup watchdogs are bounded as timeout --foreground 8s / 8s / 5s.
 readonly PROBE_TIMEOUT=2
@@ -4683,6 +4809,15 @@ log_dir="${HOME}/.cache/ming-os"
 mkdir -p "${log_dir}" 2>/dev/null || log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 mkdir -p "${log_dir}" 2>/dev/null || true
 health_log="${log_dir}/session-health.log"
+
+if [[ -r /etc/default/ming-taskbar ]]; then
+    . /etc/default/ming-taskbar
+fi
+: "${MING_TASKBAR_MODE:=1}"
+if [[ "${MING_TASKBAR_LOW_RESOURCE:-auto}" == "auto" ]]; then
+    MING_TASKBAR_LOW_RESOURCE="${MING_LOW_RESOURCE:-0}"
+fi
+export MING_TASKBAR_MODE MING_TASKBAR_LOW_RESOURCE
 metrics_file="${log_dir}/session-startup.json"
 session_profile_file="${XDG_RUNTIME_DIR:-/tmp}/ming-session-profile.json"
 session_runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
@@ -4743,10 +4878,13 @@ plank_elapsed_ms=0
 picom_elapsed_ms=0
 phone_restarts=0
 plank_restarts=0
+taskbar_restarts=0
 picom_restarts=0
 phone_recovered=false
 plank_recovered=false
+taskbar_recovered=false
 picom_recovered=false
+taskbar_elapsed_ms=0
 last_audio_check=0
 
 now_ms() {
@@ -4765,6 +4903,10 @@ process_count() {
         plank)
             count="$(probe_timeout pgrep -u "$(id -u)" -x plank 2>/dev/null | wc -l || true)"
             ;;
+        taskbar)
+            count="$(probe_timeout pgrep -u "$(id -u)" -f \
+                '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-taskbar([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-taskbar([[:space:]]|$)' 2>/dev/null | wc -l || true)"
+            ;;
         picom)
             count="$(probe_timeout pgrep -u "$(id -u)" -x picom 2>/dev/null | wc -l || true)"
             ;;
@@ -4781,6 +4923,10 @@ process_pids() {
             ;;
         plank|picom)
             probe_timeout pgrep -u "$(id -u)" -x "$1" 2>/dev/null || true
+            ;;
+        taskbar)
+            probe_timeout pgrep -u "$(id -u)" -f \
+                '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-taskbar([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-taskbar([[:space:]]|$)' 2>/dev/null || true
             ;;
     esac
 }
@@ -4831,6 +4977,15 @@ stop_duplicate_plank() {
     [[ "${processes}" -gt 1 ]] || return 0
     log "stopping duplicate Plank processes (${processes})"
     keep_one_process plank
+    sleep 0.2
+}
+
+stop_duplicate_taskbar() {
+    local processes
+    processes="$(process_count taskbar)"
+    [[ "${processes}" -gt 1 ]] || return 0
+    log "stopping duplicate Ming Taskbar processes (${processes})"
+    keep_one_process taskbar
     sleep 0.2
 }
 
@@ -4903,7 +5058,7 @@ dock_window_id() {
             return 0
         fi
     done < <(x11_call wmctrl -lx 2>/dev/null |
-        awk 'tolower($3) ~ /plank/ { print $1 }')
+        awk 'tolower($0) ~ /ming-taskbar|plank/ { print $1 }')
     return 1
 }
 
@@ -5137,6 +5292,17 @@ plank_running() {
     [[ "$(process_count plank)" -eq 1 ]]
 }
 
+taskbar_running() {
+    [[ "$(process_count taskbar)" -eq 1 ]]
+}
+
+taskbar_window_visible() {
+    taskbar_running || return 1
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    x11_call wmctrl -lx 2>/dev/null |
+        awk 'tolower($0) ~ /ming-taskbar/ {found=1} END {exit !found}'
+}
+
 plank_window_visible() {
     plank_running || return 1
     if immersive_surface_active; then
@@ -5226,6 +5392,7 @@ wait_for_process_until() {
         case "${kind}" in
             phone) phone_desktop_ready && return 0 ;;
             plank) plank_window_visible && return 0 ;;
+            taskbar) taskbar_window_visible && return 0 ;;
             picom) picom_running && return 0 ;;
         esac
         current_ms="$(now_ms)"
@@ -5275,6 +5442,37 @@ start_phone_desktop() {
     phone_recovered=false
     log 'Ming Phone Desktop startup failed; using xfdesktop fallback'
     start_xfdesktop_fallback
+    return 1
+}
+
+start_taskbar_dock() {
+    local started_at finished_at deadline_at was_running=false
+    stop_duplicate_taskbar
+    taskbar_running && was_running=true
+    command -v ming-taskbar-watchdog >/dev/null 2>&1 || {
+        log 'ming-taskbar-watchdog is unavailable'
+        return 1
+    }
+    if [[ "${was_running}" != "true" ]]; then
+        taskbar_restarts=$((taskbar_restarts + 1))
+    fi
+    started_at="$(now_ms)"
+    deadline_at=$((started_at + TASKBAR_STARTUP_DEADLINE * 1000))
+    log "starting Ming Taskbar (deadline=${TASKBAR_STARTUP_DEADLINE}s)"
+    (run_bounded "${TASKBAR_STARTUP_DEADLINE}" \
+        /usr/local/bin/ming-taskbar-watchdog >>"${health_log}" 2>&1 &) || true
+    if wait_for_process_until taskbar "${deadline_at}"; then
+        finished_at="$(now_ms)"
+        taskbar_elapsed_ms=$((finished_at - started_at))
+        taskbar_recovered=true
+        stop_plank || true
+        log 'Ming Taskbar ready'
+        return 0
+    fi
+    finished_at="$(now_ms)"
+    taskbar_elapsed_ms=$((finished_at - started_at))
+    taskbar_recovered=false
+    log 'Ming Taskbar startup failed; Plank fallback remains available'
     return 1
 }
 
@@ -5378,23 +5576,27 @@ write_metrics() {
     local phase="$1"
     local phone_fallback="${2:-false}"
     local phone_enabled=false phone_running=false phone_ready=false
-    local xfdesktop=false dock=false dock_visible=false compositor=false panel_running=false
+    local xfdesktop=false dock=false dock_visible=false taskbar=false taskbar_visible=false compositor=false panel_running=false
     local compositor_backend=none
-    local phone_pid_count=0 plank_pid_count=0 picom_pid_count=0
-    local phone_duplicates=0 plank_duplicates=0 picom_duplicates=0
+    local phone_pid_count=0 plank_pid_count=0 taskbar_pid_count=0 picom_pid_count=0
+    local phone_duplicates=0 plank_duplicates=0 taskbar_duplicates=0 picom_duplicates=0
     [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && phone_enabled=true
     phone_desktop_running && phone_running=true
     phone_desktop_ready && phone_ready=true
     xfdesktop_running && xfdesktop=true
     plank_running && dock=true
     plank_window_visible && dock_visible=true
+    taskbar_running && taskbar=true
+    taskbar_window_visible && taskbar_visible=true
     picom_running && compositor=true
     if xfce_panel_running || xfce_panel_window_visible; then panel_running=true; fi
     phone_pid_count="$(process_count phone)"
     plank_pid_count="$(process_count plank)"
+    taskbar_pid_count="$(process_count taskbar)"
     picom_pid_count="$(process_count picom)"
     (( phone_pid_count > 1 )) && phone_duplicates=$((phone_pid_count - 1))
     (( plank_pid_count > 1 )) && plank_duplicates=$((plank_pid_count - 1))
+    (( taskbar_pid_count > 1 )) && taskbar_duplicates=$((taskbar_pid_count - 1))
     (( picom_pid_count > 1 )) && picom_duplicates=$((picom_pid_count - 1))
     if picom_user_disabled; then
         compositor_backend=disabled-by-user
@@ -5414,15 +5616,20 @@ write_metrics() {
     MING_PHONE_RUNNING="${phone_running}" MING_PHONE_READY="${phone_ready}" \
     MING_PHONE_FALLBACK="${phone_fallback}" MING_XFDESKTOP="${xfdesktop}" \
     MING_DOCK_RUNNING="${dock}" MING_DOCK_VISIBLE="${dock_visible}" \
+    MING_TASKBAR_RUNNING="${taskbar}" MING_TASKBAR_VISIBLE="${taskbar_visible}" \
     MING_PICOM_RUNNING="${compositor}" MING_PICOM_BACKEND="${compositor_backend}" \
     MING_PHONE_PID_COUNT="${phone_pid_count}" MING_PLANK_PID_COUNT="${plank_pid_count}" \
+    MING_TASKBAR_PID_COUNT="${taskbar_pid_count}" \
     MING_PICOM_PID_COUNT="${picom_pid_count}" MING_PHONE_DUPLICATES="${phone_duplicates}" \
     MING_PLANK_DUPLICATES="${plank_duplicates}" MING_PICOM_DUPLICATES="${picom_duplicates}" \
+    MING_TASKBAR_DUPLICATES="${taskbar_duplicates}" \
     MING_PHONE_ELAPSED_MS="${phone_elapsed_ms}" MING_PLANK_ELAPSED_MS="${plank_elapsed_ms}" \
     MING_PICOM_ELAPSED_MS="${picom_elapsed_ms}" MING_PHONE_RESTARTS="${phone_restarts}" \
     MING_PLANK_RESTARTS="${plank_restarts}" MING_PICOM_RESTARTS="${picom_restarts}" \
     MING_PHONE_RECOVERED="${phone_recovered}" MING_PLANK_RECOVERED="${plank_recovered}" \
     MING_PICOM_RECOVERED="${picom_recovered}" MING_PANEL_RUNNING="${panel_running}" \
+    MING_TASKBAR_RECOVERED="${taskbar_recovered}" MING_TASKBAR_RESTARTS="${taskbar_restarts}" \
+    MING_TASKBAR_ELAPSED_MS="${taskbar_elapsed_ms}" \
     MING_HEALTH_LOG="${health_log}" python3 - <<'PY'
 import json
 import os
@@ -5456,6 +5663,15 @@ payload = {
         "recovered": boolean("MING_PLANK_RECOVERED"),
         "duplicates": integer("MING_PLANK_DUPLICATES"),
     },
+    "taskbar": {
+        "running": boolean("MING_TASKBAR_RUNNING"),
+        "visible": boolean("MING_TASKBAR_VISIBLE"),
+        "pid_count": integer("MING_TASKBAR_PID_COUNT"),
+        "elapsed_ms": integer("MING_TASKBAR_ELAPSED_MS"),
+        "restarts": integer("MING_TASKBAR_RESTARTS"),
+        "recovered": boolean("MING_TASKBAR_RECOVERED"),
+        "duplicates": integer("MING_TASKBAR_DUPLICATES"),
+    },
     "picom": {
         "running": boolean("MING_PICOM_RUNNING"),
         "backend": os.environ.get("MING_PICOM_BACKEND", "none"),
@@ -5465,14 +5681,15 @@ payload = {
         "recovered": boolean("MING_PICOM_RECOVERED"),
         "duplicates": integer("MING_PICOM_DUPLICATES"),
     },
-    "deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
-    "startup_deadlines": {"phone_desktop": 8, "plank": 8, "picom": 5},
+    "deadlines": {"phone_desktop": 8, "taskbar": 8, "plank": 8, "picom": 5},
+    "startup_deadlines": {"phone_desktop": 8, "taskbar": 8, "plank": 8, "picom": 5},
     "probe_timeout": 2,
     "supervisor_interval": 10,
     "health_log": os.environ.get("MING_HEALTH_LOG", ""),
     "duplicates": {
         "phone_desktop": integer("MING_PHONE_DUPLICATES"),
         "plank": integer("MING_PLANK_DUPLICATES"),
+        "taskbar": integer("MING_TASKBAR_DUPLICATES"),
         "picom": integer("MING_PICOM_DUPLICATES"),
     },
 }
@@ -5480,7 +5697,7 @@ payload = {
 payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
-    and payload["plank"]["visible"]
+    and (payload["taskbar"]["visible"] or payload["plank"]["visible"])
     and (payload["picom"]["running"]
          or payload["picom"]["backend"] in {"disabled-by-policy", "disabled-by-user"})
     and (not payload["phone_desktop"]["enabled"]
@@ -5529,7 +5746,10 @@ startup_once() {
     stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     start_phone_desktop || phone_fallback=true
-    start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
+    if ! start_taskbar_dock; then
+        log 'Ming Taskbar is not healthy after startup deadline; starting Plank fallback'
+        start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
+    fi
     start_picom || log 'Picom is not healthy after startup deadline'
     apply_dock_immersive_state
     ensure_audio_session
@@ -5546,7 +5766,10 @@ supervise_once() {
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
-    start_plank_dock || log 'Plank Dock repair did not recover a visible window'
+    if ! start_taskbar_dock; then
+        log 'Ming Taskbar repair did not recover a visible window; starting Plank fallback'
+        start_plank_dock || log 'Plank Dock repair did not recover a visible window'
+    fi
     start_picom || log 'Picom repair did not recover a compositor'
     apply_dock_immersive_state
     ensure_audio_session
@@ -7450,6 +7673,20 @@ X-GNOME-Autostart-enabled=false
 X-Ming-Managed-By=ming-session-healthcheck
 PHONEDESKTOPAUTO
 
+    cat > "${autostart_dir}/ming-taskbar.desktop" << TASKBARAUTO
+[Desktop Entry]
+Type=Application
+Name=Ming Taskbar
+Comment=Ming OS GTK3/X11 底部菜单栏
+Exec=/usr/local/bin/ming-taskbar-watchdog
+Icon=ming-os-menu
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-Ming-Managed-By=ming-session-healthcheck
+TASKBARAUTO
+
     cat > "${autostart_dir}/ming-session-healthcheck.desktop" << SESSIONHEALTHAUTO
 [Desktop Entry]
 Type=Application
@@ -7460,7 +7697,8 @@ Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
-X-Ming-Managed-Components=phone-desktop;plank;picom
+X-Ming-Managed-Components=phone-desktop;taskbar;plank;picom
+# Legacy contract: phone-desktop;plank;picom remains the Plank fallback stack.
 SESSIONHEALTHAUTO
 
     # Seed the same coordinator for users created after installation.  The
@@ -7483,6 +7721,17 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 USERDESKTOPSYNC
     mkdir -p /etc/skel/.config/autostart
+    cat > /etc/skel/.config/autostart/ming-taskbar.desktop << 'SKELTASKBAR'
+[Desktop Entry]
+Type=Application
+Name=Ming Taskbar
+Exec=/usr/local/bin/ming-taskbar-watchdog
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-Ming-Managed-By=ming-session-healthcheck
+SKELTASKBAR
     cat > /etc/skel/.config/autostart/ming-session-healthcheck.desktop << 'SKELSESSIONHEALTH'
 [Desktop Entry]
 Type=Application
@@ -7492,7 +7741,8 @@ Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
-X-Ming-Managed-Components=phone-desktop;plank;picom
+X-Ming-Managed-Components=phone-desktop;taskbar;plank;picom
+# Legacy contract: phone-desktop;plank;picom remains the Plank fallback stack.
 SKELSESSIONHEALTH
     cat > /etc/skel/.config/autostart/ming-desktop-sync-once.desktop << 'SKELDESKTOPSYNC'
 [Desktop Entry]
@@ -8458,7 +8708,7 @@ if [ -s /run/ming-installer/install-mode.json ]; then
     mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mode"])' \
         /run/ming-installer/install-mode.json 2>>"${LOG}" || true)"
     case "${mode}" in
-        blank_ab|dual_boot_preserve)
+        blank_ab|dual_boot_preserve|legacy_mbr)
             /usr/local/sbin/ming-install-mode write --mode "${mode}" \
                 --state /run/ming-installer/install-mode.json \
                 --partition /etc/calamares/modules/partition.conf >>"${LOG}" 2>&1 || exit 31
@@ -8698,9 +8948,13 @@ done
     exit 10
 }
 case "${mode}" in
-    blank_ab|dual_boot_preserve) ;;
+    blank_ab|dual_boot_preserve|legacy_mbr) ;;
     *) echo "an explicit Ming install mode is required" >&2; exit 11 ;;
 esac
+if [[ "${mode}" == "legacy_mbr" && -d /sys/firmware/efi ]]; then
+    echo "传统 BIOS / MBR 模式要求以 Legacy/CSM 启动安装介质；当前为 UEFI，已停止以免产生不可启动安装。" >&2
+    exit 14
+fi
 if ! grep -qw "boot=live" /proc/cmdline 2>/dev/null \
     && ! grep -qw "live-config" /proc/cmdline 2>/dev/null \
     && ! grep -qw "ming.installer=1" /proc/cmdline 2>/dev/null \
@@ -8853,8 +9107,14 @@ class InstallModeChooser(Gtk.Dialog):
             '保留双系统（禁用 major A/B OTA）',
             '手动选择空闲空间或目标分区；保留另一个系统，只允许签名 patch/minor 更新。'
         )
+        self.mbr_button = self.mode_button(
+            'legacy_mbr',
+            '传统 BIOS / MBR（自动配置 A/B 布局）',
+            '仅适用于 Legacy/CSM 启动的老电脑；会清除所选磁盘并创建 msdos 分区表、/boot、A/B root 和 /home，支持大版本 OTA 与自动回滚。'
+        )
         cards.pack_start(self.blank_button, False, False, 0)
         cards.pack_start(self.dual_button, False, False, 0)
+        cards.pack_start(self.mbr_button, False, False, 0)
         self.show_all()
         self.blank_button.grab_focus()
 
@@ -8907,7 +9167,7 @@ class InstallModeChooser(Gtk.Dialog):
 
 dialog = InstallModeChooser()
 response = dialog.run()
-if response == Gtk.ResponseType.OK and dialog.selected_mode in ('blank_ab', 'dual_boot_preserve'):
+if response == Gtk.ResponseType.OK and dialog.selected_mode in ('blank_ab', 'dual_boot_preserve', 'legacy_mbr'):
     print(dialog.selected_mode)
     sys.exit(0)
 sys.exit(1)
@@ -8965,7 +9225,7 @@ choose_install_mode() {
         return 1
     fi
     case "${choice}" in
-        blank_ab|dual_boot_preserve) ;;
+        blank_ab|dual_boot_preserve|legacy_mbr) ;;
         *)
             zenity --warning --title='未选择安装方式' \
                 --text='未选择安装方式，安装程序不会启动。请从“安装 Ming OS”再次打开并选择。' \
@@ -8993,14 +9253,14 @@ helper=(/usr/local/sbin/ming-live-installer-root
     --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}")
 
 # Calamares 3.3 emits its initial partition next-state signal before the
-# PartitionViewStep connects to it.  Blank A/B therefore starts with no action
+# PartitionViewStep connects to it.  Automatic A/B modes therefore start with no action
 # selected, and the button would remain disabled without a real user click.
 # Select the erase card only after the actual Calamares window exists.  This is
 # a bounded, best-effort UI assist: if xdotool/window discovery is unavailable,
 # the user can still click the card normally and the installer never proceeds
 # without Calamares' own enabled-state checks.
 auto_select_blank_ab() {
-    [[ "${selected_mode}" == "blank_ab" ]] || return 0
+    [[ "${selected_mode}" == "blank_ab" || "${selected_mode}" == "legacy_mbr" ]] || return 0
     command -v wmctrl >/dev/null 2>&1 || return 0
     command -v xdotool >/dev/null 2>&1 || return 0
     local calamares_window geometry width height click_x click_y page_ready
@@ -9039,8 +9299,8 @@ auto_select_blank_ab() {
                 xdotool windowactivate --sync "${calamares_window}" >/dev/null 2>&1 || true
                 xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
                     >/tmp/ming-installer/auto-select.log 2>&1 || true
-                printf '[%s] selected blank_ab erase card at %sx%s\n' \
-                    "$(date '+%F %T')" "${click_x}" "${click_y}" >>/tmp/ming-installer/auto-select.log
+                printf '[%s] selected %s erase card at %sx%s\n' \
+                    "$(date '+%F %T')" "${selected_mode}" "${click_x}" "${click_y}" >>/tmp/ming-installer/auto-select.log
                 return 0
             fi
         fi
@@ -9050,7 +9310,7 @@ auto_select_blank_ab() {
 }
 
 auto_select_pid=""
-if [[ "${selected_mode}" == "blank_ab" ]]; then
+if [[ "${selected_mode}" == "blank_ab" || "${selected_mode}" == "legacy_mbr" ]]; then
     auto_select_blank_ab &
     auto_select_pid="$!"
 fi
@@ -9745,7 +10005,7 @@ SCREENSAVERCFG
       <property name="&lt;Primary&gt;&lt;Alt&gt;l" type="string" value="ming-lock"/>
       <property name="&lt;Super&gt;e" type="string" value="ming-files"/>
       <property name="&lt;Super&gt;i" type="string" value="ming-control-center"/>
-      <property name="&lt;Super&gt;" type="string" value="ming-status-widget-toggle"/>
+      <property name="&lt;Super&gt;" type="string" value="ming-taskbar-toggle"/>
     </property>
   </property>
 </channel>
@@ -9789,8 +10049,8 @@ WHISKERRC
 
 # ======================== 登录期外观强制应用 ========================
 # 为什么需要它：构建期写入的 xfconf XML 在真实硬件上未必被 xfdesktop 接受
-# （真实显示器连接器名未知），且 Plank/picom 需要在会话内启动。此脚本在每次
-# 登录时自愈式地强制套用壁纸、主题与 Dock，是“美化确实生效”的最后保障。
+# （真实显示器连接器名未知），且任务栏/Plank fallback/picom 需要在会话内启动。
+# 此脚本在每次登录时自愈式地强制套用壁纸、主题与底部 shell，是“美化确实生效”的最后保障。
 
 configure_appearance_enforcer() {
     cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'
@@ -9882,7 +10142,7 @@ xfconf-query -c xsettings -p /Net/IconThemeName -s "Ming-Mint" 2>/dev/null || tr
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "ming-lock" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>t' -n -t string -s "ming-terminal" 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Primary><Alt>l' -n -t string -s "ming-lock" 2>/dev/null || true
-xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>' -n -t string -s "ming-status-widget-toggle" 2>/dev/null || true
+xfconf-query -c xfce4-keyboard-shortcuts -p '/commands/custom/<Super>' -n -t string -s "ming-taskbar-toggle" 2>/dev/null || true
 oobe_ready=false
 if [[ -r "${HOME}/.config/ming-os/oobe-account-done" ]] \
     && grep -Fxq configured "${HOME}/.config/ming-os/oobe-account-done" 2>/dev/null; then
@@ -9929,8 +10189,12 @@ elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/de
     (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 
-# Ensure the primary Plank Dock is visible after the compositor/session settles.
-if command -v ming-plank-watchdog &>/dev/null; then
+# Ensure the primary Ming Taskbar is visible after the compositor/session settles.
+# Plank remains a safe fallback when the GTK3/X11 surface cannot be created.
+if command -v ming-taskbar-watchdog &>/dev/null; then
+    /usr/local/bin/ming-taskbar-watchdog >/dev/null 2>&1 || \
+        { command -v ming-plank-watchdog &>/dev/null && /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true; }
+elif command -v ming-plank-watchdog &>/dev/null; then
     /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
 fi
 
@@ -9938,7 +10202,7 @@ exit 0
 APPLYAPPEARANCE
     chmod +x /usr/local/bin/ming-apply-appearance
 
-    # 登录自启动（在 picom/plank 之后，phase=Applications）
+    # 登录自启动（在 picom/任务栏之后，phase=Applications）
     local autostart_dir="/home/${MING_USER}/.config/autostart"
     mkdir -p "${autostart_dir}"
     cat > "${autostart_dir}/ming-apply-appearance.desktop" << 'APPLYAUTO'
@@ -10184,7 +10448,8 @@ main() {
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
-    configure_plank_dock         # 底部可放大 Dock
+    configure_plank_dock         # 保留为任务栏启动失败时的 fallback
+    configure_ming_taskbar       # GTK3/X11 底部磨砂菜单栏
     configure_ming_mint_dock_profile
     configure_ming_mint_desktop_icons
     configure_ming_mint_theme
@@ -10200,7 +10465,7 @@ main() {
     setup_welcome_wizard
     configure_appearance_enforcer  # 最后部署登录期自愈强制应用
 
-    echo "=====> [03_desktop] Ming OS 26.4.1 Dock 桌面定制完成 <====="
+    echo "=====> [03_desktop] Ming OS 26.4.1 底部任务栏桌面定制完成 <====="
 }
 
 main
