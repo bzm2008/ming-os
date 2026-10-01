@@ -28,10 +28,12 @@ pub struct Stage {
     interactive: bool,
 }
 
-pub const STAGES: [Stage; 3] = [
+pub const STAGES: [Stage; 4] = [
     Stage { name: "pet", width: 200.0, height: 200.0, interactive: false },
     Stage { name: "listening", width: 420.0, height: 280.0, interactive: true },
     Stage { name: "answer", width: 470.0, height: 520.0, interactive: true },
+    // 审批档：必须够大且可交互，否则审批卡在视口外点不到（实测「本会话信任」按钮点不到）
+    Stage { name: "approval", width: 520.0, height: 600.0, interactive: true },
 ];
 
 fn stage_by_name(name: &str) -> &'static Stage {
@@ -108,15 +110,45 @@ pub fn start_beacon(app: AppHandle) {
                 .unwrap_or("")
                 .to_string();
             let params = parse_query(&target);
-            if params.get("t").map(|v| v == &token).unwrap_or(false) {
-                if let Some(stage) = params.get("stage") {
-                    apply_stage(&app, stage);
-                }
-                if params.contains_key("hide") {
-                    hide(&app);
-                }
-            } else {
+            // 路径决定动作（早先的版本把 /permissions 当成查询参数判定了，实测 404 无响应）
+            let path = target.split('?').next().unwrap_or("");
+            if !params.get("t").map(|v| v == &token).unwrap_or(false) {
                 eprintln!("[summon] 上报口收到无效 token，已忽略：{target}");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            }
+            match path {
+                // 权限状态：面板据此显示「缺哪个权限 + 一键去开启」
+                "/permissions" => {
+                    let list = crate::permissions::probe();
+                    let body = serde_json::json!({ "capabilities": list }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+                // 一键跳系统设置对应页
+                "/open-settings" => {
+                    if let Some(id) = params.get("id") {
+                        if let Err(error) = crate::permissions::open_settings(id) {
+                            eprintln!("[summon] 打开系统设置失败（{id}）：{error}");
+                        }
+                    }
+                }
+                // 档位与收起
+                _ => {
+                    if let Some(stage) = params.get("stage") {
+                        apply_stage(&app, stage);
+                    }
+                    if params.contains_key("hide") {
+                        hide(&app);
+                    }
+                }
             }
             let _ = stream.write_all(
                 b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",

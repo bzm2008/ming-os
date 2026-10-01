@@ -255,6 +255,8 @@ const MING_TEA_SUMMON = {
   layer: null,
   capsule: null,
   answer: null,
+  permission: null,
+  permissionCheckedAt: 0,
   listeningRequested: false,
   submittedText: "",
   lastAnswer: "",
@@ -338,11 +340,16 @@ function mingTeaSummonEnsureNodes() {
   if (!document.body) return;
   const layer = document.createElement("div");
   layer.className = "mt-summon-layer";
+  const permission = document.createElement("button");
+  permission.type = "button";
+  permission.className = "mt-summon-permission";
+  permission.hidden = true;
   const capsule = document.createElement("div");
   capsule.className = "mt-summon-capsule";
   const answer = document.createElement("div");
   answer.className = "mt-summon-answer";
-  layer.append(capsule, answer);
+  layer.append(permission, capsule, answer);
+  MING_TEA_SUMMON.permission = permission;
   document.body.appendChild(layer);
   MING_TEA_SUMMON.layer = layer;
   MING_TEA_SUMMON.capsule = capsule;
@@ -419,11 +426,85 @@ function mingTeaSummonSubmit() {
   }
 }
 
+/** 向壳要一次权限状态，缺哪个就把提示条显示出来（点一下跳系统设置对应页）。
+ * 30 秒才查一次：权限不会自己变，没必要每轮都打。 */
+function mingTeaSummonCheckPermissions() {
+  if (!MING_TEA_SUMMON.shell || !MING_TEA_SUMMON.token) return;
+  const now = Date.now();
+  if (now - MING_TEA_SUMMON.permissionCheckedAt < 30000) return;
+  MING_TEA_SUMMON.permissionCheckedAt = now;
+  fetch(`${MING_TEA_SUMMON.shell}/permissions?t=${encodeURIComponent(MING_TEA_SUMMON.token)}`)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((payload) => {
+      const chip = MING_TEA_SUMMON.permission;
+      if (!chip || !payload || !Array.isArray(payload.capabilities)) return;
+      const missing = payload.capabilities.find((item) => item && item.permission_required && !item.available);
+      if (!missing) {
+        chip.hidden = true;
+        return;
+      }
+      chip.hidden = false;
+      chip.textContent = `需要${missing.label ?? "系统"}权限 · 点此开启`;
+      chip.dataset.capability = missing.id ?? "";
+    })
+    .catch(() => {
+      /* 探测失败就不显示提示条，不打扰用户 */
+    });
+}
+
+/** 在官方审批卡里补一个「本会话信任」按钮：点一下之后，本会话的普通电脑操作不再反复问。
+ * 主窗口与 summon 面板都会注入（审批流是同一套，用户在哪遇到都能选）。
+ * 为什么补在官方卡里而不是自己画一套：审批是官方的流程（拒绝/允许一次），我们只加一个选项，
+ * 不抢它的语义；危险动作（输入/剪贴板/上传/删除/安装/系统命令）在宿主侧始终会继续问。 */
+function mingTeaInjectSessionTrust() {
+  try {
+    const cards = document.querySelectorAll("[data-approval-key]");
+    for (const card of cards) {
+      if (card.querySelector(".mt-summon-trust")) continue;
+      const buttons = Array.from(card.querySelectorAll("button"));
+      const allow = buttons.find((b) => /允许|批准/.test(b.textContent || ""));
+      const trustButton = document.createElement("button");
+      trustButton.type = "button";
+      trustButton.className = `${allow?.className ?? ""} mt-summon-trust`.trim();
+      trustButton.textContent = "本会话信任";
+      trustButton.title = "本会话内的普通电脑操作不再询问；输入、上传、删除、安装等仍会确认";
+      trustButton.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          await mingTeaHubRpc("summon.trust");
+          trustButton.textContent = "已信任本会话";
+          trustButton.disabled = true;
+        } catch (error) {
+          trustButton.textContent = `信任失败：${String(error?.message ?? error).slice(0, 20)}`;
+          return;
+        }
+        // 顺手把当前这一次也允许掉，用户不用再点一次
+        if (allow) allow.click();
+      });
+      (allow?.parentElement ?? card).appendChild(trustButton);
+    }
+  } catch {
+    /* 注入失败不影响审批本身 */
+  }
+}
+
 /** 每轮（180ms 节流）跑一次：判定档位、更新胶囊与回答、按需开始听与发送。 */
 function mingTeaSummonTick() {
   if (!MING_TEA_SUMMON.on) return;
   mingTeaSummonEnsureNodes();
   if (!MING_TEA_SUMMON.capsule || !MING_TEA_SUMMON.answer) return;
+
+  mingTeaSummonCheckPermissions();
+  if (MING_TEA_SUMMON.permission && !MING_TEA_SUMMON.permissionBound) {
+    MING_TEA_SUMMON.permissionBound = true;
+    MING_TEA_SUMMON.permission.addEventListener("click", () => {
+      const id = MING_TEA_SUMMON.permission?.dataset.capability;
+      if (!id || !MING_TEA_SUMMON.shell || !MING_TEA_SUMMON.token) return;
+      const probe = new Image();
+      probe.src = `${MING_TEA_SUMMON.shell}/open-settings?t=${encodeURIComponent(MING_TEA_SUMMON.token)}&open-settings=${encodeURIComponent(id)}&_=${Date.now()}`;
+    });
+  }
 
   const voicePhase = mingTeaSummonVoicePhase();
   const composerText = mingTeaSummonComposerText();
@@ -457,10 +538,13 @@ function mingTeaSummonTick() {
     MING_TEA_SUMMON.answer.textContent = answerText;
   }
 
-  // 档位：有回答=answer；在听或胶囊有字=listening；否则只有宠物
+  // 档位：有审批=approval（要大而可点，否则审批卡在视口外点不到）；
+  //       有回答=answer；在听或胶囊有字=listening；否则只有宠物
   const hasCapsule = (MING_TEA_SUMMON.capsule.textContent || "").trim() !== "";
+  const approvalPending = document.querySelector("[data-approval-key], [data-question-key]") !== null;
   let stage = "pet";
-  if (answerText !== "") stage = "answer";
+  if (approvalPending) stage = "approval";
+  else if (answerText !== "") stage = "answer";
   else if (voicePhase || hasCapsule) stage = "listening";
   mingTeaSummonReport(stage);
 }
@@ -659,6 +743,8 @@ function applyMingTeaTweaks() {
 
       mingTeaFillContextMeter();
     mingTeaFilterModelMenu();
+    // 「本会话信任」按钮：主窗口与 summon 面板都注入（同一个宿主逻辑，用户在哪都能用）
+    mingTeaInjectSessionTrust();
     mingTeaProtectHubRoute();
 
   for (const node of mingTeaLeafNodes(document.body)) {

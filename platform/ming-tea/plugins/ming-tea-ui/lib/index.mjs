@@ -18,6 +18,7 @@ import { cpus, homedir, totalmem } from "node:os";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 // 站点接入（登录 / 额度 / 更新检查）：宿主侧实现，见 lib/host/
 import { createHubService, registerHubRpc } from "./host/rpc.mjs";
+import { getSummonTrust, shouldAutoAllow } from "./host/summon-trust.mjs";
 import { join } from "node:path";
 
 const BOOT_LIGHT = "#f6faf8";
@@ -242,9 +243,19 @@ function needsApproval(toolName) {
 
 function installApprovalGate(ctx) {
   const approval = ctx.get?.("approval");
+  const trust = getSummonTrust();
   ctx.on("tools/pre-execute", async (exec, next) => {
     const toolName = String(exec?.name ?? "");
     if (!needsApproval(toolName)) return next();
+
+    // 会话级「信任一次」：用户在面板点过之后，普通电脑操作不再反复问；
+    // 输入/剪贴板、上传/提交、删除/安装/系统命令仍然每次都问（见 summon-trust.mjs）。
+    const sessionId = exec?.agent?.session?.id;
+    if (typeof sessionId === "string" && sessionId !== "") trust.noteAskedSession(sessionId);
+    if (trust.isTrusted(sessionId) && shouldAutoAllow(toolName)) {
+      policyTrace(`allow ${toolName}（会话已信任，不再询问）`);
+      return next();
+    }
 
     if (!approval || typeof approval.request !== "function") {
       policyTrace(`deny ${toolName}（无审批服务，fail-closed）`);

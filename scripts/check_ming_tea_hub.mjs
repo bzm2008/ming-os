@@ -20,6 +20,7 @@ import { createAccountStore, isExpired } from "../platform/ming-tea/plugins/ming
 import { createModelRoute, routeConfig, ROUTE_ID, FALLBACK_MODEL, FALLBACK_PROVIDER } from "../platform/ming-tea/plugins/ming-tea-ui/lib/host/model-route.mjs";
 import { openInSystemBrowser, openerCommand } from "../platform/ming-tea/plugins/ming-tea-ui/lib/host/open-external.mjs";
 import { buildUsageBoard, describeExpiry } from "../platform/ming-tea/plugins/ming-tea-ui/lib/host/usage-view.mjs";
+import { createSummonTrust, shouldAutoAllow } from "../platform/ming-tea/plugins/ming-tea-ui/lib/host/summon-trust.mjs";
 
 let passed = 0;
 const failures = [];
@@ -685,6 +686,47 @@ await check("describeExpiry：可注入 now，非法输入返回 null 而不是�
   assertEqual(describeExpiry(undefined, at), { text: null, days: null });
   assertEqual(describeExpiry("not-a-number", at), { text: null, days: null });
   assertEqual(describeExpiry(at, at + 86_400_000).days, 0, "已过期不显示负数");
+});
+
+console.log("\n== 8. 会话级信任：谁可以在已信任会话里免确认 ==");
+
+await check("已信任会话里，看屏幕/点击类操作不再询问", async () => {
+  assertEqual(shouldAutoAllow("cua_driver_native__get_accessibility_tree"), true);
+  assertEqual(shouldAutoAllow("cua_driver_native__list_windows"), true);
+  assertEqual(shouldAutoAllow("cua_driver_native__get_window_state"), true);
+  assertEqual(shouldAutoAllow("cua_driver_native__click"), true, "点击是「看一眼再点一下」的常规动作");
+});
+
+await check("输入/剪贴板类始终要继续确认（可能打进密码）", async () => {
+  assertEqual(shouldAutoAllow("cua_driver_native__type_text"), false);
+  assertEqual(shouldAutoAllow("cua_driver_native__press_key"), false);
+  assertEqual(shouldAutoAllow("cua_driver_native__paste"), false);
+});
+
+await check("上传/提交、删除/安装/系统命令始终要继续确认", async () => {
+  assertEqual(shouldAutoAllow("cua_driver_native__upload_file"), false);
+  assertEqual(shouldAutoAllow("mcp__playwright-mcp__submit"), false);
+  assertEqual(shouldAutoAllow("computer_delete_file"), false);
+  assertEqual(shouldAutoAllow("computer_install_package"), false);
+  assertEqual(shouldAutoAllow("terminal_run"), false);
+});
+
+await check("拿不准就继续问（空名字 fail-closed）", async () => {
+  assertEqual(shouldAutoAllow(""), false);
+  assertEqual(shouldAutoAllow(undefined), false);
+});
+
+await check("信任状态只在本进程内、按会话隔离，且能撤销", async () => {
+  const trust = createSummonTrust();
+  assertEqual(trust.isTrusted("s1"), false, "默认不信任任何会话");
+  trust.noteAskedSession("s1");
+  assertEqual(trust.trust(), "s1", "不传 sessionId 时信任「最近来问的那个」");
+  assertEqual(trust.isTrusted("s1"), true);
+  assertEqual(trust.isTrusted("s2"), false, "不跨会话");
+  assertEqual(trust.untrust("s1"), "s1");
+  assertEqual(trust.isTrusted("s1"), false, "可撤销");
+  const other = createSummonTrust();
+  assertEqual(other.isTrusted("s1"), false, "不同实例互不影响（=重启即失效）");
 });
 
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);

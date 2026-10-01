@@ -23,6 +23,7 @@ import {
 import { createModelRoute, ROUTE_ID } from "./model-route.mjs";
 import { openInSystemBrowser } from "./open-external.mjs";
 import { buildUsageBoard } from "./usage-view.mjs";
+import { getSummonTrust } from "./summon-trust.mjs";
 
 export const CHANNEL = "/ming-tea";
 
@@ -345,6 +346,16 @@ export function registerHubRpc(ctx, service, { log = () => {} } = {}) {
       return { ...buildUsageBoard(quota), quota };
     },
     "tiers.get": () => service.tiersGet(),
+    // 会话级「信任一次」：面板点一下就不再反复弹审批（仅本会话、危险动作除外）
+    "summon.trust": (payload) => {
+      const target = getSummonTrust().trust(payload?.sessionId);
+      return { trusted: target, ...getSummonTrust().status() };
+    },
+    "summon.untrust": (payload) => {
+      const target = getSummonTrust().untrust(payload?.sessionId);
+      return { untrusted: target, ...getSummonTrust().status() };
+    },
+    "summon.trustStatus": () => getSummonTrust().status(),
     "models.list": () => service.modelsList(),
     "models.sync": () => service.modelsSync(),
     "update.check": () => service.updateCheck(),
@@ -359,12 +370,11 @@ export function registerHubRpc(ctx, service, { log = () => {} } = {}) {
           if (handler === undefined) {
             return { ok: true, value: { ok: false, code: "hub/unknown-endpoint", message: `未知端点：${endpoint}` } };
           }
-          void payload;
           // **永远返回 ok:true**：错误放进 value 里。若不这样，任何抛错都会走 connection 的
           // 失败信封，客户端只能看到「invalid server-response failure」这种通用串，
           // 站点故障的具体原因（HTTP 500 / 超时 / 需要重新登录）就到不了界面。
           try {
-            return { ok: true, value: { ok: true, data: await handler() } };
+            return { ok: true, value: { ok: true, data: await handler(payload) } };
           } catch (error) {
             const code = typeof error?.code === "string" ? error.code : "hub/error";
             const httpStatus = typeof error?.httpStatus === "number" ? error.httpStatus : undefined;

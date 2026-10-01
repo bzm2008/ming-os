@@ -1544,6 +1544,22 @@ body[data-ds-dark-theme] {
   display: flex;
 }
 
+/* 权限提示条：缺权限时才出现，点一下跳系统设置（⑦ 的可点击引导） */
+.mt-summon-permission {
+  pointer-events: auto;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #d08a1e 45%, transparent);
+  background: color-mix(in srgb, #fdf3e2 94%, transparent);
+  color: #7a4b06;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.mt-summon-permission[hidden] {
+  display: none;
+}
+
 /* 转录胶囊：只在听到话之后出现 */
 .mt-summon-capsule {
   max-width: 100%;
@@ -1589,14 +1605,23 @@ body[data-ds-dark-theme] {
   display: none;
 }
 
-/* 审批 / 提问卡：需要动手时才出现，贴在面板最下方，可点 */
+/* 审批 / 提问卡：需要动手时才出现。
+ * ⚠️ 必须 `position: fixed` 钉到视口底部：它原本挂在 composerSeat 里、按整页布局排布
+ * （实测在 766px 高的布局底部），而 summon 面板只有几百像素高 —— 不钉住就会落在视口外，
+ * 用户看不到也点不到（2026-10-01 实测：Playwright 报 element is not visible）。 */
 :root[data-ming-tea-summon="1"] [data-approval-key],
 :root[data-ming-tea-summon="1"] [data-question-key] {
   visibility: visible !important;
-  position: relative;
+  position: fixed !important;
+  left: 10px !important;
+  right: 10px !important;
+  bottom: 10px !important;
+  top: auto !important;
+  width: auto !important;
+  max-width: none !important;
+  max-height: 62vh;
+  overflow-y: auto;
   z-index: 2147483100;
-  width: 100% !important;
-  max-width: 100% !important;
   pointer-events: auto;
 }
 
@@ -1606,4 +1631,10 @@ body[data-ds-dark-theme] {
   .mt-summon-answer {
     background: color-mix(in srgb, #16211f 92%, transparent);
   }
+}
+
+/* summon 面板里补的「本会话信任」按钮：跟在官方审批选项后面，样式随官方按钮 */
+:root[data-ming-tea-summon="1"] .mt-summon-trust {
+  margin-left: 8px;
+  opacity: 0.92;
 }
