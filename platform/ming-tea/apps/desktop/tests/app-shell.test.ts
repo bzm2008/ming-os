@@ -92,7 +92,7 @@ describe("desktop shell", () => {
     const source = readFileSync(join(__dirname, "..", "src", "main.ts"), "utf8");
     const lock = JSON.parse(readFileSync(join(__dirname, "../../../../../assets/ming-tea-dsh-lock.json"), "utf8"));
     expect(lock.plugins).toEqual(expect.arrayContaining([
-      expect.objectContaining({package: "@michengai/dsh-codex-ui", version: "1.1.18", license: "Apache-2.0"}),
+      expect.objectContaining({package: "@michengai/dsh-codex-ui", version: "1.1.25", license: "Apache-2.0"}),
     ]));
     expect(source).toContain("DSH 社区工作台");
     expect(source).toContain("社区 Codex UI 负责会话和工作区");

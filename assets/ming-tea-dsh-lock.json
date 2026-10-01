@@ -2,10 +2,10 @@
   "schema": "ming.tea.dsh.lock.v1",
   "runtime": {
     "package": "@deepseek-ai/dsh",
-    "version": "0.1.7-rc.1",
-    "revision": "0.1.7-rc.1",
+    "version": "0.2.0-rc.2",
+    "revision": "0.2.0-rc.2",
     "license": "MIT",
-    "integrity": "sha512-O1K076aCmqE+h4fB5J+mi3twNSAnh26OqHepaqvS5f1tccFnxhVyGpUmjcncVM5x1SX4niznmvsGrsRo9p733A=="
+    "integrity": "sha512-EAJ3gPNcVt/uv8X19PMm9NkVhWgT7xXNMk0UKCVm+IQ5rpSQOcsMUa0HWlnYYVybKMsccjcRB21vVVsaXQ6IdA=="
   },
   "install": {
     "package_manager": "npm",
@@ -14,12 +14,20 @@
     "fund": false,
     "node": ">=22.19.0"
   },
+  "versionExemptions": [
+    {
+      "package": "dsh-plugin-shop",
+      "version": "0.8.3",
+      "dsh": "0.2.0-rc.2",
+      "reason": "上游 0.8.3 与 0.8.4-beta.0 的 peer 都是 ^0.1.1-rc.2，没有声明支持 0.2 的版本；经审计其实际 import 的 API（dsh-app-boot 的 loadOptionalPatches/readProfileManifest/resolveProfileDir、dsh-typert-protocol 的 Remote/TypertRemoteService）在 0.2 全部存在，故按官方 allow-version 机制接受风险运行。上游发布支持 0.2 的版本后应撤销豁免并删除本条目。"
+    }
+  ],
   "plugins": [
     {
       "package": "@deepseek-ai/dsh-tool-bash",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-e5anuuLPQLnBfAxY18cmnvikeBs2DzlBS2IjmZR16EBvee10spnSqviUYOzvLBKTVEDVQEbDZdBTSE1YsothZQ==",
+      "integrity": "sha512-0yjnxm5C7yqX/XWJYFXZVBWXrM6E/6FnjOjt7sN8Itsb5eSHXCz9e5XpKXpLSAPbzq8Kh49yFOw2ZUJRBkOHyw==",
       "capabilities": [
         "terminal.run",
         "diagnostic.run"
@@ -28,9 +36,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-tool-str-replace-editor",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-GwWmI1JvNn0itt/ZpOd1q8VqBuGUtMYPs0AEb9xzG5P6cZvoXvR/QGEEuWS9HHSzv4t2Fsas+4C5ZUmc0/DCqg==",
+      "integrity": "sha512-NDvuS4kmHFTdYNb5j/h/KwEGl4/CIB/mgQsraYj2gMvAcLz7SKfzyLHiliWFdFP48TnSRAS1JhMmNcQ0TN+T1A==",
       "capabilities": [
         "fs.read",
         "fs.write",
@@ -41,9 +49,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-tool-fs",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-9ou+RmtrC6Q0RYishWXnbrB0cWt354Z6LIF/7EHntRYv6dv8SEgOkdE+IQ3kOfTa4av4sLHZDQw1KwweoTaMuA==",
+      "integrity": "sha512-QDtVmZoc84iDwrM4ftMDwzuttQd5dXu93NMeas5cSsUvptnW4CiPrMOkYswRXmSry5WRWn7Gk0lSRJ1bpynwiQ==",
       "capabilities": [
         "file.read",
         "file.list",
@@ -54,9 +62,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-tool-web",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-ryny9wTq7aYZhFY9gCldLN5fKf24AqucX1xvXdsclWChmV5N5K8zl+Yw4S6PbMpyYdM1xXVJJR6GhDNVi+ethQ==",
+      "integrity": "sha512-NBH1e06QsDAPGPBpCjp8jr1rv+YX173vyXQ+ENT8IChHFN43S5uNZbzr/EoVTcJ4uAw3OamGXVtD7lU7uF46Jg==",
       "capabilities": [
         "browser.read",
         "browser.open",
@@ -67,9 +75,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-browser-use",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-3it6h+z/IK+YpL7kjDCq3ryXGSOLTg88VEBE08zj37lgkxeoItbNtlvQrseZbEkA39xUzmzHe3wEAIGPJWZZVg==",
+      "integrity": "sha512-B2J31SjeHOZIssee4XwmGSDG8lKx++AeQ6JqmmzlTvCh2Robz48NIlnz1FxROR8Mk10xLojsFnafpuTL/LahvQ==",
       "capabilities": [
         "browser.read",
         "browser.open"
@@ -78,9 +86,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-computer-use",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-HzihM3gU24uf7HocRF+w2CMk1LcdWjuxNM8ToHiMwOldURnDLZ7ZmpSFvZNb9oZ6EYQx5OF95gjJMQVsyLFvkg==",
+      "integrity": "sha512-QPt11n+gv7g2q5ejy1KhWaNbm9W9OO4Ti2NaRbGRgtX5iAOzPCUQT+6gbNZ2ws4JiVLNs1YnX4HodY2HQJgM1Q==",
       "capabilities": [
         "app.open",
         "browser.open"
@@ -89,9 +97,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-experimental-browser-use-playwright-mcp",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-zQST0oALz4ia6TjvegsY1oGVkjKtiYZReXvlbCk3e7p5rp1T6iG8K//t/4MQOtRDbIe10QFmf2bTzHC3dxGOvQ==",
+      "integrity": "sha512-KuiUwuRF2ZB+4rpNsQZ6vxR0xqHRt+pUWM9mrv/VLHsw/puuBeKmyK0cEi1kQMuD0C2+rh3K4ZFFXaHEXt6Tow==",
       "capabilities": [
         "browser.read",
         "browser.open",
@@ -102,9 +110,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-experimental-computer-use-cua-driver-native",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-bBW2k183A7ACdR/sau+Z65jEueVqyaDgyk9EzRyLQDJRqdK702wsiot9sAfeLD/1Qy8Ss2EjgDKh4PFmCQvs4A==",
+      "integrity": "sha512-t2ilCw0tze5qDZJJsyd8CIVZaP/dadcLR9abceCPpU2krGVZhQj1jdCyBxSVWeQCt6E0Fr09RhWxgH47Ai6qlg==",
       "capabilities": [
         "app.open",
         "browser.open"
@@ -114,9 +122,9 @@
     },
     {
       "package": "@deepseek-ai/dsh-skill-office",
-      "version": "0.1.7-rc.1",
+      "version": "0.2.0-rc.2",
       "license": "MIT",
-      "integrity": "sha512-ESjPx+iyfaNIlU9KxaU1udof9Qc9IpO+ebHBWC15DfsC2w/UDXjNVuHGiLRLd6QU9+e+RlV2Q8BX4ClBuy0k8w==",
+      "integrity": "sha512-VCo/orDfkq0tvngJZ9TGfcmnZ1Xud1wrmQdXRiof6DzIu89pEV3q6lfnrnptNynBojKu4dQ1zIChl3jtofamjw==",
       "capabilities": [
         "office.read",
         "office.write"
@@ -125,9 +133,9 @@
     },
     {
       "package": "@michengai/dsh-agency-agents",
-      "version": "1.0.5",
+      "version": "1.0.7",
       "license": "Apache-2.0",
-      "integrity": "sha512-CNcjfs7LiLW3inl8Vj6hbX6NV+ye1CAPQvJ258nO96q8gltQ94vbb9t+6WwxAk5QECyKXVJfXrZidubV+Zxs0Q==",
+      "integrity": "sha512-w35ab9oPVB1FKe3Mpn4OftBlD61mRfuP6jWv3RwBU1TdFXlYr8hZ6ZwMobtv5W/uue9WkpR+q0IfglOSAWMY4Q==",
       "capabilities": [
         "prompt.agents.read"
       ],
@@ -139,9 +147,9 @@
     },
     {
       "package": "@michengai/dsh-archive-manager",
-      "version": "1.0.5",
+      "version": "1.0.10",
       "license": "Apache-2.0",
-      "integrity": "sha512-XiFk6qXHJd9N/txlyEFKuR6v0a9uxK/AvJrnyMY5ESTFumCIzbzMTi4P9NOytCCsvMnLxFsDtchiz2D+2LGbTw==",
+      "integrity": "sha512-OajJqj8F/2RMS+fBya6AcbvyveAKrPpY4shq14d9l4T26PruFRULXCi0OXPMQ0TrqvuZoGHcft7el3szgYbWBg==",
       "capabilities": [
         "session.archive",
         "session.unarchive",
@@ -155,9 +163,9 @@
     },
     {
       "package": "@michengai/dsh-btw",
-      "version": "0.1.13",
+      "version": "0.1.15",
       "license": "Apache-2.0",
-      "integrity": "sha512-gkT6vqSQqqUD9KrVfa0LMRUcWihxefkp4zceXAlHZ7HqOfS7Abk5oaoJQ5+px6tjd71jxVOQwlhDyS8D0QJDmQ==",
+      "integrity": "sha512-kFS238yE9Gw8jDS6mslRf0ZwDxGo+gAFw2JyTytwO4xQ9pbHu1yoyaBfKyns68QV0IAtOH/RvUVt0aV8F29qKQ==",
       "capabilities": [
         "client.readonly",
         "session.sideask"
@@ -170,9 +178,9 @@
     },
     {
       "package": "@michengai/dsh-code-review",
-      "version": "0.1.7",
+      "version": "0.1.9",
       "license": "Apache-2.0",
-      "integrity": "sha512-MejubNR2YTg9mPd+RYQcvTEdSePhAXQfYJtKiJwKRIi0PJ4+Cx+ArNKs3svm4vE8/Xpw2xqUhN0cv+fkgnHjpg==",
+      "integrity": "sha512-4vO0PPNurGiQCm2e8wHfkPXaaasxHFRQbxGC+HIvod77wYHuorFlcPn+zCJErTsWYn6J4yJ5vzrWP2vdNh7U7Q==",
       "capabilities": [
         "code.read",
         "review.write"
@@ -185,9 +193,9 @@
     },
     {
       "package": "@michengai/dsh-codex-pet",
-      "version": "0.1.10",
+      "version": "0.1.12",
       "license": "Apache-2.0",
-      "integrity": "sha512-LTOLUZ13uNQ4UctYmysmEud0N9TTeWBmIDZ5VzVrdBoeSEyz88XzfoHssXWV50gCO1iiqTB6m9NmrfWxc6k9dQ==",
+      "integrity": "sha512-fzM/mrD22C3QFxEt1M1bsB1G0xUST+f4jpNgkYoK87XyRV3Ff/6fmcFAstrvtNwf+5Orz8W5RRKxxU83MKf+Zw==",
       "capabilities": [
         "client.pet"
       ],
@@ -199,9 +207,9 @@
     },
     {
       "package": "@michengai/dsh-codex-ui",
-      "version": "1.1.18",
+      "version": "1.1.25",
       "license": "Apache-2.0",
-      "integrity": "sha512-mYmEU7tf7p8k3CFeiftaOpkuPh6s62DE+1anRCmifsIVHJG0uUXb44RZCkDZmR+vhLeKptMKTf501TpCkKdQPA==",
+      "integrity": "sha512-FrOdwpewZiWkoVtePA0y5ZmSiTcaKJurJmt7QS6cSmX2SUqbrwUiRVm+Dbnj8pTzwlJ6TTNSXKIxEi81mVUJzw==",
       "capabilities": [
         "client.sidebar",
         "client.workspace",
@@ -216,9 +224,9 @@
     },
     {
       "package": "@michengai/dsh-im-connect",
-      "version": "0.1.55",
+      "version": "0.1.59",
       "license": "Apache-2.0",
-      "integrity": "sha512-lt40dC9NWJn5+JkbkgeNHp+8HpHYEk68jBUVHJH02eFA5a6fyRq6ze+xJaKv1GnCVILToCMK9XuAVG4MzSvPrQ==",
+      "integrity": "sha512-pBwhE8xvbzGhsZhSVecvRtVYjf+cJFAm22OSetmAIroQhknYhcNwFbj7fattUFHu1WTErnPcqXTtVEMWD37Mzg==",
       "capabilities": [
         "network.external",
         "im.receive",
@@ -232,9 +240,9 @@
     },
     {
       "package": "@michengai/dsh-simplify",
-      "version": "0.1.10",
+      "version": "0.1.12",
       "license": "Apache-2.0",
-      "integrity": "sha512-x/DPidoubwnqWMnnka24Ggv0E+8xf5dIo8VfYxEImEjvOdAmSzRcD9hVbuEiL5rd835m6D5A2ohv8OBZkL1R0Q==",
+      "integrity": "sha512-KpYZ9p7/v7IdRungeRZwUbT2aC4e/Ozo196JwIIDD7Qv8yhfHBmTYXU6S+wk82esiR4PI6YUXP94OgdnvugARw==",
       "capabilities": [
         "code.read",
         "code.modify"
@@ -247,9 +255,9 @@
     },
     {
       "package": "@michengai/dsh-skills-manager",
-      "version": "1.1.4",
+      "version": "1.1.8",
       "license": "Apache-2.0",
-      "integrity": "sha512-E85oOwdF23uNTS1u8iuvqXfvTskgBAZX0PbUFRYsePJ/qmK0hM9Mwji9BxlNn3OljcY61GBpUFUgynIHfKNChA==",
+      "integrity": "sha512-Bz8npEazkkVOD7Ku8EOHSzc/CMrypl+UhBbScHjBZZSyt27xgNGL1EaNYEcwuxbDIJPKHF38yOmjh92iy1xM3w==",
       "capabilities": [
         "skill.read",
         "skill.write",
@@ -291,9 +299,9 @@
     },
     {
       "package": "@michengai/dsh-automation",
-      "version": "0.1.51",
+      "version": "0.1.53",
       "license": "Apache-2.0",
-      "integrity": "sha512-kwfsjF8zENToZlz83C0D5RBBX+O64kq9ouKcEP7y+H3w8uf46TvUWIj+JF942sjcg5t54Zyz8fBG4zEpHv6p1g==",
+      "integrity": "sha512-G0tXvbX56Eze0y7BGi60XcfkYvNUXUj4RQBB7ObesiaNAKHwiFiSWCaX33alSjwOn6ClKAVr54dTAZMVD+Vo+w==",
       "capabilities": [
         "schedule.create",
         "schedule.run",

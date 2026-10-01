@@ -59,6 +59,13 @@ if [[ ! -f "${RUNTIME_DIR}/package.json" ]]; then
     printf '{"private":true,"name":"ming-tea-dsh-runtime"}\n' > "${RUNTIME_DIR}/package.json"
 fi
 
+# 运行时树是**构建产物**：先清掉 node_modules 再装，否则上一版的遗留包会把新版本的 peer 锁死，
+# npm 直接 ERESOLVE 失败。实测 0.1.7-rc.1 → 0.2.0-rc.2 必然踩到：树里旧的
+# `@deepseek-ai/dsh-experimental-browser-use-playwright-mcp@0.1.7-rc.1` 仍要求
+# `@deepseek-ai/dsh-browser-use@0.1.7-rc.1`，与本次要装的 0.2.0-rc.2 冲突。
+# 只删 node_modules 与 package-lock.json；`dsh-home/`（profile、会话、凭证）必须保留。
+rm -rf "${RUNTIME_DIR}/node_modules" "${RUNTIME_DIR}/package-lock.json"
+
 # pnpm ships beside the runtime so "dsh plugin" can spawn it: dsh does not
 # resolve pnpm from the runtime prefix on its own.
 npm install --prefix "${RUNTIME_DIR}" --ignore-scripts --no-audit --no-fund --save-exact \
@@ -86,6 +93,25 @@ if [[ ! -f "${PROFILE_DIR}/package.json" ]]; then
     DSH_HOME="${DSH_HOME_DIR}" "${runtime_bin}" \
         --profile "${PROFILE_NAME}" --from-default-profile "${PROFILE_TEMPLATE}" --dump-config >/dev/null
 fi
+
+# 精确版本豁免（lock 的 versionExemptions）：**必须在 `dsh plugin add` 之前**授予。
+# 原因（0.2.0-rc.2 实测读码）：DSH 的兼容预检跑在 pnpm 之前，不满足 `@deepseek-ai/dsh*`
+# peer 的插件会被直接拒绝（`installation rejected: … nothing was installed`，退出码 1），
+# 而本脚本是 `set -euo pipefail` —— 晚一步就会半途中止，留下「一半新一半旧」的 profile。
+# 豁免写在 profile 的 compatibility.json 里，精确到 `包@版本 × DSH 版本`；撤销用 revoke-version。
+while read -r exempt_spec exempt_dsh; do
+    [[ -n "${exempt_spec}" ]] || continue
+    echo "granting exact-version exemption: ${exempt_spec} on dsh ${exempt_dsh}"
+    DSH_HOME="${DSH_HOME_DIR}" "${runtime_bin}" plugin --profile "${PROFILE_NAME}" \
+        allow-version "${exempt_spec}" --dsh-version "${exempt_dsh}" --accept-risk
+done < <(python3 - "${LOCK_FILE}" <<'PY'
+import json, sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+for entry in payload.get("versionExemptions", []):
+    print(f'{entry["package"]}@{entry["version"]}', entry["dsh"])
+PY
+)
 
 for spec in "${profile_plugins[@]}"; do
     DSH_HOME="${DSH_HOME_DIR}" "${runtime_bin}" plugin --profile "${PROFILE_NAME}" add "${spec}" --ignore-scripts --save-exact

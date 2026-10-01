@@ -99,7 +99,7 @@
         "file.write"
       ],
       "status": "blocked-version",
-      "reason": "DSH runtime 已锁定 0.1.7-rc.1，但尚未完成该插件的 peer/runtime 集成验收；数据库能力还必须增加只读账号和连接审批。"
+      "reason": "DSH runtime 已锁定 0.2.0-rc.2，但尚未完成该插件的 peer/runtime 集成验收；数据库能力还必须增加只读账号和连接审批。"
     },
     {
       "id": "unresolved-user-names",
@@ -122,7 +122,7 @@
       "id": "dsh-codex-ui",
       "source": "https://github.com/MichengAI/dsh-codex-ui",
       "revision": "84946e2abec910b60e1f5f8aa69e45ab34df2a04",
-      "version": "1.1.18",
+      "version": "1.1.25",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -139,7 +139,7 @@
       "id": "dsh-codex-pet",
       "source": "https://github.com/MichengAI/dsh-codex-pet",
       "revision": "0.1.10",
-      "version": "0.1.10",
+      "version": "0.1.12",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -148,13 +148,13 @@
       ],
       "status": "installed-verified",
       "adapter": "@michengai/dsh-codex-pet@0.1.10 mounted by scripts/install_ming_tea_plugins.sh into profile ming-tea",
-      "reason": "桌宠插件，9 只内置宠物、零依赖、peer 含 0.1.7-rc.1。2026-09-27 验证挂载并渲染，替换了原 @linxin666/dsh-pet（两者并存会出现两只宠物，故二选一）。两点须知：① 随包 assets/codex 图集来自 OpenAI Codex，其 NOTICE 明确不在 Apache-2.0 范围内——自用可以，随 Ming OS ISO 分发不行；② 桌面浮窗需要 pet 型桌面端，铭荼 Tauri 壳需自行实现，本轮只验网页内。自定义宠物需要 DSH 内配置图像生成工具。"
+      "reason": "桌宠插件，9 只内置宠物、零依赖、peer 含 0.2.0-rc.2。2026-09-27 验证挂载并渲染，替换了原 @linxin666/dsh-pet（两者并存会出现两只宠物，故二选一）。两点须知：① 随包 assets/codex 图集来自 OpenAI Codex，其 NOTICE 明确不在 Apache-2.0 范围内——自用可以，随 Ming OS ISO 分发不行；② 桌面浮窗需要 pet 型桌面端，铭荼 Tauri 壳需自行实现，本轮只验网页内。自定义宠物需要 DSH 内配置图像生成工具。"
     },
     {
       "id": "dsh-archive-manager",
       "source": "https://github.com/MichengAI/dsh-archive-manager",
       "revision": "1.0.5",
-      "version": "1.0.5",
+      "version": "1.0.10",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -170,7 +170,7 @@
       "id": "dsh-skills-manager",
       "source": "https://github.com/MichengAI/dsh-skills-manager",
       "revision": "1.1.4",
-      "version": "1.1.4",
+      "version": "1.1.8",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -186,7 +186,7 @@
       "id": "dsh-agency-agents",
       "source": "https://github.com/MichengAI/dsh-agency-agents",
       "revision": "1.0.5",
-      "version": "1.0.5",
+      "version": "1.0.7",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -200,7 +200,7 @@
       "id": "dsh-im-connect",
       "source": "https://github.com/MichengAI/dsh-im-connect",
       "revision": "0.1.55",
-      "version": "0.1.55",
+      "version": "0.1.59",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -216,7 +216,7 @@
       "id": "dsh-btw",
       "source": "https://github.com/MichengAI/dsh-btw",
       "revision": "0.1.13",
-      "version": "0.1.13",
+      "version": "0.1.15",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -231,7 +231,7 @@
       "id": "dsh-simplify",
       "source": "https://github.com/MichengAI/dsh-simplify",
       "revision": "0.1.10",
-      "version": "0.1.10",
+      "version": "0.1.12",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -246,7 +246,7 @@
       "id": "dsh-code-review",
       "source": "https://github.com/MichengAI/dsh-code-review",
       "revision": "0.1.7",
-      "version": "0.1.7",
+      "version": "0.1.9",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
@@ -289,7 +289,7 @@
       "id": "dsh-automation",
       "source": "https://github.com/MichengAI/dsh-automation",
       "revision": "0.1.51",
-      "version": "0.1.51",
+      "version": "0.1.53",
       "license": "Apache-2.0",
       "runtime": "dsh-web-client-bundle",
       "permissions": [
