@@ -1657,3 +1657,18 @@ body[data-ds-dark-theme] {
   margin-left: 8px;
   opacity: 0.92;
 }
+
+/* 首次呼出的那一次提示（4 秒后消失，之后只留宠物） */
+.mt-summon-hint {
+  margin-bottom: 4px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mt-paper-raised, #f6faf8) 88%, transparent);
+  color: color-mix(in srgb, var(--mt-ink-strong, #10302c) 72%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 6px 14px rgba(12, 48, 44, 0.12);
+}
+.mt-summon-hint[hidden] {
+  display: none;
+}

@@ -256,6 +256,8 @@ const MING_TEA_SUMMON = {
   capsule: null,
   answer: null,
   permission: null,
+  hint: null,
+  hintShown: false,
   permissionCheckedAt: 0,
   listeningRequested: false,
   submittedText: "",
@@ -340,6 +342,9 @@ function mingTeaSummonEnsureNodes() {
   if (!document.body) return;
   const layer = document.createElement("div");
   layer.className = "mt-summon-layer";
+  const hint = document.createElement("div");
+  hint.className = "mt-summon-hint";
+  hint.hidden = true;
   const permission = document.createElement("button");
   permission.type = "button";
   permission.className = "mt-summon-permission";
@@ -348,7 +353,8 @@ function mingTeaSummonEnsureNodes() {
   capsule.className = "mt-summon-capsule";
   const answer = document.createElement("div");
   answer.className = "mt-summon-answer";
-  layer.append(permission, capsule, answer);
+  layer.append(hint, permission, capsule, answer);
+  MING_TEA_SUMMON.hint = hint;
   MING_TEA_SUMMON.permission = permission;
   document.body.appendChild(layer);
   MING_TEA_SUMMON.layer = layer;
@@ -544,6 +550,23 @@ function mingTeaSummonTick() {
   mingTeaSummonEnsureNodes();
   if (!MING_TEA_SUMMON.capsule || !MING_TEA_SUMMON.answer) return;
 
+  // 首次呼出时给一次「点一下我就开始听」的提示，4 秒后自己消失；
+  // 之后永远只显示宠物（用户明确要求「只出现一个宠物」）。
+  if (MING_TEA_SUMMON.hint && !MING_TEA_SUMMON.hintShown) {
+    MING_TEA_SUMMON.hintShown = true;
+    try {
+      if (window.localStorage.getItem("ming-tea.summon-hint") !== "1") {
+        window.localStorage.setItem("ming-tea.summon-hint", "1");
+        MING_TEA_SUMMON.hint.textContent = "点一下我就开始听";
+        MING_TEA_SUMMON.hint.hidden = false;
+        setTimeout(() => {
+          if (MING_TEA_SUMMON.hint) MING_TEA_SUMMON.hint.hidden = true;
+        }, 4000);
+      }
+    } catch {
+      /* 存不进 localStorage（隐私模式）就干脆不提示，别每次呼出都弹 */
+    }
+  }
   mingTeaSummonCheckPermissions();
   // 一次性预热语音 provider：官方 provider 的 prepare 是「同步触发、异步就绪」，
   // 模型加载要几十秒；不预热的话用户点麦克风后会长时间停在 requesting（实测踩到）。
