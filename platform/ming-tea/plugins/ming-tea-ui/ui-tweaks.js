@@ -258,6 +258,8 @@ const MING_TEA_SUMMON = {
   permission: null,
   hint: null,
   hintShown: false,
+  lastError: "",
+  errorPending: false,
   permissionCheckedAt: 0,
   listeningRequested: false,
   submittedText: "",
@@ -632,6 +634,11 @@ function mingTeaSummonTick() {
   const voicePhase = mingTeaSummonVoicePhase();
   const composerText = mingTeaSummonComposerText();
   const answerText = mingTeaSummonText("[data-turn-process-answer]");
+  // 工具活动与错误：summon 模式把对话区藏起来了，这两类信息如果不主动镜像出来，
+  // 用户只会看到面板一直「没反应」——既看不到「助手正在看屏幕」，也看不到「操作失败」。
+  const toolText = mingTeaSummonText("[data-turn-process-tool-calls]");
+  const screenBusy = /cua_driver_native__|playwright-mcp|computer/i.test(toolText);
+  const errorText = mingTeaSummonText("[data-error]").slice(0, 160);
 
   // 自动开始听：只在「还没有回答、也没在听」时点一次，避免反复开关麦克风
   if (MING_TEA_SUMMON.auto && !MING_TEA_SUMMON.listeningRequested && !voicePhase && !answerText) {
@@ -658,10 +665,41 @@ function mingTeaSummonTick() {
     MING_TEA_SUMMON.capsule.dataset.empty = "1";
   }
 
-  // 回答：镜像最后一个回答块；有内容才显示
-  if (answerText && answerText !== MING_TEA_SUMMON.lastAnswer) {
+  // 回答区的内容优先级（顺序很重要，实测踩过两个坑）：
+  //   1. **新的回答到达时以回答为准**，并清掉挂起的错误 —— 否则「工具失败 → 模型解释」时
+  //      面板会一直停在旧错误上，用户看不到模型已经解释了（实测第 4 步踩到）；
+  //   2. 没有新回答、但有挂起错误 → 显示错误（summon 把对话区藏了，不镜像就完全看不到失败）；
+  //   3. 工具正在跑（含 cua/computer 关键字）→ 显示「正在看屏幕…」；
+  //   4. 否则显示最近一次回答。
+  if (errorText && errorText !== MING_TEA_SUMMON.lastError) {
+    MING_TEA_SUMMON.lastError = errorText;
+    MING_TEA_SUMMON.errorPending = true;
+  }
+  const freshAnswer = answerText !== "" && answerText !== MING_TEA_SUMMON.lastAnswer;
+  if (freshAnswer) {
     MING_TEA_SUMMON.lastAnswer = answerText;
-    MING_TEA_SUMMON.answer.textContent = answerText;
+    MING_TEA_SUMMON.errorPending = false;
+  }
+
+  let answerShown = "";
+  let tone = "";
+  if (MING_TEA_SUMMON.errorPending) {
+    answerShown = `操作失败：${MING_TEA_SUMMON.lastError}`;
+    tone = "error";
+  } else if (answerText !== "") {
+    answerShown = answerText;
+    tone = "answer";
+  } else if (screenBusy) {
+    answerShown = "正在看屏幕…";
+    tone = "status";
+  }
+  if (MING_TEA_SUMMON.answer.textContent !== answerShown) {
+    MING_TEA_SUMMON.answer.textContent = answerShown;
+  }
+  if (tone === "") {
+    delete MING_TEA_SUMMON.answer.dataset.tone;
+  } else {
+    MING_TEA_SUMMON.answer.dataset.tone = tone;
   }
 
   // 档位：有审批=approval（要大而可点，否则审批卡在视口外点不到）；
@@ -669,8 +707,9 @@ function mingTeaSummonTick() {
   const hasCapsule = (MING_TEA_SUMMON.capsule.textContent || "").trim() !== "";
   const approvalPending = document.querySelector("[data-approval-key], [data-question-key]") !== null;
   let stage = "pet";
+  const answerVisible = answerText !== "" || errorText !== "" || screenBusy;
   if (approvalPending) stage = "approval";
-  else if (answerText !== "") stage = "answer";
+  else if (answerVisible) stage = "answer";
   else if (voicePhase || hasCapsule) stage = "listening";
   mingTeaSummonReport(stage);
 }

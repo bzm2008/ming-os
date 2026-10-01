@@ -1672,3 +1672,14 @@ body[data-ds-dark-theme] {
 .mt-summon-hint[hidden] {
   display: none;
 }
+
+/* 回答区的三种语气：正常回答 / 状态（正在看屏幕…）/ 失败 */
+.mt-summon-answer[data-tone="status"] {
+  color: color-mix(in srgb, var(--mt-ink-strong, #10302c) 66%, transparent);
+  font-style: italic;
+}
+.mt-summon-answer[data-tone="error"] {
+  border-color: color-mix(in srgb, #c62828 40%, transparent);
+  background: color-mix(in srgb, #fdeceb 92%, transparent);
+  color: #8c1d18;
+}
