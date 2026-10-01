@@ -12,6 +12,11 @@ use serde::Deserialize;
 
 const DEFAULT_HOTKEY: &str = "alt+space";
 
+/// 主键被别的应用占用时依次尝试的备用键。
+/// 为什么要有它：⌥Space 常被启动器（Raycast/Alfred 之类）占着，
+/// 而「注册失败」在用户看来就是「按了没反应」——退到一个能用的键并**明确记录哪个生效**更实在。
+const FALLBACK_HOTKEYS: [&str; 2] = ["ctrl+alt+space", "cmd+shift+space"];
+
 /// macOS 的 Carbon 全局热键靠 **run loop** 派发：不跑 run loop，按键永远不会到达回调
 /// （global-hotkey 的每个官方示例都在 tao/winit 事件循环里泵消息，2026-10-01 实测踩到：
 /// 直接阻塞在 channel 上时，日志里连一条「触发」都没有）。
@@ -28,9 +33,17 @@ mod run_loop {
     pub fn CFRunLoopRun() {}
 }
 
+/// `hotkey` 允许写成一个字符串，或一组候选（按顺序试直到注册成功）。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum HotkeySetting {
+    One(String),
+    Many(Vec<String>),
+}
+
 #[derive(Debug, Deserialize)]
 struct Settings {
-    hotkey: Option<String>,
+    hotkey: Option<HotkeySetting>,
     /// 触发时执行的命令。留空时走生产路径 `open mingtea://summon`；
     /// 开发/测试时可以填「可执行文件 + 参数」，这样不必先把 .app 打包并注册 URL scheme。
     command: Option<String>,
@@ -109,14 +122,28 @@ fn init_logging() -> Result<(), String> {
     Ok(())
 }
 
-fn read_settings(path: &Path) -> (String, Option<String>) {
-    let fallback = (DEFAULT_HOTKEY.to_string(), None);
+fn read_settings(path: &Path) -> (Vec<String>, Option<String>) {
+    let fallback = (vec![DEFAULT_HOTKEY.to_string()], None);
     match fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str::<Settings>(&contents) {
-            Ok(settings) => (
-                settings.hotkey.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_HOTKEY.to_string()),
-                settings.command.filter(|s| !s.trim().is_empty()),
-            ),
+            Ok(settings) => {
+                // `hotkey` 可以是字符串，也可以是候选数组（按顺序试）
+                let preferred: Vec<String> = match settings.hotkey {
+                    Some(HotkeySetting::One(text)) if !text.trim().is_empty() => vec![text],
+                    Some(HotkeySetting::Many(list)) => list.into_iter().filter(|s| !s.trim().is_empty()).collect(),
+                    _ => vec![DEFAULT_HOTKEY.to_string()],
+                };
+                // 用户没写候选时，自动补上内置备用键（被占用也不至于整个功能不可用）
+                let mut candidates = preferred;
+                if candidates.len() == 1 {
+                    for extra in FALLBACK_HOTKEYS {
+                        if !candidates.iter().any(|c| c == extra) {
+                            candidates.push(extra.to_string());
+                        }
+                    }
+                }
+                (candidates, settings.command.filter(|s| !s.trim().is_empty()))
+            }
             Err(e) => {
                 warn!("读取设置失败 {}: {e}; 使用默认快捷键 {DEFAULT_HOTKEY}", path.display());
                 fallback
@@ -170,21 +197,43 @@ fn parse_hotkey(input: &str) -> Result<HotKey, String> {
     Ok(HotKey::new(Some(modifiers), code))
 }
 
+/// 把生效的热键写进 `hotkey-state.json`（应用侧读给用户看「到底哪个键生效」）。
+fn write_state(active: &str, candidates: &[String]) {
+    // 就写在铭荼自己的配置目录里（app_config_dir() 本身就是 ~/Library/Application Support/铭荼）
+    let path = app_config_dir().join("hotkey-state.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = format!(
+        "{{\n  \"active\": {},\n  \"configured\": {},\n  \"pid\": {}\n}}\n",
+        serde_json::to_string(active).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into()),
+        std::process::id()
+    );
+    let _ = std::fs::write(path, payload);
+}
+
 fn main() {
     if let Err(e) = init_logging() {
         eprintln!("初始化日志失败: {e}");
         return;
     }
     let settings = settings_path();
-    let (configured, custom_command) = read_settings(&settings);
-    let hotkey_text = match parse_hotkey(&configured) {
-        Ok(_) => configured,
-        Err(e) => {
-            warn!("快捷键 {configured:?} 解析失败: {e}; 回退到 {DEFAULT_HOTKEY}");
-            DEFAULT_HOTKEY.to_string()
-        }
-    };
-    let hotkey = parse_hotkey(&hotkey_text).expect("默认快捷键必须有效");
+    let (candidates, custom_command) = read_settings(&settings);
+    let parsed: Vec<(String, HotKey)> = candidates
+        .iter()
+        .filter_map(|text| match parse_hotkey(text) {
+            Ok(key) => Some((text.clone(), key)),
+            Err(e) => {
+                warn!("快捷键 {text:?} 解析失败，跳过：{e}");
+                None
+            }
+        })
+        .collect();
+    if parsed.is_empty() {
+        error!("没有任何可用的快捷键候选，退出");
+        return;
+    }
     let manager = match GlobalHotKeyManager::new() {
         Ok(manager) => manager,
         Err(e) => {
@@ -197,21 +246,31 @@ fn main() {
         warn!("安装 SIGINT/SIGTERM 处理器失败: {e}");
     }
     let receiver = GlobalHotKeyEvent::receiver();
-    loop {
-        match manager.register(hotkey) {
-            Ok(()) => {
-                info!("已注册 {hotkey_text}");
-                break;
-            }
-            Err(e) => {
-                error!("注册快捷键 {hotkey_text} 失败（可能已被占用）: {e}；30 秒后重试");
-                if stop_rx.recv_timeout(Duration::from_secs(30)).is_ok() {
-                    info!("收到退出信号，已退出");
-                    return;
+
+    // 按候选顺序注册：第一个成功的生效；全失败则 30 秒后整体重试。
+    let (hotkey_text, hotkey) = loop {
+        let mut winner: Option<(String, HotKey)> = None;
+        for (text, key) in &parsed {
+            match manager.register(*key) {
+                Ok(()) => {
+                    info!("已注册 {text}");
+                    winner = Some((text.clone(), *key));
+                    break;
                 }
+                Err(e) => warn!("注册 {text} 失败（可能被其它应用占用）：{e}"),
             }
         }
-    }
+        if let Some(found) = winner {
+            break found;
+        }
+        error!("所有候选快捷键都注册失败；30 秒后重试");
+        if stop_rx.recv_timeout(Duration::from_secs(30)).is_ok() {
+            info!("收到退出信号，已退出");
+            return;
+        }
+    };
+    // 把「当前真正生效的键」落盘，应用侧可读给用户看
+    write_state(&hotkey_text, &candidates);
 
     // 事件处理放工作线程：主线程要留给 run loop（见 run_loop 模块的说明）
     std::thread::spawn(move || loop {

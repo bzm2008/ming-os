@@ -73,7 +73,18 @@ pub struct LaunchAgentStatus {
     pub installed: bool,
     pub loaded: bool,
     pub helper: Option<String>,
+    /// 守护进程实际注册成功的那个键（读它写的 hotkey-state.json）：
+    /// 首选键被别的应用占用时会退到备用键，界面据此告诉用户「按哪个键」。
+    pub active_hotkey: Option<String>,
     pub detail: String,
+}
+
+/// 读守护进程落盘的生效热键。
+fn active_hotkey() -> Option<String> {
+    let path = dirs::data_dir()?.join("铭荼").join("hotkey-state.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("active")?.as_str().map(|s| s.to_string())
 }
 
 /// 读 plist 里**实际写着**的 helper 路径（用于判断是否需要重写：
@@ -104,7 +115,7 @@ pub fn status() -> LaunchAgentStatus {
         (Some(p), false) => format!("尚未安装（将写入 {}）", p.display()),
         (None, _) => "找不到用户主目录".to_string(),
     };
-    LaunchAgentStatus { installed, loaded, helper, detail }
+    LaunchAgentStatus { installed, loaded, helper, active_hotkey: active_hotkey(), detail }
 }
 
 /// 安装（幂等）：写 plist → bootout 旧的（忽略失败）→ bootstrap。

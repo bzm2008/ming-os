@@ -43,7 +43,30 @@ DSH web 界面（面板与主窗口加载同一个 URL）
    └─ 我们的插件 ming-tea-ui：三态判定 + 胶囊 + 回答镜像 + 档位上报
 ```
 
-### 三态是怎么驱动的
+### 热键没反应时怎么查（2026-10-01 补）
+
+两个已知的「按了没反应」成因，以及对应的兜底：
+
+1. **首选键被别的应用占了**。守护进程现在按**候选列表**注册：
+   `hotkey` 写字符串时自动补上 `ctrl+alt+space`、`cmd+shift+space` 两个备用键，
+   也可以自己写成数组（`"hotkey": ["ctrl+alt+space", "alt+space"]`）。
+   第一个注册成功的生效，并写进 `~/Library/Application Support/铭荼/hotkey-state.json`：
+
+   ```json
+   { "active": "alt+space", "configured": ["alt+space","ctrl+alt+space","cmd+shift+space"], "pid": 6558 }
+   ```
+
+   应用的 `hotkey_status` 命令会读它，界面可以显示「按哪个键」。
+2. **注册"成功"但按键仍不生效**：实测 macOS **允许两个进程都注册同一个热键**（我起了两个
+   守护进程，两个都报「已注册 alt+space」）。所以「注册成功」不等于「事件一定到我们手里」——
+   若某个启动器(Raycast/Alfred 之类)也占着同一个键，它可能先收到。
+   判断办法：看 `~/Library/Logs/铭荼/hotkey.log` 里**有没有「触发」那一行**。
+   有 = 键到了守护进程（问题在后续的 `open`）；没有 = 键被别的应用拿走了，换个键即可。
+
+（这次的候选回退逻辑是用「首选键不可解析」验证的：日志出现
+`快捷键 "not-a-real-key" 解析失败，跳过` → `已注册 ctrl+alt+space`，状态文件 active 同步更新 ✓。）
+
+## 三态是怎么驱动的
 
 1. 面板窗口在应用启动时就**预建好（隐藏）**，所以热键后立刻可见；DSH host 没就绪时先显示一张「正在唤醒…」的本地页（`apps/desktop/public/waking.html`）。
 2. 我们插件在 `document-start` 通过壳注入的 `window.__MING_TEA_SUMMON` 得知自己处于 summon 模式，然后每轮（180ms 节流）判定档位：
