@@ -221,12 +221,37 @@ fn free_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
-/// dsh 可执行文件的解析顺序：显式环境变量 → 仓库 runtime → 未来随包资源。
+/// 从 `settings.json` 读一个字段（守护进程读同一份文件里的 hotkey）。
+/// 为什么要它：应用被 LaunchServices（Dock / `open mingtea://summon`）拉起时**不继承 shell 环境**，
+/// `MING_TEA_REPO_ROOT` 这类变量拿不到；而 runtime 目前还没打进 .app，
+/// 所以要让用户能在设置里写清 runtime 在哪。
+fn settings_field(key: &str) -> Option<String> {
+    let path = dirs::data_dir()?.join("铭荼").join("settings.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get(key)?.as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+/// dsh 可执行文件的解析顺序：
+/// 环境变量 → settings.json 的 `dshBin` → settings.json 的 `repoRoot` → 仓库 runtime → 未来随包资源。
 pub fn resolve_dsh() -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("MING_TEA_DSH_BIN") {
         let p = PathBuf::from(explicit);
         if p.is_file() {
             return Some(p);
+        }
+    }
+    if let Some(bin) = settings_field("dshBin") {
+        let p = PathBuf::from(bin);
+        if p.is_file() {
+            return Some(p);
+        }
+        eprintln!("[dsh] settings.json 里的 dshBin 不存在：{}", p.display());
+    }
+    if let Some(root) = settings_field("repoRoot") {
+        let candidate = PathBuf::from(root).join(".ming-tea/runtime/node_modules/.bin/dsh");
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     for root in repo_roots() {

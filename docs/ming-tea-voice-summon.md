@@ -12,11 +12,20 @@
 | 助手回答 | 出现在胶囊**下方**，宠物仍在最底部 |
 
 - 纯宠物档是**点击穿透**的：一块看不见的 200×200 不会挡住你点别的东西。
-- 热键在 `~/Library/Application Support/铭荼/settings.json` 里改：
-  ```json
-  { "hotkey": "alt+space" }
-  ```
-  支持 `alt/option`、`ctrl/control`、`shift`、`cmd/command/super/meta` 加一个主键（`space`、字母、数字、`F1`-`F12`）。改完重启守护进程生效（或注销重登）。
+- 配置文件是 `~/Library/Application Support/铭荼/settings.json`（应用与守护进程共用同一份）：
+
+  | 字段 | 作用 |
+  | --- | --- |
+  | `hotkey` | 快捷键，默认 `alt+space`。支持 `alt/option`、`ctrl/control`、`shift`、`cmd/command/super/meta` 加一个主键（`space`、字母、数字、`F1`-`F12`） |
+  | `repoRoot` | DSH runtime 所在仓库根（用于找到 `.ming-tea/runtime/node_modules/.bin/dsh`） |
+  | `dshBin` | 直接指定 `dsh` 可执行文件（优先于 `repoRoot`） |
+  | `command` | **仅开发/测试**：按下热键时执行这条命令，而不是 `open mingtea://summon` |
+
+  热键改动重启守护进程生效（或注销重登）。
+
+  ⚠️ 为什么需要 `repoRoot`/`dshBin`：应用被 Dock 或 `open mingtea://summon` 拉起时**不继承 shell 环境**，
+  `MING_TEA_REPO_ROOT` 这类变量拿不到；而 DSH runtime 目前**还没打进 .app**，所以要把位置写进配置。
+  runtime 进包之后这两项就可以省掉。
 
 ## 它由哪几块组成
 
