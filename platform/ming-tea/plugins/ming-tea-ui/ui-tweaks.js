@@ -236,6 +236,235 @@ function liteModeEnabled() {
   }
 }
 
+// ── summon 三态面板（快捷键呼出的助手）────────────────────────────
+// 产品要求的表现（2026-10-01 用户明确）：
+//   ① 按下快捷键 → **只出现一个宠物**；
+//   ② 用户说话 → 出现一个悬浮胶囊，显示语音转文字后的内容；
+//   ③ 助手回答 → 出现在胶囊**下方**。
+//
+// 分工：壳负责窗口尺寸/位置/点击穿透（它按我们上报的档位调整），我们负责
+// 藏外壳、留宠物、把胶囊与回答叠上去，并把当前档位告诉壳。
+// 上报通道是一条只绑 127.0.0.1、带 token 的极简单向 GET（壳里叫「上报口」）：
+// 面板页是外部源、拿不到 Tauri IPC，所以用 <img> 打一发最省事（还不触发 CORS 预检）。
+const MING_TEA_SUMMON = {
+  on: false,
+  auto: false,
+  shell: null,
+  token: null,
+  stage: "",
+  layer: null,
+  capsule: null,
+  answer: null,
+  listeningRequested: false,
+  submittedText: "",
+  lastAnswer: "",
+};
+
+/** 解析召唤参数（只在首轮做一次）。
+ * 三类来源按可靠性排序：
+ *   ① `window.__MING_TEA_SUMMON`：壳用 initialization_script 在 **document-start** 抓好的
+ *      —— DSH 启动后会把 URL query 清掉（实测 6 秒内 search 变空），所以这是主路径；
+ *   ② `location.search`：万一我们比清理更早跑，也能直接读到；
+ *   ③ `window.name`：跨导航仍然保留，作为兜底。 */
+function mingTeaSummonInit() {
+  try {
+    const frozen = window.__MING_TEA_SUMMON;
+    if (frozen && frozen.on) {
+      MING_TEA_SUMMON.on = true;
+      MING_TEA_SUMMON.auto = frozen.auto === true;
+      MING_TEA_SUMMON.shell = frozen.shell ?? null;
+      MING_TEA_SUMMON.token = frozen.token ?? null;
+      return true;
+    }
+    // Esc 收起面板：走同一条上报口（hide=1），壳负责隐藏窗口
+    if (!window.__mingTeaSummonEscBound) {
+      window.__mingTeaSummonEscBound = true;
+      document.addEventListener(
+        "keydown",
+        (event) => {
+          if (event.key !== "Escape" || !MING_TEA_SUMMON.on) return;
+          event.preventDefault();
+          if (!MING_TEA_SUMMON.shell || !MING_TEA_SUMMON.token) return;
+          try {
+            const probe = new Image();
+            probe.src = `${MING_TEA_SUMMON.shell}/stage?t=${encodeURIComponent(MING_TEA_SUMMON.token)}&hide=1&_=${Date.now()}`;
+          } catch {
+            /* 收起失败不影响继续用 */
+          }
+        },
+        true,
+      );
+    }
+    const params = new URLSearchParams(location.search);
+    if (params.get("ming-tea") === "summon") {
+      MING_TEA_SUMMON.on = true;
+      MING_TEA_SUMMON.auto = params.get("auto") === "1";
+      MING_TEA_SUMMON.shell = params.get("mt-shell");
+      MING_TEA_SUMMON.token = params.get("mt-token");
+      return true;
+    }
+    if (typeof window.name === "string" && window.name.includes("ming-tea=summon")) {
+      const fromName = new URLSearchParams(window.name);
+      MING_TEA_SUMMON.on = true;
+      MING_TEA_SUMMON.auto = fromName.get("auto") === "1";
+      MING_TEA_SUMMON.shell = fromName.get("mt-shell");
+      MING_TEA_SUMMON.token = fromName.get("mt-token");
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** 告诉壳「现在该是哪一档」——决定窗口大小、位置与是否点击穿透。 */
+function mingTeaSummonReport(stage) {
+  if (!MING_TEA_SUMMON.on) return;
+  if (MING_TEA_SUMMON.stage === stage) return;
+  MING_TEA_SUMMON.stage = stage;
+  document.documentElement.dataset.mingTeaSummonStage = stage;
+  if (!MING_TEA_SUMMON.shell || !MING_TEA_SUMMON.token) return;
+  try {
+    const probe = new Image();
+    probe.src = `${MING_TEA_SUMMON.shell}/stage?t=${encodeURIComponent(MING_TEA_SUMMON.token)}&stage=${encodeURIComponent(stage)}&_=${Date.now()}`;
+  } catch {
+    /* 上报失败只是尺寸不跟着变，不该影响说话与回答 */
+  }
+}
+
+/** 建我们自己的层（幂等）：胶囊在上、回答在下；底部留出宠物位置由 CSS 负责。 */
+function mingTeaSummonEnsureNodes() {
+  if (MING_TEA_SUMMON.layer) return;
+  if (!document.body) return;
+  const layer = document.createElement("div");
+  layer.className = "mt-summon-layer";
+  const capsule = document.createElement("div");
+  capsule.className = "mt-summon-capsule";
+  const answer = document.createElement("div");
+  answer.className = "mt-summon-answer";
+  layer.append(capsule, answer);
+  document.body.appendChild(layer);
+  MING_TEA_SUMMON.layer = layer;
+  MING_TEA_SUMMON.capsule = capsule;
+  MING_TEA_SUMMON.answer = answer;
+}
+
+const mingTeaSummonText = (selector) => {
+  try {
+    const nodes = document.querySelectorAll(selector);
+    if (nodes.length === 0) return "";
+    const node = nodes[nodes.length - 1];
+    // ⚠️ 必须用 textContent：summon 模式把对话区设成 visibility:hidden，
+    // 而 innerText 对不可见元素返回空串 —— 2026-10-01 实测踩到，表现为「回答永远不显示」。
+    return String(node.textContent ?? "").trim();
+  } catch {
+    return "";
+  }
+};
+
+/** 输入框里的文字（语音识别结果最终会落在这里）。 */
+function mingTeaSummonComposerText() {
+  try {
+    const box = document.querySelector('[data-composer-card] [contenteditable="true"], [data-composer-card] textarea, [contenteditable="true"], textarea');
+    if (!box) return "";
+    return String(box.value ?? box.textContent ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** 官方语音的相态：recording / transcribing / idle（元素不在=collapsed，即没在听）。 */
+function mingTeaSummonVoicePhase() {
+  try {
+    const el = document.querySelector("[data-voice-activity]");
+    return el ? el.getAttribute("data-voice-activity") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 点官方语音触发按钮开始听（按钮藏在被隐藏的输入区里，但仍在 DOM、仍可点）。 */
+function mingTeaSummonStartListening() {
+  try {
+    const button =
+      document.querySelector('[data-composer-card] [class*="triggerAnchor"] button') ||
+      document.querySelector('[data-composer-card] button[class*="trigger"]') ||
+      document.querySelector('[class*="triggerAnchor"] button');
+    if (!button) return false;
+    button.click();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 把输入框里的文字发出去（复用官方发送逻辑：对输入框派发回车）。 */
+function mingTeaSummonSubmit() {
+  try {
+    const box = document.querySelector('[data-composer-card] [contenteditable="true"], [data-composer-card] textarea, [contenteditable="true"], textarea');
+    if (!box) return false;
+    box.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+    });
+    box.dispatchEvent(event);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 每轮（180ms 节流）跑一次：判定档位、更新胶囊与回答、按需开始听与发送。 */
+function mingTeaSummonTick() {
+  if (!MING_TEA_SUMMON.on) return;
+  mingTeaSummonEnsureNodes();
+  if (!MING_TEA_SUMMON.capsule || !MING_TEA_SUMMON.answer) return;
+
+  const voicePhase = mingTeaSummonVoicePhase();
+  const composerText = mingTeaSummonComposerText();
+  const answerText = mingTeaSummonText("[data-turn-process-answer]");
+
+  // 自动开始听：只在「还没有回答、也没在听」时点一次，避免反复开关麦克风
+  if (MING_TEA_SUMMON.auto && !MING_TEA_SUMMON.listeningRequested && !voicePhase && !answerText) {
+    if (mingTeaSummonStartListening()) MING_TEA_SUMMON.listeningRequested = true;
+  }
+  // 说完了（语音相态消失且输入框里有字）→ 自动发送一次
+  if (composerText && composerText !== MING_TEA_SUMMON.submittedText && !voicePhase) {
+    if (mingTeaSummonSubmit()) {
+      MING_TEA_SUMMON.submittedText = composerText;
+      MING_TEA_SUMMON.capsule.textContent = composerText;
+      MING_TEA_SUMMON.capsule.dataset.empty = "0";
+    }
+  }
+
+  // 胶囊内容：优先显示「已发出的那句」，其次显示正在识别的文字
+  if (composerText && composerText !== MING_TEA_SUMMON.submittedText) {
+    MING_TEA_SUMMON.capsule.textContent = composerText;
+    MING_TEA_SUMMON.capsule.dataset.empty = "0";
+  } else if (voicePhase && !MING_TEA_SUMMON.capsule.textContent) {
+    MING_TEA_SUMMON.capsule.textContent = voicePhase === "transcribing" ? "正在识别…" : "我在听…";
+    MING_TEA_SUMMON.capsule.dataset.empty = "1";
+  }
+
+  // 回答：镜像最后一个回答块；有内容才显示
+  if (answerText && answerText !== MING_TEA_SUMMON.lastAnswer) {
+    MING_TEA_SUMMON.lastAnswer = answerText;
+    MING_TEA_SUMMON.answer.textContent = answerText;
+  }
+
+  // 档位：有回答=answer；在听或胶囊有字=listening；否则只有宠物
+  const hasCapsule = (MING_TEA_SUMMON.capsule.textContent || "").trim() !== "";
+  let stage = "pet";
+  if (answerText !== "") stage = "answer";
+  else if (voicePhase || hasCapsule) stage = "listening";
+  mingTeaSummonReport(stage);
+}
+
 function setLiteMode(on) {
   try {
     localStorage.setItem(MING_TEA_TWEAKS.lite.storageKey, on ? "1" : "0");
@@ -410,6 +639,13 @@ function applyMingTeaTweaks() {
   try {
     const lite = liteModeEnabled();
     document.documentElement.dataset.mingTeaLite = lite ? "1" : "0";
+
+    // summon 三态面板：首轮解析参数并打标记，之后每轮判定档位（宠物/听音/回答）
+    if (!MING_TEA_SUMMON.on && mingTeaSummonInit()) {
+      document.documentElement.dataset.mingTeaSummon = "1";
+      window.__mingTeaSummon = MING_TEA_SUMMON;
+    }
+    if (MING_TEA_SUMMON.on) mingTeaSummonTick();
 
     // 先恢复"仅因清亮模式"而隐藏的元素，再统一重跑隐藏规则——
     // 否则同时被侧栏规则命中的元素会在关闭清亮模式时被错误显示。

@@ -1467,3 +1467,143 @@ body[data-ds-dark-theme] {
   line-height: 1.6;
   color: color-mix(in srgb, var(--mt-ink-strong) 60%, transparent);
 }
+
+/* ── summon 三态面板（快捷键呼出的助手）────────────────────────────
+ * 产品要求的表现（2026-10-01 用户明确）：
+ *   ① 按下快捷键 → **只出现一个宠物**，别的什么都没有；
+ *   ② 用户说话 → 出现一个悬浮胶囊，显示语音转文字的内容；
+ *   ③ 助手回答 → 出现在胶囊**下方**。
+ *
+ * 分工：窗口尺寸/位置/点击穿透由桌面壳按档位调整
+ * （pet 200×200 / listening 420×280 / answer 470×520），页面只负责
+ * 「藏起一切外壳、把宠物留在底部、把胶囊与回答叠在它上面」。
+ *
+ * 为什么用 visibility 而不是 display 隐藏对话区：宠物插件的浮层可能挂在对话区内部，
+ * display:none 会让它一起消失；visibility 可以被后代用 visible 重新显形。
+ * 对话区与输入框**必须保持挂载**——语音输入与发送按钮都在里面，我们只是看不见它们。 */
+
+:root[data-ming-tea-summon="1"],
+:root[data-ming-tea-summon="1"] body {
+  overflow: hidden;
+  background: transparent;
+}
+
+/* ① 社区外壳（侧栏 / 页脚 / 首页卡 / 工作区树 / 扩展与设置导航）全隐藏 */
+:root[data-ming-tea-summon="1"] [class^="dcu-"],
+:root[data-ming-tea-summon="1"] [class*=" dcu-"] {
+  display: none !important;
+}
+
+/* ② 官方骨架（侧栏列 / 右栏列 / 工作区树 / 页头）隐藏 */
+:root[data-ming-tea-summon="1"] [class*="sidebarCol"],
+:root[data-ming-tea-summon="1"] [class*="rightbarCol"],
+:root[data-ming-tea-summon="1"] [class*="searchTree"],
+:root[data-ming-tea-summon="1"] [class*="treeBody"],
+:root[data-ming-tea-summon="1"] [class*="sectionHeader"],
+:root[data-ming-tea-summon="1"] [class*="headerSessionless"] {
+  display: none !important;
+}
+
+/* ③ 对话正文与输入区：看不见，但留在 DOM 里给语音与发送用 */
+:root[data-ming-tea-summon="1"] [data-conversation-region="chat"],
+:root[data-ming-tea-summon="1"] [data-composer-seat],
+:root[data-ming-tea-summon="1"] [data-composer-card] {
+  visibility: hidden !important;
+  box-shadow: none !important;
+}
+
+/* ④ 宠物必须可见（哪怕它挂在被隐藏的对话区里），并且钉在面板底部居中。
+ * 宠物插件的 left/top 是**内联**写死的（实测 200×200 下是 left:64px; top:38px），
+ * 窗口一变它就会跑到左上角 —— 只有 !important 能盖过内联样式。 */
+:root[data-ming-tea-summon="1"] [class*="dcp-"] {
+  visibility: visible !important;
+}
+:root[data-ming-tea-summon="1"] .dcp-floating,
+:root[data-ming-tea-summon="1"] [class*="dcp-floating"] {
+  left: 50% !important;
+  right: auto !important;
+  top: auto !important;
+  bottom: 14px !important;
+  transform: translateX(-50%) !important;
+}
+
+/* ⑤ 我们自己的层：贴底一列，胶囊在上、回答在下；底部留出宠物位置 */
+.mt-summon-layer {
+  position: fixed;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 158px; /* 底部留出宠物（约 130px）与边距 */
+  pointer-events: none;
+  z-index: 2147483000;
+}
+:root[data-ming-tea-summon="1"] .mt-summon-layer {
+  display: flex;
+}
+
+/* 转录胶囊：只在听到话之后出现 */
+.mt-summon-capsule {
+  max-width: 100%;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mt-paper-raised, #f6faf8) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mt-brand, #16857d) 24%, transparent);
+  box-shadow: var(--mt-shadow-lift, 0 10px 24px rgba(12, 48, 44, 0.18));
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mt-ink-strong, #10302c);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.mt-summon-capsule[data-empty="1"] {
+  color: color-mix(in srgb, var(--mt-ink-strong, #10302c) 55%, transparent);
+}
+
+/* 助手回答：胶囊**下方**，可滚动，不挡住宠物 */
+.mt-summon-answer {
+  max-width: 100%;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 10px 14px;
+  border-radius: var(--mt-radius-lg, 14px);
+  background: color-mix(in srgb, var(--mt-paper-raised, #f6faf8) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mt-brand, #16857d) 18%, transparent);
+  box-shadow: var(--mt-shadow-lift, 0 10px 24px rgba(12, 48, 44, 0.18));
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--mt-ink-strong, #10302c);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+/* 档位规则：宠物档什么都没有；听音档只有胶囊；回答档两件都有 */
+:root[data-ming-tea-summon="1"]:not([data-ming-tea-summon-stage="listening"]):not([data-ming-tea-summon-stage="answer"]) .mt-summon-capsule,
+:root[data-ming-tea-summon="1"]:not([data-ming-tea-summon-stage="listening"]):not([data-ming-tea-summon-stage="answer"]) .mt-summon-answer {
+  display: none;
+}
+:root[data-ming-tea-summon="1"][data-ming-tea-summon-stage="listening"] .mt-summon-answer {
+  display: none;
+}
+
+/* 审批 / 提问卡：需要动手时才出现，贴在面板最下方，可点 */
+:root[data-ming-tea-summon="1"] [data-approval-key],
+:root[data-ming-tea-summon="1"] [data-question-key] {
+  visibility: visible !important;
+  position: relative;
+  z-index: 2147483100;
+  width: 100% !important;
+  max-width: 100% !important;
+  pointer-events: auto;
+}
+
+/* 深色模式跟随主题 */
+@media (prefers-color-scheme: dark) {
+  .mt-summon-capsule,
+  .mt-summon-answer {
+    background: color-mix(in srgb, #16211f 92%, transparent);
+  }
+}
