@@ -135,17 +135,28 @@ DSH host 早已就绪，不需要现起。冷启动那 3 秒里用户看到的�
 
 **两个真问题，一个已修、一个只是测试环境限制：**
 
-### ① 已修：runtime 里缺 `tsx`（这会让**所有用户**的语音永久准备不起来）
+### ① 更正：语音 worker **不需要** tsx（我先前的判断错了，已撤回）
 
-官方语音 provider（`dsh-experimental-speech-to-text-sensevoice`）的 worker 是 **`.ts` 文件**，
-启动方式是 `node --import tsx/esm worker.ts`。runtime 里没有 `tsx` 时
-`import.meta.resolve("tsx/esm")` 直接抛错，`prepareRuntime` 失败，表现为
-**点麦克风后永远停在 `requesting`、模型从不被读取、也没有 worker 进程**。
-已把 `tsx@4.23.15` 钉进 `scripts/install_ming_tea_plugins.sh`（`TSX_SPEC`，与 pnpm 并列）——
-它属于「安装器提供的运行环境」，不是受审插件，所以**不放进锁文件**：锁里每条都要求有
-非空 `capabilities`（`plugin-registry.ts` 会校验），给 tsx 编一个能力反而是假的。
-另外给宿主加了 `speech.prepare` RPC：面板呼出时**主动预热** provider
-（模型加载要几十秒，等用户点麦克风再加载就是干等）。
+我曾判断「语音 worker 是 `.ts`、runtime 缺 `tsx` 导致所有人语音准备不起来」，并据此把
+`tsx` 钉进安装脚本。**这个判断是错的**，证据在 provider 自己的代码里：
+
+```js
+// @deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js:218
+worker: fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./worker.ts" : "./worker.js", import.meta.url))
+```
+
+发布包是 `.js` ⇒ 永远用 `lib/worker.js`，`--import tsx/esm` 那条分支根本不会走。
+实测也确实如此：`speech.prepare` 成功后拉起的进程是
+`node …/sensevoice/lib/worker.js {"providerId":"sensevoice-local",…}`。**tsx 已从安装脚本撤回。**
+
+那当时为什么看起来卡住了？两个真实原因，都不是 tsx：
+1. **我自己的 RPC bug**：`speech.config.defaultProvider` 是**响应式引用**不是字符串，
+   直接传给 `prepare` 会被注册表当成 `"[object Object]"` → `provider is unavailable`。
+   修掉之后 `prepare` 返回 `{ok:true, provider:"sensevoice-local"}` 并成功拉起 worker。
+2. **测试环境没有音频输入设备**（见下条）。
+
+保留的改动：面板呼出时主动调 `speech.prepare` 预热 provider（模型加载要时间，
+等用户点麦克风再加载就是干等），以及 `speech.status` 便于排障。
 
 ### ② 只是测试环境限制：Playwright 的 Chromium 没有音频输入设备
 
