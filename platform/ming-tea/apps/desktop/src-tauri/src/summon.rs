@@ -29,7 +29,9 @@ pub struct Stage {
 }
 
 pub const STAGES: [Stage; 4] = [
-    Stage { name: "pet", width: 200.0, height: 200.0, interactive: false },
+    // 宠物档**必须可交互**：WKWebView 要求真实用户手势才开麦，合成点击不算，
+    // 所以「点一下宠物说话」是开麦的唯一可靠入口（点击穿透会把这下点击让给背后的窗口）。
+    Stage { name: "pet", width: 220.0, height: 220.0, interactive: true },
     Stage { name: "listening", width: 420.0, height: 280.0, interactive: true },
     Stage { name: "answer", width: 470.0, height: 520.0, interactive: true },
     // 审批档：必须够大且可交互，否则审批卡在视口外点不到（实测「本会话信任」按钮点不到）

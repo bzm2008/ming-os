@@ -518,6 +518,24 @@ function mingTeaSummonTick() {
   if (!MING_TEA_SUMMON.capsule || !MING_TEA_SUMMON.answer) return;
 
   mingTeaSummonCheckPermissions();
+  // 点一下就开始说：WKWebView 惯例要求**真实用户手势**才允许开麦，
+  // 我们合成的事件不算，所以「弹出即自动听」在 macOS 上不一定成立 —— 这一下点击是兜底。
+  if (MING_TEA_SUMMON.layer && !MING_TEA_SUMMON.tapBound) {
+    MING_TEA_SUMMON.tapBound = true;
+    MING_TEA_SUMMON.layer.addEventListener(
+      "click",
+      () => {
+        MING_TEA_SUMMON.listeningRequested = false; // 允许再点一次重试
+        if (mingTeaSummonStartListening()) {
+          MING_TEA_SUMMON.listeningRequested = true;
+          MING_TEA_SUMMON.capsule.textContent = "我在听…";
+          MING_TEA_SUMMON.capsule.dataset.empty = "1";
+        }
+      },
+      true,
+    );
+  }
+
   if (MING_TEA_SUMMON.permission && !MING_TEA_SUMMON.permissionBound) {
     MING_TEA_SUMMON.permissionBound = true;
     MING_TEA_SUMMON.permission.addEventListener("click", () => {

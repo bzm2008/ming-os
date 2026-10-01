@@ -1542,6 +1542,10 @@ body[data-ds-dark-theme] {
 }
 :root[data-ming-tea-summon="1"] .mt-summon-layer {
   display: flex;
+  /* 必须能收到点击：一是「点一下就开始说话」（WKWebView 要真实手势才开麦），
+   * 二是审批/权限条本身要可点。窗口在 summon 各档本来就是可交互的，这里不再穿透。 */
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 /* 权限提示条：缺权限时才出现，点一下跳系统设置（⑦ 的可点击引导） */
