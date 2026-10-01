@@ -463,6 +463,7 @@ function mingTeaInjectSessionTrust() {
       if (card.querySelector(".mt-summon-trust")) continue;
       const buttons = Array.from(card.querySelectorAll("button"));
       const allow = buttons.find((b) => /允许|批准/.test(b.textContent || ""));
+      const deny = buttons.find((b) => /拒绝/.test(b.textContent || ""));
       const trustButton = document.createElement("button");
       trustButton.type = "button";
       trustButton.className = `${allow?.className ?? ""} mt-summon-trust`.trim();
@@ -483,6 +484,27 @@ function mingTeaInjectSessionTrust() {
         if (allow) allow.click();
       });
       (allow?.parentElement ?? card).appendChild(trustButton);
+
+      // 「拒绝并停止」：只点拒绝的话模型会换个工具再试（实测：拒绝后立刻又弹一次），
+      // 所以这里拒绝当前这次 + 中止本轮（官方 conversation 服务有 cancel()）。
+      if (!card.querySelector(".mt-summon-deny-stop")) {
+        const denyStop = document.createElement("button");
+        denyStop.type = "button";
+        denyStop.className = `${deny?.className ?? ""} mt-summon-deny-stop`.trim();
+        denyStop.textContent = "拒绝并停止";
+        denyStop.title = "拒绝这次操作，并结束本轮，避免助手反复换工具重试";
+        denyStop.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (deny) deny.click();
+          try {
+            await mingTeaCtx?.conversation?.cancel?.();
+          } catch {
+            /* 取消失败也没关系，至少这次已经被拒 */
+          }
+        });
+        (deny?.parentElement ?? allow?.parentElement ?? card).appendChild(denyStop);
+      }
     }
   } catch {
     /* 注入失败不影响审批本身 */
