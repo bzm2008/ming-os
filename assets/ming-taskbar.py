@@ -28,9 +28,9 @@ APP_DIR = pathlib.Path("/usr/share/applications")
 RUNTIME_DIR = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
 LOCK_PATH = RUNTIME_DIR / "ming-taskbar.lock"
 LOG_PATH = pathlib.Path.home() / ".cache" / "ming-os" / "ming-taskbar.log"
-TASKBAR_WIDTH = 920
-TASKBAR_HEIGHT = 64
-TASKBAR_MARGIN = 8
+TASKBAR_WIDTH = 820
+TASKBAR_HEIGHT = 56
+TASKBAR_MARGIN = 10
 REFRESH_MS = 1500
 STATUS_REFRESH_MS = 8000
 
@@ -241,7 +241,10 @@ class MingTaskbar(Gtk.Window):
             surface = "#eef7f2"
             shadow = "0 2px 8px rgba(24, 74, 65, 0.18)"
         else:
-            surface = "rgba(246, 252, 249, 0.94)"
+            # Keep the normal surface opaque as well.  VirtualBox/XRender
+            # sessions may have no compositor, in which case a translucent
+            # GTK surface renders as a black rectangle instead of glass.
+            surface = "#f5fbf7"
             shadow = "0 5px 22px rgba(24, 74, 65, 0.22)"
         return """
         #ming-taskbar {{ background-color: {surface}; border: 1px solid rgba(47,138,125,0.42);
@@ -262,7 +265,7 @@ class MingTaskbar(Gtk.Window):
 
     def _position_window(self):
         x, y, width, height = monitor_geometry()
-        taskbar_width = min(TASKBAR_WIDTH, max(560, width - 32))
+        taskbar_width = min(TASKBAR_WIDTH, max(620, int(width * 0.78)))
         self.resize(taskbar_width, TASKBAR_HEIGHT)
         self.move(x + max(0, (width - taskbar_width) // 2), y + height - TASKBAR_HEIGHT - TASKBAR_MARGIN)
 
