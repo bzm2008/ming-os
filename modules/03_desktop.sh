@@ -4718,7 +4718,7 @@ taskbar_process_running() {
 
 taskbar_window_visible() {
     command -v wmctrl >/dev/null 2>&1 || return 1
-    wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /ming-taskbar/ {found=1} END {exit !found}'
+    wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /ming-taskbar|ming taskbar/ {found=1} END {exit !found}'
 }
 
 stop_taskbar() {
@@ -5061,7 +5061,7 @@ dock_window_id() {
             return 0
         fi
     done < <(x11_call wmctrl -lx 2>/dev/null |
-        awk 'tolower($0) ~ /ming-taskbar|plank/ { print $1 }')
+        awk 'tolower($0) ~ /ming-taskbar|ming taskbar|plank/ { print $1 }')
     return 1
 }
 
@@ -5303,7 +5303,7 @@ taskbar_window_visible() {
     taskbar_running || return 1
     command -v wmctrl >/dev/null 2>&1 || return 0
     x11_call wmctrl -lx 2>/dev/null |
-        awk 'tolower($0) ~ /ming-taskbar/ {found=1} END {exit !found}'
+        awk 'tolower($0) ~ /ming-taskbar|ming taskbar/ {found=1} END {exit !found}'
 }
 
 plank_window_visible() {
@@ -9300,9 +9300,15 @@ auto_select_blank_ab() {
                 (( click_y < 70 )) && click_y=70
                 (( click_y > 90 )) && click_y=90
                 xdotool windowactivate --sync "${calamares_window}" >/dev/null 2>&1 || true
-                xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
-                    >/tmp/ming-installer/auto-select.log 2>&1 || true
-                printf '[%s] selected %s erase card at %sx%s\n' \
+                # KPMcore may redraw the card once after the first geometry
+                # probe. Retry a few bounded clicks so the automatic mode does
+                # not leave Next disabled on a transiently stale page.
+                for _click_try in 1 2 3; do
+                    xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
+                        >>/tmp/ming-installer/auto-select.log 2>&1 || true
+                    sleep 1
+                done
+                printf '[%s] selected %s erase card at %sx%s with bounded retries\n' \
                     "$(date '+%F %T')" "${selected_mode}" "${click_x}" "${click_y}" >>/tmp/ming-installer/auto-select.log
                 return 0
             fi

@@ -12,6 +12,7 @@ class MingTaskbarContracts(unittest.TestCase):
     def test_taskbar_asset_is_gtk3_x11_and_has_required_surfaces(self):
         source = TASKBAR.read_text(encoding="utf-8")
         self.assertIn("gi.require_version('Gtk', '3.0')", source)
+        self.assertIn("gi.require_version('Gdk', '3.0')", source)
         self.assertIn("Gdk.WindowTypeHint.DOCK", source)
         for marker in ("Ming 菜单", "搜索", "快速设置", "wmctrl", "MING_TASKBAR_LOW_RESOURCE"):
             self.assertIn(marker, source)
