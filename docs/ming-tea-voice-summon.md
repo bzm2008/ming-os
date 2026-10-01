@@ -141,9 +141,11 @@ DSH host 早已就绪，不需要现起。冷启动那 3 秒里用户看到的�
 启动方式是 `node --import tsx/esm worker.ts`。runtime 里没有 `tsx` 时
 `import.meta.resolve("tsx/esm")` 直接抛错，`prepareRuntime` 失败，表现为
 **点麦克风后永远停在 `requesting`、模型从不被读取、也没有 worker 进程**。
-已把 `tsx@4.23.15` 作为 runtime 依赖写进 `assets/ming-tea-dsh-lock.json`
-（和 pnpm 同性质），并给宿主加了一个 `speech.prepare` RPC：面板呼出时**主动预热** provider
-（模型加载要几十秒，等用户点麦克风再加载就会干等）。
+已把 `tsx@4.23.15` 钉进 `scripts/install_ming_tea_plugins.sh`（`TSX_SPEC`，与 pnpm 并列）——
+它属于「安装器提供的运行环境」，不是受审插件，所以**不放进锁文件**：锁里每条都要求有
+非空 `capabilities`（`plugin-registry.ts` 会校验），给 tsx 编一个能力反而是假的。
+另外给宿主加了 `speech.prepare` RPC：面板呼出时**主动预热** provider
+（模型加载要几十秒，等用户点麦克风再加载就是干等）。
 
 ### ② 只是测试环境限制：Playwright 的 Chromium 没有音频输入设备
 

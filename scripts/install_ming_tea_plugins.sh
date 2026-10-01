@@ -66,10 +66,15 @@ fi
 # 只删 node_modules 与 package-lock.json；`dsh-home/`（profile、会话、凭证）必须保留。
 rm -rf "${RUNTIME_DIR}/node_modules" "${RUNTIME_DIR}/package-lock.json"
 
-# pnpm ships beside the runtime so "dsh plugin" can spawn it: dsh does not
-# resolve pnpm from the runtime prefix on its own.
+# 两个「安装器提供的 runtime 依赖」（和锁文件里的受审插件分开：它们没有 capabilities，
+# 是运行环境的一部分，不是插件）：
+#   - pnpm：dsh plugin 要 spawn 它，dsh 不会自己从 runtime 前缀里找；
+#   - tsx：官方语音 provider 的 worker 是 `.ts`，用 `node --import tsx/esm worker.ts` 启动，
+#     缺它语音 provider 的 prepareRuntime 会直接抛错 —— 表现为「点麦克风后永远停在
+#     requesting、模型从不加载、没有 worker 进程」（2026-10-01 实测，影响所有用户）。
+readonly TSX_SPEC="tsx@4.23.15"
 npm install --prefix "${RUNTIME_DIR}" --ignore-scripts --no-audit --no-fund --save-exact \
-    "${runtime_packages[@]}" "${PNPM_SPEC}"
+    "${runtime_packages[@]}" "${PNPM_SPEC}" "${TSX_SPEC}"
 
 runtime_bin_dir="${RUNTIME_DIR}/node_modules/.bin"
 export PATH="${runtime_bin_dir}:${PATH}"
