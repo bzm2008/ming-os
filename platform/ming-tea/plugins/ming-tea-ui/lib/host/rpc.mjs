@@ -356,6 +356,36 @@ export function registerHubRpc(ctx, service, { log = () => {} } = {}) {
       return { untrusted: target, ...getSummonTrust().status() };
     },
     "summon.trustStatus": () => getSummonTrust().status(),
+    // 语音预热：官方语音 provider 的 prepare 是「同步触发、异步就绪」，
+    // 由我们主动调一次，可以避免用户点麦克风后长时间卡在 requesting。
+    "speech.prepare": (payload) => {
+      const speech = typeof ctx.get === "function" ? ctx.get("speechToText") : undefined;
+      if (!speech || typeof speech.prepare !== "function") {
+        return { ok: false, reason: "speechToText 服务不可用（voice-input-bundle 未挂载？）" };
+      }
+      // 注意：speech.config.defaultProvider 是**响应式引用**（volatile），不是字符串；
+      // 直接传它会被 provider 注册表当成 "[object Object]"（实测报 provider is unavailable）。
+      const raw = speech.config?.defaultProvider;
+      const resolved =
+        typeof raw === "string" ? raw : typeof raw?.get === "function" ? raw.get() : undefined;
+      const provider = payload?.provider ?? resolved ?? "sensevoice-local";
+      try {
+        speech.prepare(provider, payload?.options);
+        return { ok: true, provider };
+      } catch (error) {
+        return { ok: false, provider, error: String(error?.message ?? error) };
+      }
+    },
+    "speech.status": () => {
+      const speech = typeof ctx.get === "function" ? ctx.get("speechToText") : undefined;
+      if (!speech) return { available: false };
+      const raw = speech.config?.defaultProvider;
+      return {
+        available: true,
+        defaultProvider: typeof raw === "string" ? raw : typeof raw?.get === "function" ? raw.get() : null,
+        providers: typeof speech.providers?.keys === "function" ? [...speech.providers.keys()] : [],
+      };
+    },
     "models.list": () => service.modelsList(),
     "models.sync": () => service.modelsSync(),
     "update.check": () => service.updateCheck(),

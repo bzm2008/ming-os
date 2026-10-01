@@ -131,28 +131,45 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 DSH host 早已就绪，不需要现起。冷启动那 3 秒里用户看到的是「正在唤醒…」那张本地页
 （`apps/desktop/public/waking.html`），不是空白。
 
-## 语音：根因已定位，差「呼出时先进入会话」这一步（2026-10-01）
+## 语音：链路已就位，缺一个 runtime 依赖已补上（2026-10-01）
 
-官方本地语音（`experimental-voice-input-bundle`，SenseVoice）已挂在我们 profile 里，
-模型也已下载并**逐文件校验过 sha256**（242 MB：int8 模型 239 MB + tokens 316 KB + silero VAD 1.8 MB，
-落在 `$DSH_HOME/speech-to-text/sensevoice/models/{sensevoice-onnx,silero}/`，来源 HuggingFace
-`csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`，本机直连 200/0.7s）。
+**两个真问题，一个已修、一个只是测试环境限制：**
 
-**决定性发现：语音行只存在于「会话内的输入条」，新任务落地页没有它。**
-实测（DOM 断言）：在新任务页对输入框做真实点击之后，输入卡片里仍只有
-「添加文件或调用指令」与「发送消息」两个按钮；`[class*="VoiceInput"]`、`[data-voice-activity]`、
-任何 `录音/语音` 的 aria-label **全部 0 命中**。而在会话页里同一个位置会出现「开始录音」按钮。
-⇒ 我们的 summon 面板落在新任务页，所以「自动起麦 / 点一下就说话」都找不到可点的按钮。
+### ① 已修：runtime 里缺 `tsx`（这会让**所有用户**的语音永久准备不起来）
 
-**下一轮要做的**：面板呼出时先**进入一个会话**（优先打开最近会话——顺带续上上下文，也更像手机助手；
-没有会话再新建），等输入条与语音行挂载后，再自动起麦或接受「点一下宠物说话」（WKWebView
-惯例要求真实用户手势，合成点击不算）。
+官方语音 provider（`dsh-experimental-speech-to-text-sensevoice`）的 worker 是 **`.ts` 文件**，
+启动方式是 `node --import tsx/esm worker.ts`。runtime 里没有 `tsx` 时
+`import.meta.resolve("tsx/esm")` 直接抛错，`prepareRuntime` 失败，表现为
+**点麦克风后永远停在 `requesting`、模型从不被读取、也没有 worker 进程**。
+已把 `tsx@4.23.15` 作为 runtime 依赖写进 `assets/ming-tea-dsh-lock.json`
+（和 pnpm 同性质），并给宿主加了一个 `speech.prepare` RPC：面板呼出时**主动预热** provider
+（模型加载要几十秒，等用户点麦克风再加载就会干等）。
 
-顺带记录两个已做的调整（都实测过没坏）：
-- 输入区原先用 `visibility:hidden` 藏起来，实测语音行是**懒挂载**的、隐藏时不挂载；
-  现改为「移到屏幕外 + 全透明」（React 认为它正常可见），审批卡仍由自己的 `position:fixed`
-  钉在视口底部（注入假审批卡实测：`position=fixed`、rect 落在 520×600 视口的底部可见区）。
-- 已实现「点一下面板就开始说」的兜底入口（一旦进入会话即可用）。
+### ② 只是测试环境限制：Playwright 的 Chromium 没有音频输入设备
+
+实测该环境里 `navigator.mediaDevices.getUserMedia({audio:true})` 直接失败
+（`Could not start audio source`），所以自动化测试只能验证到「点麦克风 → 相态进入 requesting」，
+**录到声音并转成文字这一步必须用真机真麦克风验证**。
+
+### 已核实的部分（都不需要真麦克风）
+
+- 语音三行在运行时里正常挂载：`speech-to-text`（`defaultProvider: sensevoice-local`）、
+  `speech-to-text-sensevoice`、`api-speech-to-text`、`ui-voice-input`；
+- `speech.status` 返回 `{available:true, providers:["sensevoice-local"]}`；
+- `speech.prepare` 返回 `{ok:true, provider:"sensevoice-local"}`，并且**真的拉起了 worker 进程**；
+- 模型文件齐全且 sha256 与官方清单一致（242 MB）；原生依赖 `sherpa-onnx-node@1.13.8`
+  与平台包 `sherpa-onnx-darwin-arm64`（含 `sherpa-onnx.node`、`libonnxruntime.dylib`）都在；
+- 面板侧：**点一下面板** → 官方麦克风按钮被点到 → 相态进入 `requesting`、
+  面板切到 `listening` 档并显示「我在听…」（`tapResult=clicked`，实测）。
+
+### 更正一条我先前的错误结论
+
+我曾在文档里写「语音行只存在于会话内、新任务落地页没有」——**这是错的**：
+原因是①缺 tsx 时语音行根本不挂载，②我早期探针只等 13–14 秒，而语音行在模型就绪后
+约 **15–17 秒**才挂载。现在落地页上「开始录音」按钮稳定出现。
+
+（另记：语音行是**懒挂载**的，所以 summon 模式**不能**用 `visibility:hidden` 藏输入区 ——
+已改为「移到屏幕外 + 全透明」，React 认为它正常可见，照常挂载。）
 
 ## 权限
 

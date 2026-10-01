@@ -562,16 +562,38 @@ window.__ModuleLoader__.load({
 		  if (!MING_TEA_SUMMON.capsule || !MING_TEA_SUMMON.answer) return;
 
 		  mingTeaSummonCheckPermissions();
+		  // 一次性预热语音 provider：官方 provider 的 prepare 是「同步触发、异步就绪」，
+		  // 模型加载要几十秒；不预热的话用户点麦克风后会长时间停在 requesting（实测踩到）。
+		  // 预热绑定在发起它的连接上，面板一直开着所以没问题。
+		  if (!MING_TEA_SUMMON.speechWarmed && MING_TEA_SUMMON.shell) {
+		    MING_TEA_SUMMON.speechWarmed = true;
+		    mingTeaHubRpc("speech.prepare").catch(() => {
+		      /* 预热失败就退回「等官方 UI 自己准备」，不影响其它功能 */
+		    });
+		  }
 		  // 点一下就开始说：WKWebView 惯例要求**真实用户手势**才允许开麦，
 		  // 我们合成的事件不算，所以「弹出即自动听」在 macOS 上不一定成立 —— 这一下点击是兜底。
-		  if (MING_TEA_SUMMON.layer && !MING_TEA_SUMMON.tapBound) {
+		  //
+		  // ⚠️ 必须挂在 document 的**捕获阶段**：宠物浮层是另一个子树（并且和我们的层 z-index 相同、
+		  // 排在后面），点在宠物身上时事件根本不会冒泡到我们的层（2026-10-01 实测：handler 一次都没触发）。
+		  if (!MING_TEA_SUMMON.tapBound) {
 		    MING_TEA_SUMMON.tapBound = true;
-		    MING_TEA_SUMMON.layer.addEventListener(
+		    document.addEventListener(
 		      "click",
-		      () => {
+		      (event) => {
+		        // 我们自己的可点控件与审批卡不当作「开始说话」
+		        const target = event.target;
+		        if (target && typeof target.closest === "function" && target.closest(".mt-summon-permission, .mt-summon-trust, .mt-summon-deny-stop, [data-approval-key], [data-question-key]")) {
+		          return;
+		        }
 		        MING_TEA_SUMMON.listeningRequested = false; // 允许再点一次重试
 		        MING_TEA_SUMMON.listeningAttempts = 0;
-		        if (mingTeaSummonStartListening()) {
+		        // 两个标记便于排障：点击是否到达处理函数、是否找到了官方麦克风按钮
+		        MING_TEA_SUMMON.tapCount = (MING_TEA_SUMMON.tapCount ?? 0) + 1;
+		        document.documentElement.dataset.mingTeaTap = String(MING_TEA_SUMMON.tapCount);
+		        const started = mingTeaSummonStartListening();
+		        document.documentElement.dataset.mingTeaTapResult = started ? "clicked" : "no-trigger";
+		        if (started) {
 		          MING_TEA_SUMMON.listeningRequested = true;
 		          MING_TEA_SUMMON.capsule.textContent = "我在听…";
 		          MING_TEA_SUMMON.capsule.dataset.empty = "1";
@@ -667,11 +689,11 @@ window.__ModuleLoader__.load({
 
 		/** 宿主半区同源 RPC：通道 `/ming-tea`，返回值是 `{ok, value}` 信封。
 		 * 失败一律抛出带 code 的错误，调用方负责降级成提示气泡（不静默假装成功）。 */
-		async function mingTeaHubRpc(endpoint) {
+		async function mingTeaHubRpc(endpoint, payload = {}) {
 		  const ctx = mingTeaCtx;
 		  const rpc = ctx?.connection?.rpc;
 		  if (!rpc?.call) throw new Error("宿主连接不可用（connection 服务未注入）");
-		  const result = await rpc.call("/ming-tea", endpoint, {});
+		  const result = await rpc.call("/ming-tea", endpoint, payload);
 		  if (result === undefined || result === null) throw new Error("宿主没有返回结果");
 		  if (result.ok === false) {
 		    // 兜底：宿主现在把错误放进 value 里（见 rpc.mjs 的说明），这是老信封的兼容分支
@@ -692,9 +714,35 @@ window.__ModuleLoader__.load({
 
 		function setMingTeaContext(ctx) {
 		  mingTeaCtx = ctx;
+		  // 调试钩子（仅 mt-debug=1 时暴露）：用于在浏览器里核对宿主服务与「创建会话」这条链路
+		  try {
+		    if (new URLSearchParams(location.search).get("mt-debug") === "1") {
+		      window.__mingTeaDebug = {
+		        ctx,
+		        sessions: ctx?.sessions ?? null,
+		        conversation: ctx?.conversation ?? null,
+		        createSession: async (opts) => {
+		          if (!ctx?.sessions?.create) return { ok: false, reason: "no sessions.create" };
+		          const id = await ctx.sessions.create(opts ?? {});
+		          return { ok: true, id: String(id) };
+		        },
+		        send: async (text) => {
+		          if (!ctx?.conversation?.send) return { ok: false, reason: "no conversation.send" };
+		          await ctx.conversation.send(text);
+		          return { ok: true };
+		        },
+		        voiceRow: () => {
+		          const el = document.querySelector("[class*='VoiceInput'], [class*='triggerAnchor'], [data-voice-activity]");
+		          return el ? { found: true, cls: (el.className || "").toString().slice(0, 60) } : { found: false };
+		        },
+		      };
+		    }
+		  } catch {
+		    /* 调试钩子失败不影响功能 */
+		  }
 		  // 调试钩子：便于在浏览器里核对宿主接入（只暴露我们自己的通道，不暴露整个 ctx）
 		  if (typeof window !== "undefined") {
-		    window.__mingTeaHub = { call: (endpoint) => mingTeaHubRpc(endpoint) };
+		    window.__mingTeaHub = { call: (endpoint, payload) => mingTeaHubRpc(endpoint, payload) };
 		  }
 		  // 上下文占用需要订阅会话投影，只在拿到 ctx 时绑一次（填充循环里重复绑会泄漏订阅）
 		  mingTeaBindContextMeter();

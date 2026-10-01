@@ -132,6 +132,15 @@
       "risk": "approval-gated"
     },
     {
+      "package": "tsx",
+      "version": "4.23.15",
+      "license": "MIT",
+      "integrity": "sha512-Yiex1Ovn8z2xPpOWckIiysV1SSyRMY9BkLF++q0yKiDxCqRhosKfMg3janKkiLBwZ5c/YryloKwGZcrEmtwxKw==",
+      "capabilities": [],
+      "risk": "none",
+      "note": "官方语音 provider（experimental-speech-to-text-sensevoice）的 worker 是 .ts 文件，用 `node --import tsx/esm worker.ts` 启动；runtime 里没有 tsx 时 prepareRuntime 会直接抛错，表现为「点麦克风后永远停在 requesting、模型从不加载」（2026-10-01 实测）。所以它和 pnpm 一样属于 runtime 依赖。"
+    },
+    {
       "package": "@michengai/dsh-agency-agents",
       "version": "1.0.7",
       "license": "Apache-2.0",
