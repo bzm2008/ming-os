@@ -1593,6 +1593,18 @@ class MingSettings(Adw.ApplicationWindow):
             title="后台 AI Agent 接口",
             subtitle="正在检查隔离会话运行时；不会控制当前桌面。",
         )
+        self.agent_grant_button = Gtk.Button(label="允许本次会话控制桌面")
+        self.agent_grant_button.set_valign(Gtk.Align.CENTER)
+        self.agent_grant_button.connect("clicked", self.on_agent_foreground_grant)
+        self.agent_revoke_button = Gtk.Button(label="撤销前台权限")
+        self.agent_revoke_button.set_valign(Gtk.Align.CENTER)
+        self.agent_revoke_button.connect("clicked", self.on_agent_foreground_revoke)
+        self.agent_stop_button = Gtk.Button(label="紧急停止")
+        self.agent_stop_button.set_valign(Gtk.Align.CENTER)
+        self.agent_stop_button.connect("clicked", self.on_agent_foreground_stop)
+        self.agent_runtime_row.add_suffix(self.agent_grant_button)
+        self.agent_runtime_row.add_suffix(self.agent_revoke_button)
+        self.agent_runtime_row.add_suffix(self.agent_stop_button)
         summary.add(self.agent_runtime_row)
         box.append(summary)
 
@@ -1631,7 +1643,7 @@ class MingSettings(Adw.ApplicationWindow):
                 result = {}
             if result.get("ok") and result.get("protocol") == "ming.agent.v1":
                 row.set_title("后台 AI Agent 接口已就绪")
-                row.set_subtitle("支持隔离图形会话；前台桌面操控保持关闭。")
+                row.set_subtitle("支持隔离图形会话；前台权限默认关闭，可按本次登录会话授予。")
             else:
                 row.set_title("后台 AI Agent 接口未就绪")
                 row.set_subtitle(error or result.get("message") or "运行时依赖尚未安装。")
@@ -1641,6 +1653,38 @@ class MingSettings(Adw.ApplicationWindow):
             ["/usr/local/bin/ming-agent-bridge", "capabilities"],
             timeout=8, on_done=done)
         return False
+
+    def _run_agent_foreground_action(self, args, success_text):
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}") if rc == 0 else {}
+            except ValueError:
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.toast(success_text, "info")
+                self.refresh_agent_runtime_status()
+            else:
+                self.toast(result.get("message") or error or "Agent 前台操作未完成。", "warning")
+            return False
+
+        run_capture_async(args, timeout=8, on_done=done)
+
+    def on_agent_foreground_grant(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "grant",
+             "--scope", "screen.read,screen.input,window.control,files.user,system.settings",
+             "--confirm"],
+            "已允许 Agent 在本次登录会话控制桌面。")
+
+    def on_agent_foreground_revoke(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "revoke"],
+            "Agent 前台权限已撤销。")
+
+    def on_agent_foreground_stop(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "stop"],
+            "Agent 前台控制已紧急停止。")
 
     def refresh_security_status(self):
         def admin_done(rc, output, _error):

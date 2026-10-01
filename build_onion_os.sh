@@ -2993,6 +2993,12 @@ if "socket" in agent_bridge or "http.server" in agent_bridge:
     errors.append("ming-agent-bridge must not open a network listener")
 agent_capabilities = require_file(
     "usr/lib/ming-os/agent/agent-capabilities.json", "ming.agent.v1")
+agent_core = require_file(
+    "usr/local/lib/ming-os/ming-agent-core.py", "ForegroundGrantManager")
+agent_cli = require_file(
+    "usr/local/bin/ming-agent", "capabilities")
+if "arbitrary_shell" not in agent_cli or "foreground" not in agent_cli:
+    errors.append("ming-agent CLI must expose controlled foreground and shell-free capabilities")
 agent_service = require_file(
     "usr/local/bin/ming-agent-service", "org.mingos.Agent1")
 if "FOREGROUND_ASSIST = False" not in agent_service:

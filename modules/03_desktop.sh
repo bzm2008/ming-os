@@ -328,7 +328,7 @@ install_ming_shell_components() {
     mkdir -p "${lib_dir}" /usr/local/bin /usr/local/sbin /etc/udev/rules.d \
         "/home/${MING_USER}/.local/share/applications"
     install -d -o root -g root -m 0700 /var/cache/ming-os/store /run/ming-store-control
-    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-taskbar.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-runtime.py ming-agent-bridge.py; do
+    for asset in ming-ui-tokens.py ming-session-profile.py ming-shell-common.py ming-notifications.py ming-device-control.py ming-audio-session.py ming-hardware-status.py ming-storage-status.py ming-appearance-control.py ming-app-drawer.py ming-taskbar.py ming-launch.py ming-package-installer.py ming-appimage-installer.py ming-wine-installer.py ming-android-runtime.py ming-toolbox.py ming-store.py ming-store-core.py ming-store-control.py ming-agent-core.py ming-agent.py ming-agent-runtime.py ming-agent-bridge.py; do
         if [[ ! -s "${asset_dir}/${asset}" ]]; then
             echo "ERROR: missing Ming shell asset: ${asset}" >&2
             return 1
@@ -428,6 +428,9 @@ install_ming_shell_components() {
     install -m 0755 "${asset_dir}/ming-app-drawer.py" /usr/local/bin/ming-app-drawer
     install -m 0755 "${asset_dir}/ming-taskbar.py" /usr/local/bin/ming-taskbar
     install -m 0755 "${asset_dir}/ming-launch.py" /usr/local/bin/ming-launch
+    install -m 0644 "${asset_dir}/ming-agent-core.py" "${lib_dir}/ming-agent-core.py"
+    install -m 0644 "${asset_dir}/ming-agent-core.py" /usr/local/bin/ming-agent-core.py
+    install -m 0755 "${asset_dir}/ming-agent.py" /usr/local/bin/ming-agent
     cat > /usr/local/bin/ming-status-widget-toggle << 'MINGSTATUSWIDGETTOGGLE'
 #!/usr/bin/env bash
 set -u

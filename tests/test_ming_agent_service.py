@@ -18,6 +18,7 @@ class AgentServiceContracts(unittest.TestCase):
         self.assertEqual("org.mingos.Agent1", metadata["bus_name"])
         self.assertEqual("/org/mingos/Agent1", metadata["object_path"])
         self.assertFalse(metadata["foreground_assist"])
+        self.assertTrue(metadata["foreground_supported"])
 
     def test_dispatch_json_returns_bridge_error_without_session(self):
         result = SERVICE.dispatch_json('{"screen": "status"}')

@@ -28,12 +28,23 @@ def _load_bridge():
     return module
 
 
+def _load_cli():
+    path = ROOT / "ming-agent.py"
+    spec = importlib.util.spec_from_file_location("ming_agent_cli_service", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("ming-agent.py is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def service_metadata() -> dict[str, Any]:
     return {
         "protocol": PROTOCOL,
         "bus_name": BUS_NAME,
         "object_path": OBJECT_PATH,
         "foreground_assist": FOREGROUND_ASSIST,
+        "foreground_supported": True,
         "user_scoped": True,
         "enabled_by_default": False,
     }
@@ -54,8 +65,7 @@ def dispatch_json(payload: str) -> dict[str, Any]:
             "protocol": PROTOCOL, "request_id": request_id, "ok": False,
             "state": "invalid_request", "message": "请求必须包含字符串 argv 数组。",
         }
-    bridge = _load_bridge()
-    return bridge.dispatch(argv)
+    return _load_cli().dispatch(argv)
 
 
 try:
@@ -77,8 +87,7 @@ if dbus is not None:
 
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s")
         def Capabilities(self):
-            bridge = _load_bridge()
-            return json.dumps(bridge.capabilities(pathlib.Path("/run/user/%s/ming-os/agent" % os.getuid())), ensure_ascii=False)
+            return json.dumps(_load_cli().dispatch(["capabilities"]), ensure_ascii=False)
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s")
         def DispatchJson(self, payload):
