@@ -157,6 +157,10 @@ worker: fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./worker.ts" : 
 
 保留的改动：面板呼出时主动调 `speech.prepare` 预热 provider（模型加载要时间，
 等用户点麦克风再加载就是干等），以及 `speech.status` 便于排障。
+**预热本身也修过一次**：早期版本在第一轮 tick 就调用、并且**提前把 `speechWarmed` 置位**，
+而那时 `connection` 服务还没注入 ⇒ 报「宿主连接不可用」且永不重试，打包版里预热一直没生效
+（实测）。现在改成「成功才算预热完成 + 有限次重试」，并把它写进
+`data-ming-tea-speech-prepare` 便于排障。
 
 ### ② 只是测试环境限制：Playwright 的 Chromium 没有音频输入设备
 

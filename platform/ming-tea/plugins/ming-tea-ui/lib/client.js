@@ -565,11 +565,21 @@ window.__ModuleLoader__.load({
 		  // 一次性预热语音 provider：官方 provider 的 prepare 是「同步触发、异步就绪」，
 		  // 模型加载要几十秒；不预热的话用户点麦克风后会长时间停在 requesting（实测踩到）。
 		  // 预热绑定在发起它的连接上，面板一直开着所以没问题。
+		  // ⚠️ 必须等 `connection` 服务就绪再调：面板刚起来的前几轮 tick 里它还没注入，
+		  // 早期版本因此在第一轮就调用并**把 warmed 提前置位**，于是永远不重试、worker 从不启动
+		  // （实测报「宿主连接不可用（connection 服务未注入）」，打包版里预热一直没生效）。
 		  if (!MING_TEA_SUMMON.speechWarmed && MING_TEA_SUMMON.shell) {
-		    MING_TEA_SUMMON.speechWarmed = true;
-		    mingTeaHubRpc("speech.prepare").catch(() => {
-		      /* 预热失败就退回「等官方 UI 自己准备」，不影响其它功能 */
-		    });
+		    MING_TEA_SUMMON.speechAttempts = (MING_TEA_SUMMON.speechAttempts ?? 0) + 1;
+		    document.documentElement.dataset.mingTeaSpeechPrepare = "pending";
+		    mingTeaHubRpc("speech.prepare")
+		      .then((result) => {
+		        MING_TEA_SUMMON.speechWarmed = true; // 成功才算预热完成
+		        document.documentElement.dataset.mingTeaSpeechPrepare = result?.ok ? "ok" : `fail:${result?.reason ?? result?.error ?? "unknown"}`;
+		      })
+		      .catch((error) => {
+		        document.documentElement.dataset.mingTeaSpeechPrepare = `error:${String(error?.message ?? error).slice(0, 60)}`;
+		        if (MING_TEA_SUMMON.speechAttempts > 40) MING_TEA_SUMMON.speechWarmed = true; // 放弃，等官方 UI 自己准备
+		      });
 		  }
 		  // 点一下就开始说：WKWebView 惯例要求**真实用户手势**才允许开麦，
 		  // 我们合成的事件不算，所以「弹出即自动听」在 macOS 上不一定成立 —— 这一下点击是兜底。
