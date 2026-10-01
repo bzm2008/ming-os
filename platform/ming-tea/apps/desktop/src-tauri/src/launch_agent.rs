@@ -76,6 +76,19 @@ pub struct LaunchAgentStatus {
     pub detail: String,
 }
 
+/// 读 plist 里**实际写着**的 helper 路径（用于判断是否需要重写：
+/// 例如从「开发机 repo 里的二进制」换成「.app 包内那份」）。
+pub fn installed_helper_path() -> Option<PathBuf> {
+    let path = plist_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    // 只取 ProgramArguments 里的第一个 <string>：plist 很小，不值得引入解析库
+    let start = text.find("<key>ProgramArguments</key>")?;
+    let rest = &text[start..];
+    let open = rest.find("<string>")? + "<string>".len();
+    let close = rest[open..].find("</string>")? + open;
+    Some(PathBuf::from(rest[open..close].trim()))
+}
+
 pub fn status() -> LaunchAgentStatus {
     let path = plist_path();
     let installed = path.as_ref().map(|p| p.is_file()).unwrap_or(false);

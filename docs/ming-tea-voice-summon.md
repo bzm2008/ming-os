@@ -171,6 +171,34 @@ MING_TEA_NO_HOTKEY_INSTALL=1 ./target/debug/ming-tea-desktop --summon
 7. **被杀时要带走 host**：Rust 默认没有信号处理器，`pkill` 会让 DSH host 变孤儿；现在装了 SIGTERM/SIGINT 处理器 + pidfile 残留清理（清理前会用 `ps` 确认那个 pid 确实是我们的 dsh，避免 pid 复用误杀）。
 8. **前端构建要用 `/Users/mac/.local/bin/node`（v26）**：用 runtime 自带的 node v24 跑 `vite build` 会因 rollup 原生模块 ABI 不匹配报 `ERR_DLOPEN_FAILED`。
 
+## 打包（2026-10-01 打通，剩运行时一项）
+
+```bash
+cd platform/ming-tea/apps/desktop
+pnpm build:hotkey                 # 构建守护进程并把二进制按 target triple 暂存到 src-tauri/binaries/
+pnpm exec tauri build --bundles app   # 只打 .app（DMG 那一步在本机会失败，见下）
+```
+
+产物 `src-tauri/target/release/bundle/macos/铭荼.app` 里已经包含：
+
+| 内容 | 位置 | 作用 |
+| --- | --- | --- |
+| 守护进程 | `Contents/MacOS/ming-tea-hotkey`（`bundle.externalBin`） | LaunchAgent 直接指向包内这份，用户不用另装 |
+| URL scheme | `Info.plist` 的 `CFBundleURLTypes`（`mingtea`） | `open mingtea://summon` 能唤起应用 |
+| 麦克风说明 | `Info.plist` 的 `NSMicrophoneUsageDescription` | 语音首次使用能正常弹权限（裸二进制做不到） |
+
+**实测**：`open "mingtea://summon"` → 打包版应用收到 deep link 并显示面板；
+LaunchAgent 的 plist 会从「开发机 repo 里的二进制」**自动刷新**成「.app 包内那份」
+（应用启动时比对记录路径与当前解析路径，不一致就重写并重新 bootstrap —— 只判断「装没装过」
+会导致热键指向一个不存在的位置）。
+
+**还差的一项（分发阻塞）**：DSH runtime 本身**还没有进包**，所以打包版目前仍要
+`MING_TEA_REPO_ROOT`（或 `MING_TEA_DSH_BIN`）才能找到 `dsh`。要把
+`.ming-tea/runtime` 作为资源打进 `.app` 并让 `resolve_dsh()` 优先用包内路径，属于分发那一轮的事。
+
+**DMG 那一步在本机会失败**（`bundle_dmg.sh` 报错，与 hdiutil / Finder 自动化有关，2026-09-26 就留下过失败的
+`rw.*.dmg`），所以本地验收用 `--bundles app`；正式发行前要单独解决签名与 DMG。
+
 ## 已知限制 / 还没做
 
 - **打包分发未完成**：守护进程二进制还没有通过 `bundle.externalBin` 打进 `.app`，URL scheme 也只有在**打包后的 .app** 里才注册。开发机走上面的 `command` 路径可以先跑通；正式分发前要补「守护进程入包 + 签名 + 公证」。

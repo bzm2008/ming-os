@@ -92,12 +92,22 @@ fn install_hotkey_daemon() {
         return;
     }
     let status = launch_agent::status();
-    if status.installed {
+    let recorded = launch_agent::installed_helper_path().map(|path| path.display().to_string());
+    if status.installed && status.loaded && status.helper == recorded {
         eprintln!(
-            "[hotkey] LaunchAgent 已在位（loaded={}, helper={:?}）",
-            status.loaded, status.helper
+            "[hotkey] LaunchAgent 已在位且指向当前 helper（helper={:?}）",
+            status.helper
         );
         return;
+    }
+    if status.installed {
+        // 装过但没加载、或路径变了（开发机 → .app 包内）都要重写：否则热键指向一个不存在的位置
+        eprintln!(
+            "[hotkey] 需要刷新 LaunchAgent（installed={}, loaded={}, 记录路径={:?}）",
+            status.installed,
+            status.loaded,
+            launch_agent::installed_helper_path()
+        );
     }
     if launch_agent::resolve_helper().is_none() {
         eprintln!(

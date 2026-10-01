@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:agent": "pnpm --dir ../.. build:agent",
-    "build:hotkey": "cargo build --manifest-path ../hotkey-daemon/Cargo.toml",
+    "build:hotkey": "cargo build --release --manifest-path ../hotkey-daemon/Cargo.toml && mkdir -p src-tauri/binaries && cp ../hotkey-daemon/target/release/ming-tea-hotkey \"src-tauri/binaries/ming-tea-hotkey-$(rustc -vV | sed -n 's/^host: //p')\"",
     "tauri:dev": "tauri dev",
     "tauri:build": "pnpm build:hotkey && tauri build"
   },

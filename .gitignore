@@ -63,3 +63,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.swp
+
+# Tauri externalBin 暂存目录（构建产物，由 pnpm build:hotkey 生成）
+/platform/ming-tea/apps/desktop/src-tauri/binaries/
