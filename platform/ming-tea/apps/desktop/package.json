@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "build:agent": "pnpm --dir ../.. build:agent",
+    "build:hotkey": "cargo build --manifest-path ../hotkey-daemon/Cargo.toml",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "pnpm build:hotkey && tauri build"
   },
   "dependencies": {
     "@ming-tea/protocol": "workspace:*",

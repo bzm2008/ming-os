@@ -13,7 +13,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.4.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.8.5", features = [] }
+# tray-icon：托盘常驻（关窗后仍能恢复主窗口）
+# macos-private-api：透明窗口（summon 面板）在 macOS 上必需
+tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
+# single-instance 必须最先注册：第二次启动只把 argv/URL 交给已经在跑的实例
+tauri-plugin-single-instance = "2.5.2"
+tauri-plugin-deep-link = "2.6.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 只用于「真实探测麦克风授权状态」；辅助功能与屏幕录制用直接 FFI，不需要 crate。
+# AVMediaFormat 特性是 authorizationStatusForMediaType 的前提。
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["AVMediaFormat"] }

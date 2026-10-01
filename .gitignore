@@ -52,6 +52,10 @@ __pycache__/
 /platform/ming-tea/apps/desktop/dist/
 /platform/ming-tea/apps/desktop/src-tauri/target/
 /platform/ming-tea/apps/desktop/src-tauri/resources/
+# Tauri v2 的 ACL schema 是 tauri-build 每次构建生成的（可复现），不入库
+/platform/ming-tea/apps/desktop/src-tauri/gen/
+# 热键守护进程的 cargo 产物（130MB+，可复现）
+/platform/ming-tea/apps/hotkey-daemon/target/
 /platform/ming-tea/scripts/.cache/
 /platform/ming-tea/tsconfig.tsbuildinfo
 

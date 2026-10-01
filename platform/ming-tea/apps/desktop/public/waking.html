@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>铭荼助手</title>
+    <style>
+      /* 透明窗口：整页透明，只有卡片本身有底色 */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+        color: #10302c;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .card {
+        width: 100%;
+        border-radius: 22px;
+        padding: 16px 18px;
+        background: rgba(246, 250, 248, 0.94);
+        border: 1px solid rgba(22, 133, 125, 0.22);
+        box-shadow: 0 18px 40px rgba(12, 48, 44, 0.22);
+        backdrop-filter: blur(18px);
+        display: flex;
+        gap: 14px;
+        align-items: center;
+      }
+      .pet {
+        width: 54px;
+        height: 54px;
+        border-radius: 18px;
+        background: radial-gradient(circle at 32% 28%, #7fd6c8, #16857d 70%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 26px;
+        box-shadow: inset 0 -3px 8px rgba(0, 0, 0, 0.12);
+        animation: breathe 1.9s ease-in-out infinite;
+        flex: none;
+      }
+      @keyframes breathe {
+        0%, 100% { transform: translateY(0) scale(1); }
+        50% { transform: translateY(-3px) scale(1.04); }
+      }
+      .text { min-width: 0; }
+      .title { font-size: 14px; font-weight: 600; }
+      .hint { margin-top: 4px; font-size: 12px; line-height: 1.6; color: rgba(16, 48, 44, 0.66); }
+      .error { margin-top: 6px; font-size: 12px; line-height: 1.55; color: #b3261e; word-break: break-word; }
+      .dots::after {
+        content: "";
+        animation: dots 1.4s steps(4, end) infinite;
+      }
+      @keyframes dots {
+        0% { content: ""; }
+        25% { content: "·"; }
+        50% { content: "··"; }
+        75% { content: "···"; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .pet { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <div class="pet">✦</div>
+        <div class="text">
+          <div class="title">正在唤醒铭荼<span class="dots"></span></div>
+          <div class="hint" id="hint">第一次唤醒要把后台服务拉起来，通常几秒内就好。</div>
+          <div class="error" id="error" hidden></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // Rust 侧启动失败时会 eval 一个 window.__mingTeaHostError；这里如实显示，别让用户对着空白面板发呆
+      const errorBox = document.getElementById("error");
+      const hint = document.getElementById("hint");
+      setInterval(() => {
+        const message = window.__mingTeaHostError;
+        if (message) {
+          hint.hidden = true;
+          errorBox.hidden = false;
+          errorBox.textContent = "启动失败：" + message;
+        }
+      }, 500);
+    </script>
+  </body>
+</html>

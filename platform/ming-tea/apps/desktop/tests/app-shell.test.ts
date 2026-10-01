@@ -60,8 +60,13 @@ describe("desktop shell", () => {
 
   it("exposes a native Agent runtime status command", () => {
     const rust = readFileSync(join(__dirname, "..", "src-tauri", "src", "lib.rs"), "utf8");
-    expect(rust).toContain("agent_runtime_status");
-    expect(rust).toContain("agent_endpoint");
+    // 2026-10-01 起壳不再启动进程内桩 agent（resources/ming-tea-agent.mjs 只在仓库里留档），
+    // 改为真正监督 DSH host 并暴露它的状态；因此这里断言的是新的命令面。
+    expect(rust).toContain("fn dsh_status");
+    expect(rust).toContain("use dsh_host::{DshHost");
+    expect(rust).toContain("fn dsh_start");
+    expect(rust).toContain("fn summon_show");
+    expect(rust).toContain("install_hotkey_daemon");
   });
 
   it("keeps mode and thinking selection in the pre-session gate", () => {
