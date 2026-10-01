@@ -131,25 +131,28 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 DSH host 早已就绪，不需要现起。冷启动那 3 秒里用户看到的是「正在唤醒…」那张本地页
 （`apps/desktop/public/waking.html`），不是空白。
 
-## 语音：现状与三个必须知道的坑（2026-10-01 盘查）
+## 语音：根因已定位，差「呼出时先进入会话」这一步（2026-10-01）
 
-官方本地语音（`experimental-voice-input-bundle`，SenseVoice）**已经挂在我们 profile 里**，
-但「弹出就能直接说话」这条链路还差一步。盘查结论：
+官方本地语音（`experimental-voice-input-bundle`，SenseVoice）已挂在我们 profile 里，
+模型也已下载并**逐文件校验过 sha256**（242 MB：int8 模型 239 MB + tokens 316 KB + silero VAD 1.8 MB，
+落在 `$DSH_HOME/speech-to-text/sensevoice/models/{sensevoice-onnx,silero}/`，来源 HuggingFace
+`csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`，本机直连 200/0.7s）。
 
-1. **语音按钮只在「会话内的输入条」里挂载**，新任务落地页没有它。
-   我们的 summon 面板落在新任务页 ⇒ 找不到可点的麦克风按钮（实测：整页搜 `voice|trigger|mic`
-   只命中设置按钮与工作区选择器，没有任何语音元素；`[data-voice-activity]` 也不存在）。
-   → 修法（下一轮）：面板呼出时**先进入一个会话**（打开最近会话更符合手机助手的连续性，
-   也能顺带续上上下文），输入条与语音 UI 挂载后再开始听。
-2. **WKWebView 惯例要求真实用户手势才允许开麦**。我们 `.click()` 合成的事件不算；
-   所以已经加了「**点一下宠物就开始说**」的兜底（宠物档也改成可交互，否则点击会穿透到背后窗口）。
-   这一条要在真机上确认：若自动起麦被拒，点一下面板即可。
-3. **首次使用要下载 239 MB 模型**（int8，来自 HuggingFace 的
-   `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`，另有 316 KB tokens 与
-   1.8 MB silero VAD）。本机直连 huggingface.co 实测 200（0.7s）。下载落在
-   `$DSH_HOME/speech-to-text/sensevoice`。**未下载前语音不可用**，这一点要在产品上说明。
+**决定性发现：语音行只存在于「会话内的输入条」，新任务落地页没有它。**
+实测（DOM 断言）：在新任务页对输入框做真实点击之后，输入卡片里仍只有
+「添加文件或调用指令」与「发送消息」两个按钮；`[class*="VoiceInput"]`、`[data-voice-activity]`、
+任何 `录音/语音` 的 aria-label **全部 0 命中**。而在会话页里同一个位置会出现「开始录音」按钮。
+⇒ 我们的 summon 面板落在新任务页，所以「自动起麦 / 点一下就说话」都找不到可点的按钮。
 
-已实现的部分：面板出现后会自动尝试点官方麦克风；同时提供「点一下宠物说话」的兜底入口。
+**下一轮要做的**：面板呼出时先**进入一个会话**（优先打开最近会话——顺带续上上下文，也更像手机助手；
+没有会话再新建），等输入条与语音行挂载后，再自动起麦或接受「点一下宠物说话」（WKWebView
+惯例要求真实用户手势，合成点击不算）。
+
+顺带记录两个已做的调整（都实测过没坏）：
+- 输入区原先用 `visibility:hidden` 藏起来，实测语音行是**懒挂载**的、隐藏时不挂载；
+  现改为「移到屏幕外 + 全透明」（React 认为它正常可见），审批卡仍由自己的 `position:fixed`
+  钉在视口底部（注入假审批卡实测：`position=fixed`、rect 落在 520×600 视口的底部可见区）。
+- 已实现「点一下面板就开始说」的兜底入口（一旦进入会话即可用）。
 
 ## 权限
 

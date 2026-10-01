@@ -390,16 +390,43 @@ function mingTeaSummonVoicePhase() {
   }
 }
 
-/** 点官方语音触发按钮开始听（按钮藏在被隐藏的输入区里，但仍在 DOM、仍可点）。 */
+/** 点官方语音触发按钮开始听。
+ * 注意两点（2026-10-01 实测）：
+ *   ① 语音按钮是**按需挂载**的（模型就绪 + 输入区被交互过才出现），所以找不到时先聚焦输入框催一下，
+ *      并允许后续轮次继续重试（调用方按 attempts 控制次数）；
+ *   ② 它在被 summon 隐藏的输入区里，`visibility:hidden` 不影响程序化点击。 */
+const MING_TEA_VOICE_TRIGGER_SELECTORS = [
+  '[data-composer-card] button[aria-label*="录音"]',
+  '[data-composer-card] button[aria-label*="语音"]',
+  '[data-composer-card] button[aria-label*="说话"]',
+  '[data-composer-card] [class*="triggerAnchor"] button',
+  '[data-composer-card] button[class*="trigger"]',
+  '[class*="triggerAnchor"] button',
+];
+
 function mingTeaSummonStartListening() {
   try {
-    const button =
-      document.querySelector('[data-composer-card] [class*="triggerAnchor"] button') ||
-      document.querySelector('[data-composer-card] button[class*="trigger"]') ||
-      document.querySelector('[class*="triggerAnchor"] button');
-    if (!button) return false;
-    button.click();
-    return true;
+    for (const selector of MING_TEA_VOICE_TRIGGER_SELECTORS) {
+      const button = document.querySelector(selector);
+      if (button && !button.disabled) {
+        button.click();
+        return true;
+      }
+    }
+    // 还没挂载：语音行是在**输入区收到真实指针事件**之后才挂载的（只 focus() 不够，实测），
+    // 所以这里补一串合成的指针/焦点事件当「催挂载」，下一次 tick 再找按钮。
+    const input = document.querySelector('[data-composer-input="true"], [data-composer-card] [contenteditable="true"]');
+    if (input) {
+      input.focus?.();
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "focusin"]) {
+        try {
+          input.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        } catch {
+          /* 单个事件失败不影响其它 */
+        }
+      }
+    }
+    return false;
   } catch {
     return false;
   }
@@ -526,6 +553,7 @@ function mingTeaSummonTick() {
       "click",
       () => {
         MING_TEA_SUMMON.listeningRequested = false; // 允许再点一次重试
+        MING_TEA_SUMMON.listeningAttempts = 0;
         if (mingTeaSummonStartListening()) {
           MING_TEA_SUMMON.listeningRequested = true;
           MING_TEA_SUMMON.capsule.textContent = "我在听…";
@@ -552,7 +580,10 @@ function mingTeaSummonTick() {
 
   // 自动开始听：只在「还没有回答、也没在听」时点一次，避免反复开关麦克风
   if (MING_TEA_SUMMON.auto && !MING_TEA_SUMMON.listeningRequested && !voicePhase && !answerText) {
+    // 按钮按需挂载，允许重试若干次（大约 180ms × 20 ≈ 4 秒）
+    MING_TEA_SUMMON.listeningAttempts = (MING_TEA_SUMMON.listeningAttempts ?? 0) + 1;
     if (mingTeaSummonStartListening()) MING_TEA_SUMMON.listeningRequested = true;
+    else if (MING_TEA_SUMMON.listeningAttempts > 20) MING_TEA_SUMMON.listeningRequested = true; // 放弃自动，等用户点
   }
   // 说完了（语音相态消失且输入框里有字）→ 自动发送一次
   if (composerText && composerText !== MING_TEA_SUMMON.submittedText && !voicePhase) {

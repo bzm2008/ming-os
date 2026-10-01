@@ -1504,11 +1504,26 @@ body[data-ds-dark-theme] {
   display: none !important;
 }
 
-/* ③ 对话正文与输入区：看不见，但留在 DOM 里给语音与发送用 */
-:root[data-ming-tea-summon="1"] [data-conversation-region="chat"],
+/* ③ 对话正文：藏起来（我们用 textContent 镜像它的文本，所以 hidden 不影响复用） */
+:root[data-ming-tea-summon="1"] [data-conversation-region="chat"] {
+  visibility: hidden !important;
+  box-shadow: none !important;
+}
+
+/* ③b 输入区：**不能**用 visibility:hidden —— 实测语音行是懒挂载的，
+ * 隐藏时它根本不挂载，于是「点一下说话」永远找不到麦克风按钮（2026-10-01 踩到）。
+ * 改成「移到屏幕外 + 全透明」：React 认为它正常可见、照常挂载，用户也看不见它。
+ * 注意：审批卡虽然也挂在这一带，但它自己有 position:fixed 规则，会钉回视口底部。 */
 :root[data-ming-tea-summon="1"] [data-composer-seat],
 :root[data-ming-tea-summon="1"] [data-composer-card] {
-  visibility: hidden !important;
+  position: fixed !important;
+  left: -10000px !important;
+  top: 0 !important;
+  width: 820px !important;
+  max-width: none !important;
+  opacity: 0 !important;
+  visibility: visible !important;
+  pointer-events: none !important;
   box-shadow: none !important;
 }
 
