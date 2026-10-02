@@ -128,11 +128,30 @@ fn install_hotkey_daemon() {
 /// 是否已经处理过一次 summon（冷启动时初始 URL 的 `RunEvent::Opened` 可能早于
 /// 我们的 `on_open_url` 注册，setup 里的补偿逻辑据此避免重复处理 —— 重复会变成「再按一次收起」）。
 static SUMMON_HANDLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 进程启动时刻：用来把「启动初期同一个 URL 被投递两次」和「用户又按了一次热键」区分开。
+static APP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+/// 启动后这段时间内的重复 summon 视为「同一个初始 URL 的第二份投递」，忽略。
+/// 取 1 秒：初始 URL 的两条投递路径相差只有几百毫秒（补偿线程 0.5 秒内就会动手），
+/// 而用户在启动后 1 秒内按热键的概率极低 —— 把窗口压到最小，避免误吞真实按键。
+const INITIAL_URL_DEDUPE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 处理 `mingtea://summon|open|quit`。
 fn handle_deep_link(app: &AppHandle, raw: &str) {
     let lower = raw.to_ascii_lowercase();
     if lower.starts_with("mingtea://summon") {
+        // 初始 URL 有两条投递路径（插件的 on_open_url 事件 + setup 里的补偿），
+        // 若两条都到，第二次会变成「收起」——面板刚弹出来就消失。启动 3 秒内的重复直接忽略；
+        // 之后（用户真按热键）保持原有的开/关手感。
+        let since_start = APP_STARTED
+            .get()
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if since_start < INITIAL_URL_DEDUPE
+            && SUMMON_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            eprintln!("[deep-link] 启动初期的重复 summon（{since_start:?}），忽略以免刚弹出又收起");
+            return;
+        }
         SUMMON_HANDLED.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(state) = app.try_state::<AppState>() {
             let _ = summon::summon(app, Arc::clone(&state.host));
@@ -197,6 +216,7 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = APP_STARTED.set(std::time::Instant::now());
     // 第一件事：把 stderr 落到 ~/Library/Logs/铭荼/app.log。
     // 打包版被 LaunchServices 拉起时 stderr 无处可去（实测 `log show` 里一条我们自己的行都没有），
     // 冷启动这类问题因此无法验证、用户也拿不到现场。
@@ -285,7 +305,8 @@ pub fn run() {
                 // 与「按一下快捷键先被整个应用窗口糊一脸」正是要避免的体感。
                 //
                 // 这个线程做两件事：
-                // 1. 等初始 URL 出现（最多 1 秒；普通启动拿不到就按普通启动处理）；
+                // 1. 等初始 URL 出现（**最多 0.5 秒**：URL 投递实测在 100ms 内到；
+                //    普通启动则等满这 0.5 秒再显示主窗口 —— 不能为了冷启动让日常启动白等太久）；
                 // 2. **如果事件比我们的监听更早发出，就自己补处理一次** —— 实测冷启动时
                 //    `get_current()` 有值、但我们的 `on_open_url` 回调没收到（事件在注册监听前已发过），
                 //    表现为「面板窗口存在但不显示、停在系统默认位置」。
@@ -295,7 +316,7 @@ pub fn run() {
                     use tauri_plugin_deep_link::DeepLinkExt;
                     let started = std::time::Instant::now();
                     let mut initial: Option<Vec<tauri::Url>> = None;
-                    for _ in 0..10 {
+                    for _ in 0..5 {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         if let Ok(Some(urls)) = handle_for_main.deep_link().get_current() {
                             initial = Some(urls);

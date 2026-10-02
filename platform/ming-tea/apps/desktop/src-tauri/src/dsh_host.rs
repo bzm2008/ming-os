@@ -21,10 +21,6 @@ use std::time::{Duration, Instant};
 /// 不能碰 Mutex —— 见 `install_signal_handlers` 的说明。
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 
-pub fn current_child_pid() -> i32 {
-    CHILD_PID.load(Ordering::SeqCst)
-}
-
 #[cfg(unix)]
 mod signal_ffi {
     extern "C" {
@@ -51,8 +47,11 @@ pub fn install_signal_handlers() {
         }
     }
     unsafe {
-        signal_ffi::signal(15, on_signal as usize); // SIGTERM
-        signal_ffi::signal(2, on_signal as usize); // SIGINT
+        // 显式先转成 fn 指针再转 usize：直接 as usize 会触发
+        // `direct cast of function item into an integer` lint（虽是老写法，明确点更好读）
+        let handler = on_signal as extern "C" fn(i32) as usize;
+        signal_ffi::signal(15, handler); // SIGTERM
+        signal_ffi::signal(2, handler); // SIGINT
     }
 }
 

@@ -15,8 +15,6 @@ use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewUrl, Webvi
 
 pub const SUMMON_LABEL: &str = "summon";
 pub const MAIN_LABEL: &str = "main";
-const PANEL_WIDTH: f64 = 420.0;
-const PANEL_HEIGHT: f64 = 320.0;
 
 /// 三态几何（用户要求：默认只有宠物 → 说话时出转录胶囊 → 回答出现在胶囊下方）。
 /// 窗口**底边固定**，内容往上长，所以宠物始终停在原位，不会因为回答变长而跳动。
