@@ -314,6 +314,46 @@ model=deepseek-v4.1-flash + 图片 → 「①计算器（Calculator） ②0」�
 DSH host 早已就绪，不需要现起。冷启动那 3 秒里用户看到的是「正在唤醒…」那张本地页
 （`apps/desktop/public/waking.html`），不是空白。
 
+### 冷启动只弹面板：URL 路径也修好了（2026-10-02）
+
+上面那张表里的冷启动是用 `--summon` 命令行参数测的，而**守护进程实际做的是
+`open mingtea://summon`** —— 两条路不一样：macOS 不会把 URL 放进 argv（走 Apple Event），
+所以判断「是不是被召唤启动」的那段 argv 逻辑对冷启动**不成立**，实测主窗口照样被弹了出来。
+现在（都用 `scripts/winlist.c` + `~/Library/Logs/铭荼/app.log` 断言过）：
+
+| 启动方式 | 行为 | 证据 |
+| --- | --- | --- |
+| `open mingtea://summon`（= 热键路径） | **只弹面板**，不显示主窗口；面板首帧就在底部 `220×220 @(850,720)` | 日志 `[setup] 被 summon URL 拉起（100ms 后确认）`、`[main]` 行数 = 0 |
+| 普通启动（Dock / `open -a`） | 显示主窗口，不弹面板 | 日志 `[main] 显示主窗口` = 1 行，`只弹面板` = 0 |
+
+三处具体改动：①主窗口在 `tauri.conf.json` 里改成 `visible: false`，由 `open_main_window` 决定何时显示，
+这样不会先闪一下再消失；②setup 里异步等最多 1 秒读初始 URL —— 若事件比我们的 `on_open_url`
+注册更早发出（实测会这样：`get_current()` 有值、回调没收到），就**自己补处理一次**
+（用 `SUMMON_HANDLED` 原子标记避免重复 → 重复会变成「再按一次收起」）；
+③摆位放到 `window.show()` **之后**：窗口没被 OS 映射时设的位置不生效，
+原先冷启动会先按系统默认位置露一下（实测 `y=215`，本该 `720`）再跳过去；
+顺带让 `set_focus()` 失败**不再中断**摆位（原先 `?` 提前返回，面板就停在错位置）。
+
+### 打包版现在有日志可看了：`~/Library/Logs/铭荼/app.log`
+
+打包版被 LaunchServices 拉起时 **stderr 无处可去** —— 实测
+`log show --predicate 'process == "ming-tea-desktop"'` 里一条我们自己的行都没有
+（只有 WebKit 噪音），于是「冷启动到底弹了哪个窗口」这类问题既没法验证、用户也拿不到现场。
+现在启动第一件事就是把 fd 2 指向 `~/Library/Logs/铭荼/app.log`（`src/logging.rs` 里一行 `dup2`，
+我们自己的 `eprintln`、panic、依赖库的警告全都会落进去；超过 2 MB 下次启动时重开）。
+排障第一步就是看这个文件，例如：
+
+```bash
+tail -30 ~/Library/Logs/铭荼/app.log        # 壳的启动/召唤/宿主日志
+tail -5  ~/Library/Logs/铭荼/hotkey.log     # 守护进程（热键）日志
+```
+
+**一个打包坑（我踩了）**：直接 `cp` 新二进制覆盖**已签名** `.app` 里的主可执行文件会**破坏签名**，
+macOS 随后拒绝启动（`Launchd job spawn failed`）。要么走正规打包
+（`pnpm exec tauri build --bundles app`），要么覆盖后 `codesign --force --deep --sign - 铭荼.app`。
+顺带实测：重建导致的 ad-hoc 签名标识变化**没有**清掉 TCC 授权
+（辅助功能/屏幕录制/麦克风五项探测重建后仍全部 `available`）。
+
 ## 语音：链路已就位，缺一个 runtime 依赖已补上（2026-10-01）
 
 **两个真问题，一个已修、一个只是测试环境限制：**

@@ -29,3 +29,5 @@ dirs = "6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-av-foundation = { version = "0.3", features = ["AVMediaFormat"] }
+# 只为把 stderr 重定向到 app.log 时用 dup2（日志文件是打包版唯一能看到现场的途径）
+libc = "0.2"

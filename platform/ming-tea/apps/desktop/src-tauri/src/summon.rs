@@ -287,10 +287,17 @@ pub fn summon(app: &AppHandle, host: Arc<DshHost>) -> Result<(), String> {
     if let Some(url) = status.url.clone() {
         navigate_to_dsh(&window, &url);
     }
-    // 每次呼出都从「只有宠物」这一档开始（用户要求：先只出现宠物）
-    apply_stage(app, "pet");
     window.show().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
+    // 聚焦失败**不能**中断后面的摆位：冷启动时窗口刚映射，set_focus 可能失败，
+    // 而位置没摆正是用户最容易看到的毛病（实测踩到：`?` 提前返回 ⇒ 面板停在 y=215）。
+    if let Err(error) = window.set_focus() {
+        eprintln!("[summon] 聚焦面板失败（继续摆位）：{error}");
+    }
+    // 每次呼出都从「只有宠物」这一档开始（用户要求：先只出现宠物）。
+    // ⚠️ 顺序很重要：**必须放在 show() 之后**。窗口还没被 OS 映射时设的位置不生效，
+    // 于是冷启动会先按系统默认位置露一下（实测 y=215，本该 720），等插件上报档位才跳到正确位置
+    // —— 用户看到一次明显跳动（2026-10-02 实测）。show 之后再摆位就一次到位。
+    apply_stage(app, "pet");
     eprintln!(
         "[summon] 面板已显示（host_ready={}, url={:?}）",
         status.url.is_some(),
@@ -336,6 +343,9 @@ pub fn open_main_window(app: &AppHandle, host: Arc<DshHost>) -> Result<(), Strin
     let window = app
         .get_webview_window(MAIN_LABEL)
         .ok_or_else(|| "找不到主窗口".to_string())?;
+    // 记一行：主窗口在 tauri.conf.json 里是 `visible: false`（好让 summon 冷启动不弹它），
+    // 所以「到底有没有显示主窗口」只能靠日志断言（2026-10-02 加）。
+    eprintln!("[main] 显示主窗口（启动方式见上面的 setup 行）");
     let app_for_thread = app.clone();
     std::thread::spawn(move || match host.ensure_started("ming-tea") {
         Ok(url) => {

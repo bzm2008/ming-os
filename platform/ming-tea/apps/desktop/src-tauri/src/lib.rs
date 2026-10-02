@@ -14,6 +14,7 @@
 
 mod dsh_host;
 mod launch_agent;
+mod logging;
 mod permissions;
 mod summon;
 
@@ -124,10 +125,15 @@ fn install_hotkey_daemon() {
     }
 }
 
+/// 是否已经处理过一次 summon（冷启动时初始 URL 的 `RunEvent::Opened` 可能早于
+/// 我们的 `on_open_url` 注册，setup 里的补偿逻辑据此避免重复处理 —— 重复会变成「再按一次收起」）。
+static SUMMON_HANDLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 处理 `mingtea://summon|open|quit`。
 fn handle_deep_link(app: &AppHandle, raw: &str) {
     let lower = raw.to_ascii_lowercase();
     if lower.starts_with("mingtea://summon") {
+        SUMMON_HANDLED.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(state) = app.try_state::<AppState>() {
             let _ = summon::summon(app, Arc::clone(&state.host));
         }
@@ -191,6 +197,11 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 第一件事：把 stderr 落到 ~/Library/Logs/铭荼/app.log。
+    // 打包版被 LaunchServices 拉起时 stderr 无处可去（实测 `log show` 里一条我们自己的行都没有），
+    // 冷启动这类问题因此无法验证、用户也拿不到现场。
+    logging::redirect_stderr_to_file();
+
     let host = Arc::new(DshHost::new());
     let host_for_setup = Arc::clone(&host);
     let host_for_exit = Arc::clone(&host);
@@ -268,8 +279,58 @@ pub fn run() {
                     }
                 });
             } else {
-                // 主窗口转为加载 DSH 界面（后端就绪后自动导航）
-                let _ = summon::open_main_window(&handle, Arc::clone(&host_for_setup));
+                // 也可能是**被 summon URL 拉起的**：macOS 上 `open mingtea://summon`
+                // 不会把 URL 放进 argv（走的是 Apple Event → 插件的 `RunEvent::Opened`），
+                // 所以上面那轮 argv 判断对冷启动不成立 —— 实测因此**主窗口也被弹了出来**，
+                // 与「按一下快捷键先被整个应用窗口糊一脸」正是要避免的体感。
+                //
+                // 这个线程做两件事：
+                // 1. 等初始 URL 出现（最多 1 秒；普通启动拿不到就按普通启动处理）；
+                // 2. **如果事件比我们的监听更早发出，就自己补处理一次** —— 实测冷启动时
+                //    `get_current()` 有值、但我们的 `on_open_url` 回调没收到（事件在注册监听前已发过），
+                //    表现为「面板窗口存在但不显示、停在系统默认位置」。
+                let handle_for_main = handle.clone();
+                let host_for_main = Arc::clone(&host_for_setup);
+                std::thread::spawn(move || {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    let started = std::time::Instant::now();
+                    let mut initial: Option<Vec<tauri::Url>> = None;
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if let Ok(Some(urls)) = handle_for_main.deep_link().get_current() {
+                            initial = Some(urls);
+                            break;
+                        }
+                    }
+                    let is_summon = |url: &tauri::Url| {
+                        url.as_str().to_ascii_lowercase().starts_with("mingtea://summon")
+                    };
+                    match initial {
+                        Some(urls) if urls.iter().any(is_summon) => {
+                            eprintln!(
+                                "[setup] 被 summon URL 拉起（{}ms 后确认）：只弹面板，不显示主窗口",
+                                started.elapsed().as_millis()
+                            );
+                            if !SUMMON_HANDLED.load(std::sync::atomic::Ordering::SeqCst) {
+                                if let Some(url) = urls.iter().find(|url| is_summon(url)) {
+                                    eprintln!("[setup] 初始 URL 事件没到我们的监听，这里补处理一次");
+                                    handle_deep_link(&handle_for_main, url.as_str());
+                                }
+                            }
+                        }
+                        Some(urls) => {
+                            // 是别的 URL（例如 mingtea://open）：照常显示主窗口，并补处理该 URL
+                            let _ = summon::open_main_window(&handle_for_main, host_for_main);
+                            for url in urls {
+                                handle_deep_link(&handle_for_main, url.as_str());
+                            }
+                        }
+                        None => {
+                            // 普通启动（没有初始 URL）
+                            let _ = summon::open_main_window(&handle_for_main, host_for_main);
+                        }
+                    }
+                });
             }
 
             // 首次启动时如果就是被 URL 拉起来的，这里补一次

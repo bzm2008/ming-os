@@ -2059,6 +2059,7 @@ name = "ming-tea-desktop"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "libc",
  "objc2",
  "objc2-av-foundation",
  "objc2-foundation",

@@ -1,0 +1,66 @@
+//! 把壳的 stderr 落到文件 —— 打包版由 LaunchServices 启动时，stderr **无处可去**。
+//!
+//! 为什么必须做（2026-10-02 实测）：用 `open mingtea://summon`（= 热键守护进程做的事）冷启动应用后，
+//! `log show --predicate 'process == "ming-tea-desktop"'` 里**一条 `[setup]`/`[summon]` 都没有**
+//! （只有 WebKit 的噪音），于是「冷启动到底弹了哪个窗口」这类问题既没法验证、用户也拿不到现场。
+//!
+//! 做法：启动早期把 fd 2 直接指向 `~/Library/Logs/铭荼/app.log`（追加）。
+//! 一行 `dup2` 就能把之后**所有**输出（我们自己的 eprintln、panic、依赖库的警告）都留下，
+//! 不必逐个改 `eprintln!`。文件超过 [`MAX_LOG_BYTES`] 就在启动时重开一次（简易轮转，不无限长）。
+
+use std::fs::{create_dir_all, metadata, remove_file, OpenOptions};
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
+
+/// 超过这个大小就在下次启动时重开（不做精细轮转：桌面应用的启动日志不需要历史归档）。
+const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
+
+pub fn log_file_path() -> Option<PathBuf> {
+    // 与热键守护进程同一个目录（它写 hotkey.log），用户只需记住一个地方。
+    Some(dirs::home_dir()?.join("Library/Logs/铭荼/app.log"))
+}
+
+/// 当前本地时间（`YYYY-MM-DD HH:MM:SS`）。用 libc 而不是引入 chrono —— 只为一个时间戳不值得。
+fn local_timestamp() -> String {
+    // SAFETY: time/localtime_r/strftime 都是只读或写我们自己的栈上缓冲；
+    // 缓冲区长度足够（`%Y-%m-%d %H:%M:%S` 最多 19 字符 + NUL）。
+    unsafe {
+        let mut now: libc::time_t = 0;
+        libc::time(&mut now);
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return format!("epoch={now}");
+        }
+        let mut buffer = [0i8; 64];
+        let format = c"%Y-%m-%d %H:%M:%S";
+        if libc::strftime(buffer.as_mut_ptr(), buffer.len(), format.as_ptr(), &tm) == 0 {
+            return format!("epoch={now}");
+        }
+        std::ffi::CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned()
+    }
+}
+
+/// 把 fd 2 指向日志文件，并写一行启动标记。失败时静默退回 stderr（不能因为日志写不了就起不来）。
+pub fn redirect_stderr_to_file() {
+    let Some(path) = log_file_path() else { return };
+    if let Some(directory) = path.parent() {
+        let _ = create_dir_all(directory);
+    }
+    if metadata(&path).map(|meta| meta.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        let _ = remove_file(&path);
+    }
+    let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) else { return };
+    let descriptor = file.as_raw_fd();
+    // SAFETY: dup2 把 fd 2 复制成这个文件的描述符。之后 file 被 forget：这个描述符要活到进程结束，
+    // 由操作系统在退出时回收（写成 drop 会立刻关掉 fd，日志就没了）。
+    unsafe {
+        libc::dup2(descriptor, 2);
+    }
+    std::mem::forget(file);
+    eprintln!(
+        "=== 铭荼 {} 启动（pid {}，日志 {}）===",
+        local_timestamp(),
+        std::process::id(),
+        path.display()
+    );
+}
