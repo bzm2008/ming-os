@@ -219,8 +219,23 @@ fn summon_init_script() -> String {
 }
 
 /// 贴屏幕底部居中偏上（手机助手的位置感）。**底边固定**，所以调用方只改尺寸也稳。
+///
+/// 两个实测细节（2026-10-02，用 `scripts/winlist.c` 采样窗口几何时抓到）：
+/// 1. `current_monitor()` 可能返回 `None`（面板刚建好、还没落到任何屏幕时就会）——
+///    早先这里直接 `return`，于是**位置停在旧值、只有宽高变了**，肉眼就是面板没居中；
+///    现在退到 `primary_monitor()`，两个都没有才放弃并打一行日志。
+/// 2. `set_size` 与 `set_position` 是两条独立的运行时分发（Tauri 2 的 `set_bounds`
+///    只作用于内部 webview，不能用来一次设窗口），所以先把**位置**摆好再改尺寸：
+///    中间态是「旧尺寸、新位置」，比「新尺寸、旧位置」更不容易看出跳动。
 fn place_bottom_center(window: &WebviewWindow, width: f64, height: f64) {
-    let Ok(Some(monitor)) = window.current_monitor() else { return };
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => Some(monitor),
+        _ => window.primary_monitor().ok().flatten(),
+    };
+    let Some(monitor) = monitor else {
+        eprintln!("[summon] 取不到屏幕信息，面板位置未更新（请检查是否在没有显示器的会话里）");
+        return;
+    };
     let size = monitor.size();
     let scale = monitor.scale_factor();
     let w = width * scale;
@@ -234,8 +249,9 @@ fn place_bottom_center(window: &WebviewWindow, width: f64, height: f64) {
 pub fn apply_stage(app: &AppHandle, name: &str) {
     let Some(window) = app.get_webview_window(SUMMON_LABEL) else { return };
     let stage = stage_by_name(name);
-    let _ = window.set_size(LogicalSize::new(stage.width, stage.height));
+    // 顺序有意义：先摆位置、再改尺寸（见 place_bottom_center 的说明）
     place_bottom_center(&window, stage.width, stage.height);
+    let _ = window.set_size(LogicalSize::new(stage.width, stage.height));
     if let Err(error) = window.set_ignore_cursor_events(!stage.interactive) {
         eprintln!("[summon] 设置点击穿透失败：{error}");
     }

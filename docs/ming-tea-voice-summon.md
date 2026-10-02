@@ -348,8 +348,37 @@ worker: fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./worker.ts" : 
 ### ② 只是测试环境限制：Playwright 的 Chromium 没有音频输入设备
 
 实测该环境里 `navigator.mediaDevices.getUserMedia({audio:true})` 直接失败
-（`Could not start audio source`），所以自动化测试只能验证到「点麦克风 → 相态进入 requesting」，
-**录到声音并转成文字这一步必须用真机真麦克风验证**。
+（`Could not start audio source`），所以**浏览器采集**这一段自动化覆盖不到，必须真机真麦。
+
+不过「模型能不能把中文语音转成文字」这一半**已经可以离线验证**（见下一节）——
+所以现在真正缺的只剩「麦克风 → 浏览器编码成 WAV → 上传」这一段采集链路。
+
+### ③ 语音识别本体：用合成语音离线验证（2026-10-02，`scripts/check_sensevoice_asr.mjs`）
+
+**为什么能这样测**：官方 provider 的 `transcribe` 本质是「POST 到 worker 起的本地 HTTP 服务」
+（`lib/worker.js` 的 `startRecognitionServer`），而那个服务收的就是
+**规范 16 kHz 单声道 PCM16 WAV** —— 浏览器录音也是编码成这个格式再上传的。
+于是「合成语音 → 识别」可以完全离线跑：macOS 自带 `say` 合成中文、`afconvert` 转格式、
+直接 POST 给 worker。跑法：
+
+```bash
+node scripts/check_sensevoice_asr.mjs     # 退出码非 0 = 识别结果不符预期
+```
+
+实测结果（Tingting 语音，本机 Apple Silicon）：
+
+| 说的 | 转写 | 模型耗时 |
+| --- | --- | --- |
+| 帮我看看屏幕上有什么 | 「我看看屏幕上有什么。」 | 0.07s |
+| 把音量调大一点 | 「把音量调大一点。」 | 0.05s |
+
+模型加载 0.7–0.8s（磁盘缓存已热），一次 2 秒语音的端到端往返约 **0.09s**，标点是模型自己加的
+（SenseVoice 的逆文本规整）。第一条开头掉了一个「帮」，属 TTS 与 VAD 切分的正常损耗，
+语义无损 —— 断言因此用「包含关键片段」而不是逐字相等。
+
+**踩到的坑（值得记住）**：`afconvert` 产出的 WAV **不是**规范 44 字节头（会插 FLLR 等块），
+而 worker 的 `validateWave` 逐字段校验（`data` 必须正好在偏移 36、`fmt` 块正好 16 字节、
+各长度字段自洽），所以报 `Invalid speech WAV`。脚本里会把 PCM 取出来**重写规范头**再发。
 
 ### 已核实的部分（都不需要真麦克风）
 
@@ -359,6 +388,7 @@ worker: fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./worker.ts" : 
 - `speech.prepare` 返回 `{ok:true, provider:"sensevoice-local"}`，并且**真的拉起了 worker 进程**；
 - 模型文件齐全且 sha256 与官方清单一致（242 MB）；原生依赖 `sherpa-onnx-node@1.13.8`
   与平台包 `sherpa-onnx-darwin-arm64`（含 `sherpa-onnx.node`、`libonnxruntime.dylib`）都在；
+- **真实音频转写**：`scripts/check_sensevoice_asr.mjs` 两条中文语音全部识别正确（见上一节）；
 - 面板侧：**点一下面板** → 官方麦克风按钮被点到 → 相态进入 `requesting`、
   面板切到 `listening` 档并显示「我在听…」（`tapResult=clicked`，实测）。
 
@@ -489,8 +519,9 @@ LaunchAgent 的 plist 会从「开发机 repo 里的二进制」**自动刷新**
 - **`⌥Space` 可能与其它启动器冲突**：注册失败会写日志并按候选列表重试；
   当前生效的热键与候选列表写在 `~/Library/Application Support/铭荼/hotkey-state.json`。
 - **单屏假设**：面板贴在**主显示器**底部；多屏且鼠标在副屏时不会跟过去。
-- **语音需要真人开麦**：「录到声音 → 转文字」在自动化环境里覆盖不到
-  （Playwright 的 Chromium 没有音频输入设备），必须真机真麦验证。
+- **只有「麦克风采集」这一段还需要真人开麦**：识别本体已用合成语音离线验证通过
+  （`scripts/check_sensevoice_asr.mjs`），缺的是「真麦克风 → 浏览器编码 WAV → 上传」这一段
+  ——Playwright 的 Chromium 没有音频输入设备，自动化覆盖不到。
 - **审批卡仍沿用官方版式**（已在三态面板里放行并钉到视口底部，有专门的 `approval` 档 520×600），
   没有做成铭荼自绘的胶囊风格紧凑条。
 
