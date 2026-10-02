@@ -300,6 +300,83 @@
       "status": "installed-verified",
       "adapter": "@michengai/dsh-automation@0.1.51",
       "reason": "定时任务：按计划在独立 Session 中执行任务，支持通过对话创建与手动触发。2026-09-27 安装并实测：侧栏「定时任务」由原来的设置页引导变为真实界面（推荐案例、我的定时任务/执行记录、新建定时任务），其 antd 组件自动继承铭荼主题（实测 --ant-color-primary = #16857d）。依赖 antd 6.6.5 + luxon + zod（约 4.7MB，引入 69 个包）。排程会在无人值守时创建会话，故能力标 approval-gated。"
+    },
+    {
+      "id": "dsh-routing-suite",
+      "source": "https://github.com/dragonbaba/dsh-routing-suite",
+      "revision": "0.1.2",
+      "version": "0.1.2",
+      "license": "MIT",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "prompt.assemble",
+        "webserver.loopback.read"
+      ],
+      "status": "installed-verified",
+      "adapter": "dsh-routing-suite@0.1.2",
+      "reason": "「智能路由模式」：自带一个 agent preset。宿主半区只在会话选中该 preset 时改写 system prompt，其余场景完全不介入；只额外注册一个只读状态接口（实测 GET /routing-suite/api/status 返回 {ok:true,enabled:true,strategy:auto,preset:routing-suite}）。自述不做额外模型请求、不动文件系统/进程/包/网络。**本产品没有把它的模式挂进模式菜单**：这个 DSH 构建没有 .agent-presets 用户预设根（官方 desktop 安装器的物化路径在铭荼不适用），而它的 preset 内容是官方 standard 的英文 coding-agent persona，直接塞进铭荼三场景菜单会与产品形态冲突；要启用需另做一轮（把 preset/routing-suite 适配成第 4 个铭荼场景：persona、工具裁剪、主题）。"
+    },
+    {
+      "id": "dsh-graphlint",
+      "source": "https://github.com/AngelosZou/graphlint",
+      "revision": "0.4.0",
+      "version": "0.4.0",
+      "license": "MIT",
+      "runtime": "dsh-cordis-node",
+      "permissions": [
+        "workspace.read",
+        "process.exec.graphlint"
+      ],
+      "status": "installed-verified",
+      "adapter": "dsh-graphlint@0.4.0",
+      "reason": "死代码检测：注册 graphlint_query / graphlint_build / graphlint_config 三个工具 + 一个 graphlint 技能。**只挂「开发模式」**（根行在 profile patch 里 disabled）。真正的分析由外部 graphlint CLI 完成（先找 PATH，再探项目内 env/.venv/venv 的 bin），机器上没装时工具会如实报错并给出安装提示 —— 因此 Debian 13 与低配可用性要单独验证，暂不进正式 ISO。peer 只声明 @deepseek-ai/dsh-tools ^0.1.0-rc.6，已按锁文件的 versionExemptions 授精确版本豁免（依据：它在 @deepseek-ai/* 上只 import defineTool，其余能力全走宿主服务 subprocess/fs/skills/jobs/timer）。"
+    },
+    {
+      "id": "dsh-deja",
+      "source": "https://github.com/vshulcz/deja-vu",
+      "revision": "0.21.4",
+      "version": "0.21.4",
+      "license": "MIT",
+      "runtime": "dsh-cordis-node",
+      "permissions": [
+        "session-history.read.other-agents",
+        "file.write.deja-index",
+        "process.exec.deja"
+      ],
+      "status": "installed-verified",
+      "adapter": "dsh-deja@0.21.4",
+      "reason": "deja-vu 记忆（工具 deja_recall / deja_remember / deja_blame / deja_fix / deja_how / deja_session …）。**默认关闭**：profile patch 里有 `- id: deja` + `disabled: true`（行 id 是 deja，不是包名），用户显式删掉那两行并重启宿主才会启用。它依赖 @vshulcz/deja-vu，进而拉平台原生二进制 @vshulcz/deja-vu-darwin-arm64@0.21.4（13.9 MB 预编译 Go 程序），把本机其它 agent（Claude Code / Codex / Cursor…）写下的会话历史建成可检索索引，故按「读其它 agent 历史 + 执行原生二进制」这类高权限项记录。插件自述兼容的 DSH 只有 0.1.1-rc.2（未声明 0.2）。"
+    },
+    {
+      "id": "dsh-context",
+      "source": "https://github.com/bowenliang123/dsh-context",
+      "revision": "0.62.2",
+      "version": "0.62.2",
+      "license": "Apache-2.0",
+      "runtime": "dsh-web-client-bundle",
+      "permissions": [
+        "session.read",
+        "context.insight.read"
+      ],
+      "status": "installed-verified",
+      "adapter": "dsh-context@0.62.2",
+      "reason": "上下文洞察与管理：右侧栏「上下文」面板（文案「查看上下文的构成、统计、演变。」）+ /context 命令 + 仪表盘。**不注册模型工具**（宿主里那两处 tools.register 是给工具调用打归属的包装，不是新工具）。上游 dsh.compatibility.dshReleases 明确写了 0.2.0-rc.2: compatible，无需豁免。实测：宿主 API /api/dsh-context/detail 返回 200、浏览器控制台 0 错误、无失败请求。它的 CSS 全部用 --dsw-alias-* 令牌，因此自动继承铭荼主题；唯一缺口是它用短名 --dsw-alias-brand-primary（官方把它定义成偏蓝中性色），已把该令牌补进我们的调色板，实测页面 body 上 = #16857d。"
+    },
+    {
+      "id": "dsh-codex-guard",
+      "source": "https://github.com/Akimiya-z/codex-guard",
+      "revision": "87e138cdcca2e2929073bb913212dc06769087fc",
+      "version": "1.9.0",
+      "license": "MIT",
+      "runtime": "dsh-cordis-node",
+      "permissions": [
+        "workspace.read",
+        "git.read",
+        "process.exec.codex-guard"
+      ],
+      "status": "installed-verified",
+      "adapter": "dsh-codex-guard@1.9.0（vendored：platform/ming-tea/plugins/vendor-dsh-codex-guard）",
+      "reason": "提交前卫生检查（TODO/FIXME 残留、硬编码密钥、提交信息格式）：只注册一个 codex_guard 工具，**不 hook 审批**（不会与铭荼审批闸门形成双重拦截）。npm 上没有这个包（只发布在 GitHub），按「依赖必须锁定、禁止 git/URL 安装」的口径 **vendor 进仓库**并用 link: 安装（详见该目录 VENDOR.md）。唯一改动：把上游的 `npx --yes codex-guard`（运行时按需去 registry 下载并执行）换成执行锁里钉住的 codex-guard@1.16.0（MIT，runtime 包，带 integrity）。**只挂「开发模式」**（根行 disabled）。实测：按插件同样的调用形态跑通 `node <cli> --git` 与 `--git --json`。"
     }
   ]
 }

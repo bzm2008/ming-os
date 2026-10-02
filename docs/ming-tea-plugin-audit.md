@@ -142,3 +142,80 @@ version / integrity / license / stars / downloads / tier / verified；安装走 
 
 结论不变：**商店可用，但仍不能当作"安全来源"** —— 它的价值是"发现 + 安装通道"，
 真正的安全边界要由我们自建白名单目录 + 安装前确认来提供。
+
+## 2026-10-02 批次：五社区插件装进铭荼（含 codex-guard vendoring）
+
+用户点名装五个（原始清单里 `deja-vu`＝`dsh-deja` 是同一个插件、`dsh-context` 写了两遍）。
+全部按 lock 驱动安装：`assets/ming-tea-dsh-lock.json` 固定版本 + `versionExemptions`（需要时）
++ `scripts/install_ming_tea_plugins.sh` 安装，机器可读记录进 `assets/ming-tea-community-candidates.json`。
+
+| 包 | 版本 | 许可 | 运行时 | 权限（记在候选清单） | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `dsh-routing-suite` | 0.1.2 | MIT | dsh-web-client-bundle | `prompt.assemble`、`webserver.loopback.read` | 装上，**模式不露出**（见下） |
+| `dsh-graphlint` | 0.4.0 | MIT | dsh-cordis-node | `workspace.read`、`process.exec.graphlint` | 装上，**只挂开发模式** |
+| `dsh-deja` | 0.21.4 | MIT | dsh-cordis-node | `session-history.read.other-agents`、`file.write.deja-index`、`process.exec.deja` | 装上，**默认关闭** |
+| `dsh-context` | 0.62.2 | Apache-2.0 | dsh-web-client-bundle | `session.read`、`context.insight.read` | 装上，正常渲染 |
+| `dsh-codex-guard` | 1.9.0 | MIT | dsh-cordis-node | `workspace.read`、`git.read`、`process.exec.codex-guard` | **vendor 进仓库**，只挂开发模式 |
+
+### 三个需要解释的取舍
+
+1. **`dsh-routing-suite` 装了但不露出模式。** 它的宿主半区只在会话选中 `routing-suite`
+   这个 agent preset 时才改写 system prompt，而它**不自注册 preset** —— 上游靠「官方 desktop
+   安装器把 `preset/routing-suite` 物化到用户预设根」，而本 DSH 构建里**没有** `.agent-presets`
+   这条路径（运行时代码零引用）。剩下的唯一办法是把它的 preset 当成一个 profile 行挂上，
+   但那会让铭荼的模式菜单多出一个「智能路由模式」，内容却是**官方 standard 的英文
+   coding-agent persona**（`You are a coding agent powered by the {{model}} model`），
+   与我们的中文三场景形态直接冲突。所以本版本保持「装上、可审计、只提供只读状态接口」；
+   要真正启用，需要把那份 preset 适配成第 4 个铭荼场景（persona、工具裁剪、主题），属另一轮工作。
+2. **`dsh-graphlint` / `dsh-codex-guard` 只挂「开发模式」。** 两者注册的是模型可见工具
+   （死代码检测三个、提交前卫生检查一个）。插件的 bundle patch 是把行插在 **profile 根**上的，
+   根行会让工具对**所有场景**可见；因此我们在 **profile patch**（在所有 bundle 层之后）把这两个
+   根行 `disabled: true`，改用 `platform/ming-tea/plugins/ming-tea-ui/scenes.config.mjs` 里
+   开发场景的 `extraRows` 挂载。实测组合后的配置：`preset-ptc` 有两个插件行，
+   `preset-standard`/`preset-minimal` 没有。
+3. **`dsh-deja` 默认关闭**（用户明确选择）。profile patch 写的是 `- id: deja` + `disabled: true`
+   （行 id 是 `deja`，不是包名 `dsh-deja`；行 id 写错会静默不生效）。要开启就删掉那两行并重启宿主。
+   它同时会拉一个 **13.9 MB 的预编译原生二进制**（`@vshulcz/deja-vu-darwin-arm64@0.21.4`，
+   integrity 记在 lock 的 notes 里）并索引本机其它 agent 的历史，所以即使开启也应视为高权限能力。
+
+### `dsh-codex-guard` 为什么 vendor，以及改了什么
+
+- **npm 上没有这个包**（只发布在 GitHub）。按我们自己的口径「依赖必须锁定、禁止 git/URL 安装」，
+  把它的 `dsh/` 子树按 commit `87e138cdcca2e2929073bb913212dc06769087fc` 放进
+  `platform/ming-tea/plugins/vendor-dsh-codex-guard/`，用 `link:` 安装（见该目录 `VENDOR.md`）。
+- **唯一改动**：上游的工具实现是 `npx --yes codex-guard` —— 也就是**运行时按需去 npm registry
+  拉一个包并执行**。改成执行锁里钉住的 `codex-guard@1.16.0`（作为 **runtime 包**安装，带 integrity），
+  解析顺序：`MING_TEA_CODEX_GUARD_CLI` → `require.resolve` → `<DSH_HOME>/../node_modules/codex-guard`；
+  解析不到就如实报错并提示重装，**不退回动态下载**。
+- 顺带记一条 pnpm 语义（实测）：`link:` 与 `file:` 目标**都只建软链、都不会安装被链包自己的依赖**，
+  所以 CLI 不能作为 vendored 包的 dependency 指望被自动装上 —— 它必须单独作为 runtime 包钉住。
+
+### 兼容性豁免（新增一条）
+
+`dsh-graphlint@0.4.0`：上游 peer 只声明 `@deepseek-ai/dsh-tools ^0.1.0-rc.6`（与 `cordis ^4.0.1`），
+没有覆盖 `0.2.0-rc.2`。经审计它在 `@deepseek-ai/*` 上**只 import `defineTool`**（0.2.0-rc.2 的
+`dsh-tools/lib/index.js` 里该导出仍在），其余能力全走宿主服务 `tools/subprocess/fs/skills/jobs/timer`
+（`resolveExecutable` 由 `@deepseek-ai/dsh-subprocess-local` 提供、`timer` 由
+`@deepseek-ai/cordis-plugin-timer` 提供，本运行时均有），故按官方 `allow-version` 机制接受风险。
+**`dsh-codex-guard` 不需要豁免**：它的 peer 写成 `>=0.1.0-rc.1 <0.2.0 || >=0.2.0`，预检实测放行
+（比严格 semver 宽松）。`dsh-context` 上游自己声明了 `0.2.0-rc.2: compatible`，也不需要。
+
+### 主题适配（唯一一处真缺口）
+
+`dsh-context`（21 处）与 `dsh-routing-suite` 的界面都用 `--dsw-alias-*` 令牌，因此本来就继承铭荼主题；
+但它们引用的是**短名** `--dsw-alias-brand-primary`，官方把它定义成偏蓝的中性色
+（`--dsw-static-neutral-bluish-1000`），而我们的调色板只覆盖了长名变体
+`--dsw-alias-brand-primary-new-colorprimary-new-color`。已把短名补进
+`platform/ming-tea/plugins/ming-tea-ui/theme/palette.mjs`；实测临时实例页面 `body` 上该令牌
+= `#16857d`（深色 `#4fb3a4`），插件的强调色随铭荼品牌色。
+
+### 实测边界（如实）
+
+- **已验证**：安装与组合（`--dump-config` 里五个插件行与 disabled 状态）、宿主干净启动
+  （无错误无警告）、`/routing-suite/api/status` 200、`/api/dsh-context/detail` 200、
+  浏览器控制台 0 错误 0 失败请求、右侧栏出现 context 面板入口、`codex-guard` CLI 按插件形态
+  跑通（`--git` / `--git --json`）、summon 紧凑模式里新插件 UI 全部不可见（真可见判定下只有宠物层）。
+- **未验证**：`graphlint_*` 三个工具需要外部 `graphlint` CLI（本机没装，未跑通端到端）；
+  `deja_*` 七个工具（默认关闭，未启用）；`dsh-context` 面板**内部**图表在真实会话下的渲染
+  （只在落地页确认入口与零报错）；routing-suite 的模式（未露出）；Debian 13 与低配可用性
+  （五个都**未在 Linux 上实测**，故都没进正式 ISO 清单，只留在开发树与候选清单里）。
