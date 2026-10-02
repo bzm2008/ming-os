@@ -48,6 +48,8 @@ class MingTaskbarContracts(unittest.TestCase):
             "native opaque window visual",
             "ming-taskbar.ready",
             "mark_ready()",
+            "override_background_color",
+            "window_color.parse",
             "Gdk.WindowTypeHint.DOCK",
             "refresh_windows",
             "refresh_status",

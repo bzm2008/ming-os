@@ -243,6 +243,15 @@ class MingTaskbar(Gtk.Window):
         self.set_keep_above(True)
         self.set_accept_focus(False)
         self.set_focus_on_map(False)
+        # X11 sessions without a compositor expose the native window pixels
+        # outside GTK's rounded CSS surface. Paint those pixels with the same
+        # Ming Mint surface so the corner fallback is light instead of black.
+        try:
+            window_color = Gdk.RGBA()
+            window_color.parse("#eef7f2" if self.low_resource else "#f5fbf7")
+            self.override_background_color(Gtk.StateFlags.NORMAL, window_color)
+        except (AttributeError, TypeError, ValueError):
+            pass
         # Keep the native opaque window visual.  An app-paintable GTK window
         # can acquire an ARGB visual and become black on X11 sessions without
         # a compositor, even when its CSS surface is opaque.
