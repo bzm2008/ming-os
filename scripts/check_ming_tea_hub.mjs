@@ -7,6 +7,8 @@
 //
 // 用法：node scripts/check_ming_tea_hub.mjs   （退出码非 0 表示有用例失败）
 
+import { readFileSync } from "node:fs";
+
 import {
   compareVersions,
   createHubClient,
@@ -750,6 +752,21 @@ await check("信任状态只在本进程内、按会话隔离，且能撤销", a
   assertEqual(trust.isTrusted("s1"), false, "可撤销");
   const other = createSummonTrust();
   assertEqual(other.isTrusted("s1"), false, "不同实例互不影响（=重启即失效）");
+});
+
+await check("客户端产物是最新的：改了 ui-tweaks.js 必须重新构建 lib/client.js", () => {
+  // 这条不是「逻辑测试」而是**构建新鲜度**守门：插件的客户端半区是 ui-tweaks.js 打包进
+  // lib/client.js 后被宿主缓存的（改了源码不重新构建，页面会一直跑旧包 —— 本项目踩过好几次）。
+  // 这里挑两个只在 2026-10-02 才加进去的字符串做指纹。
+  const tweaks = readFileSync(new URL("../platform/ming-tea/plugins/ming-tea-ui/ui-tweaks.js", import.meta.url), "utf8");
+  const bundle = readFileSync(new URL("../platform/ming-tea/plugins/ming-tea-ui/lib/client.js", import.meta.url), "utf8");
+  assert(tweaks.includes("mingTeaHumanizeError"), "源码里应当有这个函数");
+  assert(bundle.includes("mingTeaHumanizeError"), "lib/client.js 里也应当有 ⇒ 构建没漏");
+  assert(bundle.includes("当前模型不能看图"), "「模型不能看图」的提示要真的进包");
+  assert(
+    /does not declare image input\|does not support image input/.test(bundle.replace(/\\/g, "")),
+    "识别两种官方的「不能收图」错误原文",
+  );
 });
 
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);

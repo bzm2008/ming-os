@@ -546,6 +546,22 @@ function mingTeaInjectSessionTrust() {
   }
 }
 
+/** 把已知的工具错误翻译成用户能动手解决的提示。
+ *
+ * 为什么需要：summon 面板把对话区藏了，用户只看得到我们镜像的这一行错误。
+ * 工具层的英文原文（例如「模型不能收图」）对用户没有任何可操作性 ——
+ * 实测踩到：路由默认模型是 auto，而 auto 没声明 image 输入，
+ * 于是「看屏幕」时报 `cannot read … as an image: model "auto" does not declare image input`，
+ * 用户只会看到一句英文错误、不知道该干什么（2026-10-02）。
+ * 只翻译**确定的**几种，其余原样透出 —— 不猜、不吞掉原始信息。 */
+function mingTeaHumanizeError(text) {
+  const raw = typeof text === "string" ? text : String(text ?? "");
+  if (/does not declare image input|does not support image input/i.test(raw)) {
+    return "当前模型不能看图（Auto 不支持图片），请在输入框旁把模型切到 deepseek-v4.1-flash，再说一次。";
+  }
+  return raw;
+}
+
 /** 每轮（180ms 节流）跑一次：判定档位、更新胶囊与回答、按需开始听与发送。 */
 function mingTeaSummonTick() {
   if (!MING_TEA_SUMMON.on) return;
@@ -684,7 +700,7 @@ function mingTeaSummonTick() {
   let answerShown = "";
   let tone = "";
   if (MING_TEA_SUMMON.errorPending) {
-    answerShown = `操作失败：${MING_TEA_SUMMON.lastError}`;
+    answerShown = `操作失败：${mingTeaHumanizeError(MING_TEA_SUMMON.lastError)}`;
     tone = "error";
   } else if (answerText !== "") {
     answerShown = answerText;

@@ -131,6 +131,16 @@ DSH 判断「这个模型能不能收图」看的是模型条目上的 `inputMod
 （`@deepseek-ai/dsh-agent-preset` 里没有任何 model 字段），所以要么把路由默认值换成
 `deepseek-v4.1-flash`（会改变计费路径），要么在面板里提示用户切模型。
 
+**已经做掉的一半**：面板现在把这个错误**翻译成可操作的提示**（`mingTeaHumanizeError`，
+只翻译确定的两种官方措辞，其余原样透出）：用户看到的是
+「操作失败：当前模型不能看图（Auto 不支持图片），请在输入框旁把模型切到
+deepseek-v4.1-flash，再说一次。」而不是一句英文。三种情况都在真实页面上验证过：
+`does not declare image input` ✓、`does not support image input` ✓、
+无关错误（`bring_to_front … was not verified as frontmost`）**原样透出** ✓
+（都是 tone=error、stage=answer）。
+⚠️ 改了 `ui-tweaks.js` 一定要 `node scripts/build.mjs` 重新构建 `lib/client.js`，
+否则宿主与页面继续跑旧包；`scripts/check_ming_tea_hub.mjs` 现在有一条**产物新鲜度**断言专门守这个。
+
 ### 审批与「本会话信任」（用户选定的默认）
 
 - 提示文案与闸门来自我们自己的宿主半区（`lib/index.mjs` 的 `installApprovalGate`）：
