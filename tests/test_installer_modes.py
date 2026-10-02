@@ -94,6 +94,8 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("window_y=", DESKTOP)
         self.assertIn("$((width * 300 / 1000))", DESKTOP)
         self.assertIn("upper-row multi-point retries", DESKTOP)
+        self.assertIn("seq 1 960", DESKTOP)
+        self.assertIn("_ % 8", DESKTOP)
 
     def test_calamares_show_sequence_starts_at_partition_not_welcome(self):
         """The native welcome module can stall at "Remaining modules: welcome" in Live VMs."""

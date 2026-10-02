@@ -9267,29 +9267,24 @@ auto_select_blank_ab() {
     command -v wmctrl >/dev/null 2>&1 || return 0
     command -v xdotool >/dev/null 2>&1 || return 0
     local calamares_window geometry width height window_x window_y click_x click_y page_ready
-    for _ in $(seq 1 240); do
+    for _ in $(seq 1 960); do
         calamares_window="$({
             timeout --foreground 2s wmctrl -lx 2>/dev/null || true
         } | awk 'tolower($0) ~ /calamares/ { print $1; exit }')"
         if [[ -n "${calamares_window}" ]]; then
             page_ready=false
+            if grep -Eq 'No partitioning choice has been made yet|Updating partitioning preview widgets' \
+                /tmp/ming-installer/calamares.log 2>/dev/null; then
+                page_ready=true
+            fi
             # The top-level window exists during the slow requirements scan.
-            # Wait for the partition page's own debug marker so the click is
-            # never delivered to the transient spinner page.
-            for _page_try in $(seq 1 240); do
-                if grep -Eq 'No partitioning choice has been made yet|Updating partitioning preview widgets' \
-                    /tmp/ming-installer/calamares.log 2>/dev/null; then
-                    page_ready=true
-                    break
-                fi
+            # Keep probing instead of blocking once for a marker that may not
+            # be emitted by a distro Calamares build. During the scan, issue a
+            # harmless bounded click every two seconds; once the partition
+            # page is ready, the same click selects the erase card.
+            if [[ "${page_ready}" != "true" ]] && (( _ % 8 != 0 )); then
                 sleep 0.25
-            done
-            if [[ "${page_ready}" == "true" ]]; then
-                sleep 2
-            else
-                # Direct launches may not have a debug log; give the page a
-                # conservative fallback delay before using geometry.
-                sleep 8
+                continue
             fi
             geometry="$(xdotool getwindowgeometry --shell "${calamares_window}" 2>/dev/null || true)"
             width="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "WIDTH" {print $2}')"
@@ -9319,7 +9314,7 @@ auto_select_blank_ab() {
                 done
                 printf '[%s] selected %s erase card with upper-row multi-point retries at y=%s\n' \
                     "$(date '+%F %T')" "${selected_mode}" "${click_y}" >>/tmp/ming-installer/auto-select.log
-                return 0
+                [[ "${page_ready}" == "true" ]] && return 0
             fi
         fi
         sleep 0.25
