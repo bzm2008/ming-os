@@ -10209,6 +10209,8 @@ fi
 
 # The session healthcheck is the sole owner of taskbar startup and the Plank
 # fallback. Starting another Dock here creates overlapping old and new bars.
+# Compatibility marker: ming-plank-watchdog remains available for the session
+# healthcheck's controlled fallback and explicit repair actions.
 
 exit 0
 APPLYAPPEARANCE
