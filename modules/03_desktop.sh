@@ -9266,7 +9266,7 @@ auto_select_blank_ab() {
     [[ "${selected_mode}" == "blank_ab" || "${selected_mode}" == "legacy_mbr" ]] || return 0
     command -v wmctrl >/dev/null 2>&1 || return 0
     command -v xdotool >/dev/null 2>&1 || return 0
-    local calamares_window geometry width height click_x click_y page_ready
+    local calamares_window geometry width height window_x window_y click_x click_y page_ready
     for _ in $(seq 1 240); do
         calamares_window="$({
             timeout --foreground 2s wmctrl -lx 2>/dev/null || true
@@ -9294,22 +9294,31 @@ auto_select_blank_ab() {
             geometry="$(xdotool getwindowgeometry --shell "${calamares_window}" 2>/dev/null || true)"
             width="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "WIDTH" {print $2}')"
             height="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "HEIGHT" {print $2}')"
+            window_x="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "X" {print $2}')"
+            window_y="$(printf '%s\n' "${geometry}" | awk -F= '$1 == "Y" {print $2}')"
             if [[ "${width}" =~ ^[0-9]+$ && "${height}" =~ ^[0-9]+$ && "${width}" -ge 800 ]]; then
-                click_x=$((width * 205 / 1000))
-                click_y=$((height * 110 / 1000))
-                (( click_y < 70 )) && click_y=70
-                (( click_y > 90 )) && click_y=90
+                # The erase card is a shallow row near the top of the
+                # partition page.  Its active area ends before y=90 on the
+                # 1024x768 Calamares layout, so target the upper half and
+                # retry a few x positions instead of clicking its lower edge.
+                click_y=$((height * 75 / 1000))
+                (( click_y < 58 )) && click_y=58
+                (( click_y > 78 )) && click_y=78
                 xdotool windowactivate --sync "${calamares_window}" >/dev/null 2>&1 || true
                 # KPMcore may redraw the card once after the first geometry
                 # probe. Retry a few bounded clicks so the automatic mode does
                 # not leave Next disabled on a transiently stale page.
-                for _click_try in 1 2 3; do
+                for click_x in $((width * 205 / 1000)) $((width * 300 / 1000)) $((width * 500 / 1000)); do
                     xdotool mousemove --window "${calamares_window}" "${click_x}" "${click_y}" click 1 \
                         >>/tmp/ming-installer/auto-select.log 2>&1 || true
-                    sleep 1
+                    if [[ "${window_x}" =~ ^-?[0-9]+$ && "${window_y}" =~ ^-?[0-9]+$ ]]; then
+                        xdotool mousemove $((window_x + click_x)) $((window_y + click_y)) click 1 \
+                            >>/tmp/ming-installer/auto-select.log 2>&1 || true
+                    fi
+                    sleep 0.75
                 done
-                printf '[%s] selected %s erase card at %sx%s with bounded retries\n' \
-                    "$(date '+%F %T')" "${selected_mode}" "${click_x}" "${click_y}" >>/tmp/ming-installer/auto-select.log
+                printf '[%s] selected %s erase card with upper-row multi-point retries at y=%s\n' \
+                    "$(date '+%F %T')" "${selected_mode}" "${click_y}" >>/tmp/ming-installer/auto-select.log
                 return 0
             fi
         fi

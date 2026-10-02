@@ -88,6 +88,13 @@ def write_installed_desktop(root, uuid):
 
 
 class InstallerModeTests(unittest.TestCase):
+    def test_auto_select_targets_upper_erase_card_row_with_multi_point_retries(self):
+        self.assertIn("click_y=$((height * 75 / 1000))", DESKTOP)
+        self.assertIn("window_x=", DESKTOP)
+        self.assertIn("window_y=", DESKTOP)
+        self.assertIn("$((width * 300 / 1000))", DESKTOP)
+        self.assertIn("upper-row multi-point retries", DESKTOP)
+
     def test_calamares_show_sequence_starts_at_partition_not_welcome(self):
         """The native welcome module can stall at "Remaining modules: welcome" in Live VMs."""
         base_settings = BASE.split("cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'", 1)[1].split(
