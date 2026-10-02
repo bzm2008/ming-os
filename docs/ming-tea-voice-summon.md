@@ -11,7 +11,9 @@
 | 对着麦克风说话 | 胶囊出现并显示识别文字；说完自动发送 |
 | 助手回答 | 出现在胶囊**下方**，宠物仍在最底部 |
 
-- 纯宠物档是**点击穿透**的：一块看不见的 200×200 不会挡住你点别的东西。
+- 纯宠物档**是可点的，不是点击穿透**（2026-10-01 用户实测后改的）：WKWebView 只认**真实用户手势**
+  才肯开麦，合成点击不算，所以「点一下宠物开始说话」是开麦的唯一可靠入口 ——
+  点击穿透会把这一下让给背后的窗口。面板窗口在宠物档是 220×220。
 - 配置文件是 `~/Library/Application Support/铭荼/settings.json`（应用与守护进程共用同一份）：
 
   | 字段 | 作用 |
@@ -77,7 +79,7 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 
    | 档位 | 窗口 | 交互 |
    | --- | --- | --- |
-   | `pet` | 200×200 | 点击穿透 |
+   | `pet` | 220×220 | 可交互（**必须**：开麦要真实用户手势，见上文） |
    | `listening` | 420×280 | 可交互 |
    | `answer` | 470×520 | 可交互 |
    | `approval` | 520×600 | 可交互（有审批时**必须**切到这档：审批卡原本挂在整页布局底部，小窗口里根本点不到） |
@@ -92,10 +94,42 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 而 DSH 还会给模型注入一段 `GUIDANCE`（先确认应用与窗口、再取一次新鲜快照才动手）。
 我们要做的只有三件事，现在都做了：
 
-1. **模型必须能看图**：默认模型是 `deepseek-v4.1-flash`（实测能正确描述图片；
-   `glm-5.2` 明确说不能看图、`auto` 会返回空 —— 所以**不要**把看屏幕的会话切到 `auto`）。
+1. **模型必须能看图 —— 而且要真的「声明」能看图**（2026-10-02 补上的一个真缺陷，见下一节）：
+   看屏幕的模型用 `deepseek-v4.1-flash`（站点侧实测能正确描述图片；`glm-5.2` 明确说不能看图、
+   `auto` 传图返回空 —— 所以**不要**把看屏幕的会话切到 `auto`）。
 2. **权限**：屏幕录制（截图）、辅助功能（点击输入）；缺哪个面板会显示可点的提示条。
 3. **审批**：进到「操纵电脑」这一步必须经过用户同意。
+
+### 「模型不能看图」这个坑（2026-10-02 修复，我先前一条结论是错的）
+
+**症状**：代理能点（像素坐标点得挺准），但**看不见**。实测里它一边点一边说
+「There's no screenshot available to me (image unavailable — model doesn't support images)」，
+只能靠猜坐标硬试。
+
+**根因**：`read_image` / 电脑操作工具取快照时会被拦下：
+
+```
+cannot read "/…/calc_before.png" as an image:
+model "deepseek-v4.1-flash" does not declare image input; switch to an image-capable model
+```
+
+DSH 判断「这个模型能不能收图」看的是模型条目上的 `inputModalities`；而 pi-ai 的模型条目
+**缺省是 `["text"]`**（`DEFAULT_INPUT`）。我们的站点路由是**手写**的，只声明了
+`id/name/contextWindow/reasoningEfforts`，没声明 `input` ⇒ 在工具层就被拒，
+截图根本到不了模型（模型侧其实完全能读图 —— 站点 API 直连实测同一张截图，
+`deepseek-v4.1-flash` 正确答出「计算器」与显示区「0」，见下方证据）。
+
+**修法**（`lib/host/model-route.mjs`）：给站点实测能看图的模型显式声明
+`input: ["text", "image"]`（`deepseek-v4.1-flash`、`mimo-v2.6-flash`、`glm-5.3`），
+其余一律 `["text"]`。**`auto` 特意不声明**：它传图返回空，声明了只会换来空回答；
+不声明时「看屏幕」会明确报错而不是静默给空结果。改完打开一次页面即生效
+（`modelsSync` 会按内容差异重写路由配置，写入位置是
+`.ming-tea/runtime/dsh-home/profiles/ming-tea/cordis.patch.yml` 的 `llm-pi-ai.providers.ming-tea-hub`）。
+
+**遗留的产品取舍**（待用户决定）：路由的默认模型是 `auto`（免费额度走它），
+而 `auto` 不能看图 ⇒ 新用户第一次「看屏幕」会看到报错。预设层**钉不了模型**
+（`@deepseek-ai/dsh-agent-preset` 里没有任何 model 字段），所以要么把路由默认值换成
+`deepseek-v4.1-flash`（会改变计费路径），要么在面板里提示用户切模型。
 
 ### 审批与「本会话信任」（用户选定的默认）
 
@@ -140,7 +174,42 @@ DSH web 界面（面板与主窗口加载同一个 URL）
      都在后台运行、没有可见窗口。」
 ```
 
-（对屏幕内容的描述准确，说明视觉链路真的通了，不是猜的。）
+（**注意这条旧证据的边界**：它只证明模型能拿到窗口/应用清单（那是无障碍树的**文本**），
+**不能**证明它能看图 —— 当时的配置里模型并没有声明 `image`，截图其实被工具层拒了。
+真正把「截图 → 决策 → 动手」跑通的是 2026-10-02 那次，见下一节。）
+
+### 实测证据：截图 → 决策 → 点击（2026-10-02，修好 `input` 声明之后）
+
+环境：打包版应用（壳监督的 DSH host）+ Playwright 驱动 host 页面；模型按钮显示
+`deepseek-v4.1-flash`；五项权限探测**全部 available**（辅助功能/屏幕录制/麦克风/终端/诊断）。
+任务只给一句：「把计算器窗口切到前台，先点 AC 清空，依次点 7、+、3、=，再用截图确认显示区」。
+
+一次会话（1 轮 / 28 步 / 1.4M tok / 4 分 12 秒）里观察到：
+
+- **模型在从画面读坐标**：思考里出现「the `%` button (center 145,185) roughly centered」
+  这类描述，紧接着就是 `cua_driver_native__click · {…"x1":58,"y1":150,"x2":118,"y2":210}`；
+- 显示区按 `7 → 7+ → 7+3 → 10` 推进，最终回答：「显示区结果：10（上方还保留算式 7+3）」；
+- 它自己交代了两条真实限制：计算器的**无障碍树是空的**（`elements=0`，所以只能按截图坐标点）；
+  「后台输入被拒（窗口不在当前 Space）」⇒ 走前台 CGEvent 投递；
+  `bring_to_front` 无法独立验证 frontmost，靠每次点击后的截图（红黄绿灯点亮、显示区变化）判断；
+- 审批行为符合设计：点过「本会话信任」后，**点击类不再问**，但
+  「模拟键盘输入或读写剪贴板」这类**仍然每次都问**（本次会话共弹 5 次，其中 3 次是键盘输入）。
+
+**独立复核（不靠它的自述）**：把上一轮留下的真实 macOS 截图
+（`~/Documents/deepseek-harness/Default workspace/calc_before.png`）直接发给站点 API：
+
+```
+model=deepseek-v4.1-flash + 图片 → 「①计算器（Calculator） ②0」（prompt_tokens 253）
+```
+
+⇒ 站点模型确实能读真实截图（也说明我们的 `input:["text","image"]` 声明属实），
+当时「0」正是点击前的显示值。
+
+**证据边界（如实）**：最终「10」是**代理自己读它自己的截图**得出的结论，
+我本人无法独立复核这一张 —— 本会话的主模型不接受图像输入，而从 bash 调
+`osascript`/`screencapture` 因没有辅助功能/屏幕录制权限会卡住（实测挂起，已终止）。
+可独立确认的是：计算器进程确实被拉起（`Calculator` pid 28387）、
+截图能被站点模型正确读出内容。
 
 ## 响应速度（2026-10-01 实测）
 
@@ -240,6 +309,13 @@ summon 模式把官方对话区藏起来了，所以**工具活动与失败必�
 
 壳里有真实探测（`permissions.rs`：`AXIsProcessTrusted` / `CGPreflightScreenCaptureAccess` / `AVCaptureDevice`）与命令 `permission_status`、`permission_open_settings`，可以一键跳系统设置对应页。注意：`packages/agent/src/platform-status.ts` 里那份清单是**硬编码**的旧实现，新的以壳为准。
 
+**当前真机状态（2026-10-02 实测，直接读壳的上报口）**：
+`GET http://127.0.0.1:<beacon>/permissions?t=<token>`（token 只在 `MING_TEA_DEBUG_BEACON=1` 时打到 stderr）返回五项**全部 `available: true`**：
+辅助功能、屏幕录制、麦克风、终端、诊断。探测是诚实的 —— 麦克风只有在
+`AVAuthorizationStatus::Authorized` 时才报 available，`NotDetermined`（还没问过）会如实报
+`available:false, permission_required:true` 并给出「第一次说话时会弹窗」的文案，
+所以这个 `true` 不是「未询问」被误读。
+
 ## 隐私边界（必须知道）
 
 - **音频只在本机识别**（SenseVoice），不发给站点。
@@ -307,18 +383,42 @@ LaunchAgent 的 plist 会从「开发机 repo 里的二进制」**自动刷新**
 
 ## 已知限制 / 还没做
 
-- **打包分发未完成**：守护进程二进制还没有通过 `bundle.externalBin` 打进 `.app`，URL scheme 也只有在**打包后的 .app** 里才注册。开发机走上面的 `command` 路径可以先跑通；正式分发前要补「守护进程入包 + 签名 + 公证」。
-- **审批 UI 在三态面板里还没有专门版式**：目前沿用官方审批卡（`[data-approval-key]` / `[data-question-key]`，已在 CSS 里放行并置顶），没有做成胶囊风格的紧凑条。
-- **「本会话信任」还没接进 DSH 的审批流**：当前 DSH 侧的审批仍按它自己的策略走；会话级信任需要在我们的宿主半区接一个 hook。
-- **`⌥Space` 可能与其它启动器冲突**：注册失败会写日志并每 30 秒重试。
+（2026-10-02 校订：下面几条是**当前仍然成立**的；已完成的旧条目不再留在这里，
+避免把做过的说成没做。）
+
+- **DSH runtime 未进包**：守护进程二进制已经通过 `bundle.externalBin` 进了 `.app`
+  （`Contents/MacOS/ming-tea-hotkey`），URL scheme 也在 `.app` 的 Info.plist 里；
+  但 `.ming-tea/runtime` 还没作为资源打进去，所以打包版仍要 `repoRoot`/`dshBin` 才能找到 `dsh`。
+- **DMG 打包在本机失败**：`bundle_dmg.sh`（与 hdiutil / Finder 自动化有关，2026-09-26 起就存在），
+  本地验收用 `--build --bundles app`。
+- **`auto` 不能看图**：路由默认模型是 `auto`，而它没声明 `image`（传图会返回空）。
+  看屏幕的会话必须用 `deepseek-v4.1-flash`；预设层钉不了模型，怎么兜这个默认值是**待定的产品取舍**。
+- **`⌥Space` 可能与其它启动器冲突**：注册失败会写日志并按候选列表重试；
+  当前生效的热键与候选列表写在 `~/Library/Application Support/铭荼/hotkey-state.json`。
 - **单屏假设**：面板贴在**主显示器**底部；多屏且鼠标在副屏时不会跟过去。
-- **语音需要真人开麦**：自动化测试覆盖不到麦克风链路（我用浏览器假设备只验证过组件挂载与相态）。
+- **语音需要真人开麦**：「录到声音 → 转文字」在自动化环境里覆盖不到
+  （Playwright 的 Chromium 没有音频输入设备），必须真机真麦验证。
+- **审批卡仍沿用官方版式**（已在三态面板里放行并钉到视口底部，有专门的 `approval` 档 520×600），
+  没有做成铭荼自绘的胶囊风格紧凑条。
 
 ## 验证证据（2026-10-01）
 
-- 壳侧端到端（日志）：`[single-instance] 第二次启动` → `[summon] 面板已显示` → `[summon] 档位 -> pet（200×200，interactive=false）`；用 curl 驱动上报口可依次看到 `answer（470×520，interactive=true）`、`listening（420×280）`、`pet`。
+- 壳侧端到端（日志）：`[single-instance] 第二次启动` → `[summon] 面板已显示` → `[summon] 档位 -> pet（220×220，interactive=true）`；用 curl 驱动上报口可依次看到 `answer（470×520，interactive=true）`、`listening（420×280）`、`pet`。
 - 浏览器实测（Playwright，`addInitScript` 模拟壳注入）：`summon="1"`、初始 `stage=pet` 且**侧栏/对话区/输入框全部不可见、宠物可见**；注入语音相态 → `stage=listening` 且胶囊显示「我在听…」；注入 `[data-turn-process-answer]` → `stage=answer`、回答可见；几何断言 `answerBelowCapsule=true`、`answerAbovePet=true`、`petCentered=true`。
 - 冷启动召唤：应用未运行时 `--summon` 启动**只弹面板不弹主窗口**，且**只起一个** DSH host。
 - 宿主生命周期回归（两场景）：就绪后 SIGTERM、启动中途 SIGTERM，应用与 host 都一起退出、端口释放。
-- 测试：vitest 37/37、`scripts/check_ming_tea_hub.mjs` 45/45、Python 8/8。
+- 测试：vitest 37/37、`scripts/check_ming_tea_hub.mjs` 45/45。
 - **用户实测确认**：冷启动召唤后屏幕上「只有宠物，没别的了」。
+
+## 验证证据（2026-10-02 追加）
+
+- `scripts/check_ming_tea_hub.mjs` **51/51**（新增 7 条「哪些模型声明 image」的断言）、
+  vitest **37/37**（`platform/ming-tea` 全量 9 个测试文件）、`scripts/verify_presets.py` 退出码 0。
+- 「截图 → 决策 → 点击」端到端：见上面《实测证据：截图 → 决策 → 点击》。
+- 权限：壳上报口五项全部 `available: true`（见《权限》一节）。
+- 加热键链路回归：Playwright 等插件加载完成后点宠物 → `tap=clicked`、`phase=recording`、
+  `stage=listening`、胶囊「我在听…」。
+  （**一条自我更正**：2026-10-02 早先我报过「插件在该次 Playwright 运行里根本没加载」——
+  那是**测试脚本的时序问题**：它在朗读按钮出现的瞬间（约 3s）就检查层，而插件是按需异步加载的；
+  四个对照变体（假麦克风标志 / 麦克风权限 / 260×260 小视口 / 三者叠加）全部正常加载，
+  改成「先等 `__mingTeaHub` 与 `.mt-summon-layer` 出现再点」后稳定通过。）
