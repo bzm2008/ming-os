@@ -567,14 +567,14 @@ window.__ModuleLoader__.load({
 		 *
 		 * 为什么需要：summon 面板把对话区藏了，用户只看得到我们镜像的这一行错误。
 		 * 工具层的英文原文（例如「模型不能收图」）对用户没有任何可操作性 ——
-		 * 实测踩到：路由默认模型是 auto，而 auto 没声明 image 输入，
-		 * 于是「看屏幕」时报 `cannot read … as an image: model "auto" does not declare image input`，
-		 * 用户只会看到一句英文错误、不知道该干什么（2026-10-02）。
+		 * 实测踩到：模型没声明 image 输入时「看屏幕」会在工具层被拒，
+		 * 报 `cannot read … as an image: model "…" does not declare image input`，
+		 * 用户只会看到一句英文、不知道该干什么（2026-10-02）。
 		 * 只翻译**确定的**几种，其余原样透出 —— 不猜、不吞掉原始信息。 */
 		function mingTeaHumanizeError(text) {
 		  const raw = typeof text === "string" ? text : String(text ?? "");
 		  if (/does not declare image input|does not support image input/i.test(raw)) {
-		    return "当前模型不能看图（Auto 不支持图片），请在输入框旁把模型切到 deepseek-v4.1-flash，再说一次。";
+		    return "当前模型不能看图，请在输入框旁换一个支持图片的模型（例如 deepseek-v4.1-flash），再说一次。";
 		  }
 		  return raw;
 		}

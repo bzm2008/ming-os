@@ -95,8 +95,9 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 我们要做的只有三件事，现在都做了：
 
 1. **模型必须能看图 —— 而且要真的「声明」能看图**（2026-10-02 补上的一个真缺陷，见下一节）：
-   看屏幕的模型用 `deepseek-v4.1-flash`（站点侧实测能正确描述图片；`glm-5.2` 明确说不能看图、
-   `auto` 传图返回空 —— 所以**不要**把看屏幕的会话切到 `auto`）。
+   看起来能读图的模型有 `auto`（默认模型，实测 4/4 正确）、`deepseek-v4.1-flash`、
+   `mimo-v2.6-flash`、`glm-5.3`；`glm-5.2` 明确说不能看图。声明名单见下一节 ——
+   **声明比能力本身更要紧**：没声明的模型即使能看图，截图也会在工具层被拦掉。
 2. **权限**：屏幕录制（截图）、辅助功能（点击输入）；缺哪个面板会显示可点的提示条。
 3. **审批**：进到「操纵电脑」这一步必须经过用户同意。
 
@@ -120,24 +121,35 @@ DSH 判断「这个模型能不能收图」看的是模型条目上的 `inputMod
 `deepseek-v4.1-flash` 正确答出「计算器」与显示区「0」，见下方证据）。
 
 **修法**（`lib/host/model-route.mjs`）：给站点实测能看图的模型显式声明
-`input: ["text", "image"]`（`deepseek-v4.1-flash`、`mimo-v2.6-flash`、`glm-5.3`），
-其余一律 `["text"]`。**`auto` 特意不声明**：它传图返回空，声明了只会换来空回答；
-不声明时「看屏幕」会明确报错而不是静默给空结果。改完打开一次页面即生效
-（`modelsSync` 会按内容差异重写路由配置，写入位置是
-`.ming-tea/runtime/dsh-home/profiles/ming-tea/cordis.patch.yml` 的 `llm-pi-ai.providers.ming-tea-hub`）。
+`input: ["text", "image"]`，其余一律 `["text"]`。名单是
+**`auto`、`deepseek-v4.1-flash`、`mimo-v2.6-flash`、`glm-5.3`**。
+`auto` 在名单里是**更正后的结论**：先前写「auto 传图返回空、所以别用 auto 看屏幕」，
+2026-10-02 用同一张真实截图连测 4 次，auto **全部正确读图**
+（上游分别落到 `gpt-5.4-nano` ×3、`claude-haiku-4-5` ×1），那句话没能复现、已撤回。
+**这一点很关键**：免费层用户只有 `auto` 可选，若不给 auto 声明 image，
+等于他们永远用不了「看屏幕」——而这是我们自己拦的，不是站点做不到。
+改完打开一次页面即生效（`modelsSync` 会按内容差异重写路由配置，写入位置是
+`.ming-tea/runtime/dsh-home/profiles/ming-tea/cordis.patch.yml` 的
+`llm-pi-ai.providers.ming-tea-hub`，可用 `grep -A4 'id: auto'` 核对）。
 
-**遗留的产品取舍**（待用户决定）：路由的默认模型是 `auto`（免费额度走它），
-而 `auto` 不能看图 ⇒ 新用户第一次「看屏幕」会看到报错。预设层**钉不了模型**
-（`@deepseek-ai/dsh-agent-preset` 里没有任何 model 字段），所以要么把路由默认值换成
-`deepseek-v4.1-flash`（会改变计费路径），要么在面板里提示用户切模型。
+**仍未实测的边界（如实）**：`auto` 的声明已落盘、也有离线断言，但
+DSH 层的端到端只用 `deepseek-v4.1-flash` 完整跑过（两者走的是同一条声明→工具放行代码路径）；
+`glm-5.3-flash`/`deepseek-v4-pro`/`deepseek-v4-flash`/`step-3.7-flash` 目前只声明文本
+（未实测其视觉能力，保守起见不声明）。
 
-**已经做掉的一半**：面板现在把这个错误**翻译成可操作的提示**（`mingTeaHumanizeError`，
+**关于默认模型**：路由默认是 `auto`（免费额度走它）。既然 auto 自己就能看图，
+**不需要**为了「看屏幕」去改默认值或钉死付费模型 —— 之前的顾虑建立在
+「auto 不能看图」这个已被推翻的判断上。预设层本来就钉不了模型
+（`@deepseek-ai/dsh-agent-preset` 里没有任何 model 字段），现在也不需要钉了。
+
+**面板还会兜一层**：万一某个模型确实不能收图（例如用户手动选了名单外的模型），
+面板会把那句英文工具错误**翻译成可操作的提示**（`mingTeaHumanizeError`，
 只翻译确定的两种官方措辞，其余原样透出）：用户看到的是
-「操作失败：当前模型不能看图（Auto 不支持图片），请在输入框旁把模型切到
-deepseek-v4.1-flash，再说一次。」而不是一句英文。三种情况都在真实页面上验证过：
-`does not declare image input` ✓、`does not support image input` ✓、
-无关错误（`bring_to_front … was not verified as frontmost`）**原样透出** ✓
-（都是 tone=error、stage=answer）。
+「操作失败：当前模型不能看图，请在输入框旁换一个支持图片的模型
+（例如 deepseek-v4.1-flash），再说一次。」而不是一句英文。
+三种情况都在真实页面上验证过：`does not declare image input` ✓、
+`does not support image input` ✓、无关错误（`bring_to_front … was not verified as frontmost`）
+**原样透出** ✓（都是 tone=error、stage=answer）。
 ⚠️ 改了 `ui-tweaks.js` 一定要 `node scripts/build.mjs` 重新构建 `lib/client.js`，
 否则宿主与页面继续跑旧包；`scripts/check_ming_tea_hub.mjs` 现在有一条**产物新鲜度**断言专门守这个。
 
@@ -401,8 +413,10 @@ LaunchAgent 的 plist 会从「开发机 repo 里的二进制」**自动刷新**
   但 `.ming-tea/runtime` 还没作为资源打进去，所以打包版仍要 `repoRoot`/`dshBin` 才能找到 `dsh`。
 - **DMG 打包在本机失败**：`bundle_dmg.sh`（与 hdiutil / Finder 自动化有关，2026-09-26 起就存在），
   本地验收用 `--build --bundles app`。
-- **`auto` 不能看图**：路由默认模型是 `auto`，而它没声明 `image`（传图会返回空）。
-  看屏幕的会话必须用 `deepseek-v4.1-flash`；预设层钉不了模型，怎么兜这个默认值是**待定的产品取舍**。
+- **部分模型的视觉能力未实测**：`auto`/`deepseek-v4.1-flash`/`mimo-v2.6-flash`/`glm-5.3`
+  已声明 `image`（前两者有直接证据），`glm-5.2` 明确不能看图；
+  但 `glm-5.3-flash`/`deepseek-v4-pro`/`deepseek-v4-flash`/`step-3.7-flash` 只声明了文本
+  （没实测过它们能不能看图，保守不声明）。
 - **`⌥Space` 可能与其它启动器冲突**：注册失败会写日志并按候选列表重试；
   当前生效的热键与候选列表写在 `~/Library/Application Support/铭荼/hotkey-state.json`。
 - **单屏假设**：面板贴在**主显示器**底部；多屏且鼠标在副屏时不会跟过去。

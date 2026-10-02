@@ -36,11 +36,15 @@ export const REASONING_EFFORTS = { off: null, low: "low", medium: "medium", high
  * `read_image` 报 `cannot read "…png" as an image: model "…" does not declare image input`，
  * 截图根本到不了模型（2026-10-02 实测踩到：代理会用像素坐标点计算器，却看不见截图）。
  *
- * 名单只收**站点侧实测能正确描述图片**的模型；其余一律只声明文本 ——
- * 宁可让「看屏幕」明确失败，也不要声明了却拿到空回答（`auto` 就是这种：
- * 传图返回空，因此特意不声明 image，「看屏幕」会自动落到具体视觉模型上）。
+ * 名单收**站点侧实测能正确描述图片**的模型，其余只声明文本。
+ * `auto` **在名单里**：2026-10-02 用同一张真实 macOS 截图连测 4 次，auto 全部正确读图
+ * （上游分别落到 `gpt-5.4-nano` ×3、`claude-haiku-4-5` ×1）。
+ * —— 早先文档里「auto 传图返回空、所以别用 auto 看屏幕」**没能复现**，那句话已更正；
+ * 不声明 image 的代价是**免费层用户永远用不了「看屏幕」**（他们只有 auto 可选），
+ * 所以这里按实测声明 image：上游偶尔落到不能看图的模型时，会以可见的错误呈现，
+ * 而不是被我们自己的声明先拦掉。
  */
-export const VISION_MODEL_IDS = new Set(["deepseek-v4.1-flash", "mimo-v2.6-flash", "glm-5.3"]);
+export const VISION_MODEL_IDS = new Set(["auto", "deepseek-v4.1-flash", "mimo-v2.6-flash", "glm-5.3"]);
 const TEXT_ONLY_INPUT = ["text"];
 const VISION_INPUT = ["text", "image"];
 

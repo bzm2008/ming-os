@@ -558,9 +558,11 @@ await check("routeConfig：auto 恒在首位、跳过不可用、去重", () => 
   assertEqual(config.models[1].name, "DS 付费");
 });
 
-await check("看屏幕：只有实测能看图的模型才声明 image，auto 不声明", () => {
+await check("看屏幕：实测能看图的模型声明 image（含 auto），其余只声明文本", () => {
   // 背景（2026-10-02 实测）：不声明 image 时截图到不了模型，
   // read_image 直接报 `model "…" does not declare image input`，代理只能盲点像素。
+  // auto 必须声明：免费层用户只有 auto 可选，不声明等于他们永远用不了「看屏幕」；
+  // 2026-10-02 用真实截图连测 4 次 auto 均正确读图（上游 gpt-5.4-nano / claude-haiku-4-5）。
   const config = routeConfig(undefined, [
     { id: "deepseek-v4.1-flash", available: true },
     { id: "mimo-v2.6-flash", available: true },
@@ -569,7 +571,7 @@ await check("看屏幕：只有实测能看图的模型才声明 image，auto �
     { id: "step-3.7-flash", available: true },
   ]);
   const input = (id) => config.models.find((m) => m.id === id)?.input;
-  assertEqual(input("auto"), ["text"], "auto 传图返回空 ⇒ 不声明 image，避免拿到空回答");
+  assertEqual(input("auto"), ["text", "image"], "免费层唯一的模型，必须能看图");
   assertEqual(input("deepseek-v4.1-flash"), ["text", "image"], "钉住的视觉模型必须声明 image");
   assertEqual(input("mimo-v2.6-flash"), ["text", "image"]);
   assertEqual(input("glm-5.3"), ["text", "image"]);
