@@ -389,8 +389,44 @@ node scripts/check_sensevoice_asr.mjs     # 退出码非 0 = 识别结果不符�
 - 模型文件齐全且 sha256 与官方清单一致（242 MB）；原生依赖 `sherpa-onnx-node@1.13.8`
   与平台包 `sherpa-onnx-darwin-arm64`（含 `sherpa-onnx.node`、`libonnxruntime.dylib`）都在；
 - **真实音频转写**：`scripts/check_sensevoice_asr.mjs` 两条中文语音全部识别正确（见上一节）；
+- **整条链路端到端**（`scripts/check_voice_pipeline.mjs`，假麦克风喂合成语音）：
+  输入区录完文字落进输入框 ✅、面板胶囊显示转写 ✅、点太早时的重试 ✅（见下一节）；
 - 面板侧：**点一下面板** → 官方麦克风按钮被点到 → 相态进入 `requesting`、
   面板切到 `listening` 档并显示「我在听…」（`tapResult=clicked`，实测）。
+
+### ④ 整条语音链路端到端（假麦克风，2026-10-02）
+
+**关键技巧**：Chromium 能把一个 WAV 文件当成麦克风 ——
+`--use-fake-device-for-media-stream --use-file-for-fake-audio-capture=<file.wav>`。
+于是 `getUserMedia` 不再报「没有音频输入设备」，而**后面每一环都是真的**：
+真实采集、真实重采样与编码（麦克风报 48 kHz，上传前编码成 16 kHz 规范 WAV）、
+真实上传、真实本地模型推理。脚本 `scripts/check_voice_pipeline.mjs` 三种模式都跑：
+
+```bash
+node scripts/check_voice_pipeline.mjs              # 三种模式
+node scripts/check_voice_pipeline.mjs --mode panel # 只跑某一个
+```
+
+| 模式 | 做了什么 | 实测结果 |
+| --- | --- | --- |
+| `composer` | 点官方「开始录音」→ 喂 8 秒合成语音 → 停止 | 文字落进输入框：「我看看屏幕上有什么，帮我看看屏幕上有什么…」（文件在 8 秒里循环了几遍） |
+| `panel` | summon 模式下点宠物 → 胶囊「我在听…」→ 停止 | **转写出现在胶囊里**（用户要的就是这个） |
+| `early-tap` | 语音按钮还不可用时点宠物，随后恢复 | 胶囊立刻显示「正在准备麦克风…」，1 秒后自行进入录音 |
+
+**踩到的两个坑（都写进脚本注释了）**：
+
+1. **录音中官方会换按钮**：麦克风按钮从「开始录音」变成「取消」，旁边另起一个「停止并识别」。
+   按 `aria-label*="录音"` 去找停止按钮会**点空** —— 我第一版脚本因此以为点了停止，其实那次是
+   「自动停止」兜住的，结论差点错。正确做法是点 `button[aria-label="停止并识别"]`。
+2. **summon 模式下输入区在屏幕外**（`left:-10000px` + `pointer-events:none`，这是设计），
+   Playwright 的真实点击会报 `Element is outside of the viewport`。要停止录音必须用**页面内 JS 点击**
+   （`page.evaluate(() => button.click())`）——插件的「点一下说话」本来就是这么点的。
+
+**顺带修掉一个真缺陷：点得太早会「没反应」**。官方语音行是懒挂载的（宿主刚起时约 15 秒才出现），
+而插件原先在点击时找不到麦克风按钮就**直接放弃**（只把 `data-ming-tea-tap-result` 记成 `no-trigger`）——
+用户表现为「点了宠物什么都没发生」。现在改成：记下意图 + 立刻在胶囊里给一句
+「正在准备麦克风…」+ 每轮 tick（180ms）重试，成功后置 `data-ming-tea-tap-result=clicked-after-wait`；
+约 12.6 秒仍挂不上就如实显示「麦克风还没准备好，再点我一下」。三种状态都有断言覆盖。
 
 ### 更正一条我先前的错误结论
 
@@ -519,9 +555,9 @@ LaunchAgent 的 plist 会从「开发机 repo 里的二进制」**自动刷新**
 - **`⌥Space` 可能与其它启动器冲突**：注册失败会写日志并按候选列表重试；
   当前生效的热键与候选列表写在 `~/Library/Application Support/铭荼/hotkey-state.json`。
 - **单屏假设**：面板贴在**主显示器**底部；多屏且鼠标在副屏时不会跟过去。
-- **只有「麦克风采集」这一段还需要真人开麦**：识别本体已用合成语音离线验证通过
-  （`scripts/check_sensevoice_asr.mjs`），缺的是「真麦克风 → 浏览器编码 WAV → 上传」这一段
-  ——Playwright 的 Chromium 没有音频输入设备，自动化覆盖不到。
+- **只差「真人对着真麦克风说」这一个变量**：识别本体（`check_sensevoice_asr.mjs`）与
+  采集→编码→上传→转写→落进输入框/胶囊（`check_voice_pipeline.mjs`，Chromium 用 WAV 文件当麦克风）
+  都已端到端验证；剩下未验证的只是**物理麦克风这一个声源**（真人开麦）。
 - **审批卡仍沿用官方版式**（已在三态面板里放行并钉到视口底部，有专门的 `approval` 档 520×600），
   没有做成铭荼自绘的胶囊风格紧凑条。
 

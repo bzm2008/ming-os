@@ -648,6 +648,14 @@ window.__ModuleLoader__.load({
 		          MING_TEA_SUMMON.listeningRequested = true;
 		          MING_TEA_SUMMON.capsule.textContent = "我在听…";
 		          MING_TEA_SUMMON.capsule.dataset.empty = "1";
+		        } else {
+		          // 官方语音行是**懒挂载**的：刚呼出（宿主刚起）就点，按钮往往还不存在。
+		          // 早先这里直接放弃 ⇒ 用户看到的是「点了没反应」（2026-10-02 实测：等 15s 再点才有用）。
+		          // 现在记住意图，接下来每轮 tick 重试，并且**立刻给一句反馈**，让用户知道点到了。
+		          MING_TEA_SUMMON.tapPending = true;
+		          MING_TEA_SUMMON.tapAttempts = 0;
+		          MING_TEA_SUMMON.capsule.textContent = "正在准备麦克风…";
+		          MING_TEA_SUMMON.capsule.dataset.empty = "1";
 		        }
 		      },
 		      true,
@@ -672,6 +680,26 @@ window.__ModuleLoader__.load({
 		  const toolText = mingTeaSummonText("[data-turn-process-tool-calls]");
 		  const screenBusy = /cua_driver_native__|playwright-mcp|computer/i.test(toolText);
 		  const errorText = mingTeaSummonText("[data-error]").slice(0, 160);
+
+		  // 用户点过宠物但当时按钮还没挂载 → 继续替他重试（「点了没反应」的那次修复）
+		  if (MING_TEA_SUMMON.tapPending) {
+		    if (voicePhase) {
+		      MING_TEA_SUMMON.tapPending = false; // 已经听上了
+		    } else {
+		      MING_TEA_SUMMON.tapAttempts = (MING_TEA_SUMMON.tapAttempts ?? 0) + 1;
+		      if (mingTeaSummonStartListening()) {
+		        MING_TEA_SUMMON.tapPending = false;
+		        MING_TEA_SUMMON.listeningRequested = true;
+		        document.documentElement.dataset.mingTeaTapResult = "clicked-after-wait";
+		        MING_TEA_SUMMON.capsule.textContent = "我在听…";
+		      } else if (MING_TEA_SUMMON.tapAttempts > 70) {
+		        // ≈180ms × 70 ≈ 12.6 秒还挂不上：如实告诉用户，并允许再点一次重来。
+		        MING_TEA_SUMMON.tapPending = false;
+		        document.documentElement.dataset.mingTeaTapResult = "no-trigger-give-up";
+		        MING_TEA_SUMMON.capsule.textContent = "麦克风还没准备好，再点我一下";
+		      }
+		    }
+		  }
 
 		  // 自动开始听：只在「还没有回答、也没在听」时点一次，避免反复开关麦克风
 		  if (MING_TEA_SUMMON.auto && !MING_TEA_SUMMON.listeningRequested && !voicePhase && !answerText) {
