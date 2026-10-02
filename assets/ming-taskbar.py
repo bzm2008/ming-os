@@ -27,6 +27,7 @@ from gi.repository import Gdk, GdkX11, GLib, Gtk
 APP_DIR = pathlib.Path("/usr/share/applications")
 RUNTIME_DIR = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
 LOCK_PATH = RUNTIME_DIR / "ming-taskbar.lock"
+READY_PATH = RUNTIME_DIR / "ming-taskbar.ready"
 LOG_PATH = pathlib.Path.home() / ".cache" / "ming-os" / "ming-taskbar.log"
 TASKBAR_WIDTH = 820
 TASKBAR_HEIGHT = 56
@@ -56,6 +57,22 @@ def log(message):
         with LOG_PATH.open("a", encoding="utf-8") as stream:
             stream.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
     except OSError:
+        pass
+
+
+def mark_ready():
+    try:
+        READY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        READY_PATH.write_text("%s\n" % os.getpid(), encoding="ascii")
+    except OSError:
+        pass
+
+
+def clear_ready():
+    try:
+        if READY_PATH.read_text(encoding="ascii").strip() == str(os.getpid()):
+            READY_PATH.unlink()
+    except (OSError, ValueError):
         pass
 
 
@@ -410,6 +427,7 @@ class MingTaskbar(Gtk.Window):
         menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
 
     def _on_destroy(self, _widget):
+        clear_ready()
         clear_workarea_strut(self.get_window())
         Gtk.main_quit()
 
@@ -428,16 +446,21 @@ def main(argv=None):
     if not instance.acquire():
         return 0
     try:
+        clear_ready()
         Gtk.init([])
         taskbar = MingTaskbar()
         signal.signal(signal.SIGTERM, lambda *_args: taskbar.destroy())
         signal.signal(signal.SIGINT, lambda *_args: taskbar.destroy())
         taskbar.show_all()
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        mark_ready()
         Gtk.main()
     except Exception as exc:
         log("taskbar exited with error: %s" % exc)
         return 1
     finally:
+        clear_ready()
         instance.close()
     return 0
 

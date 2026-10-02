@@ -3852,7 +3852,9 @@ repair_components() {
         /usr/local/bin/ming-phone-desktop-watchdog >/dev/null 2>&1 || log "desktop repair failed"
     fi
     if command -v ming-plank-watchdog >/dev/null 2>&1; then
-        /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || log "dock repair failed"
+        if ! pgrep -u "$(id -u)" -f '/usr/local/bin/ming-taskbar([[:space:]]|$)' >/dev/null 2>&1; then
+            /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || log "dock repair failed"
+        fi
     fi
     if ! has_proc 'ming-launch[[:space:]]+--server' && [[ -x /usr/local/bin/ming-launch ]]; then
         (nohup /usr/local/bin/ming-launch --server >>"${log_file}" 2>&1 &) || log "launch broker repair failed"
@@ -4718,6 +4720,11 @@ taskbar_process_running() {
 
 taskbar_window_visible() {
     command -v wmctrl >/dev/null 2>&1 || return 1
+    if [[ -r "${XDG_RUNTIME_DIR:-/tmp}/ming-taskbar.ready" ]]; then
+        local ready_pid
+        read -r ready_pid <"${XDG_RUNTIME_DIR:-/tmp}/ming-taskbar.ready" || ready_pid=""
+        [[ "${ready_pid}" =~ ^[0-9]+$ ]] && kill -0 "${ready_pid}" 2>/dev/null && return 0
+    fi
     wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /ming-taskbar|ming taskbar/ {found=1} END {exit !found}'
 }
 
@@ -4763,9 +4770,7 @@ case "${1:-start}" in
         sleep 2
         while true; do
             if ! start_taskbar; then
-                log 'Ming Taskbar failed; asking Plank watchdog for the safe fallback'
-                command -v ming-plank-watchdog >/dev/null 2>&1 && \
-                    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
+                log 'Ming Taskbar failed; session healthcheck owns the Plank fallback'
             else
                 pkill -TERM -u "$(id -u)" -x plank >/dev/null 2>&1 || true
             fi
@@ -10202,14 +10207,8 @@ elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/de
     (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 
-# Ensure the primary Ming Taskbar is visible after the compositor/session settles.
-# Plank remains a safe fallback when the GTK3/X11 surface cannot be created.
-if command -v ming-taskbar-watchdog &>/dev/null; then
-    /usr/local/bin/ming-taskbar-watchdog >/dev/null 2>&1 || \
-        { command -v ming-plank-watchdog &>/dev/null && /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true; }
-elif command -v ming-plank-watchdog &>/dev/null; then
-    /usr/local/bin/ming-plank-watchdog >/dev/null 2>&1 || true
-fi
+# The session healthcheck is the sole owner of taskbar startup and the Plank
+# fallback. Starting another Dock here creates overlapping old and new bars.
 
 exit 0
 APPLYAPPEARANCE

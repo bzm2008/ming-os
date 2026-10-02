@@ -27,6 +27,7 @@ class MingTaskbarContracts(unittest.TestCase):
         self.assertIn("X-Ming-Managed-By=ming-session-healthcheck", source)
         self.assertIn("ming-plank-watchdog", source)
         self.assertIn("Ming Taskbar", source)
+        self.assertIn("session healthcheck owns the Plank fallback", source)
 
     def test_taskbar_uses_workarea_strut_and_does_not_touch_grub(self):
         source = TASKBAR.read_text(encoding="utf-8")
@@ -45,6 +46,8 @@ class MingTaskbarContracts(unittest.TestCase):
             "int(width * 0.78)",
             "TASKBAR_HEIGHT = 56",
             "native opaque window visual",
+            "ming-taskbar.ready",
+            "mark_ready()",
             "Gdk.WindowTypeHint.DOCK",
             "refresh_windows",
             "refresh_status",
