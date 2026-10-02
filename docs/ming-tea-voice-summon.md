@@ -157,6 +157,22 @@ clang -O2 -framework CoreGraphics -framework CoreFoundation scripts/winlist.c -o
 热键路径里面板显示后会 `set_focus()`，理论上也会把它带到前台；若用户报「按了没反应」，
 先用这个探针看一眼——**面板可能真的开了，只是没开在他眼前的那个 Space 里**。
 
+### 一条命令验收冷启动热键（`scripts/check_summon_coldstart.sh`）
+
+不用手工比对日志：关掉应用后跑它，它等你按一次热键，然后逐项判定
+
+```bash
+scripts/check_summon_coldstart.sh        # 默认最多等 120 秒
+```
+
+四项判定（每项都会打印过了/没过 + 原因）：① 守护进程收到按键（`hotkey.log` 里有「触发 …」）；
+② 应用被 URL 拉起且判定为冷启动（`app.log` 里有「被 summon URL 拉起」）；③ 没显示主窗口（`[main]` 行数 = 0）；
+④ 面板在屏幕上、底边贴在「屏幕高 − 140」（用 `scripts/winlist.c` 问 WindowServer 要几何，屏幕高也由它给出，不写死）。
+
+实测（2026-10-02，用**模拟**按键跑通全流程）：5 项全过 —— `触发 alt+space` →
+`被 summon URL 拉起（110ms 后确认）` → `[main]` 0 行 → 面板 `onscreen=1 220x220 @(850,720) 底边=940`。
+⚠️ 其中 ① 目前只用**模拟**的「触发」行验证过脚本本身的判定逻辑，**真人按键**尚未跑过。
+
 ## 三态是怎么驱动的
 
 1. 面板窗口在应用启动时就**预建好（隐藏）**，所以热键后立刻可见；DSH host 没就绪时先显示一张「正在唤醒…」的本地页（`apps/desktop/public/waking.html`）。

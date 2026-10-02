@@ -25,6 +25,12 @@
 
 int main(int argc, char **argv) {
     int all = (argc > 1 && strcmp(argv[1], "--all") == 0);
+    // 先报一次主显示器尺寸：调用方（例如 check_summon_coldstart.sh）据此算「面板底边应该是多少」，
+    // 不必把 1080 这类数字写死在脚本里。
+    CGDirectDisplayID main_display = CGMainDisplayID();
+    CGRect screen = CGDisplayBounds(main_display);
+    printf("display main %.0fx%.0f @(%.0f,%.0f)\n",
+           screen.size.width, screen.size.height, screen.origin.x, screen.origin.y);
     CGWindowListOption opts = all ? kCGWindowListOptionAll
                                   : (kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements);
     CFArrayRef list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID);
