@@ -556,6 +556,29 @@ await check("routeConfig：auto 恒在首位、跳过不可用、去重", () => 
   assertEqual(config.models[1].name, "DS 付费");
 });
 
+await check("看屏幕：只有实测能看图的模型才声明 image，auto 不声明", () => {
+  // 背景（2026-10-02 实测）：不声明 image 时截图到不了模型，
+  // read_image 直接报 `model "…" does not declare image input`，代理只能盲点像素。
+  const config = routeConfig(undefined, [
+    { id: "deepseek-v4.1-flash", available: true },
+    { id: "mimo-v2.6-flash", available: true },
+    { id: "glm-5.3", available: true },
+    { id: "glm-5.2", available: true },
+    { id: "step-3.7-flash", available: true },
+  ]);
+  const input = (id) => config.models.find((m) => m.id === id)?.input;
+  assertEqual(input("auto"), ["text"], "auto 传图返回空 ⇒ 不声明 image，避免拿到空回答");
+  assertEqual(input("deepseek-v4.1-flash"), ["text", "image"], "钉住的视觉模型必须声明 image");
+  assertEqual(input("mimo-v2.6-flash"), ["text", "image"]);
+  assertEqual(input("glm-5.3"), ["text", "image"]);
+  assertEqual(input("glm-5.2"), ["text"], "实测不能看图 ⇒ 只声明文本");
+  assertEqual(input("step-3.7-flash"), ["text"]);
+  assert(
+    config.models.every((m) => Array.isArray(m.input) && m.input.includes("text")),
+    "每个模型都至少声明文本",
+  );
+});
+
 await check("useAsDefault 只改 provider/model 两个字段", async () => {
   const settings = settingsStub();
   const route = createModelRoute(stubCtx({ settings }));

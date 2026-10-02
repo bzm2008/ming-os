@@ -30,11 +30,30 @@ const DEFAULT_MODEL_NS = "agent-default-model";
  */
 export const REASONING_EFFORTS = { off: null, low: "low", medium: "medium", high: "high" };
 
+/**
+ * 输入模态。**手写路由必须显式声明**：pi-ai 的模型条目缺省是 `["text"]`
+ * （`DEFAULT_INPUT`），未声明 `image` 的模型会让「看屏幕」在工具层直接被拒：
+ * `read_image` 报 `cannot read "…png" as an image: model "…" does not declare image input`，
+ * 截图根本到不了模型（2026-10-02 实测踩到：代理会用像素坐标点计算器，却看不见截图）。
+ *
+ * 名单只收**站点侧实测能正确描述图片**的模型；其余一律只声明文本 ——
+ * 宁可让「看屏幕」明确失败，也不要声明了却拿到空回答（`auto` 就是这种：
+ * 传图返回空，因此特意不声明 image，「看屏幕」会自动落到具体视觉模型上）。
+ */
+export const VISION_MODEL_IDS = new Set(["deepseek-v4.1-flash", "mimo-v2.6-flash", "glm-5.3"]);
+const TEXT_ONLY_INPUT = ["text"];
+const VISION_INPUT = ["text", "image"];
+
+function inputModalitiesFor(id) {
+  return VISION_MODEL_IDS.has(id) ? VISION_INPUT : TEXT_ONLY_INPUT;
+}
+
 export const AUTO_MODEL = {
   id: ROUTE_MODEL_ID,
   name: "铭荼 Auto",
   contextWindow: CONTEXT_WINDOW,
   reasoningEfforts: REASONING_EFFORTS,
+  input: inputModalitiesFor(ROUTE_MODEL_ID),
 };
 
 /** 路由配置。`extraModels` 来自站点 `/models`（付费档会多出具体模型），
@@ -51,6 +70,7 @@ export function routeConfig(baseURL = HUB_API_BASE_URL, extraModels = []) {
       name: model.name || model.id,
       contextWindow: CONTEXT_WINDOW,
       reasoningEfforts: REASONING_EFFORTS,
+      input: inputModalitiesFor(model.id),
     });
   }
   return {
