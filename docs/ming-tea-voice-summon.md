@@ -107,6 +107,36 @@ cd platform/ming-tea/apps/hotkey-daemon && cargo run --release --example hotkey_
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cn.mingos.mingtea.hotkey.plist
 ```
 
+#### 日志现在能区分三种「按了没反应」（2026-10-02 加的诊断）
+
+守护进程原先只记「触发」，于是「按了没反应」分不清是**键没到**还是**到了但没匹配**。
+现在**任何**到达的热键事件都会留一行：
+
+| 日志里看到 | 含义 | 下一步 |
+| --- | --- | --- |
+| 只有「已注册 …」「进入事件循环」，按了也没有新行 | 键**根本没到**我们手里 | 换键；确认没有启动器抢（本机装了 ChatGPT.app，`⌥Space` 是它的默认唤起键） |
+| `收到热键事件 id=…  state=Pressed —— 未匹配，未执行动作` | 事件到了但 `id` 和注册的不一致 | **我们的 bug**：注册 id 与事件 id 对不上，要改匹配逻辑 |
+| `触发 alt+space` + `已执行 open mingtea://summon` | 键到了、动作也发了 | 剩下看应用侧有没有 `[summon] 面板已显示` |
+
+#### 不靠截图判定「面板在不在屏幕上」：窗口探针
+
+```bash
+clang -O2 -framework CoreGraphics -framework CoreFoundation scripts/winlist.c -o /tmp/winlist
+/tmp/winlist            # 只列在屏上的窗口
+/tmp/winlist --all      # 连隐藏/其它 Space 的窗口一起列
+/tmp/winlist --all | grep 铭荼
+```
+
+判读：summon 宠物档 = `layer=5`、约 `220x220`、标题「铭荼助手」；
+`onscreen=0` 说明窗口存在但**不在当前屏幕上**（被隐藏或在别的 Space）——
+这正是「壳日志说面板已显示、人却说没看见」的典型成因，也能用来断言档位几何。
+
+**实测提醒（2026-10-02）**：如果应用是被**后台方式**拉起的（例如从脚本 `nohup` 启动），
+它的窗口可能停在别的 Space / 处于隐藏态（`/tmp/winlist --all` 里 `onscreen=0`）。
+`open -a "<铭荼.app>"` 能让主窗口回到当前屏幕（实测 `onscreen` 由 0 变 1）。
+热键路径里面板显示后会 `set_focus()`，理论上也会把它带到前台；若用户报「按了没反应」，
+先用这个探针看一眼——**面板可能真的开了，只是没开在他眼前的那个 Space 里**。
+
 ## 三态是怎么驱动的
 
 1. 面板窗口在应用启动时就**预建好（隐藏）**，所以热键后立刻可见；DSH host 没就绪时先显示一张「正在唤醒…」的本地页（`apps/desktop/public/waking.html`）。

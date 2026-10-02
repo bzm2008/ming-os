@@ -297,7 +297,20 @@ fn main() {
                     info!("非 macOS 平台且未配置自定义命令，仅记录触发");
                 }
             }
-            Ok(_) => {}
+            // 诊断（2026-10-02 加）：**任何**到达的热键事件都留一行痕迹。
+            // 因为「按了没反应」有三种完全不同的成因，没有这行就分不开：
+            //   ① 日志里连事件行都没有 → 键根本没到我们手里（被别的应用抢了，或注册无效）；
+            //   ② 有事件行但 id/state 不匹配 → 是我们自己的 bug（注册 id 与事件 id 对不上）；
+            //   ③ 有「触发」→ 键到了，问题在后面的 open/deep link。
+            // 实测背景：`⌥Space` 从未在日志里留下过「触发」，而当时无法区分 ①②。
+            Ok(event) => {
+                info!(
+                    "收到热键事件 id={}（期望 {}）state={:?} —— 未匹配，未执行动作",
+                    event.id(),
+                    hotkey.id(),
+                    event.state()
+                );
+            }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 error!("全局快捷键事件通道已断开");
