@@ -49,24 +49,37 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 
 两个已知的「按了没反应」成因，以及对应的兜底：
 
-1. **首选键被别的应用占了**。守护进程现在按**候选列表**注册：
+1. **首选键被别的应用占了**。守护进程按**候选列表**注册，而且（2026-10-02 起）
+   **把候选键全部注册上，按其中任何一个都唤出面板**：
    `hotkey` 写字符串时自动补上 `ctrl+alt+space`、`cmd+shift+space` 两个备用键，
    也可以自己写成数组（`"hotkey": ["ctrl+alt+space", "alt+space"]`）。
-   第一个注册成功的生效，并写进 `~/Library/Application Support/铭荼/hotkey-state.json`：
+   实测三个键同时注册成功，`~/Library/Application Support/铭荼/hotkey-state.json` 长这样：
 
    ```json
-   { "active": "alt+space", "configured": ["alt+space","ctrl+alt+space","cmd+shift+space"], "pid": 6558 }
+   { "active": "alt+space",
+     "configured": ["alt+space","ctrl+alt+space","cmd+shift+space"],
+     "registered": ["alt+space","ctrl+alt+space","cmd+shift+space"],
+     "pid": 62526 }
    ```
 
-   应用的 `hotkey_status` 命令会读它，界面可以显示「按哪个键」。
+   `active` 是主键（应用的 `hotkey_status` 读它给界面显示），`registered` 是**实际注册成功**的全集。
+
+   ⚠️ 这里原先有个隐蔽后果：旧策略是「**第一个**注册成功就用它」，而 macOS 允许重复注册
+   （见下一条），于是备用键**永远不会真的注册**——被抢占时用户换不了手。
+   现在改成全部注册，所以「按 ⌥Space 没反应就试试 ⌃⌥Space」是真的可用。
 2. **注册"成功"但按键仍不生效**：实测 macOS **允许两个进程都注册同一个热键**（我起了两个
    守护进程，两个都报「已注册 alt+space」）。所以「注册成功」不等于「事件一定到我们手里」——
-   若某个启动器(Raycast/Alfred 之类)也占着同一个键，它可能先收到。
-   判断办法：看 `~/Library/Logs/铭荼/hotkey.log` 里**有没有「触发」那一行**。
-   有 = 键到了守护进程（问题在后续的 `open`）；没有 = 键被别的应用拿走了，换个键即可。
+   若某个启动器也占着同一个键（本机装了 **ChatGPT.app**，`⌥Space` 正是它的默认唤起键），
+   它可能先收到。判断办法：看 `~/Library/Logs/铭荼/hotkey.log`，
+   三种形态对应三种成因（2026-10-02 起的诊断日志）：
+   - 连「收到热键事件」都没有 → 键**根本没到**守护进程（被抢占或注册无效）；
+   - `收到热键事件 id=…（已注册的是 …）—— 未匹配` → 事件到了但 id 对不上（我们的 bug）；
+   - `触发 …` + `已执行 open mingtea://summon` → 键到了、动作也发了，接着看
+     `~/Library/Logs/铭荼/app.log` 里有没有 `[summon] 面板已显示`。
 
 （这次的候选回退逻辑是用「首选键不可解析」验证的：日志出现
-`快捷键 "not-a-real-key" 解析失败，跳过` → `已注册 ctrl+alt+space`，状态文件 active 同步更新 ✓。）
+`快捷键 "not-a-real-key" 解析失败，跳过` → `已注册 ctrl+alt+space`，状态文件 active 同步更新 ✓。
+「全部注册」是用三个键各自一行「已注册」+ 状态文件 `registered` 数组验证的 ✓。）
 
 ### 「按键到底有没有送达守护进程」—— 我自己测不了，只能你按一下（2026-10-02 记录）
 

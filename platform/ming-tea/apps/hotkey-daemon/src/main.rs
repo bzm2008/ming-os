@@ -198,16 +198,18 @@ fn parse_hotkey(input: &str) -> Result<HotKey, String> {
 }
 
 /// 把生效的热键写进 `hotkey-state.json`（应用侧读给用户看「到底哪个键生效」）。
-fn write_state(active: &str, candidates: &[String]) {
+fn write_state(active: &str, candidates: &[String], registered: &[String]) {
     // 就写在铭荼自己的配置目录里（app_config_dir() 本身就是 ~/Library/Application Support/铭荼）
     let path = app_config_dir().join("hotkey-state.json");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // active = 主键（应用侧 hotkey_status 读它）；registered = 实际注册成功的全部候选键
     let payload = format!(
-        "{{\n  \"active\": {},\n  \"configured\": {},\n  \"pid\": {}\n}}\n",
+        "{{\n  \"active\": {},\n  \"configured\": {},\n  \"registered\": {},\n  \"pid\": {}\n}}\n",
         serde_json::to_string(active).unwrap_or_else(|_| "\"\"".into()),
         serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(registered).unwrap_or_else(|_| "[]".into()),
         std::process::id()
     );
     let _ = std::fs::write(path, payload);
@@ -247,21 +249,27 @@ fn main() {
     }
     let receiver = GlobalHotKeyEvent::receiver();
 
-    // 按候选顺序注册：第一个成功的生效；全失败则 30 秒后整体重试。
-    let (hotkey_text, hotkey) = loop {
-        let mut winner: Option<(String, HotKey)> = None;
+    // 候选键**全部注册**，任一命中都触发。
+    //
+    // 为什么不是「第一个成功就用它」：macOS **允许两个进程注册同一个热键**
+    // （实测两个守护进程都报「已注册 alt+space」），所以「注册成功」并不代表事件会到我们手里 ——
+    // 被启动器占着的键照样能注册成功，却永远收不到事件。旧的「首个成功即生效」策略因此
+    // 有个隐蔽后果：备用键根本不会注册，用户换不了手（本机装了 ChatGPT.app，⌥Space 正是它的默认唤起键）。
+    // 现在把候选键都注册上，用户按其中任何一个都能唤出面板，`hotkey-state.json` 里
+    // `registered` 列出实际注册成功的集合。
+    let registered = loop {
+        let mut registered: Vec<(String, HotKey)> = Vec::new();
         for (text, key) in &parsed {
             match manager.register(*key) {
                 Ok(()) => {
                     info!("已注册 {text}");
-                    winner = Some((text.clone(), *key));
-                    break;
+                    registered.push((text.clone(), *key));
                 }
-                Err(e) => warn!("注册 {text} 失败（可能被其它应用占用）：{e}"),
+                Err(e) => warn!("注册 {text} 失败：{e}"),
             }
         }
-        if let Some(found) = winner {
-            break found;
+        if !registered.is_empty() {
+            break registered;
         }
         error!("所有候选快捷键都注册失败；30 秒后重试");
         if stop_rx.recv_timeout(Duration::from_secs(30)).is_ok() {
@@ -270,7 +278,12 @@ fn main() {
         }
     };
     // 把「当前真正生效的键」落盘，应用侧可读给用户看
-    write_state(&hotkey_text, &candidates);
+    let registered_texts: Vec<String> = registered.iter().map(|(text, _)| text.clone()).collect();
+    let hotkey_text = registered
+        .first()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    write_state(&hotkey_text, &candidates, &registered_texts);
 
     // 事件处理放工作线程：主线程要留给 run loop（见 run_loop 模块的说明）
     std::thread::spawn(move || loop {
@@ -279,8 +292,17 @@ fn main() {
             std::process::exit(0);
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
-            Ok(event) if event.id() == hotkey.id() && event.state() == HotKeyState::Pressed => {
-                info!("触发 {hotkey_text}");
+            // 任一**已注册**的候选键按下都触发（用户按备用键也能唤出）
+            Ok(event)
+                if event.state() == HotKeyState::Pressed
+                    && registered.iter().any(|(_, key)| key.id() == event.id()) =>
+            {
+                let matched = registered
+                    .iter()
+                    .find(|(_, key)| key.id() == event.id())
+                    .map(|(text, _)| text.clone())
+                    .unwrap_or_else(|| hotkey_text.clone());
+                info!("触发 {matched}");
                 if let Some(command) = custom_command.as_deref() {
                     // 开发路径：settings.json 里显式给了命令，直接跑它
                     match Command::new("/bin/sh").arg("-c").arg(command).spawn() {
@@ -304,10 +326,11 @@ fn main() {
             //   ③ 有「触发」→ 键到了，问题在后面的 open/deep link。
             // 实测背景：`⌥Space` 从未在日志里留下过「触发」，而当时无法区分 ①②。
             Ok(event) => {
+                let expected: Vec<u32> = registered.iter().map(|(_, key)| key.id()).collect();
                 info!(
-                    "收到热键事件 id={}（期望 {}）state={:?} —— 未匹配，未执行动作",
+                    "收到热键事件 id={}（已注册的是 {:?}）state={:?} —— 未匹配，未执行动作",
                     event.id(),
-                    hotkey.id(),
+                    expected,
                     event.state()
                 );
             }
