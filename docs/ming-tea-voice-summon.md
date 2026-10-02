@@ -68,6 +68,45 @@ DSH web 界面（面板与主窗口加载同一个 URL）
 （这次的候选回退逻辑是用「首选键不可解析」验证的：日志出现
 `快捷键 "not-a-real-key" 解析失败，跳过` → `已注册 ctrl+alt+space`，状态文件 active 同步更新 ✓。）
 
+### 「按键到底有没有送达守护进程」—— 我自己测不了，只能你按一下（2026-10-02 记录）
+
+截至 2026-10-02，**这条链路仍然没有真人按键的成功记录**（`hotkey.log` 里 0 条「触发」）。
+我尝试用应用自己的电脑操作工具（CUA）发**合成**按键来自动化这一步，结论是**这条路走不通**，
+过程与证据如下（免得下一个人重复踩）：
+
+| 实验 | 结果 |
+| --- | --- |
+| 把守护进程切到无人占用的 `ctrl+alt+shift+f9`，用 CUA `hotkey`（`keys=["ctrl","alt","shift","f9"]`, `scope=desktop`）发一次 | 工具返回 `Pressed desktop hotkey ctrl+alt+shift+f9.`，**`hotkey.log` 无「触发」** |
+| 同上的 `⌥Space`（合成） | 同样无「触发」；顺带看桌面截图，ChatGPT 也没有被唤起 |
+| **对照**：同一个工具发 `⌘⇧3`（macOS 系统截图快捷键） | **成功** —— 桌面真的出现了 `截屏2026-10-02 12.27.34.png` |
+
+所以：**CUA 的合成按键能进系统级热键（`⌘⇧3` 生效），却到不了我们注册的应用级 Carbon 热键。**
+为排除「是不是我们的守护进程写错了」，我又写了一个**同构极简探针**
+（`platform/ming-tea/apps/hotkey-daemon/examples/hotkey_probe.rs`：同一个 crate、同一个组合键、
+同样在主线程跑 `CFRunLoopRun`），停掉守护进程后单独跑它 —— 合成按键**它也没收到**。
+⇒ 结论是**测量手段无效**，不是「守护进程坏了」；真实按键的送达与否仍未验证。
+
+**给你的排查顺序**（按一次键，看日志）：
+
+```bash
+tail -f ~/Library/Logs/铭荼/hotkey.log        # 按一次热键，看有没有「触发 …」这一行
+```
+
+- 有「触发」→ 键到了守护进程，接着看有没有 `已执行 open mingtea://summon`；那条链路已单独验证过。
+- 没有「触发」→ 键没到我们手里。两种可能：①被别的应用（启动器）抢了 —— 本机装了
+  **ChatGPT.app**，而 `⌥Space` 正是它的默认唤起键，这是首选嫌疑；②注册本身无效。
+  区分办法：把 `~/Library/Application Support/铭荼/settings.json` 的 `hotkey` 换成
+  `ctrl+alt+space`（或 `ctrl+alt+shift+f9`）后 `launchctl kickstart -k gui/$(id -u)/cn.mingos.mingtea.hotkey`，
+  再按一次；仍然没有「触发」就换探针跑（见下），把「注册无效」和「被抢」分开。
+
+```bash
+# 探针：停守护进程 → 跑探针 → 按一次 ctrl+alt+shift+f9 → 看有没有 TRIGGERED
+launchctl bootout gui/$(id -u)/cn.mingos.mingtea.hotkey
+cd platform/ming-tea/apps/hotkey-daemon && cargo run --release --example hotkey_probe
+# 看完恢复：
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cn.mingos.mingtea.hotkey.plist
+```
+
 ## 三态是怎么驱动的
 
 1. 面板窗口在应用启动时就**预建好（隐藏）**，所以热键后立刻可见；DSH host 没就绪时先显示一张「正在唤醒…」的本地页（`apps/desktop/public/waking.html`）。
