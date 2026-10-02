@@ -310,6 +310,10 @@
         disabled: true
       - id: str-replace-editor
         name: "@deepseek-ai/dsh-tool-str-replace-editor"
+      - id: dsh-graphlint
+        name: "dsh-graphlint"
+      - id: codex-guard
+        name: "dsh-codex-guard"
       - id: abilities
         name: cordis:group
         group: true

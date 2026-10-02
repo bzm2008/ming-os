@@ -771,6 +771,44 @@ await check("客户端产物是最新的：改了 ui-tweaks.js 必须重新构�
   );
 });
 
+await check("2026-10-02 批次：社区插件只挂开发场景、调色板补齐品牌短名令牌", () => {
+  // 这批插件是外部包，装的姿势容易在后续改动里悄悄退化，所以把四条关键契约钉成断言：
+  // ① 两个带模型工具的插件**只能**出现在开发场景（根行在 profile patch 里 disabled）；
+  // ② deja（会读其它 agent 历史 + 拉原生二进制）默认关闭，靠 install 脚本写 profile patch 保证；
+  // ③ 主题：插件用短名 --dsw-alias-brand-primary，调色板必须有它，且已构建进产物；
+  // ④ lock 里五个包都记了许可，registry 包还要有 integrity。
+  const presets = readFileSync(new URL("../platform/ming-tea/plugins/ming-tea-ui/presets/scenes.patch.yml", import.meta.url), "utf8");
+  const blocks = presets.split(/^- id: (preset-\w+)$/m).slice(1);
+  const bodyOf = {};
+  for (let i = 0; i < blocks.length; i += 2) bodyOf[blocks[i]] = blocks[i + 1];
+  assert(bodyOf["preset-ptc"].includes("dsh-graphlint") && bodyOf["preset-ptc"].includes("dsh-codex-guard"), "开发场景应挂这两个插件");
+  for (const scene of ["preset-standard", "preset-minimal"]) {
+    assert(!bodyOf[scene].includes("dsh-graphlint"), `${scene} 不该出现 graphlint`);
+    assert(!bodyOf[scene].includes("codex-guard"), `${scene} 不该出现 codex-guard`);
+  }
+
+  const installer = readFileSync(new URL("./install_ming_tea_plugins.sh", import.meta.url), "utf8");
+  assert(installer.includes("ming-tea:deja-default-off"), "install 脚本要写入 deja 默认关闭");
+  assert(installer.includes("ming-tea:dev-only-tools"), "install 脚本要禁用两个插件的根行");
+
+  const palette = readFileSync(new URL("../platform/ming-tea/plugins/ming-tea-ui/theme/palette.mjs", import.meta.url), "utf8");
+  const bundle = readFileSync(new URL("../platform/ming-tea/plugins/ming-tea-ui/lib/client.js", import.meta.url), "utf8");
+  assert(palette.includes('"--dsw-alias-brand-primary"'), "调色板要覆盖插件用的短名品牌令牌");
+  assert(bundle.includes("--dsw-alias-brand-primary: #16857d"), "短名令牌要已构建进 client.js");
+
+  const lock = JSON.parse(readFileSync(new URL("../assets/ming-tea-dsh-lock.json", import.meta.url), "utf8"));
+  const byName = Object.fromEntries(lock.plugins.map((plugin) => [plugin.package, plugin]));
+  for (const name of ["dsh-routing-suite", "dsh-graphlint", "dsh-deja", "dsh-context", "dsh-codex-guard"]) {
+    assert(byName[name] !== undefined, `lock 里缺 ${name}`);
+    assert(byName[name].license, `${name} 要记许可`);
+  }
+  for (const name of ["dsh-routing-suite", "dsh-graphlint", "dsh-deja", "dsh-context", "codex-guard"]) {
+    assert(byName[name].integrity, `${name} 要记 integrity`);
+  }
+  assert(!byName["dsh-codex-guard"].integrity, "vendored 包没有 npm integrity，应留空并靠 source 说明来源");
+  assert(byName["dsh-codex-guard"].source.startsWith("link:"), "vendored 包用 link: 安装");
+});
+
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);
 if (failures.length > 0) {
   console.log("失败明细：");

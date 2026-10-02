@@ -72,6 +72,10 @@ export const TOKEN_OVERRIDES = {
   "--dsw-alias-state-business-primary": brand,
   "--dsw-alias-state-business-tertiary": brandSoft,
   "--dsw-alias-brand-primary-new-colorprimary-new-color": brand,
+  // 2026-10-02：第三方插件（dsh-context 仪表盘、dsh-routing-suite 状态条）用的是这个**短名字**，
+  // 而官方把它定义成偏蓝的中性色（`--dsw-static-neutral-bluish-1000`）。不覆盖的话，
+  // 新装的插件强调色会是官方蓝灰、与我们薄荷青绿不一致（实测：dsh-context 里 21 处引用）。
+  "--dsw-alias-brand-primary": brand,
   "--dsw-alias-button-info-fill": brand,
   "--dsw-alias-button-info-hover": brandStrong,
   "--dsw-alias-button-primary-fill": brand,

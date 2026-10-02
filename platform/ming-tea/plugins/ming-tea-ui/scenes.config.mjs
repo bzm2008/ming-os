@@ -90,8 +90,18 @@ export const scenes = [
     // 官方**没有任何预设挂载**的孤儿工具包：@deepseek-ai/dsh-tool-str-replace-editor
     // （str_replace_editor：查看 / 创建 / 字面量精确替换 / 按行插入）。
     // 这是 DSH 里唯一"不整文件重写就能改代码"的工具，对写程序直接有用，所以只给开发场景挂。
+    //
+    // 2026-10-02 新增两个社区插件的工具行，同样**只给开发场景**：
+    //   - dsh-graphlint：graphlint_query / graphlint_build / graphlint_config（死代码检测；
+    //     真正干活的是外部 graphlint CLI，机器上没装时工具会如实报错并给出安装提示）；
+    //   - dsh-codex-guard：codex_guard（提交前卫生检查：TODO 残留 / 硬编码密钥 / 提交信息格式）。
+    // 两个插件的**根行在 profile patch 里被禁用**（见 scripts/install_ming_tea_plugins.sh 的
+    // ming-tea:dev-only-tools 段）—— 根行是 profile 级、会让工具对所有场景可见，
+    // 而办公/学习场景面向普通用户，不该多出「跑死代码分析」「扫密钥」这类工具。
     extraRows: [
       { id: "str-replace-editor", name: "@deepseek-ai/dsh-tool-str-replace-editor" },
+      { id: "dsh-graphlint", name: "dsh-graphlint" },
+      { id: "codex-guard", name: "dsh-codex-guard" },
     ],
     // 官方默认关、这一场景要开的能力（见文件末尾说明）：
     // - 委派后端 codex / claude-code：需要机器上真的装了对应 CLI，否则调用会报错（文档已标注）
