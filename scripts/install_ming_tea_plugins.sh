@@ -45,10 +45,16 @@ repo_root = sys.argv[2].rstrip("/")
 print("runtime", f'{payload["runtime"]["package"]}@{payload["runtime"]["version"]}')
 for plugin in payload["plugins"]:
     name = plugin["package"]
+    source = plugin.get("source", "")
     if not plugin.get("profiles"):
         print("runtime", f'{name}@{plugin["version"]}')
-    elif plugin.get("source", "").startswith("link:"):
-        print("plugin", f'link:{repo_root}/{plugin["source"][len("link:"):]}', name)
+    elif source.startswith("link:"):
+        # link: 只建软链，**不会安装被链包自己的依赖**（pnpm 语义）——只适合没有依赖的自家插件。
+        print("plugin", f'link:{repo_root}/{source[len("link:"):]}', name)
+    elif source.startswith("file:"):
+        # file: 会把该目录打包进 profile 的 node_modules，并**装齐它声明的依赖**
+        # （vendored 的 dsh-codex-guard 就是靠这个把钉住的 codex-guard CLI 一起装上）。
+        print("plugin", f'file:{repo_root}/{source[len("file:"):]}', name)
     else:
         print("plugin", f'{name}@{plugin["version"]}', name)
 PY
@@ -152,6 +158,60 @@ else:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n" + block, encoding="utf-8")
     print("shop catalog pin: written to profile patch")
+PY
+
+# deja-vu 记忆**默认关闭**（用户的显式选择；见 docs/ming-tea-plugin-audit.md）。
+# 同样必须写在 profile patch：bundle 层的按 id 覆盖会被之后应用的 bundle 层赢掉（上一条同理）。
+# 该插件把本机其它 agent（Claude Code / Codex / Cursor…）写下的会话历史建成可检索索引，
+# 并会拉一个 13.9 MB 的预编译原生二进制，因此默认不启用；用户想用时删掉这一段并重启宿主即可。
+python3 - "${PROFILE_DIR}/cordis.patch.yml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+marker = "# ming-tea:deja-default-off"
+block = f"""
+{marker} —— deja-vu 记忆默认关闭（想开启就删掉下面两行并重启宿主）
+# 插件行 id 是 `deja`（不是包名 dsh-deja），disabled 是 DSH patch 的原生语义。
+- id: deja
+  disabled: true
+"""
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+if marker in text:
+    print("deja default-off: already present")
+else:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n" + block, encoding="utf-8")
+    print("deja default-off: written to profile patch")
+PY
+
+# 只给「开发模式」挂的两个社区插件：**禁用它们的根行**，工具只经由
+# platform/ming-tea/plugins/ming-tea-ui/scenes.config.mjs 里开发场景的 extraRows 出现。
+# 为什么必须在 profile patch：插件自己的 bundle 层在我们之后应用，我们的 bundle 层按 id
+# 覆盖会被它赢掉（同 shop 目录源那条的实测结论）。
+python3 - "${PROFILE_DIR}/cordis.patch.yml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+marker = "# ming-tea:dev-only-tools"
+block = f"""
+{marker} —— 两个社区插件的根行禁用（它们只在「开发模式」里被挂）
+# dsh-graphlint：graphlint_query / graphlint_build / graphlint_config（死代码检测）
+# codex-guard  ：codex_guard（提交前卫生检查）
+# 想临时全局启用：把下面对应的 disabled 行删掉并重启宿主。
+- id: dsh-graphlint
+  disabled: true
+- id: codex-guard
+  disabled: true
+"""
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+if marker in text:
+    print("dev-only-tools: already present")
+else:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n" + block, encoding="utf-8")
+    print("dev-only-tools: written to profile patch")
 PY
 
 python3 - "${PROFILE_DIR}/package.json" "${profile_packages[@]}" <<'PY'

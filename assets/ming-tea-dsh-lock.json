@@ -20,6 +20,12 @@
       "version": "0.8.3",
       "dsh": "0.2.0-rc.2",
       "reason": "上游 0.8.3 与 0.8.4-beta.0 的 peer 都是 ^0.1.1-rc.2，没有声明支持 0.2 的版本；经审计其实际 import 的 API（dsh-app-boot 的 loadOptionalPatches/readProfileManifest/resolveProfileDir、dsh-typert-protocol 的 Remote/TypertRemoteService）在 0.2 全部存在，故按官方 allow-version 机制接受风险运行。上游发布支持 0.2 的版本后应撤销豁免并删除本条目。"
+    },
+    {
+      "package": "dsh-graphlint",
+      "version": "0.4.0",
+      "dsh": "0.2.0-rc.2",
+      "reason": "上游 peer 只声明 @deepseek-ai/dsh-tools ^0.1.0-rc.6（与 @deepseek-ai/cordis ^4.0.1），没有覆盖 0.2.0-rc.2。经审计它在 @deepseek-ai/* 上**只 import 了 dsh-tools 的 defineTool**（0.2.0-rc.2 的 dsh-tools/lib/index.js 里该导出仍在，工具注册面未变），其余能力全部通过宿主服务取得（tools/subprocess/fs/skills/jobs/timer；其中 resolveExecutable 由 @deepseek-ai/dsh-subprocess-local 提供、timer 由 @deepseek-ai/cordis-plugin-timer 提供，本运行时均有），故按官方 allow-version 机制接受风险运行。上游发布覆盖 0.2 的版本后应撤销豁免并删除本条目。"
     }
   ],
   "plugins": [
@@ -329,6 +335,96 @@
       ],
       "source": "https://github.com/LivXue/dsh-plugin-shop",
       "notes": "目录源已在 profile patch 钉死；typert codec 由 scripts/patch_shop_typert_compat.mjs 做等价改写（上游对齐后还原）。"
+    },
+    {
+      "package": "dsh-routing-suite",
+      "version": "0.1.2",
+      "license": "MIT",
+      "integrity": "sha512-jo7SG3xlgsQ/D3Z+Rj/tzz5p+nE/40dFqr0t4csuWlYwz6HP2aa7vFl4oY8sl4gYflJCpscBTqIU7UZGbDZvkg==",
+      "capabilities": [
+        "agent.preset",
+        "client.settings"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/dragonbaba/dsh-routing-suite",
+      "notes": "自带的「智能路由模式」是一个 agent preset，但它**不自注册**（宿主半区只在会话选中该 preset 时改写 system prompt），而本 DSH 构建没有 .agent-presets 用户预设根，官方 desktop 安装器的物化路径在铭荼不适用。因此本版本**只装不露出模式**：不把它的 preset 塞进模式菜单（那是官方 standard 的英文 coding-agent persona，与铭荼三场景冲突）。启用方式与取舍见 docs/ming-tea-plugin-audit.md。它只注册一个只读状态接口 /routing-suite/api/status。"
+    },
+    {
+      "package": "dsh-graphlint",
+      "version": "0.4.0",
+      "license": "MIT",
+      "integrity": "sha512-dGvNR6Rn8AWpwkZKGP9LC4UHkHquQlYQp8XF7Syivu+GiHcbGI3QhNG79TGtwZXncbEr+awwY4V5mB8LAh3stA==",
+      "capabilities": [
+        "tools.deadcode",
+        "skill.filesystem"
+      ],
+      "risk": "runs-external-cli",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/AngelosZou/graphlint",
+      "notes": "注册 graphlint_query / graphlint_build / graphlint_config 三个工具 + 一个 graphlint 技能；实际分析由外部 CLI 完成（先在 PATH 找 graphlint，再探项目内 env/.venv/venv 的 bin，找不到就如实报错）。inject 需要 tools/subprocess/fs/skills/jobs/timer —— 本运行时全部具备（timer 来自 @deepseek-ai/cordis-plugin-timer，resolveExecutable 来自 @deepseek-ai/dsh-subprocess-local）。peer 只声明到 dsh-tools ^0.1.0-rc.6，故需要 versionExemption。"
+    },
+    {
+      "package": "dsh-deja",
+      "version": "0.21.4",
+      "license": "MIT",
+      "integrity": "sha512-Fsyho6aQu+MbNCh6IaUmbzOAHxFMzPwWBvluqp3sQzJC7wVQyByLQksmZPc+b5/F0OtFtH0XoSJuc2HatHD6iA==",
+      "capabilities": [
+        "tools.memory-index"
+      ],
+      "risk": "reads-other-agents-history",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/vshulcz/deja-vu",
+      "notes": "deja-vu 记忆（行 id 是 `deja`）：把本机其它 agent 写下的会话历史建成可检索索引，工具通过 execFileSync 调 deja 二进制。依赖 @vshulcz/deja-vu@0.21.4（MIT, sha512-2YwFuNKmRtC3tMYOPjmSoelMsGuv6FhI2dD67PpNiOBuZ/z3xfsOEvdbotooS0nS2rUTusHnll9pfRLE8neI2w==），它会拉平台原生二进制 @vshulcz/deja-vu-darwin-arm64@0.21.4（13.9 MB 预编译 Go 程序, sha512-jdRh3Z/hgerAJLOv4+DtYBE2jqfsyJBtI+mIXIO9lVNXhFkP6bLGQfv3copNKiHK+jjoXsA39wFEFej21EPLOg==）。**默认关闭**：install 脚本在 profile patch 里对行 `deja` 写 disabled: true；用户显式开启的方式见 docs/ming-tea-plugin-audit.md。插件自述兼容的 DSH 只有 0.1.1-rc.2（未声明 0.2），故默认关也降低了风险面。"
+    },
+    {
+      "package": "dsh-context",
+      "version": "0.62.2",
+      "license": "Apache-2.0",
+      "integrity": "sha512-Du1QMCHMniBm2XYQTX0XdRaw2rnMjj/sokH16EU+mUOpYcMoyyQP5S/bzZonuT7YSV1QMu2nY/RtlirwxH5nNw==",
+      "capabilities": [
+        "client.dashboard",
+        "settings.section",
+        "tools.context-insight"
+      ],
+      "risk": "local-ui",
+      "profiles": [
+        "web"
+      ],
+      "repository": "https://github.com/bowenliang123/dsh-context",
+      "notes": "上下文洞察与管理：宿主半区 + 客户端仪表盘（注入 client-ui-conversation / client-ui-settings / client-ui-sidebar-right）。上游 dsh.compatibility.dshReleases 明确写了 0.2.0-rc.2: compatible，故无需豁免。peer 里 react/react-dom ^18.3.1 在 profile 的 autoInstallPeers:false 下不会自动装 —— 实测客户端半区能否渲染为准，缺则按审计文档补。"
+    },
+    {
+      "package": "dsh-codex-guard",
+      "version": "1.9.0",
+      "license": "MIT",
+      "capabilities": [
+        "tools.hygiene"
+      ],
+      "risk": "runs-external-cli",
+      "profiles": [
+        "web"
+      ],
+      "source": "link:platform/ming-tea/plugins/vendor-dsh-codex-guard",
+      "notes": "上游只发布在 GitHub（npm 上没有 dsh-codex-guard），故 vendor 进仓库（`link:` 安装；注意 pnpm 对 link/file 目标都只建软链、**不会装被链包自己的依赖**，所以它需要的 CLI 单独作为 runtime 包钉进本锁）：commit 87e138cdcca2e2929073bb913212dc06769087fc 的 dsh/ 子树，见该目录的 VENDOR.md。**唯一改动**：把上游的 `npx --yes codex-guard`（运行时按需下载执行）换成执行本包 dependency 里钉住的 codex-guard@1.16.0（MIT, sha512-mWWBwV9vstdB+0UFGpq0BY0IQnEZOTdFDSxlM8b6ML/3G7Z13+Sbwlqis+AcW6zG73lpOW0qoCVyAdZOGnaFHw==），不联网、不经 shell。注册单个 codex_guard 工具，不 hook 审批。"
+    },
+    {
+      "package": "codex-guard",
+      "version": "1.16.0",
+      "license": "MIT",
+      "integrity": "sha512-mWWBwV9vstdB+0UFGpq0BY0IQnEZOTdFDSxlM8b6ML/3G7Z13+Sbwlqis+AcW6zG73lpOW0qoCVyAdZOGnaFHw==",
+      "capabilities": [
+        "tools.hygiene.cli"
+      ],
+      "risk": "runs-external-cli",
+      "repository": "https://github.com/Akimiya-z/codex-guard",
+      "notes": "dsh-codex-guard 实际执行的那个 CLI（vendored 副本把它从 `npx --yes` 改成执行本地副本）。**故意不带 profiles** ⇒ 装进运行时树，供 vendored 插件解析（profile 里的 link/file 安装不会装被链包的依赖，实测）。engines: node>=20；无 install/postinstall 脚本。"
     }
   ]
 }
