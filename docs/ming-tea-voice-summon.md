@@ -120,12 +120,18 @@ tail -f ~/Library/Logs/铭荼/hotkey.log        # 按一次热键，看有没有
   再按一次；仍然没有「触发」就换探针跑（见下），把「注册无效」和「被抢」分开。
 
 ```bash
-# 探针：停守护进程 → 跑探针 → 按一次 ctrl+alt+shift+f9 → 看有没有 TRIGGERED
+# 探针：停守护进程 → 跑探针 → 按一次上面任一热键 → 看有没有 TRIGGERED
+# 探针注册的是**同一组候选键**（alt+space / ctrl+alt+space / cmd+shift+space）且不带任何我自己的逻辑，
+# 所以「探针收到、守护进程没收到」= 我们的问题；「两个都没收到」= 系统没把它派发过来。
 launchctl bootout gui/$(id -u)/cn.mingos.mingtea.hotkey
 cd platform/ming-tea/apps/hotkey-daemon && cargo run --release --example hotkey_probe
 # 看完恢复：
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cn.mingos.mingtea.hotkey.plist
 ```
+
+**别再用合成按键去验这条路了**：我试过三种注入方式（CUA 的 `CGEventPost`、CUA 桌面热键、
+`IOHIDPostEvent` 注入 HID 层），对我们这种**应用级 Carbon 热键**全都不生效；
+而同一个工具发的 `⌘⇧3`（系统级热键）确实截了图 —— 系统处理的热键会响应合成事件，应用注册的不会。
 
 #### 日志现在能区分三种「按了没反应」（2026-10-02 加的诊断）
 
