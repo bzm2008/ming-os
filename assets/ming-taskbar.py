@@ -34,6 +34,7 @@ TASKBAR_HEIGHT = 56
 TASKBAR_MARGIN = 10
 REFRESH_MS = 1500
 STATUS_REFRESH_MS = 8000
+IMMERSIVE_REFRESH_MS = 500
 
 FIXED_APPS = (
     ("应用库", "ming-app-library.desktop", "view-grid-symbolic", "ming-app-drawer --toggle"),
@@ -170,6 +171,18 @@ def window_rows():
     return rows
 
 
+def active_fullscreen_window():
+    """Return whether the active X11 client owns the fullscreen state."""
+    root = run_command(["xprop", "-root", "_NET_ACTIVE_WINDOW"], timeout=1)
+    if root is None:
+        return False
+    active = next((token for token in root.stdout.split() if token.startswith("0x")), "")
+    if not active or active.lower() in {"0x0", "0x00000000"}:
+        return False
+    state = run_command(["xprop", "-id", active, "_NET_WM_STATE"], timeout=1)
+    return bool(state and "_NET_WM_STATE_FULLSCREEN" in state.stdout)
+
+
 def activate_window(window_id):
     return bool(run_command(["wmctrl", "-i", "-a", window_id], timeout=2))
 
@@ -221,12 +234,14 @@ class MingTaskbar(Gtk.Window):
         self._buttons = {}
         self._status_labels = {}
         self._strut_width = 0
+        self._immersive = False
         self._build_window()
         self._build_ui()
         self._position_window()
         self.connect("destroy", self._on_destroy)
         GLib.timeout_add(REFRESH_MS, self.refresh_windows)
         GLib.timeout_add(STATUS_REFRESH_MS, self.refresh_status)
+        GLib.timeout_add(IMMERSIVE_REFRESH_MS, self.refresh_immersive)
 
     def _build_window(self):
         self.set_title("Ming Taskbar")
@@ -399,6 +414,24 @@ class MingTaskbar(Gtk.Window):
         self._status_labels["audio"].set_text(audio_text)
         self._status_labels["battery"].set_text(battery_text)
         self.clock.set_text(time.strftime("%H:%M"))
+        return True
+
+    def refresh_immersive(self):
+        immersive = active_fullscreen_window()
+        if immersive == self._immersive:
+            return True
+        self._immersive = immersive
+        if immersive:
+            clear_workarea_strut(self.get_window())
+            self.hide()
+            log("taskbar hidden for fullscreen window")
+        else:
+            self._position_window()
+            self.show_all()
+            if self.get_window() is not None:
+                _x, _y, width, height = monitor_geometry()
+                set_workarea_strut(self.get_window(), width, height)
+            log("taskbar restored after fullscreen window")
         return True
 
     def _launch_command(self, command):
