@@ -9,6 +9,15 @@ PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 
 
 class MingTaskbarContracts(unittest.TestCase):
+    def test_legacy_plank_is_not_installed_or_started(self):
+        desktop = DESKTOP.read_text(encoding="utf-8")
+        apps = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
+        self.assertIn("retire_legacy_desktop_surfaces", desktop)
+        self.assertNotIn("configure_plank_dock         #", desktop)
+        self.assertNotIn("\n    configure_ming_mint_dock_profile", desktop)
+        self.assertNotIn("        plank \\", apps)
+        self.assertIn("MING_TASKBAR_FALLBACK=none", desktop)
+
     def test_taskbar_asset_is_gtk3_x11_and_has_required_surfaces(self):
         source = TASKBAR.read_text(encoding="utf-8")
         self.assertIn("gi.require_version('Gtk', '3.0')", source)
@@ -65,7 +74,7 @@ class MingTaskbarContracts(unittest.TestCase):
         for marker in (
             'self.taskbar_mode = os.environ.get("MING_TASKBAR_MODE", "0") == "1"',
             "if self.taskbar_mode:",
-            "self.status.hide()",
+            "self.status = None",
         ):
             self.assertIn(marker, source)
 

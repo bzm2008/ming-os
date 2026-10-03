@@ -4112,7 +4112,7 @@ class PhoneDesktop(Gtk.Window):
         self.resize(screen_w, screen_h)
         self.move(0, 0)
         self.connect("destroy", self.on_destroy)
-        self.register_status_widget_pid()
+        # The taskbar owns system status controls; no floating status widget is created.
         # Gtk.Fixed and transparent EventBox children can be no-window widgets
         # on the VirtualBox/Xrender path.  Receive root-window events as the
         # final, renderer-independent desktop input route.
@@ -4171,7 +4171,7 @@ class PhoneDesktop(Gtk.Window):
         self._last_status_toggle_at = 0.0
         self._context_menu = None
         self.last_context_result = None
-        self.status = StatusWidget()
+        self.status = None
         self.launch_feedback = LaunchFeedbackOverlay()
         self.launch_feedback.set_sensitive(False)
         self.connect("map-event", lambda *_args: self.enforce_desktop_layer())
@@ -4268,16 +4268,6 @@ class PhoneDesktop(Gtk.Window):
         return False
 
     def toggle_status_widget(self):
-        if self.taskbar_mode:
-            return False
-        now = time.monotonic()
-        # Xfce may deliver the same Super press through both the shortcut
-        # command and the desktop key handler.  A single debounce window keeps
-        # one physical press from expanding and immediately collapsing again.
-        if now - self._last_status_toggle_at < STATUS_TOGGLE_DEDUP_SECONDS:
-            return False
-        self._last_status_toggle_at = now
-        self.status.set_collapsed(not self.status.collapsed)
         return False
 
     def _on_toggle_signal(self, _signum, _frame):
@@ -4469,7 +4459,7 @@ class PhoneDesktop(Gtk.Window):
         if event_window is not None and event_window not in (root_window, fixed_window):
             return False
         x, y = self.fixed_event_coords(event)
-        for overlay in (self.status, self.launch_feedback):
+        for overlay in (self.launch_feedback,):
             if not overlay.get_visible():
                 continue
             allocation = overlay.get_allocation()
@@ -4760,40 +4750,12 @@ class PhoneDesktop(Gtk.Window):
         # Gtk.Widget.show_all() re-shows explicitly hidden children.  Reapply
         # the persisted widget state after rendering so compact mode never
         # leaves both the compact row and expanded controls visible.
-        self.status.apply_collapsed_state()
-        if self.taskbar_mode:
-            self.status.hide()
         if not self.launch_feedback.item:
             self.launch_feedback.hide()
         self.enforce_desktop_layer()
 
     def place_overlays(self):
         screen_w = max(320, self.get_screen().get_width())
-        widget_geometry = status_widget_compact_geometry({
-            "width": screen_w, "height": self.get_screen().get_height(),
-        })
-        widget_w = widget_geometry["width"]
-        widget_h = widget_geometry["height"]
-        if self.taskbar_mode:
-            self.status.hide()
-        else:
-            self.status.set_size_request(widget_w, self.status.preferred_height())
-            # Keep the compact height explicit even if a future theme changes
-            # the preferred height implementation.
-            self.status.set_size_request(widget_w, widget_h)
-            # Pin the visible capsule itself as well as its outer allocation.
-            # The expanded popup is a separate window and must never resize it.
-            self.status.widget_box.set_size_request(widget_w, widget_h)
-            self.status.compact_button.set_size_request(widget_w, widget_h)
-            x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
-            y = CLOCK_MARGIN_Y
-            if self.status.get_parent() is None:
-                self.fixed.put(self.status, x, y)
-            else:
-                self.fixed.move(self.status, x, y)
-            if not self.status.collapsed:
-                self.status.position_expanded_window()
-            GLib.idle_add(self.status.verify_top_alignment)
         feedback_w = 340 if screen_w >= 900 else 250
         self.launch_feedback.set_size_request(feedback_w, 84)
         feedback_x = max(20, int((screen_w - feedback_w) / 2))

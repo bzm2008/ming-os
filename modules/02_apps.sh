@@ -120,7 +120,6 @@ install_xfce_desktop() {
 
     apt install -y --no-install-recommends \
         picom \
-        plank \
         librsvg2-bin \
         librsvg2-common \
         imagemagick || return 1

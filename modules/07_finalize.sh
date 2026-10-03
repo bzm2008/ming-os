@@ -36,24 +36,17 @@ readonly DESKTOP_LAUNCHERS=(
 )
 
 refresh_dock_launchers() {
-    local helper="/usr/local/sbin/ming-refresh-dock-launchers"
-    if [[ ! -x "${helper}" ]]; then
-        echo "[07_finalize][ERROR] Dock launcher refresh helper is missing" >&2
-        return 1
-    fi
-    if ! "${helper}" "${MING_USER}"; then
-        echo "[07_finalize][ERROR] Dock launcher refresh reported missing targets" >&2
-        return 1
-    fi
-
-    local name
-    for name in ming-settings; do
-        if [[ ! -s "/usr/share/applications/ming-dock-${name}.desktop" \
-           || ! -s "${USER_HOME}/.config/plank/dock1/launchers/${name}.dockitem" ]]; then
-            echo "[07_finalize][ERROR] final Dock launcher missing: ${name}" >&2
-            return 1
-        fi
-    done
+    # Plank and its launcher proxy were retired. The GTK3 taskbar discovers
+    # trusted desktop entries directly and owns the bottom shell.
+    rm -rf "${USER_HOME}/.config/plank" "/etc/skel/.config/plank" \
+        /usr/share/plank /usr/local/share/plank 2>/dev/null || true
+    rm -f /usr/local/bin/ming-plank-watchdog /usr/local/bin/ming-dock \
+        /usr/local/bin/ming-dock-watchdog /usr/local/sbin/ming-refresh-dock-launchers \
+        "${USER_HOME}/.config/autostart/ming-dock.desktop" \
+        "${USER_HOME}/.config/autostart/plank.desktop" \
+        "/etc/skel/.config/autostart/ming-dock.desktop" \
+        "/etc/skel/.config/autostart/plank.desktop" 2>/dev/null || true
+    return 0
 }
 
 seed_trusted_desktop_receipts() {
@@ -680,7 +673,6 @@ verify_appearance_assets() {
         "/usr/local/bin/ming-apply-appearance"
         "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml"
         "/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-        "/etc/skel/.config/plank/dock1/settings"
     )
 
     for f in "${must_exist[@]}"; do

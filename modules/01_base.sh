@@ -1363,7 +1363,7 @@ apply_optional_services() {
     # the existing watchdogs; this helper only records duplicate processes.
     local user=${MING_SESSION_USER:-${SUDO_USER:-user}}
     local process count
-    for process in xfce4-panel picom plank; do
+    for process in xfce4-panel picom; do
         count=$(pgrep -u "${user}" -x "${process}" 2>/dev/null | wc -l | tr -d ' ')
         [[ "${count:-0}" -le 1 ]] || log "duplicate ${process} processes detected: ${count}"
     done
@@ -3488,7 +3488,7 @@ migrate_installed_ming_profile() {
     local profile_files=(
         # Canonical skeleton entries: /etc/skel/.config/autostart/ming-phone-desktop.desktop,
         # /etc/skel/.config/autostart/ming-apply-appearance.desktop and the
-        # /etc/skel/.config/plank/dock1/settings; the session health
+        # the session health
         # coordinator is copied by relative path below.
         ".config/autostart/ming-session-healthcheck.desktop"
         ".config/autostart/ming-apply-appearance.desktop"
@@ -3497,7 +3497,6 @@ migrate_installed_ming_profile() {
         ".config/autostart/ming-phone-desktop.desktop"
         ".config/autostart/ming-dock.desktop"
         ".config/autostart/ming-window-manager.desktop"
-        ".config/plank/dock1/settings"
         ".config/gtk-3.0/settings.ini"
         ".config/gtk-4.0/settings.ini"
         ".config/ming-os/ming-mint-theme"
@@ -3528,7 +3527,7 @@ migrate_installed_ming_profile() {
     # as arbitrary user-provided desktop files.
     for launcher in \
         ming-settings.desktop ming-files.desktop ming-terminal.desktop \
-        ming-status-center.desktop ming-app-library.desktop ming-store.desktop \
+        ming-app-library.desktop ming-store.desktop \
         ming-toolbox.desktop ming-firefox.desktop xiahai-xiaoming.desktop; do
         for profile_source in "${target}/usr/share/applications/${launcher}" "/usr/share/applications/${launcher}"; do
             [[ -f "${profile_source}" && ! -L "${profile_source}" ]] || continue
@@ -3540,20 +3539,6 @@ migrate_installed_ming_profile() {
         copy_managed_profile_directory "${source_root}" "Desktop" || return 1
         copy_managed_profile_directory "${source_root}" "桌面" || return 1
         copy_managed_profile_directory "${source_root}" ".config/autostart" || return 1
-    done
-    local dock_dir="${target}${MING_PRIMARY_HOME}/.config/plank/dock1/launchers"
-    profile_path_is_safe "${dock_dir}" || return 1
-    [[ ! -L "${dock_dir}" ]] || return 1
-    mkdir -p "${dock_dir}" || return 1
-    profile_path_is_safe "${dock_dir}" || return 1
-    for source_root in "${profile_sources[@]}"; do
-        local source_dock="${source_root}/.config/plank/dock1/launchers"
-        profile_source_is_safe "${source_dock}" || continue
-        while IFS= read -r -d '' source; do
-            [[ -f "${source}" && ! -L "${source}" ]] || continue
-            relative="${source#"${source_root}"/}"
-            copy_profile_file "${source}" "${relative}" || return 1
-        done < <(find -P "${source_dock}" -maxdepth 1 -type f -name '*.dockitem' -print0 2>/dev/null)
     done
     return 0
 }

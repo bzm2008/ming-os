@@ -7,7 +7,7 @@
 #   自动 HiDPI 缩放、品牌化视觉、开箱即用的完整体验。
 #
 # 核心改进 (vs 26.0.6)：
-#   1. Ming GTK3/X11 底部玻璃任务栏；Plank 仅作为兼容 fallback
+#   1. Ming GTK3/X11 底部玻璃任务栏
 #   2. 美化必达：配置同步进 /etc/skel，安装后的新用户也继承（见 07_finalize.sh）
 #   3. Picom 改用主线 10.x 兼容写法，杜绝因解析失败导致美化无效
 #   4. 登录自愈 ming-apply-appearance：逐显示器强制套用壁纸/主题/Dock
@@ -4712,6 +4712,33 @@ log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
 }
 
+retire_legacy_desktop_surfaces() {
+    # The GTK3 taskbar is the only bottom shell. Remove old Plank/custom Dock
+    # packages, launchers, themes and per-user state so upgrades cannot revive
+    # a second bar from a previous image.
+    if command -v dpkg-query >/dev/null 2>&1 \
+       && dpkg-query -W -f='${db:Status-Abbrev}' plank 2>/dev/null | grep -q '^ii '; then
+        apt-get purge -y --auto-remove plank libplank1 libplank-common >/dev/null 2>&1 || true
+    fi
+    rm -rf /usr/share/plank /usr/local/share/plank \
+        "/home/${MING_USER}/.config/plank" "/etc/skel/.config/plank" \
+        /usr/local/bin/ming-dock /usr/local/bin/ming-dock-watchdog \
+        /usr/local/bin/ming-plank-watchdog /usr/local/sbin/ming-refresh-dock-launchers \
+        /usr/local/bin/ming-dock-only-init \
+        /usr/local/bin/ming-status-widget-toggle /usr/local/bin/ming-status-center \
+        /usr/share/applications/ming-status-center.desktop \
+        "/home/${MING_USER}/.cache/ming-os/plank.log" 2>/dev/null || true
+    rm -f "/home/${MING_USER}/.config/autostart/ming-dock.desktop" \
+        "/home/${MING_USER}/.config/autostart/ming-dock-only.desktop" \
+        "/home/${MING_USER}/.config/autostart/plank.desktop" \
+        "/home/${MING_USER}/.local/share/applications/ming-status-center.desktop" \
+        "/etc/skel/.config/autostart/ming-dock.desktop" \
+        "/etc/skel/.config/autostart/plank.desktop" 2>/dev/null || true
+    rm -f "/home/${MING_USER}/.config/ming-os/status-widget.json" \
+        "/home/${MING_USER}/.config/ming-os/status-widget.pid" \
+        "/home/${MING_USER}/.cache/ming-os/ming-phone-desktop.pid" 2>/dev/null || true
+}
+
 taskbar_process_running() {
     pgrep -u "$(id -u)" -f \
         '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-taskbar([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-taskbar([[:space:]]|$)' \
@@ -4788,7 +4815,7 @@ MINGTASKBARWATCH
 # Ming OS GTK3/X11 bottom taskbar defaults.
 MING_TASKBAR_MODE=1
 MING_TASKBAR_LOW_RESOURCE=auto
-MING_TASKBAR_FALLBACK=plank
+MING_TASKBAR_FALLBACK=none
 MINGTASKBARDEFAULTS
     chmod 0644 /etc/default/ming-taskbar
     chown -R "${MING_USER}:${MING_USER}" "${taskbar_log_dir}" "/home/${MING_USER}/.config/ming-os"
@@ -5662,15 +5689,6 @@ payload = {
     },
     "xfdesktop": {"running": boolean("MING_XFDESKTOP")},
     "xfce_panel": {"running": boolean("MING_PANEL_RUNNING")},
-    "plank": {
-        "running": boolean("MING_DOCK_RUNNING"),
-        "visible": boolean("MING_DOCK_VISIBLE"),
-        "pid_count": integer("MING_PLANK_PID_COUNT"),
-        "elapsed_ms": integer("MING_PLANK_ELAPSED_MS"),
-        "restarts": integer("MING_PLANK_RESTARTS"),
-        "recovered": boolean("MING_PLANK_RECOVERED"),
-        "duplicates": integer("MING_PLANK_DUPLICATES"),
-    },
     "taskbar": {
         "running": boolean("MING_TASKBAR_RUNNING"),
         "visible": boolean("MING_TASKBAR_VISIBLE"),
@@ -5689,14 +5707,13 @@ payload = {
         "recovered": boolean("MING_PICOM_RECOVERED"),
         "duplicates": integer("MING_PICOM_DUPLICATES"),
     },
-    "deadlines": {"phone_desktop": 8, "taskbar": 8, "plank": 8, "picom": 5},
-    "startup_deadlines": {"phone_desktop": 8, "taskbar": 8, "plank": 8, "picom": 5},
+    "deadlines": {"phone_desktop": 8, "taskbar": 8, "picom": 5},
+    "startup_deadlines": {"phone_desktop": 8, "taskbar": 8, "picom": 5},
     "probe_timeout": 2,
     "supervisor_interval": 10,
     "health_log": os.environ.get("MING_HEALTH_LOG", ""),
     "duplicates": {
         "phone_desktop": integer("MING_PHONE_DUPLICATES"),
-        "plank": integer("MING_PLANK_DUPLICATES"),
         "taskbar": integer("MING_TASKBAR_DUPLICATES"),
         "picom": integer("MING_PICOM_DUPLICATES"),
     },
@@ -5705,7 +5722,7 @@ payload = {
 payload["healthy"] = (
     (payload["phone_desktop"]["ready"] or
      (payload["phone_desktop"]["fallback"] and payload["xfdesktop"]["running"]))
-    and (payload["taskbar"]["visible"] or payload["plank"]["visible"])
+    and payload["taskbar"]["visible"]
     and (payload["picom"]["running"]
          or payload["picom"]["backend"] in {"disabled-by-policy", "disabled-by-user"})
     and (not payload["phone_desktop"]["enabled"]
@@ -5754,10 +5771,7 @@ startup_once() {
     stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
     start_phone_desktop || phone_fallback=true
-    if ! start_taskbar_dock; then
-        log 'Ming Taskbar is not healthy after startup deadline; starting Plank fallback'
-        start_plank_dock || log 'Plank Dock is not healthy after startup deadline'
-    fi
+    start_taskbar_dock || log 'Ming Taskbar is not healthy after startup deadline'
     start_picom || log 'Picom is not healthy after startup deadline'
     apply_dock_immersive_state
     ensure_audio_session
@@ -5774,10 +5788,7 @@ supervise_once() {
     if ! start_phone_desktop; then
         phone_fallback=true
     fi
-    if ! start_taskbar_dock; then
-        log 'Ming Taskbar repair did not recover a visible window; starting Plank fallback'
-        start_plank_dock || log 'Plank Dock repair did not recover a visible window'
-    fi
+    start_taskbar_dock || log 'Ming Taskbar repair did not recover a visible window'
     start_picom || log 'Picom repair did not recover a compositor'
     apply_dock_immersive_state
     ensure_audio_session
@@ -7699,14 +7710,13 @@ TASKBARAUTO
 [Desktop Entry]
 Type=Application
 Name=Ming Session Health
-Comment=统一启动并监测手机桌面、Dock 与合成器
+Comment=统一启动并监测手机桌面、任务栏与合成器
 Exec=/usr/local/bin/ming-session-healthcheck --session
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
-X-Ming-Managed-Components=phone-desktop;taskbar;plank;picom
-# Legacy contract: phone-desktop;plank;picom remains the Plank fallback stack.
+X-Ming-Managed-Components=phone-desktop;taskbar;picom
 SESSIONHEALTHAUTO
 
     # Seed the same coordinator for users created after installation.  The
@@ -7749,8 +7759,7 @@ Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=2
-X-Ming-Managed-Components=phone-desktop;taskbar;plank;picom
-# Legacy contract: phone-desktop;plank;picom remains the Plank fallback stack.
+X-Ming-Managed-Components=phone-desktop;taskbar;picom
 SKELSESSIONHEALTH
     cat > /etc/skel/.config/autostart/ming-desktop-sync-once.desktop << 'SKELDESKTOPSYNC'
 [Desktop Entry]
@@ -10207,10 +10216,8 @@ elif command -v xfdesktop &>/dev/null && ! pgrep -u "$(id -u)" -x xfdesktop >/de
     (nohup xfdesktop >/dev/null 2>&1 &) 2>/dev/null || true
 fi
 
-# The session healthcheck is the sole owner of taskbar startup and the Plank
-# fallback. Starting another Dock here creates overlapping old and new bars.
-# Compatibility marker: ming-plank-watchdog remains available for the session
-# healthcheck's controlled fallback and explicit repair actions.
+# The session healthcheck is the sole owner of taskbar startup. Starting
+# another Dock here creates overlapping old and new bars.
 
 exit 0
 APPLYAPPEARANCE
@@ -10462,9 +10469,8 @@ main() {
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
-    configure_plank_dock         # 保留为任务栏启动失败时的 fallback
     configure_ming_taskbar       # GTK3/X11 底部磨砂菜单栏
-    configure_ming_mint_dock_profile
+    retire_legacy_desktop_surfaces
     configure_ming_mint_desktop_icons
     configure_ming_mint_theme
     configure_picom
