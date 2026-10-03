@@ -558,23 +558,30 @@ await check("routeConfig：auto 恒在首位、跳过不可用、去重", () => 
   assertEqual(config.models[1].name, "DS 付费");
 });
 
-await check("看屏幕：实测能看图的模型声明 image（含 auto），其余只声明文本", () => {
+await check("看屏幕：只有实测稳定能读图的模型声明 image（不含 auto），其余只声明文本", () => {
   // 背景（2026-10-02 实测）：不声明 image 时截图到不了模型，
   // read_image 直接报 `model "…" does not declare image input`，代理只能盲点像素。
-  // auto 必须声明：免费层用户只有 auto 可选，不声明等于他们永远用不了「看屏幕」；
-  // 2026-10-02 用真实截图连测 4 次 auto 均正确读图（上游 gpt-5.4-nano / claude-haiku-4-5）。
+  // auto 是「池子」，看图能力随路由漂移：2026-10-02 晚 4 次样本里 1 次空回答、1 次读错
+  // （agnes-2.5-flash 空 / gpt-5.6-luna 把 0 读成 1），故**不声明 image**——
+  // 「读错屏幕」比「明确报错」危险。这与产品决策一致：看屏幕钉具体视觉模型、不用 auto。
   const config = routeConfig(undefined, [
     { id: "deepseek-v4.1-flash", available: true },
     { id: "mimo-v2.6-flash", available: true },
     { id: "glm-5.3", available: true },
+    { id: "glm-5.3-flash", available: true },
+    { id: "kimi-k3", available: true },
+    { id: "deepseek-v4-pro", available: true },
     { id: "glm-5.2", available: true },
     { id: "step-3.7-flash", available: true },
   ]);
   const input = (id) => config.models.find((m) => m.id === id)?.input;
-  assertEqual(input("auto"), ["text", "image"], "免费层唯一的模型，必须能看图");
+  assertEqual(input("auto"), ["text"], "auto 是池子、会读错图 ⇒ 不声明 image（明确报错好过读错）");
   assertEqual(input("deepseek-v4.1-flash"), ["text", "image"], "钉住的视觉模型必须声明 image");
   assertEqual(input("mimo-v2.6-flash"), ["text", "image"]);
   assertEqual(input("glm-5.3"), ["text", "image"]);
+  assertEqual(input("glm-5.3-flash"), ["text", "image"], "2026-10-02 晚实测 3/3 正确");
+  assertEqual(input("kimi-k3"), ["text", "image"], "2026-10-02 晚实测 3/3 正确");
+  assertEqual(input("deepseek-v4-pro"), ["text", "image"], "2026-10-02 晚实测 3/3 正确");
   assertEqual(input("glm-5.2"), ["text"], "实测不能看图 ⇒ 只声明文本");
   assertEqual(input("step-3.7-flash"), ["text"]);
   assert(

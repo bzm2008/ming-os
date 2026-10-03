@@ -36,15 +36,28 @@ export const REASONING_EFFORTS = { off: null, low: "low", medium: "medium", high
  * `read_image` 报 `cannot read "…png" as an image: model "…" does not declare image input`，
  * 截图根本到不了模型（2026-10-02 实测踩到：代理会用像素坐标点计算器，却看不见截图）。
  *
- * 名单收**站点侧实测能正确描述图片**的模型，其余只声明文本。
- * `auto` **在名单里**：2026-10-02 用同一张真实 macOS 截图连测 4 次，auto 全部正确读图
- * （上游分别落到 `gpt-5.4-nano` ×3、`claude-haiku-4-5` ×1）。
- * —— 早先文档里「auto 传图返回空、所以别用 auto 看屏幕」**没能复现**，那句话已更正；
- * 不声明 image 的代价是**免费层用户永远用不了「看屏幕」**（他们只有 auto 可选），
- * 所以这里按实测声明 image：上游偶尔落到不能看图的模型时，会以可见的错误呈现，
- * 而不是被我们自己的声明先拦掉。
+ * 名单收**站点侧实测能正确读图**的模型，其余只声明文本。逐条的实测依据：
+ *   - `deepseek-v4.1-flash`：同一张真实 macOS 截图，多次正确答出显示区「0」（回归首选）；
+ *   - `kimi-k3`、`glm-5.3`、`glm-5.3-flash`、`deepseek-v4-pro`：2026-10-02 晚各 3/3 正确（累计 4/4）；
+ *   - `mimo-v2.6-flash`：早前实测可读图（当前站点探测标为不可用，故会从模型列表里被丢掉）；
+ *   - `glm-5.2`：明确回答「我无法处理图片」⇒ 只声明文本。
+ *
+ * ⚠️ **`auto` 不在名单里（2026-10-02 晚按新证据改回，推翻当天早些时候的判断）**：
+ * 当时用 4 次样本（gpt-5.4-nano ×3 / claude-haiku-4-5）得出「auto 能看图」，据此给它声明了
+ * image；晚些时候再测 4 次，结果是 **1/3 命中 + 1 次空回答 + 1 次读错**（上游 `agnes-2.5-flash`
+ * 返回空、`gpt-5.6-luna` 把「0」读成「1」）。auto 是**池子**，看图能力随路由漂移，
+ * 而「读错屏幕」比「明确报错」危险得多（代理会照着错误读数去点）。
+ * 这也与既定产品决策一致：看屏幕钉具体视觉模型，**不用 auto**。
+ * 代价如实记录：只有 auto 的免费层用户将用不了「看屏幕」（面板会给可操作提示让用户换模型）。
  */
-export const VISION_MODEL_IDS = new Set(["auto", "deepseek-v4.1-flash", "mimo-v2.6-flash", "glm-5.3"]);
+export const VISION_MODEL_IDS = new Set([
+  "deepseek-v4.1-flash",
+  "mimo-v2.6-flash",
+  "glm-5.3",
+  "kimi-k3",
+  "glm-5.3-flash",
+  "deepseek-v4-pro",
+]);
 const TEXT_ONLY_INPUT = ["text"];
 const VISION_INPUT = ["text", "image"];
 
