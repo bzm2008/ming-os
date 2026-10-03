@@ -12,7 +12,9 @@ jobs:
   contract:
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        # Linux 也在契约测试矩阵里：铭荼要进 ming-os（Debian 13）系统构建，
+        # 插件/代理半区的行为不能只在 macOS/Windows 上成立。
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -35,12 +37,22 @@ jobs:
     strategy:
       matrix:
         include:
+          # macOS：app + dmg（dmg 在 CI 上不需要签名也能出未签名包）。
           - os: macos-latest
             target: aarch64-apple-darwin
+            bundles: "app,dmg"
           - os: macos-latest
             target: x86_64-apple-darwin
+            bundles: "app,dmg"
+          # Linux：deb（ming-os 系统构建直接 apt 安装的对象）+ AppImage（免安装备用）。
+          # WebKitGTK 等 Debian 依赖用 system 系 apt 装，runner 是 ubuntu-22.04/24.04。
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: "deb,appimage"
+          # Windows：NSIS 安装器（currentUser 装到用户目录，不需要管理员）。
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: "nsis"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -56,11 +68,46 @@ jobs:
           cache: pnpm
           cache-dependency-path: platform/ming-tea/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Linux 构建需要 WebKitGTK/GTK 的开发头文件（Tauri 2 在 Linux 的系统依赖）。
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev build-essential curl wget file \
+            libxkbcommon-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir apps/desktop build:agent
-      - run: pnpm --filter @ming-tea/desktop tauri:build -- --target ${{ matrix.target }}
+      # build:hotkey 只在 macOS 有意义（热键守护进程随 .app 打包）；Linux/Windows 的
+      # externalBin 由各自平台的打包约定处理，见 platform/ming-tea/apps/hotkey-daemon/README。
+      - name: Build hotkey helper (macOS only)
+        if: runner.os == 'macOS'
+        run: pnpm --dir apps/desktop build:hotkey
+      - name: Build hotkey helper (Linux / Windows)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p apps/desktop/src-tauri/binaries
+          cargo build --release --manifest-path apps/hotkey-daemon/Cargo.toml
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp apps/hotkey-daemon/target/release/ming-tea-hotkey.exe \
+              "apps/desktop/src-tauri/binaries/ming-tea-hotkey-${{ matrix.target }}.exe"
+          else
+            cp apps/hotkey-daemon/target/release/ming-tea-hotkey \
+              "apps/desktop/src-tauri/binaries/ming-tea-hotkey-${{ matrix.target }}"
+          fi
+      - name: Tauri build
+        run: >
+          pnpm --filter @ming-tea/desktop exec tauri build
+          --target ${{ matrix.target }}
+          --bundles ${{ matrix.bundles }}
       - uses: actions/upload-artifact@v4
         with:
           name: ming-tea-${{ matrix.target }}
-          path: platform/ming-tea/apps/desktop/src-tauri/target/**/bundle/**
+          path: |
+            platform/ming-tea/apps/desktop/src-tauri/target/*/release/bundle/**
+            platform/ming-tea/apps/desktop/src-tauri/target/release/bundle/**
           if-no-files-found: error

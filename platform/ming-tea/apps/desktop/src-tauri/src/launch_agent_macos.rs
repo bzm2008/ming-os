@@ -1,11 +1,11 @@
-//! 热键守护进程的随登录启动管理（LaunchAgent）。
-//!
-//! 为什么需要守护进程：**进程完全退出后，任何快捷键都不可能生效**。
-//! 所以热键由一个极小的常驻二进制持有（`platform/ming-tea/apps/hotkey-daemon`，
-//! 用 global-hotkey 注册、按下时执行 `open "mingtea://summon"`）。它不申请任何 TCC 权限：
-//! Carbon 全局热键不需要辅助功能权限。
-//!
-//! 这个模块只做三件事：写 plist、bootstrap/bootout、查状态。
+// 热键守护进程的随登录启动管理（LaunchAgent）。
+// 
+// 为什么需要守护进程：**进程完全退出后，任何快捷键都不可能生效**。
+// 所以热键由一个极小的常驻二进制持有（`platform/ming-tea/apps/hotkey-daemon`，
+// 用 global-hotkey 注册、按下时执行 `open "mingtea://summon"`）。它不申请任何 TCC 权限：
+// Carbon 全局热键不需要辅助功能权限。
+// 
+// 这个模块只做三件事：写 plist、bootstrap/bootout、查状态。
 
 use std::path::PathBuf;
 use std::process::Command;
