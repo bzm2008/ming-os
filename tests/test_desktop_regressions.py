@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import pathlib
+import re
 import shutil
 import tempfile
 import unittest
@@ -1562,9 +1563,10 @@ class DesktopPolishContractTests(unittest.TestCase):
             self.assertIn(marker, status)
 
     def test_phone_desktop_binds_win_key_to_status_widget_toggle(self):
-        # The floating status widget itself was retired (PhoneDesktop.status is
-        # None), but the Windows key must still be recognised and routed through
-        # the single toggle entry point instead of being handled inline.
+        # The floating status widget was retired (PhoneDesktop.status is
+        # None). The Win key must still be recognised and routed through the
+        # single toggle entry point — and that entry must stay an explicit
+        # no-op rather than silently regrowing widget logic.
         for marker in (
             "def is_status_widget_toggle_key",
             'self.connect("key-press-event", self.on_key_press)',
@@ -1572,6 +1574,19 @@ class DesktopPolishContractTests(unittest.TestCase):
             "self.toggle_status_widget()",
         ):
             self.assertIn(marker, self.phone)
+        # toggle_status_widget is a deliberate retired no-op whose body only
+        # returns False. Assert that contract explicitly so any resurrection
+        # of set_collapsed / self.status fails here first.
+        toggle = re.search(
+            r"def toggle_status_widget\(self\):\n(.*?)\n(?=\n    def )",
+            self.phone,
+            re.S,
+        )
+        self.assertIsNotNone(toggle, "toggle_status_widget not found")
+        body = toggle.group(1)
+        self.assertNotIn("set_collapsed", body)
+        self.assertNotIn("self.status", body)
+        self.assertIn("return False", body)
 
     def test_fullscreen_and_drawer_lower_the_dock_without_killing_plank(self):
         for marker in (
