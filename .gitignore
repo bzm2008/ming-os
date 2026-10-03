@@ -7,6 +7,11 @@ output/
 # The build validates its package metadata and SHA256; it is never committed.
 /assets/vendor/xiahai-xiaoming/xiahai-xiaoming_0.0.2-beta_amd64.deb
 
+# 铭荼 DSH 桌面的 ming-os 构建产物（scripts/prepare_ming_tea_desktop.sh 生成，
+# 179MB 级的 runtime tarball 与 Linux .deb/.bin —— 由 CI 或 Debian 13 宿主产出，
+# receipt.json 的 sha256 供 modules/04_ming_tea_desktop.sh 校验；不进 git）。
+/assets/vendor/ming-tea-desktop/
+
 # Trae IDE
 .trae/
 
