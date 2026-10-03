@@ -7,6 +7,20 @@ import tempfile
 import unittest
 
 
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    PackageInstaller resolves the package path before it runs dpkg-deb, so on a
+    host where the system temp root sits behind a symlink (macOS: /var ->
+    /private/var) a raw temp path can never match the command the product
+    actually runs, and every inspection would fail validation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "assets" / "ming-package-installer.py"
 
@@ -33,7 +47,7 @@ class FakeRunner:
 class PackageInstallerInspectTests(unittest.TestCase):
     def test_pkexec_install_rejects_caller_without_ready_administrator_state(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -63,7 +77,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_accepts_real_dpkg_deb_labeled_field_output(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"not-a-real-deb-but-a-regular-file")
             command = (
@@ -90,7 +104,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_returns_verified_amd64_deb_metadata(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"not-a-real-deb-but-a-regular-file")
             command = (
@@ -114,7 +128,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_install_rejects_wrong_architecture_before_apt_or_privilege_use(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "foreign.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -135,7 +149,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_labels_unsupported_architecture_as_validation_failure(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "foreign.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -153,7 +167,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_accepts_architecture_independent_debs(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "shared-data.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -170,7 +184,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_refuses_a_directory_named_like_a_deb_before_metadata_probe(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "not-a-package.deb"
             package.mkdir()
             runner = FakeRunner({})
@@ -186,7 +200,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 
     def test_inspect_reports_metadata_timeout_as_a_structured_error(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "slow.deb"
             package.write_bytes(b"local package")
 
@@ -206,7 +220,7 @@ class PackageInstallerInspectTests(unittest.TestCase):
 class PackageInstallerInstallTests(unittest.TestCase):
     def test_refresh_caches_updates_system_and_local_desktop_databases(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             local_dir = pathlib.Path(directory) / "applications"
             local_dir.mkdir()
             local_desktops = ("update-desktop-database", local_dir.as_posix())
@@ -227,7 +241,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_refresh_caches_ignores_missing_optional_proxy_desktop_database(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             missing_proxy_dir = pathlib.Path(directory) / "missing-applications"
             system_desktops = ("update-desktop-database", "/usr/share/applications")
             refresh_icons = ("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
@@ -245,7 +259,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_publishes_package_launchers_before_refreshing_desktop_state(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -292,7 +306,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_does_not_leak_apt_output_when_the_package_manager_is_busy(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -329,7 +343,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
     def test_install_keeps_transaction_result_but_rejects_a_missing_gui_launcher(self):
         """A browser-downloaded desktop application is not ready until it can launch."""
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             desktop = pathlib.Path(directory) / "sample-app.desktop"
             package.write_bytes(b"local package")
@@ -374,7 +388,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_reports_a_readable_launcher_warning_when_exec_is_missing(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             desktop = pathlib.Path(directory) / "sample-app.desktop"
             package.write_bytes(b"local package")
@@ -422,7 +436,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_repairs_dependencies_once_then_verifies_and_refreshes(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -473,7 +487,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_reports_refresh_warning_after_package_is_verified(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -513,7 +527,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
         """The first post-install catalog refresh must see newly published proxies."""
         installer_module = load_installer()
         events = []
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -549,7 +563,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_requires_administrator_after_safe_inspection(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -570,7 +584,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 
     def test_install_does_not_refresh_caches_when_package_verification_fails(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (
@@ -602,7 +616,7 @@ class PackageInstallerInstallTests(unittest.TestCase):
 class PackageInstallerRepairTests(unittest.TestCase):
     def test_repair_publishes_package_launchers_before_refreshing_desktop_state(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             reinstall = (
                 "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
                 "-o", "Dpkg::Lock::Timeout=30", "install", "sample-app",
@@ -635,7 +649,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
 
     def test_repair_reinstalls_package_and_refreshes_desktop_entries(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             reinstall = (
                 "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "--reinstall",
                 "-o", "Dpkg::Lock::Timeout=30", "install", "sample-app",
@@ -673,7 +687,7 @@ class PackageInstallerRepairTests(unittest.TestCase):
 class PackageInstallerCliTests(unittest.TestCase):
     def test_inspect_json_cli_emits_structured_package_result(self):
         installer = load_installer()
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             package = pathlib.Path(directory) / "sample-app.deb"
             package.write_bytes(b"local package")
             metadata = (

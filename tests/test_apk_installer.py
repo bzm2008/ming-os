@@ -7,6 +7,20 @@ import unittest
 from unittest import mock
 
 
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The Android runtime resolves the APK path before it inspects the package, so
+    on a host where the system temp root sits behind a symlink (macOS: /var ->
+    /private/var) a raw temp path never matches the path the product reports or
+    runs against, and every package would look like an invalid source.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "ming_android_runtime", ROOT / "assets" / "ming-android-runtime.py"
@@ -17,7 +31,7 @@ SPEC.loader.exec_module(MODULE)
 
 class ApkInstallerContracts(unittest.TestCase):
     def test_aapt_native_code_output_is_parsed_without_tuple_unpacking_error(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -28,7 +42,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertIn("x86_64", metadata["abis"])
 
     def test_rejects_urls_symlinks_traversal_and_non_apk_files(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -47,7 +61,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertEqual("invalid_source", runtime.validate_apk(link)["state"])
 
     def test_rejects_invalid_package_and_arm_only_stable_install(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -61,7 +75,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertIn("实验室", arm_only["error"])
 
     def test_accepts_x86_64_and_universal_and_records_sha256(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             payload = b"apk payload"
@@ -84,7 +98,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertEqual("universal", runtime.validate_apk(apk)["architecture"])
 
     def test_install_requires_waydroid_readback_and_creates_private_metadata_log_and_desktop_entry(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -119,7 +133,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertTrue(any(call[:3] == ("waydroid", "app", "list") for call in calls))
 
     def test_install_does_not_mark_success_when_waydroid_readback_is_missing(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -136,7 +150,7 @@ class ApkInstallerContracts(unittest.TestCase):
             self.assertEqual("install_unconfirmed", result["state"])
 
     def test_uninstall_removes_only_after_package_readback(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")

@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 import pathlib
 import tempfile
 import threading
@@ -8,6 +9,20 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def non_root_posix():
+    """True when the runner cannot build a root-owned /opt/apps fixture.
+
+    The installer only publishes proxies whose source and every parent up to
+    /opt/apps are owned by uid 0 with no group/other write bit (correct for the
+    real /opt/apps). A non-root runner cannot create such a tree, so these
+    contracts only mean something as root.
+    """
+    return os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0
+
+
+NEEDS_ROOT = "requires root-owned /opt/apps fixture (passes when run as uid 0)"
 
 
 def load(name, filename):
@@ -18,6 +33,7 @@ def load(name, filename):
     return module
 
 
+@unittest.skipIf(non_root_posix(), NEEDS_ROOT)
 class OptAppsProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
