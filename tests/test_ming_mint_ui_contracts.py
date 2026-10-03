@@ -40,7 +40,7 @@ class MingMintThemeContracts(unittest.TestCase):
         self.assertIn("background-opacity=100", self.desktop)
 
     def test_responsive_dock_profile_is_applied_at_runtime(self):
-        self.assertIn("MingDockProfile=2641-responsive-centered", self.desktop)
+        self.assertIn("MingDockProfile=2641-calm-glass-rail", self.desktop)
         self.assertIn("IconSize=40", self.desktop)
         self.assertIn("ZoomPercent=148", self.desktop)
         self.assertIn("Offset=12", self.desktop)

@@ -33,6 +33,18 @@ def load_interaction_state():
     return namespace["InteractionState"]
 
 
+def fake_absolute_root(*parts):
+    """Build an absolute fake root that is valid on POSIX and on Windows.
+
+    The product only treats a launcher as a system application when the path is
+    absolute (``is_system_application_path``), so a hard-coded ``C:/...`` literal
+    silently stops matching on Linux/macOS where ``Path("C:/x").is_absolute()``
+    is False. Anchoring at the current drive/root keeps the fake tree absolute on
+    every host.
+    """
+    return pathlib.Path(pathlib.Path.cwd().anchor).joinpath(*parts)
+
+
 def load_phone_dedup_functions():
     source = PHONE_DESKTOP.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -136,7 +148,7 @@ class DesktopSourceTests(unittest.TestCase):
 
     def test_android_desktop_is_enabled(self):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
-        self.assertIn("X-Ming-Managed-Components=phone-desktop;plank;picom", self.desktop)
+        self.assertIn("X-Ming-Managed-Components=phone-desktop;taskbar;picom", self.desktop)
         self.assertIn("X-GNOME-Autostart-enabled=true", self.desktop)
         self.assertIn("Exec=/usr/bin/true", self.desktop)
         self.assertIn("ming-phone-desktop --sync", self.desktop)
@@ -318,16 +330,17 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                      str(PHONE_DESKTOP), "exec"), namespace)
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
+        fake_root = fake_absolute_root("ming-test")
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
         apps = []
         for stem in ("settings", "files", "terminal"):
             apps.extend([
                 {
-                    "path": f"C:/ming-test/applications/ming-{stem}.desktop",
+                    "path": str(fake_root / "applications" / f"ming-{stem}.desktop"),
                     "basename": f"ming-{stem}.desktop",
                 },
                 {
-                    "path": f"C:/ming-test/applications/ming-dock-ming-{stem}.desktop",
+                    "path": str(fake_root / "applications" / f"ming-dock-ming-{stem}.desktop"),
                     "basename": f"ming-dock-ming-{stem}.desktop",
                 },
             ])
@@ -359,20 +372,22 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                      str(PHONE_DESKTOP), "exec"), namespace)
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
-        namespace["DESKTOP_DIR"] = pathlib.Path("C:/ming-test/home/user/Desktop")
-        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
+        fake_root = fake_absolute_root("ming-test")
+        fake_home = fake_root / "home" / "user"
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
+        namespace["DESKTOP_DIR"] = fake_home / "Desktop"
+        namespace["HOME"] = fake_home
         apps = [
             {
-                "path": "C:/ming-test/home/user/Desktop/ming-settings.desktop",
+                "path": str(fake_home / "Desktop" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
             {
-                "path": "C:/ming-test/home/user/.local/share/applications/ming-settings.desktop",
+                "path": str(fake_home / ".local" / "share" / "applications" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
             {
-                "path": "C:/ming-test/applications/ming-settings.desktop",
+                "path": str(fake_root / "applications" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
         ]
@@ -382,19 +397,21 @@ class DesktopSourceTests(unittest.TestCase):
         )
 
     def test_phone_desktop_deduplicates_store_and_toolbox_user_copies(self):
+        fake_root = fake_absolute_root("ming-test")
+        fake_home = fake_root / "home" / "user"
         namespace = load_phone_dedup_functions()
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
-        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
+        namespace["HOME"] = fake_home
         apps = []
         for basename in ("ming-store.desktop", "ming-toolbox.desktop"):
             apps.extend([
                 {
-                    "path": f"C:/ming-test/applications/{basename}",
+                    "path": str(fake_root / "applications" / basename),
                     "basename": basename,
                     "diagnostic": "",
                 },
                 {
-                    "path": f"C:/ming-test/home/user/.local/share/applications/{basename}",
+                    "path": str(fake_home / ".local" / "share" / "applications" / basename),
                     "basename": basename,
                     "diagnostic": "",
                 },
@@ -407,7 +424,7 @@ class DesktopSourceTests(unittest.TestCase):
             [item["basename"] for item in selected],
         )
         self.assertTrue(all(
-            item["path"].startswith("C:/ming-test/applications/")
+            item["path"].startswith(str(fake_root / "applications"))
             for item in selected
         ))
 
@@ -782,7 +799,11 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            # Canonicalize the temp root: the product resolves candidate paths
+            # before comparing them with SYSTEM_APPLICATION_DIR, so on hosts
+            # where the temp directory sits behind a symlink (macOS: /var ->
+            # /private/var) the unresolved form can never match.
+            root = pathlib.Path(temp_dir).resolve()
             state_dir = root / "state"
             system_dir = root / "usr" / "share" / "applications"
             desktop = root / "home" / "user" / "Desktop"
@@ -919,7 +940,7 @@ class DesktopSourceTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            root = pathlib.Path(temp_dir).resolve()
             system_dir = root / "usr" / "share" / "applications"
             desktop = root / "home" / "user" / "Desktop"
             state_dir = root / "state"
@@ -1056,7 +1077,7 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            root = pathlib.Path(temp_dir).resolve()
             desktop = root / "Desktop"
             source_dir = root / "source"
             source_dir.mkdir()
@@ -1208,7 +1229,10 @@ class DesktopSourceTests(unittest.TestCase):
             "geometry top-alignment failed",
         ):
             self.assertIn(marker, status)
-        self.assertIn("GLib.idle_add(self.status.verify_top_alignment)", placement)
+        # The floating status widget (and its placement/verification in the
+        # overlay host) was retired with the legacy dock, so the overlay host
+        # must no longer place or verify it.
+        self.assertNotIn("self.status", placement)
 
     def test_status_widget_all_layers_reject_vertical_stretch_and_top_margin(self):
         status = self.phone[self.phone.index("class StatusWidget"):
@@ -1407,7 +1431,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
         self.assertIn("Offset=12", self.desktop)
-        self.assertIn("MingDockProfile=2641-responsive-centered", self.desktop)
+        self.assertIn("MingDockProfile=2641-calm-glass-rail", self.desktop)
         self.assertIn('gsettings set "${plank_schema}" alignment center', self.desktop)
         self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.desktop)
         self.assertIn("UrgentBounceTime=420", self.desktop)
@@ -1538,11 +1562,14 @@ class DesktopPolishContractTests(unittest.TestCase):
             self.assertIn(marker, status)
 
     def test_phone_desktop_binds_win_key_to_status_widget_toggle(self):
+        # The floating status widget itself was retired (PhoneDesktop.status is
+        # None), but the Windows key must still be recognised and routed through
+        # the single toggle entry point instead of being handled inline.
         for marker in (
             "def is_status_widget_toggle_key",
             'self.connect("key-press-event", self.on_key_press)',
             "def on_key_press(self, _window, event)",
-            "self.status.set_collapsed(not self.status.collapsed)",
+            "self.toggle_status_widget()",
         ):
             self.assertIn(marker, self.phone)
 

@@ -118,11 +118,19 @@ class DockLifecycleContracts(unittest.TestCase):
         for marker in ("short_side <= 720", "icon_size=32", "short_side <= 900", "icon_size=36", "icon_size=40"):
             self.assertIn(marker, self.watchdog)
         self.assertIn("offset=0", self.watchdog)
-        self.assertIn('"ZoomPercent=136"', self.build)
-        self.assertIn('"MingDockProfile=2641-calm-glass-rail"', self.build)
-        self.assertIn('"Offset=0"', self.build)
-        self.assertIn('"LaunchBounceTime=130"', self.build)
-        self.assertIn('"ItemMoveTime=130"', self.build)
+        # The build gate no longer pins the retired plank/Dock literals: it now
+        # requires the taskbar watchdog and rejects every retired Dock surface.
+        self.assertIn('require_file("usr/local/bin/ming-taskbar-watchdog", "taskbar_window_visible")', self.build)
+        self.assertIn('require_absent(retired_path, "retired Dock surface")', self.build)
+        for retired_path in (
+            '"usr/local/bin/ming-dock"',
+            '"usr/local/bin/ming-dock-watchdog"',
+            '"usr/share/plank"',
+            '"home/user/.config/plank"',
+            '"usr/local/bin/ming-status-widget-toggle"',
+            '"home/user/.config/ming-os/status-widget.json"',
+        ):
+            self.assertIn(retired_path, self.build)
 
     def test_responsive_dock_profile_is_applied_at_runtime(self):
         for marker in (
@@ -485,7 +493,7 @@ class DockLifecycleContracts(unittest.TestCase):
             "xrender",
             "timeout --foreground 2s",
             '"phone_desktop"',
-            '"plank"',
+            '"taskbar"',
             '"picom"',
         ):
             self.assertIn(marker, self.session_healthcheck)
