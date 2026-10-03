@@ -1,7 +1,35 @@
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
+
+
+def non_root_posix():
+    """True when the runner cannot satisfy the launcher's root-ownership rule.
+
+    The trusted-launcher verifier requires both the desktop entry and its
+    directory to be owned by uid 0 with no group/other write bit (correct for
+    /usr/share/applications), which a non-root test runner cannot create.
+    """
+    return os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0
+
+
+NEEDS_ROOT = "requires root-owned system directory (passes when run as uid 0)"
+
+
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The trusted launcher resolves managed desktop entries before deciding
+    whether they live in a trusted directory, so on a host where the temp root
+    sits behind a symlink (macOS: /var -> /private/var) a raw temp path is not
+    recognised as trusted.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -21,7 +49,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         cls.launch = load_asset()
 
     def test_system_desktop_uses_verified_desktop_activation(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             system_dir = pathlib.Path(directory)
             desktop = system_dir / "example.desktop"
             desktop.write_text(
@@ -37,7 +65,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         self.assertEqual((), request.argv)
 
     def test_broker_revalidates_immediately_before_desktop_activation(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             desktop_path = str(pathlib.Path(directory) / "example.desktop")
         events = []
         request = self.launch.LaunchRequest(
@@ -57,7 +85,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
             events)
 
     def test_broker_fails_closed_when_system_desktop_verification_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             desktop_path = str(pathlib.Path(directory) / "example.desktop")
         activated = []
         request = self.launch.LaunchRequest(
@@ -74,8 +102,9 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         self.assertFalse(broker.launch(request))
         self.assertEqual([], activated)
 
+    @unittest.skipIf(non_root_posix(), NEEDS_ROOT)
     def test_system_desktop_requires_one_installed_package_owner(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             desktop = root / "example.desktop"
             desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
@@ -96,7 +125,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
             self.assertEqual(2, len(calls))
 
     def test_system_desktop_rejects_multiple_package_owners(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             desktop = root / "example.desktop"
             desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
@@ -110,7 +139,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
                 descriptor_revalidator=lambda *_args: True))
 
     def test_user_desktop_keeps_strict_argv_path(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             user_dir = pathlib.Path(directory) / "user-apps"
             system_dir = pathlib.Path(directory) / "system-apps"
             user_dir.mkdir()
@@ -127,7 +156,7 @@ class TrustedSystemLauncherTests(unittest.TestCase):
         self.assertEqual("/bin/echo", request.argv[0])
 
     def test_user_xiahai_entry_redirects_to_the_canonical_system_entry(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             user_dir = root / "user-apps"
             system_dir = root / "system-apps"

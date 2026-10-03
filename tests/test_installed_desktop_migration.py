@@ -24,7 +24,8 @@ class InstalledDesktopMigrationTests(unittest.TestCase):
         self.assertIn("MING_PRIMARY_HOME", identity)
         self.assertIn("/etc/skel/.config/autostart/ming-phone-desktop.desktop", identity)
         self.assertIn("/etc/skel/.config/autostart/ming-apply-appearance.desktop", identity)
-        self.assertIn("/etc/skel/.config/plank/dock1/settings", identity)
+        # The plank Dock settings path was retired with the legacy dock.
+        self.assertNotIn("/etc/skel/.config/plank/dock1/settings", identity)
 
     def test_migration_preserves_unmanaged_user_configuration(self):
         source = BASE.read_text(encoding="utf-8")
@@ -192,14 +193,12 @@ class InstalledDesktopMigrationTests(unittest.TestCase):
         self.assertIn("require-desktop-profile", build)
         self.assertIn("startswith(\"/usr/local/sbin/ming-installer-verify installed --receipt\")", build)
 
-    def test_identity_migration_checks_dock_parents_and_preserves_leaf_symlinks(self):
+    def test_identity_migration_preserves_leaf_symlinks_for_every_destination(self):
         identity = BASE.read_text(encoding="utf-8").split(
             "cat > /usr/local/sbin/ming-fix-installed-identity", 1
         )[1].split("\nMINGIDENTITY", 1)[0]
-        dock_check = 'profile_path_is_safe "${dock_dir}"'
-        dock_mkdir = 'mkdir -p "${dock_dir}"'
-        self.assertIn(dock_check, identity)
-        self.assertLess(identity.index(dock_check), identity.index(dock_mkdir))
+        # The plank Dock parent checks were retired with the legacy dock; the
+        # destination guard order and leaf-symlink preservation still hold.
         destination_link = 'if [[ -L "${destination}" ]]; then'
         destination_safe = 'profile_path_is_safe "${destination}"'
         self.assertIn(destination_link, identity)
@@ -211,6 +210,7 @@ class InstalledDesktopMigrationTests(unittest.TestCase):
             identity.index(destination_link),
         )
         self.assertIn('chroot "${target}" chown --no-dereference', identity)
+        self.assertNotIn("dock_dir", identity)
 
     def test_known_ming_profile_paths_force_replace_unmarked_legacy_rc3_state(self):
         """RC3-era unmarked Ming files must not win over the canonical profile."""
@@ -223,7 +223,8 @@ class InstalledDesktopMigrationTests(unittest.TestCase):
         # arbitrary user desktop files remain marker-gated.
         self.assertIn('copy_profile_file "${source}" "${relative}" true', identity)
         self.assertIn('copy_profile_file "${profile_source}" ".local/share/applications/${launcher}" true', identity)
-        self.assertIn('copy_profile_file "${source}" "${relative}" || return 1', identity)
+        # The marker-gated (non-force) desktop-file path keeps the plain form.
+        self.assertIn('copy_profile_file "${entry}" "${relative}" || return 1', identity)
 
     def test_finalize_preserves_leaf_symlinked_launcher_before_full_path_guard(self):
         finalize = FINALIZE.read_text(encoding="utf-8")

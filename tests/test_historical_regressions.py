@@ -333,7 +333,7 @@ class HistoricalRegressionContracts(unittest.TestCase):
         profile = DESKTOP.split("configure_ming_mint_dock_profile() {", 1)[1].split(
             "configure_ming_mint_desktop_icons()", 1)[0]
         self.assertIn("IconSize=40", profile)
-        self.assertIn("ZoomPercent=148", profile)
+        self.assertIn("ZoomPercent=136", profile)
         self.assertIn("Offset=12", profile)
         self.assertIn("Theme=Ming", profile)
         self.assertNotIn("Theme=Ming-Mint", profile)

@@ -13,6 +13,23 @@ import importlib.util
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def bash_major_version():
+    """Major version of the bash that runs generated helpers, 0 when unknown.
+
+    The image ships Debian bash 5, but a developer host may still provide bash
+    3.2 (macOS), where constructs such as ${var,,} are a fatal
+    "bad substitution" rather than a portability footnote.
+    """
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    match = re.search(r"version (\d+)", completed.stdout or "")
+    return int(match.group(1)) if match else 0
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
@@ -378,6 +395,11 @@ class StabilityRecoveryContracts(unittest.TestCase):
             "MINGDESKHEALTH")
         self.assertIn("json.dumps", control)
         self.assertIn("json.dumps", health)
+        if bash_major_version() < 4:
+            self.skipTest(
+                "the generated helpers use ${var,,} (bash 4+); "
+                "macOS ships bash 3.2, while the image runs Debian bash 5"
+            )
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             fake_bin = root / "bin"
@@ -574,7 +596,9 @@ fi
         status = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
         self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed", status)
         self.assertIn("else STATUS_WIDGET_EXPANDED_HEIGHT", status)
-        self.assertIn(
+        # The floating status widget was retired (PhoneDesktop.status is None), so
+        # the overlay host must no longer size or place it.
+        self.assertNotIn(
             "self.status.set_size_request(widget_w, self.status.preferred_height())",
             PHONE,
         )

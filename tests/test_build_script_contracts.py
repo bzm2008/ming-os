@@ -12,6 +12,37 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
 RESUME = (ROOT / "resume_build.sh").read_text(encoding="utf-8")
 
+DEBIAN_PAYLOAD_REASON = (
+    "this contract executes a build_onion_os.sh payload that asserts Debian "
+    "semantics the host cannot provide: the AppStream/rootfs gate refuses any "
+    "path component that is a symlink (macOS ships /var and /tmp as symlinks) "
+    "and the payload shells out to GNU coreutils. It runs unchanged on Debian "
+    "and in WSL."
+)
+
+
+def host_runs_build_payloads():
+    """True when the host can satisfy the embedded build-payload contracts."""
+    root = pathlib.Path(tempfile.gettempdir())
+    current = pathlib.Path(root.anchor)
+    for part in root.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return False
+    for probe in (["du", "-sb", "."], ["sha256sum", "--version"]):
+        try:
+            completed = subprocess.run(probe, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if completed.returncode != 0:
+            return False
+    return True
+
+
+NEEDS_DEBIAN_PAYLOAD = unittest.skipUnless(
+    host_runs_build_payloads(), DEBIAN_PAYLOAD_REASON
+)
+
 
 class BuildScriptContractTests(unittest.TestCase):
     @staticmethod
@@ -510,11 +541,13 @@ class BuildScriptContractTests(unittest.TestCase):
         self.assertIsNotNone(match, result.stdout + result.stderr + output)
         return int(match.group(1)), int(match.group(2)), result
 
+    @NEEDS_DEBIAN_PAYLOAD
     def test_build_input_hash_propagates_source_tree_failure_and_cleans_temp_files(self):
         rc, remaining, _result = self._run_input_hash_failure("source-tree")
         self.assertNotEqual(rc, 0)
         self.assertEqual(remaining, 0)
 
+    @NEEDS_DEBIAN_PAYLOAD
     def test_build_input_hash_propagates_each_file_hash_failure_and_cleans_temp_files(self):
         for failure_mode in ("input-hash", "file-hash", "final-hash"):
             with self.subTest(failure_mode=failure_mode):
@@ -537,6 +570,7 @@ class BuildScriptContractTests(unittest.TestCase):
             self.assertIn(marker, initialize)
         self.assertNotIn('--modules-sha256 "$(build_inputs_sha256)"', initialize)
 
+    @NEEDS_DEBIAN_PAYLOAD
     def test_clean_rootfs_signal_trap_exits_after_cleanup(self):
         """HUP/INT/TERM must not resume the cleanup payload after interruption."""
         payload = self._clean_chroot_appstream_payload()
@@ -748,6 +782,7 @@ class BuildScriptContractTests(unittest.TestCase):
         )
         self.assertIn('mv -- "${metadata_stage}" "${destination}"', clean)
 
+    @NEEDS_DEBIAN_PAYLOAD
     def test_clean_rootfs_ignores_stale_swcatalog_metadata_behind_a_symlink(self):
         """Only DEP-11 records from this APT lists directory may enter the index."""
         payload = self._clean_chroot_appstream_payload()
@@ -881,6 +916,7 @@ class BuildScriptContractTests(unittest.TestCase):
         )
         self.assertEqual(escaped_files, [], "cleanup wrote through the index symlink")
 
+    @NEEDS_DEBIAN_PAYLOAD
     def test_clean_rootfs_creates_a_missing_swcatalog_parent_inside_rootfs(self):
         """A fresh chroot without AppStream cache directories remains buildable."""
         payload = self._clean_chroot_appstream_payload()
