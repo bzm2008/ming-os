@@ -8,6 +8,13 @@ import unittest
 from unittest import mock
 
 
+# Temp-root requirement: the store core validates the *entire* ancestor chain of
+# its journal/state paths and rejects any symlinked or group/other-writable
+# parent (ming-store-core.py). macOS' per-user TMPDIR is clean once resolved, but
+# a world-writable /tmp (mode 1777) is rejected by contract, so on Linux run this
+# module with a private temp root (mode 0700, no symlink), e.g.
+#   TMPDIR=/root/ming-private-tmp python3 -m unittest discover -s tests -t tests
+# otherwise the two jsonl-journal cases fail with "日志父目录权限过宽".
 class CanonicalTempDirectory(tempfile.TemporaryDirectory):
     """A TemporaryDirectory whose name is already fully resolved.
 
