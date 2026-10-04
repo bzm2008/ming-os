@@ -84,6 +84,10 @@ def write_core_desktops(root):
         "ming-firefox.desktop": "/usr/local/bin/ming-firefox",
         "ming-store.desktop": "/usr/local/bin/ming-store",
         "ming-toolbox.desktop": "/usr/local/bin/ming-toolbox",
+        # modules/03_desktop.sh installs the classic GTK shell entry; the
+        # backend validator lists it as a core desktop since the ming-tea
+        # integration (module 04 adds the full DSH entry separately).
+        "ming-tea.desktop": "/usr/local/bin/ming-tea",
         "xiahai-xiaoming.desktop": "/opt/xiahai-xiaoming/xiahai-xiaoming",
     }
     applications = root / "usr/share/applications"

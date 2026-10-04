@@ -2302,12 +2302,10 @@ search_path = ":".join(str(root / item) for item in (
 ))
 errors = []
 desktop_commands = {}
-# Ming Tea plugin manifest is installed by modules/03_desktop.sh and checked
-# here so the ISO cannot ship the native app without its audited catalog.
-ming_tea_plugins = require_file("usr/share/ming-os/ming-tea/plugins.json", "ming-tea-plugins.json")
-for marker in ["ming-browser-adapter", "ming-terminal-adapter", "ming-office-adapter"]:
-    if marker not in ming_tea_plugins:
-        errors.append(f"Ming Tea plugin manifest missing {marker}")
+# Ming Tea plugin manifest: installed by modules/03_desktop.sh and verified by
+# modules/04_ming_tea_desktop.sh (receipt fail-closed). The backend validator
+# runs standalone on Exec resolvability only — it must not depend on the
+# manifest (test fixtures and per-desktop checks would otherwise fail).
 for name in desktop_names:
     path = root / "usr/share/applications" / name
     if not path.is_file():
@@ -3538,6 +3536,14 @@ require_file("usr/share/ming-os/homepage/index.html", "Ming OS")
 firefox_policy = require_file("etc/firefox-esr/policies/policies.json", "Homepage")
 if "file:///usr/share/ming-os/homepage/index.html" not in firefox_policy:
     errors.append("Firefox policy must restore the Ming OS homepage")
+
+# Ming Tea plugin manifest: installed by modules/03_desktop.sh (classic shell)
+# and verified end-to-end by modules/04_ming_tea_desktop.sh (marker checks).
+# The ISO must not ship the native app without its audited catalog.
+ming_tea_plugins = require_file("usr/share/ming-os/ming-tea/plugins.json", "ming-tea-plugins.json")
+for marker in ["ming-browser-adapter", "ming-terminal-adapter", "ming-office-adapter"]:
+    if marker not in ming_tea_plugins:
+        errors.append(f"Ming Tea plugin manifest missing {marker}")
 
 require_path("usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so")
 require_path("usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so")

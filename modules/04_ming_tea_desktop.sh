@@ -189,6 +189,19 @@ APPDESKTOP
     return 0
 }
 
+# ── 7. 插件 manifest 标记核验（ISO 不得缺审计目录）────────────────────────────
+# 原 backend-validator 版检查与独立运行的 fixture 测试冲突（validator 只管 Exec
+# 可解析性，无 shell 函数作用域）；manifest 的 marker 检查归位到本模块。
+verify_plugin_manifest() {
+    local manifest="/usr/share/ming-os/ming-tea/plugins.json"
+    [[ -s "${manifest}" ]] || mtd_fail "missing Ming Tea plugin manifest: ${manifest}"
+    local marker
+    for marker in ming-browser-adapter ming-terminal-adapter ming-office-adapter; do
+        grep -q "\"${marker}\"" "${manifest}" || mtd_fail "Ming Tea plugin manifest missing ${marker}"
+    done
+    return 0
+}
+
 main() {
     mtd_log "开始安装铭荼 DSH 桌面应用"
     [[ -d "${MTD_ASSET_DIR}" ]] || mtd_fail "missing ${MTD_ASSET_DIR}（构建宿主机要先跑 scripts/prepare_ming_tea_desktop.sh）"
@@ -199,6 +212,7 @@ main() {
     install_dsh_runtime || return 1
     install_hotkey_daemon || return 1
     install_launcher || return 1
+    verify_plugin_manifest || return 1
 
     # 与模块 03 的 GTK 壳并存：ming-tea.desktop（原生壳）保留，
     # ming-tea-dsh.desktop 是完整版；把「铭荼」入口留给更完整的 DSH 版本。
