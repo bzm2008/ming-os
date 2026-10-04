@@ -2998,466 +2998,13 @@ DOCKONLY
 
 # ======================== Plank macOS 风格 Dock ========================
 
-configure_plank_dock() {
-    local plank_dir="/home/${MING_USER}/.config/plank/dock1"
-    mkdir -p "${plank_dir}/launchers"
+# ======================== Ming 窗口控制与健康检查运行时 ========================
 
-    # Install the retired filename as an inert shim before touching any
-    # legacy compatibility content.  If a module run is interrupted, a
-    # reused chroot must still be unable to launch the old GTK Dock.
-    cat > /usr/local/bin/ming-dock << 'MINGDOCKPRESEED'
-#!/usr/bin/env bash
-exit 0
-MINGDOCKPRESEED
-    chmod 0755 /usr/local/bin/ming-dock
+install_ming_window_runtime() {
+    # Window control, desktop health check, window manager watchdog, and
+    # phone desktop watchdog — essential runtime components for Ming OS desktop.
+    # Extracted from retired configure_plank_dock to survive the Plank→Taskbar migration.
 
-    # Dock 行为与外观：底部居中、轻放大、Calm Glass Rail 玻璃底座；避免老机动画压力过大。
-    cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
-[PlankDockPreferences]
-# MingDockProfile=2641-calm-glass-rail
-#当前 Dock 上的启动器（顺序即显示顺序）
-DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
-#停靠位置: 0=左 1=右 2=上 3=下
-Position=3
-#对齐: 3=居中
-Alignment=3
-#居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
-# Legacy RC3 Offset=12 is intentionally not active; zero keeps Alignment=3 centered.
-Offset=0
-#图标大小（ming-scale 会按分辨率覆盖）
-IconSize=40
-#悬停放大开关
-ZoomEnabled=true
-#放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
-ZoomPercent=136
-#隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
-HideMode=1
-#自动隐藏延迟
-UnhideDelay=0
-HideDelay=0
-#主题（见下方 Ming.theme）
-Theme=Ming
-#显示在所有工作区
-Monitor=
-#锁定图标，防止误拖拽
-LockItems=false
-#压力解锁
-PressureReveal=false
-#显示正在运行程序的指示点
-ShowDockItem=true
-ItemsAlignment=3
-#淡入淡出
-FadeOpacity=1.0
-PLANKSETTINGS
-
-    if [[ "${MING_SKIP_XIAHAI:-0}" == "1" ]]; then
-        sed -i 's/;;xiahai-xiaoming\.dockitem//g' "${plank_dir}/settings"
-    fi
-
-    # Late modules install some launchers after this module. Keep generation in
-    # one idempotent helper and let 07_finalize run it again before seeding skel.
-    cat > /usr/local/sbin/ming-refresh-dock-launchers << 'MINGREFRESHDOCK'
-#!/usr/bin/env bash
-set -uo pipefail
-
-target_user="${1:-${SUDO_USER:-$(id -un)}}"
-user_home="$(getent passwd "${target_user}" | awk -F: 'NR == 1 { print $6 }')"
-if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
-    echo "ERROR: cannot resolve Dock home for ${target_user}" >&2
-    exit 1
-fi
-
-plank_dir="${user_home}/.config/plank/dock1"
-mkdir -p "${plank_dir}/launchers"
-missing=0
-skip_xiahai=false
-[[ -f /etc/ming-os/skip-xiahai ]] && skip_xiahai=true
-
-_plank_launcher() {
-        local name="$1" target="$2"
-        local target_path="/usr/share/applications/${target}"
-        local proxy_path="/usr/share/applications/ming-dock-${name}.desktop"
-        local display_name icon wm_class exec_line
-        case "${name}" in
-            ming-firefox)
-                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/firefox-esr.desktop
-                ;;
-        esac
-        [[ -f "${target_path}" ]] || {
-            echo "WARN: Dock target missing: ${target}" >&2
-            return 1
-        }
-        display_name="$(awk -F= '/^Name\[zh_CN\]=/{print substr($0,index($0,"=")+1); exit} /^Name=/{fallback=substr($0,index($0,"=")+1)} END{if (!found && fallback) print fallback}' "${target_path}" | head -n1)"
-        icon="$(awk -F= '/^Icon=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
-        wm_class="$(awk -F= '/^StartupWMClass=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
-        case "${name}" in
-            ming-settings) wm_class="${wm_class:-uno.scallion.MingSettings}" ;;
-            ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
-            ming-firefox) wm_class="${wm_class:-Firefox-esr}" ;;
-            ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
-        esac
-        exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
-        cat > "${proxy_path}" << DOCKPROXY
-[Desktop Entry]
-Type=Application
-Name=${display_name:-${name}}
-Exec=${exec_line}
-Icon=${icon:-application-x-executable}
-Terminal=false
-NoDisplay=true
-StartupNotify=true
-StartupWMClass=${wm_class:-${name}}
-DOCKPROXY
-        cat > "${plank_dir}/launchers/${name}.dockitem" << DOCKITEM
-[PlankDockItemPreferences]
-Launcher=file://${proxy_path}
-DOCKITEM
-}
-
-cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
-[PlankDockItemPreferences]
-Launcher=file:///usr/share/applications/ming-app-library.desktop
-DRAWERDOCKITEM
-for launcher in \
-    "ming-firefox:ming-firefox.desktop" \
-    "ming-files:ming-files.desktop" \
-    "ming-store:ming-store.desktop" \
-    "ming-settings:ming-settings.desktop" \
-    "ming-terminal:ming-terminal.desktop"; do
-    _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
-done
-if ! ${skip_xiahai}; then
-    _plank_launcher "xiahai-xiaoming" "xiahai-xiaoming.desktop" || missing=1
-else
-    rm -f "${plank_dir}/launchers/xiahai-xiaoming.dockitem" \
-          /usr/share/applications/ming-dock-xiahai-xiaoming.desktop
-fi
-
-if [[ "$(id -u)" -eq 0 ]]; then
-    chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
-fi
-exit "${missing}"
-MINGREFRESHDOCK
-    chmod 0755 /usr/local/sbin/ming-refresh-dock-launchers
-    /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
-        echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
-
-    # Calm Glass Rail: semi-transparent Ming Mint rail with restrained hover feedback.
-    local theme_dir
-    for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
-    mkdir -p "${theme_dir}"
-    cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
-[PlankTheme]
-TopRoundness=14
-BottomRoundness=14
-LineWidth=1
-OuterStrokeColor=47;;138;;125;;80
-FillStartColor=255;;255;;255;;228
-FillEndColor=231;;245;;241;;240
-InnerStrokeColor=255;;255;;255;;170
-
-[PlankDockTheme]
-HorizPadding=14
-TopPadding=8
-BottomPadding=8
-ItemPadding=4
-IndicatorSize=4
-IconShadowSize=0
-UrgentBounceHeight=1.10
-LaunchBounceHeight=0.12
-FadeOpacity=1.0
-ClickTime=160
-UrgentBounceTime=420
-LaunchBounceTime=130
-ActiveTime=160
-SlideTime=160
-FadeTime=120
-HideTime=120
-GlowSize=0
-GlowTime=10000
-GlowPulseTime=1600
-UrgentHueShift=86
-ItemMoveTime=130
-CascadeHide=false
-PLANKTHEME
-    done
-
-    cat > /tmp/ming-dock-legacy << 'MINGDOCK'
-#!/usr/bin/env python3
-import configparser
-import subprocess
-from pathlib import Path
-
-import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-from gi.repository import Gdk, Gio, GLib, Gtk
-
-APPS = [
-    ('ming-settings.desktop', 'ming-settings', 'Ming 设置'),
-    ('ming-app-library.desktop', 'ming-app-library', '应用库'),
-    ('ming-files.desktop', 'ming-files', '文件'),
-    ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
-    ('ming-store.desktop', 'ming-store', 'Ming 应用商店'),
-    ('xiahai-xiaoming.desktop', 'xiahai-xiaoming', '小明 AI 助手'),
-    ('ming-terminal.desktop', 'ming-terminal', '终端'),
-]
-
-CSS = b'''
-window#ming-dock-window {
-  background: transparent;
-}
-.dock {
-  border-radius: 16px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 18px 42px rgba(21, 68, 56, 0.18), inset 0 1px 0 rgba(255,255,255,0.82);
-}
-.dock-button {
-  border-radius: 12px;
-  padding: 5px;
-  background: rgba(255, 255, 255, 0.22);
-  border: 1px solid transparent;
-}
-.dock-button:hover {
-  background: rgba(47, 138, 125, 0.14);
-  border-color: rgba(47, 138, 125, 0.22);
-}
-'''
-
-def desktop_path(basename):
-    for base in (Path('/usr/share/applications'), Path.home() / '.local/share/applications', Path.home() / 'Desktop'):
-        path = base / basename
-        if path.exists():
-            return path
-    return None
-
-def app_name(path, fallback):
-    if not path:
-        return fallback
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.optionxform = str
-    try:
-        parser.read(path, encoding='utf-8')
-        entry = parser['Desktop Entry']
-        return entry.get('Name[zh_CN]') or entry.get('Name') or fallback
-    except Exception:
-        return fallback
-
-class DockButton(Gtk.Button):
-    def __init__(self, basename, icon, fallback):
-        super().__init__()
-        self.basename = basename
-        self.path = desktop_path(basename)
-        self.icon = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
-        self.icon.set_pixel_size(36)
-        self.set_image(self.icon)
-        self.set_always_show_image(True)
-        self.set_relief(Gtk.ReliefStyle.NONE)
-        self.set_tooltip_text(app_name(self.path, fallback))
-        self.get_style_context().add_class('dock-button')
-        self.connect('clicked', self.launch)
-        self.connect('enter-notify-event', self.hover_in)
-        self.connect('leave-notify-event', self.hover_out)
-
-    def hover_in(self, *_args):
-        self.icon.set_pixel_size(46)
-        return False
-
-    def hover_out(self, *_args):
-        self.icon.set_pixel_size(36)
-        return False
-
-    def launch(self, *_args):
-        try:
-            info = Gio.DesktopAppInfo.new_from_filename(str(self.path)) if self.path else None
-            if info and info.launch([], None):
-                return
-        except Exception:
-            pass
-        try:
-            subprocess.Popen(['gtk-launch', Path(self.basename).stem])
-            return
-        except Exception:
-            pass
-        try:
-            Gio.AppInfo.launch_default_for_uri(f'appstream://{self.basename}', None)
-        except Exception:
-            pass
-
-class MingDock(Gtk.Window):
-    def __init__(self):
-        super().__init__(title='Ming Dock')
-        self.set_name('ming-dock-window')
-        self.set_decorated(False)
-        self.set_resizable(False)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        self.stick()
-        self.set_keep_above(True)
-        provider = Gtk.CssProvider()
-        try:
-            provider.load_from_data(CSS)
-            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 710)
-        except GLib.Error:
-            pass
-
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        box.get_style_context().add_class('dock')
-        for basename, icon, fallback in APPS:
-            box.pack_start(DockButton(basename, icon, fallback), False, False, 0)
-        self.add(box)
-        self.connect('size-allocate', lambda *_args: self.place())
-        self.get_screen().connect('size-changed', lambda *_args: self.place())
-        GLib.timeout_add_seconds(2, self.place)
-        self.show_all()
-        self.place()
-
-    def place(self):
-        screen = self.get_screen()
-        width = self.get_allocated_width() or 560
-        height = self.get_allocated_height() or 70
-        x = max(12, int((screen.get_width() - width) / 2))
-        y = max(12, screen.get_height() - height - 18)
-        self.move(x, y)
-        return True
-
-if __name__ == '__main__':
-    MingDock()
-    Gtk.main()
-MINGDOCK
-    chmod 0600 /tmp/ming-dock-legacy
-    rm -f /tmp/ming-dock-legacy
-
-    # Keep the historical filename for package upgrades, but make the shipped
-    # entry inert.  Plank is the single Dock owner; this prevents an old
-    # environment variable or session snapshot from reviving a second GTK
-    # launcher after installation.
-    cat > /usr/local/bin/ming-dock << 'MINGDOCKRETIRED'
-#!/usr/bin/env bash
-exit 0
-MINGDOCKRETIRED
-    chmod 0755 /usr/local/bin/ming-dock
-
-cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
-#!/usr/bin/env bash
-set -u
-
-# The custom GTK Dock was retired in favor of Plank.  This compatibility
-# filename is deliberately inert even when an upgraded user's environment
-# still contains the old opt-in variable; there must be one launcher surface.
-exit 0
-
-ming_log_dir() {
-    local primary="${HOME}/.cache/ming-os"
-    if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
-        printf '%s\n' "${primary}"
-        return 0
-    fi
-    local fallback="${XDG_RUNTIME_DIR:-/tmp}/ming-os-$(id -u)"
-    mkdir -p "${fallback}" 2>/dev/null || fallback="/tmp"
-    printf '%s\n' "${fallback}"
-}
-
-ming_log() {
-    local file="$1"
-    shift
-    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
-}
-
-x11_call() {
-    command -v timeout >/dev/null 2>&1 || return 127
-    timeout --foreground 2s "$@"
-}
-
-dock_process_running() {
-    pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1
-}
-
-dock_window_visible() {
-    dock_process_running || return 1
-    command -v wmctrl >/dev/null 2>&1 || return 0
-    local size sw sh
-    size="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
-    sw="${size%x*}"
-    sh="${size#*x}"
-    [[ "${sw}" =~ ^[0-9]+$ && "${sh}" =~ ^[0-9]+$ ]] || { sw=32768; sh=32768; }
-    x11_call wmctrl -lG 2>/dev/null | awk -v sw="${sw}" -v sh="${sh}" '
-        /Ming Dock$/ && $3 < sw && $4 < sh && $5 > 0 && $6 > 0 { found=1 }
-        END { exit !found }
-    '
-}
-
-stop_ming_dock() {
-    pkill -TERM -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 || true
-}
-
-start_plank_fallback() {
-    command -v plank >/dev/null 2>&1 || return 1
-    stop_ming_dock
-    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
-    local log_file
-    log_file="$(ming_log_dir)/ming-dock.log"
-    ming_log "${log_file}" "starting single-instance Plank fallback"
-    (nohup plank >>"${log_file}" 2>&1 &) || true
-}
-
-start_ming_dock() {
-    command -v ming-dock >/dev/null 2>&1 || return 1
-    dock_window_visible && return 0
-    if dock_process_running; then
-        stop_ming_dock
-        sleep 1
-    fi
-    export DISPLAY="${DISPLAY:-:0}"
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
-    local log_file
-    log_file="$(ming_log_dir)/ming-dock.log"
-    ming_log "${log_file}" "starting ming-dock DISPLAY=${DISPLAY}"
-    (nohup ming-dock >>"${log_file}" 2>&1 &) || (nohup ming-dock >/dev/null 2>&1 &)
-    for _ready_try in $(seq 1 10); do
-        dock_window_visible && return 0
-        sleep 0.25
-    done
-    ming_log "${log_file}" "ming-dock did not publish a visible in-bounds window"
-    stop_ming_dock
-    return 1
-}
-
-case "${1:-start}" in
-    --session)
-        lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-dock-watchdog.lock"
-        if ! mkdir "${lock_dir}" 2>/dev/null; then
-            exit 0
-        fi
-        trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
-        sleep 3
-        failures=0
-        while true; do
-            if start_ming_dock; then
-                failures=0
-            else
-                failures=$((failures + 1))
-                if [[ "${failures}" -ge 3 ]]; then
-                    start_plank_fallback || true
-                    while true; do
-                        pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || start_plank_fallback || true
-                        sleep 5
-                    done
-                fi
-            fi
-            sleep 5
-        done
-        ;;
-    *)
-        start_ming_dock
-        ;;
-esac
-MINGDOCKWATCH
-    chmod 0755 /usr/local/bin/ming-dock-watchdog
 
 cat > /usr/local/bin/ming-window-control << 'MINGWINDOWCONTROL'
 #!/usr/bin/env bash
@@ -4146,6 +3693,468 @@ case "${1:-start}" in
 esac
 PHONEDESKWATCH
     chmod 0755 /usr/local/bin/ming-phone-desktop-watchdog
+}
+
+configure_plank_dock() {
+    local plank_dir="/home/${MING_USER}/.config/plank/dock1"
+    mkdir -p "${plank_dir}/launchers"
+
+    # Install the retired filename as an inert shim before touching any
+    # legacy compatibility content.  If a module run is interrupted, a
+    # reused chroot must still be unable to launch the old GTK Dock.
+    cat > /usr/local/bin/ming-dock << 'MINGDOCKPRESEED'
+#!/usr/bin/env bash
+exit 0
+MINGDOCKPRESEED
+    chmod 0755 /usr/local/bin/ming-dock
+
+    # Dock 行为与外观：底部居中、轻放大、Calm Glass Rail 玻璃底座；避免老机动画压力过大。
+    cat > "${plank_dir}/settings" << 'PLANKSETTINGS'
+[PlankDockPreferences]
+# MingDockProfile=2641-calm-glass-rail
+#当前 Dock 上的启动器（顺序即显示顺序）
+DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem;;ming-firefox.dockitem;;ming-store.dockitem;;xiahai-xiaoming.dockitem;;ming-terminal.dockitem
+#停靠位置: 0=左 1=右 2=上 3=下
+Position=3
+#对齐: 3=居中
+Alignment=3
+#居中偏移：0=真正水平居中；底部留白由主题 padding 和工作区预留负责
+# Legacy RC3 Offset=12 is intentionally not active; zero keeps Alignment=3 centered.
+Offset=0
+#图标大小（ming-scale 会按分辨率覆盖）
+IconSize=40
+#悬停放大开关
+ZoomEnabled=true
+#放大倍率：只提供轻微反馈，避免图标跳动和低端显卡压力
+ZoomPercent=136
+#隐藏模式: 0=不隐藏 1=智能隐藏 2=自动隐藏 3=躲避窗口 4=窗口铺满时隐藏
+HideMode=1
+#自动隐藏延迟
+UnhideDelay=0
+HideDelay=0
+#主题（见下方 Ming.theme）
+Theme=Ming
+#显示在所有工作区
+Monitor=
+#锁定图标，防止误拖拽
+LockItems=false
+#压力解锁
+PressureReveal=false
+#显示正在运行程序的指示点
+ShowDockItem=true
+ItemsAlignment=3
+#淡入淡出
+FadeOpacity=1.0
+PLANKSETTINGS
+
+    if [[ "${MING_SKIP_XIAHAI:-0}" == "1" ]]; then
+        sed -i 's/;;xiahai-xiaoming\.dockitem//g' "${plank_dir}/settings"
+    fi
+
+    # Late modules install some launchers after this module. Keep generation in
+    # one idempotent helper and let 07_finalize run it again before seeding skel.
+    cat > /usr/local/sbin/ming-refresh-dock-launchers << 'MINGREFRESHDOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+
+target_user="${1:-${SUDO_USER:-$(id -un)}}"
+user_home="$(getent passwd "${target_user}" | awk -F: 'NR == 1 { print $6 }')"
+if [[ -z "${user_home}" || ! -d "${user_home}" ]]; then
+    echo "ERROR: cannot resolve Dock home for ${target_user}" >&2
+    exit 1
+fi
+
+plank_dir="${user_home}/.config/plank/dock1"
+mkdir -p "${plank_dir}/launchers"
+missing=0
+skip_xiahai=false
+[[ -f /etc/ming-os/skip-xiahai ]] && skip_xiahai=true
+
+_plank_launcher() {
+        local name="$1" target="$2"
+        local target_path="/usr/share/applications/${target}"
+        local proxy_path="/usr/share/applications/ming-dock-${name}.desktop"
+        local display_name icon wm_class exec_line
+        case "${name}" in
+            ming-firefox)
+                [[ -f "${target_path}" ]] || target_path=/usr/share/applications/firefox-esr.desktop
+                ;;
+        esac
+        [[ -f "${target_path}" ]] || {
+            echo "WARN: Dock target missing: ${target}" >&2
+            return 1
+        }
+        display_name="$(awk -F= '/^Name\[zh_CN\]=/{print substr($0,index($0,"=")+1); exit} /^Name=/{fallback=substr($0,index($0,"=")+1)} END{if (!found && fallback) print fallback}' "${target_path}" | head -n1)"
+        icon="$(awk -F= '/^Icon=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
+        wm_class="$(awk -F= '/^StartupWMClass=/{print substr($0,index($0,"=")+1); exit}' "${target_path}" | head -n1)"
+        case "${name}" in
+            ming-settings) wm_class="${wm_class:-uno.scallion.MingSettings}" ;;
+            ming-files) wm_class="${wm_class:-org.mingos.Files}" ;;
+            ming-firefox) wm_class="${wm_class:-Firefox-esr}" ;;
+            ming-terminal) wm_class="${wm_class:-Xfce4-terminal}" ;;
+        esac
+        exec_line="/usr/local/bin/ming-launch --desktop-file ${target_path} --source dock"
+        cat > "${proxy_path}" << DOCKPROXY
+[Desktop Entry]
+Type=Application
+Name=${display_name:-${name}}
+Exec=${exec_line}
+Icon=${icon:-application-x-executable}
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=${wm_class:-${name}}
+DOCKPROXY
+        cat > "${plank_dir}/launchers/${name}.dockitem" << DOCKITEM
+[PlankDockItemPreferences]
+Launcher=file://${proxy_path}
+DOCKITEM
+}
+
+cat > "${plank_dir}/launchers/ming-app-library.dockitem" << 'DRAWERDOCKITEM'
+[PlankDockItemPreferences]
+Launcher=file:///usr/share/applications/ming-app-library.desktop
+DRAWERDOCKITEM
+for launcher in \
+    "ming-firefox:ming-firefox.desktop" \
+    "ming-files:ming-files.desktop" \
+    "ming-store:ming-store.desktop" \
+    "ming-settings:ming-settings.desktop" \
+    "ming-terminal:ming-terminal.desktop"; do
+    _plank_launcher "${launcher%%:*}" "${launcher#*:}" || missing=1
+done
+if ! ${skip_xiahai}; then
+    _plank_launcher "xiahai-xiaoming" "xiahai-xiaoming.desktop" || missing=1
+else
+    rm -f "${plank_dir}/launchers/xiahai-xiaoming.dockitem" \
+          /usr/share/applications/ming-dock-xiahai-xiaoming.desktop
+fi
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    chown -R "${target_user}:$(id -gn "${target_user}")" "${plank_dir}/launchers" 2>/dev/null || true
+fi
+exit "${missing}"
+MINGREFRESHDOCK
+    chmod 0755 /usr/local/sbin/ming-refresh-dock-launchers
+    /usr/local/sbin/ming-refresh-dock-launchers "${MING_USER}" || \
+        echo "[03_desktop][WARN] Late Dock launchers will be completed by 07_finalize"
+
+    # Calm Glass Rail: semi-transparent Ming Mint rail with restrained hover feedback.
+    local theme_dir
+    for theme_dir in /usr/share/plank/themes/Ming /usr/share/plank/themes/Default; do
+    mkdir -p "${theme_dir}"
+    cat > "${theme_dir}/dock.theme" << 'PLANKTHEME'
+[PlankTheme]
+TopRoundness=14
+BottomRoundness=14
+LineWidth=1
+OuterStrokeColor=47;;138;;125;;80
+FillStartColor=255;;255;;255;;228
+FillEndColor=231;;245;;241;;240
+InnerStrokeColor=255;;255;;255;;170
+
+[PlankDockTheme]
+HorizPadding=14
+TopPadding=8
+BottomPadding=8
+ItemPadding=4
+IndicatorSize=4
+IconShadowSize=0
+UrgentBounceHeight=1.10
+LaunchBounceHeight=0.12
+FadeOpacity=1.0
+ClickTime=160
+UrgentBounceTime=420
+LaunchBounceTime=130
+ActiveTime=160
+SlideTime=160
+FadeTime=120
+HideTime=120
+GlowSize=0
+GlowTime=10000
+GlowPulseTime=1600
+UrgentHueShift=86
+ItemMoveTime=130
+CascadeHide=false
+PLANKTHEME
+    done
+
+    cat > /tmp/ming-dock-legacy << 'MINGDOCK'
+#!/usr/bin/env python3
+import configparser
+import subprocess
+from pathlib import Path
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gio, GLib, Gtk
+
+APPS = [
+    ('ming-settings.desktop', 'ming-settings', 'Ming 设置'),
+    ('ming-app-library.desktop', 'ming-app-library', '应用库'),
+    ('ming-files.desktop', 'ming-files', '文件'),
+    ('ming-firefox.desktop', 'firefox-esr', 'Firefox ESR'),
+    ('ming-store.desktop', 'ming-store', 'Ming 应用商店'),
+    ('xiahai-xiaoming.desktop', 'xiahai-xiaoming', '小明 AI 助手'),
+    ('ming-terminal.desktop', 'ming-terminal', '终端'),
+]
+
+CSS = b'''
+window#ming-dock-window {
+  background: transparent;
+}
+.dock {
+  border-radius: 16px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 42px rgba(21, 68, 56, 0.18), inset 0 1px 0 rgba(255,255,255,0.82);
+}
+.dock-button {
+  border-radius: 12px;
+  padding: 5px;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid transparent;
+}
+.dock-button:hover {
+  background: rgba(47, 138, 125, 0.14);
+  border-color: rgba(47, 138, 125, 0.22);
+}
+'''
+
+def desktop_path(basename):
+    for base in (Path('/usr/share/applications'), Path.home() / '.local/share/applications', Path.home() / 'Desktop'):
+        path = base / basename
+        if path.exists():
+            return path
+    return None
+
+def app_name(path, fallback):
+    if not path:
+        return fallback
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        parser.read(path, encoding='utf-8')
+        entry = parser['Desktop Entry']
+        return entry.get('Name[zh_CN]') or entry.get('Name') or fallback
+    except Exception:
+        return fallback
+
+class DockButton(Gtk.Button):
+    def __init__(self, basename, icon, fallback):
+        super().__init__()
+        self.basename = basename
+        self.path = desktop_path(basename)
+        self.icon = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
+        self.icon.set_pixel_size(36)
+        self.set_image(self.icon)
+        self.set_always_show_image(True)
+        self.set_relief(Gtk.ReliefStyle.NONE)
+        self.set_tooltip_text(app_name(self.path, fallback))
+        self.get_style_context().add_class('dock-button')
+        self.connect('clicked', self.launch)
+        self.connect('enter-notify-event', self.hover_in)
+        self.connect('leave-notify-event', self.hover_out)
+
+    def hover_in(self, *_args):
+        self.icon.set_pixel_size(46)
+        return False
+
+    def hover_out(self, *_args):
+        self.icon.set_pixel_size(36)
+        return False
+
+    def launch(self, *_args):
+        try:
+            info = Gio.DesktopAppInfo.new_from_filename(str(self.path)) if self.path else None
+            if info and info.launch([], None):
+                return
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(['gtk-launch', Path(self.basename).stem])
+            return
+        except Exception:
+            pass
+        try:
+            Gio.AppInfo.launch_default_for_uri(f'appstream://{self.basename}', None)
+        except Exception:
+            pass
+
+class MingDock(Gtk.Window):
+    def __init__(self):
+        super().__init__(title='Ming Dock')
+        self.set_name('ming-dock-window')
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.stick()
+        self.set_keep_above(True)
+        provider = Gtk.CssProvider()
+        try:
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 710)
+        except GLib.Error:
+            pass
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.get_style_context().add_class('dock')
+        for basename, icon, fallback in APPS:
+            box.pack_start(DockButton(basename, icon, fallback), False, False, 0)
+        self.add(box)
+        self.connect('size-allocate', lambda *_args: self.place())
+        self.get_screen().connect('size-changed', lambda *_args: self.place())
+        GLib.timeout_add_seconds(2, self.place)
+        self.show_all()
+        self.place()
+
+    def place(self):
+        screen = self.get_screen()
+        width = self.get_allocated_width() or 560
+        height = self.get_allocated_height() or 70
+        x = max(12, int((screen.get_width() - width) / 2))
+        y = max(12, screen.get_height() - height - 18)
+        self.move(x, y)
+        return True
+
+if __name__ == '__main__':
+    MingDock()
+    Gtk.main()
+MINGDOCK
+    chmod 0600 /tmp/ming-dock-legacy
+    rm -f /tmp/ming-dock-legacy
+
+    # Keep the historical filename for package upgrades, but make the shipped
+    # entry inert.  Plank is the single Dock owner; this prevents an old
+    # environment variable or session snapshot from reviving a second GTK
+    # launcher after installation.
+    cat > /usr/local/bin/ming-dock << 'MINGDOCKRETIRED'
+#!/usr/bin/env bash
+exit 0
+MINGDOCKRETIRED
+    chmod 0755 /usr/local/bin/ming-dock
+
+cat > /usr/local/bin/ming-dock-watchdog << 'MINGDOCKWATCH'
+#!/usr/bin/env bash
+set -u
+
+# The custom GTK Dock was retired in favor of Plank.  This compatibility
+# filename is deliberately inert even when an upgraded user's environment
+# still contains the old opt-in variable; there must be one launcher surface.
+exit 0
+
+ming_log_dir() {
+    local primary="${HOME}/.cache/ming-os"
+    if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
+        printf '%s\n' "${primary}"
+        return 0
+    fi
+    local fallback="${XDG_RUNTIME_DIR:-/tmp}/ming-os-$(id -u)"
+    mkdir -p "${fallback}" 2>/dev/null || fallback="/tmp"
+    printf '%s\n' "${fallback}"
+}
+
+ming_log() {
+    local file="$1"
+    shift
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
+}
+
+x11_call() {
+    command -v timeout >/dev/null 2>&1 || return 127
+    timeout --foreground 2s "$@"
+}
+
+dock_process_running() {
+    pgrep -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1
+}
+
+dock_window_visible() {
+    dock_process_running || return 1
+    command -v wmctrl >/dev/null 2>&1 || return 0
+    local size sw sh
+    size="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
+    sw="${size%x*}"
+    sh="${size#*x}"
+    [[ "${sw}" =~ ^[0-9]+$ && "${sh}" =~ ^[0-9]+$ ]] || { sw=32768; sh=32768; }
+    x11_call wmctrl -lG 2>/dev/null | awk -v sw="${sw}" -v sh="${sh}" '
+        /Ming Dock$/ && $3 < sw && $4 < sh && $5 > 0 && $6 > 0 { found=1 }
+        END { exit !found }
+    '
+}
+
+stop_ming_dock() {
+    pkill -TERM -u "$(id -u)" -f '(^|[[:space:]])python3([0-9.]*)?[[:space:]]+/usr/local/bin/ming-dock([[:space:]]|$)|(^|[[:space:]])/usr/local/bin/ming-dock([[:space:]]|$)' >/dev/null 2>&1 || true
+}
+
+start_plank_fallback() {
+    command -v plank >/dev/null 2>&1 || return 1
+    stop_ming_dock
+    pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 && return 0
+    local log_file
+    log_file="$(ming_log_dir)/ming-dock.log"
+    ming_log "${log_file}" "starting single-instance Plank fallback"
+    (nohup plank >>"${log_file}" 2>&1 &) || true
+}
+
+start_ming_dock() {
+    command -v ming-dock >/dev/null 2>&1 || return 1
+    dock_window_visible && return 0
+    if dock_process_running; then
+        stop_ming_dock
+        sleep 1
+    fi
+    export DISPLAY="${DISPLAY:-:0}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+    local log_file
+    log_file="$(ming_log_dir)/ming-dock.log"
+    ming_log "${log_file}" "starting ming-dock DISPLAY=${DISPLAY}"
+    (nohup ming-dock >>"${log_file}" 2>&1 &) || (nohup ming-dock >/dev/null 2>&1 &)
+    for _ready_try in $(seq 1 10); do
+        dock_window_visible && return 0
+        sleep 0.25
+    done
+    ming_log "${log_file}" "ming-dock did not publish a visible in-bounds window"
+    stop_ming_dock
+    return 1
+}
+
+case "${1:-start}" in
+    --session)
+        lock_dir="${XDG_RUNTIME_DIR:-/tmp}/ming-dock-watchdog.lock"
+        if ! mkdir "${lock_dir}" 2>/dev/null; then
+            exit 0
+        fi
+        trap 'rmdir "${lock_dir}" 2>/dev/null || true' EXIT
+        sleep 3
+        failures=0
+        while true; do
+            if start_ming_dock; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                if [[ "${failures}" -ge 3 ]]; then
+                    start_plank_fallback || true
+                    while true; do
+                        pgrep -u "$(id -u)" -x plank >/dev/null 2>&1 || start_plank_fallback || true
+                        sleep 5
+                    done
+                fi
+            fi
+            sleep 5
+        done
+        ;;
+    *)
+        start_ming_dock
+        ;;
+esac
+MINGDOCKWATCH
+    chmod 0755 /usr/local/bin/ming-dock-watchdog
 
     cat > /usr/local/bin/ming-plank-watchdog << 'PLANKWATCH'
 #!/usr/bin/env bash
@@ -10469,6 +10478,7 @@ main() {
     ensure_wps_office
     configure_xfce_settings      # 先写桌面/xfwm/xsettings（含壁纸 backdrop）
     configure_xfce_panel         # 顶部 macOS 菜单栏
+    install_ming_window_runtime  # Window control, healthcheck, watchdogs
     configure_ming_taskbar       # GTK3/X11 底部磨砂菜单栏
     retire_legacy_desktop_surfaces
     configure_ming_mint_desktop_icons
