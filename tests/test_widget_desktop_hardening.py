@@ -10,7 +10,7 @@ SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 
 
-class WidgetGeometryContracts(unittest.TestCase):
+class WinKeyRoutingContracts(unittest.TestCase):
     def test_win_key_dedup_window_covers_shortcut_and_signal_delivery(self):
         # The retired widget's dedup window is gone with its implementation; the
         # surviving contract is only that the Win key routes into a no-op entry
