@@ -89,12 +89,18 @@ run_optional_step() {
 # ======================== 桌面环境 ========================
 
 install_xfce_desktop() {
+    # xfwm4 is the XFCE session window manager: the session failsafe
+    # (07_finalize.sh Client0_Command) and the installer session both exec it.
+    # It is a leaf package, so nothing else pulls it in — without this line the
+    # image boots with no window manager at all (no decorations, focus or EWMH,
+    # which also breaks the window-control/taskbar visibility probes).
     apt install -y --no-install-recommends \
         xserver-xorg \
         xserver-xorg-video-amdgpu \
         xserver-xorg-video-ati \
         xserver-xorg-video-nouveau \
         xserver-xorg-input-libinput \
+        xfwm4 \
         xfdesktop4 \
         xfce4-panel \
         xfce4-session \

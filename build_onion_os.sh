@@ -3923,6 +3923,10 @@ for marker in ['"${target}/usr/lib/ming-os/sfdisk.real"', '"${target}/usr/sbin/s
 installer_session = require_file("usr/local/bin/ming-installer-session", "xfwm4 --replace")
 if "wmctrl -x -a calamares.calamares" not in installer_session:
     errors.append("installer session must focus Calamares through xfwm4/wmctrl")
+# Matching the launcher text is not evidence that the binary exists: the
+# 2026-10-04 VM run booted an ISO whose session exec'd xfwm4 while the package
+# was never installed. Check the actual window manager in the target rootfs.
+require_path("usr/bin/xfwm4")
 for font_marker in [
     "usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",

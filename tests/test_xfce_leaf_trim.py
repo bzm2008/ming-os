@@ -15,11 +15,20 @@ class XfceLeafTrimContractTests(unittest.TestCase):
         )[0]
         for package in ("xfce4-appfinder", "xfce4-whiskermenu-plugin", "xfce4-taskmanager", "mousepad", "ristretto"):
             self.assertNotRegex(install, rf"^\s+{re.escape(package)}\s*\\?$", package)
-        for package in ("xfdesktop4", "xfce4-session", "xfce4-settings", "xfce4-terminal", "thunar", "xfconf"):
+        for package in ("xfwm4", "xfdesktop4", "xfce4-session", "xfce4-settings", "xfce4-terminal", "thunar", "xfconf"):
             self.assertIn(package, install)
         self.assertNotRegex(install, r"^\s+xfce4\s*\\?$", "Xfce meta package can pull trimmed leaves")
         self.assertNotIn("thunar-archive-plugin", install)
         self.assertNotIn("thunar-media-tags-plugin", install)
+
+    def test_window_manager_binary_is_checked_in_the_build_gate(self):
+        """A text match on the session script is not proof the WM exists."""
+        build = (ROOT / "build_onion_os.sh").read_text(encoding="utf-8")
+        self.assertIn('require_path("usr/bin/xfwm4")', build)
+        self.assertIn(
+            'require_file("usr/local/bin/ming-installer-session", "xfwm4 --replace")',
+            build,
+        )
 
     def test_trimmed_stock_entries_are_hidden_without_removing_install_capability(self):
         self.assertIn("hide_trimmed_xfce_entries()", DESKTOP)
