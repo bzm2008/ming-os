@@ -17,6 +17,22 @@ import tempfile
 import threading
 
 
+def _load_ui_tokens():
+    path = pathlib.Path(__file__).with_name("ming-ui-tokens.py")
+    try:
+        spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return dict(module.TOKENS)
+    except (OSError, ImportError, AttributeError):
+        return {"canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_subtle": "#EEF5F1",
+                "accent": "#2F8A7D", "text": "#1B2320", "muted": "#5B6B64",
+                "border": "#D7E4DE", "focus": "#3AAE99"}
+
+
+MING_UI_TOKENS = _load_ui_tokens()
+
+
 ANIMATION_DURATION_MS = 160
 DRAWER_REVEAL_OFFSET = 32
 DRAWER_HEIGHT_RATIO = 0.72
@@ -633,32 +649,44 @@ class DrawerController:
         window.set_type_hint(self.Gdk.WindowTypeHint.DIALOG)
         window.set_accept_focus(True)
         window.set_focus_on_map(True)
+        window.set_size_request(360, 260)
+        if os.environ.get("MING_LOW_RESOURCE") == "1":
+            window.get_style_context().add_class("ming-low-resource")
+        if os.environ.get("MING_REDUCED_MOTION") == "1":
+            window.get_style_context().add_class("ming-reduced-motion")
         provider = Gtk.CssProvider()
-        provider.load_from_data(b"""
+        css = """
         window#ming-app-drawer {
-          background: #F8FBF9;
+          background: @@canvas@@;
           font-family: "Noto Sans CJK SC", sans-serif;
           font-weight: 400;
         }
         .drawer-root {
-          background: #F8FBF9;
-          border-top: 1px solid rgba(47, 138, 125, 0.16);
+          background: @@surface@@;
+          border-top: 1px solid alpha(@@accent@@, 0.16);
           padding: 16px;
         }
         .drawer-header { padding-bottom: 4px; }
-        .drawer-close { border-radius: 9px; padding: 6px 12px; }
-        .drawer-category { border-radius: 8px; padding: 8px 12px; }
-        .drawer-category:checked { background: #2F8A7D; color: #ffffff; }
+        .drawer-close { border-radius: 9px; padding: 6px 12px; min-height: 32px; }
+        .drawer-category { border-radius: 8px; padding: 8px 12px; min-height: 32px; }
+        .drawer-category:checked { background: @@accent@@; color: #ffffff; }
         .drawer-tile {
           border-radius: 10px;
           padding: 8px;
-           background: #F8FBF9;
+           background: @@surface@@;
           border: 1px solid transparent;
         }
-        .drawer-tile:hover { background: rgba(47, 138, 125, 0.09); border-color: rgba(47, 138, 125, 0.13); }
-        .drawer-label { color: #1D2924; font-weight: 500; font-size: 11px; }
+        .drawer-tile:hover, .drawer-tile:focus { background: alpha(@@accent@@, 0.09); border-color: alpha(@@accent@@, 0.20); }
+        .drawer-label { color: @@text@@; font-weight: 500; font-size: 11px; }
         .drawer-diagnostic { color: #A33A32; font-size: 10px; font-weight: 500; }
-        """)
+        .ming-reduced-motion * { transition-duration: 0ms; }
+        .ming-low-resource { box-shadow: none; }
+        @media (max-width: 760px) { .drawer-root { padding: 10px; } .drawer-tile { padding: 6px; } }
+        """.replace("@@canvas@@", MING_UI_TOKENS["canvas"]).replace(
+            "@@surface@@", MING_UI_TOKENS["surface"]).replace(
+            "@@accent@@", MING_UI_TOKENS["accent"]).replace(
+            "@@text@@", MING_UI_TOKENS["text"]).encode("utf-8")
+        provider.load_from_data(css)
         Gtk.StyleContext.add_provider_for_screen(
             self.Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )

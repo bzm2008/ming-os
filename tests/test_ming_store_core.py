@@ -8,6 +8,27 @@ import unittest
 from unittest import mock
 
 
+# Temp-root requirement: the store core validates the *entire* ancestor chain of
+# its journal/state paths and rejects any symlinked or group/other-writable
+# parent (ming-store-core.py). macOS' per-user TMPDIR is clean once resolved, but
+# a world-writable /tmp (mode 1777) is rejected by contract, so on Linux run this
+# module with a private temp root (mode 0700, no symlink), e.g.
+#   TMPDIR=/root/ming-private-tmp python3 -m unittest discover -s tests -t tests
+# otherwise the two jsonl-journal cases fail with "日志父目录权限过宽".
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The store core resolves state and journal paths and refuses a parent that is
+    itself a symlink, so on a host where the system temp root sits behind a
+    symlink (macOS: /var -> /private/var) a raw temp path is rejected as
+    untrusted even though the test built it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "assets" / "ming-store-core.py"
 UI_PATH = ROOT / "assets" / "ming-store.py"
@@ -75,7 +96,7 @@ class MingStoreCatalogTests(unittest.TestCase):
     def test_vendor_entries_remain_actionable_for_user_provided_packages(self):
         provider = self.core.VendorOfficialProvider(catalog_root=CATALOG_ROOT)
         entries = provider.refresh_catalog()
-        self.assertEqual({"wechat", "wps", "qq", "dingtalk"}, {item["app_id"] for item in entries})
+        self.assertTrue({"wechat", "wps", "qq", "dingtalk", "spark-store"} <= {item["app_id"] for item in entries})
         for item in entries:
             self.assertTrue(item["enabled"])
             self.assertEqual("user-provided", item["installation_mode"])
@@ -233,7 +254,7 @@ class MingStoreTransactionTests(unittest.TestCase):
         self.assertEqual("refresh_warning", machine.state)
 
     def test_jsonl_journal_redacts_secrets_and_machine_identifiers(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             path = pathlib.Path(directory) / "store.jsonl"
             journal = self.core.TransactionJournal(path)
             journal.write({
@@ -252,7 +273,7 @@ class MingStoreTransactionTests(unittest.TestCase):
         self.assertIn("[REDACTED]", text)
 
     def test_jsonl_journal_redacts_values_under_sensitive_keys(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             path = pathlib.Path(directory) / "store.jsonl"
             self.core.TransactionJournal(path).write({
                 "password": "hunter2",
@@ -266,7 +287,7 @@ class MingStoreTransactionTests(unittest.TestCase):
         self.assertEqual("[REDACTED]", json.loads(text)["password"])
 
     def test_jsonl_journal_rejects_a_symlink_log_path(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             outside = root / "outside.log"
             outside.write_text("keep\n", encoding="utf-8")
@@ -286,7 +307,7 @@ class MingStoreTransactionTests(unittest.TestCase):
         self.assertIn("stat.S_ISREG", source)
 
     def test_jsonl_journal_rejects_a_symlinked_parent_before_creation(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             outside = root / "outside"
             outside.mkdir()
@@ -345,7 +366,7 @@ class MingStoreDownloadTests(unittest.TestCase):
                 raise OSError("temporary network failure")
             return self.Response(payload)
 
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             destination = pathlib.Path(directory) / "app.deb"
             result = self.core.SecureDownloader(opener=opener, sleeper=lambda _delay: None).download(
                 "https://download.example.invalid/app.deb",
@@ -364,7 +385,7 @@ class MingStoreDownloadTests(unittest.TestCase):
             seen_range.append(request.get_header("Range"))
             return self.Response(payload[4:], status=206)
 
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             destination = pathlib.Path(directory) / "app.deb"
             destination.with_suffix(".deb.part").write_bytes(payload[:4])
             self.core.SecureDownloader(opener=opener).download(
@@ -379,7 +400,7 @@ class MingStoreDownloadTests(unittest.TestCase):
         downloader = self.core.SecureDownloader(
             opener=lambda request, timeout=30: self.Response(b"wrong")
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             destination = pathlib.Path(directory) / "app.deb"
             with self.assertRaises(self.core.DownloadRejected):
                 downloader.download(
@@ -402,7 +423,7 @@ class MingStoreDownloadTests(unittest.TestCase):
                 payload, final_url="http://mirror.example.invalid/app.deb"
             )
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             with self.assertRaises(self.core.DownloadRejected):
                 downloader.download(
                     "https://download.example.invalid/app.deb",
@@ -430,7 +451,7 @@ class MingStoreDownloadTests(unittest.TestCase):
             ),
             allowed_hosts={"download.example.invalid"},
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             with self.assertRaises(self.core.DownloadRejected):
                 downloader.download(
                     "https://download.example.invalid/app.deb",
@@ -443,7 +464,7 @@ class MingStoreDownloadTests(unittest.TestCase):
         downloader = self.core.SecureDownloader(
             opener=lambda request, timeout=30: self.Response(payload)
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             destination = root / "app.deb"
             outside = root / "outside"
@@ -466,7 +487,7 @@ class MingStoreDownloadTests(unittest.TestCase):
         downloader = self.core.SecureDownloader(
             opener=lambda request, timeout=30: self.Response(payload)
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             outside = root / "outside"
             outside.mkdir()
@@ -490,7 +511,7 @@ class MingStoreDownloadTests(unittest.TestCase):
             opener=lambda request, timeout=30: self.Response(payload),
             max_bytes=5,
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             destination = pathlib.Path(directory) / "app.deb"
             with self.assertRaises(self.core.DownloadRejected):
                 downloader.download(
@@ -590,7 +611,7 @@ class MingStoreUiLogicTests(unittest.TestCase):
         self.assertEqual("status_unavailable", inventory[1]["_installed_state"]["state"])
 
     def test_controller_reads_only_failed_journal_records(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             path = pathlib.Path(directory) / "store.jsonl"
             path.write_text(
                 '{"state":"succeeded","app_id":"vlc"}\n'
@@ -604,7 +625,7 @@ class MingStoreUiLogicTests(unittest.TestCase):
 
     def test_local_deb_is_inspected_but_never_executed(self):
         calls = []
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             source = pathlib.Path(directory) / "demo.deb"
             source.write_bytes(b"local deb")
             controller = self.ui.StoreController(
@@ -623,7 +644,7 @@ class MingStoreUiLogicTests(unittest.TestCase):
         controller = self.ui.StoreController(catalog=object(), deb_inspector=lambda path: {})
         with self.assertRaises(ValueError):
             controller.local_deb_detail("https://example.invalid/app.deb")
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             text = root / "app.txt"
             text.write_text("x", encoding="utf-8")
@@ -788,7 +809,7 @@ class MingStoreUiLogicTests(unittest.TestCase):
         self.assertNotIn("private", result["message"])
 
     def test_log_reader_limits_records_and_uses_redaction(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             path = pathlib.Path(directory) / "store.jsonl"
             path.write_text(
                 "".join(
@@ -818,7 +839,7 @@ class MingStoreUiLogicTests(unittest.TestCase):
             command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing helper")),
         )
         controller.live_mode = lambda: False
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             controller.create_transaction = lambda *args, **kwargs: {
                 "request_id": "a" * 32,
             }

@@ -8,35 +8,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PHONE = ROOT / "assets" / "ming-phone-desktop.py"
 
 
-class StatusWidgetRegressionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.source = PHONE.read_text(encoding="utf-8")
-        cls.status = cls.source[
-            cls.source.index("class StatusWidget"):
-            cls.source.index("class WallpaperCanvas")
-        ]
-
-    def test_expanded_panel_has_one_header_and_never_reuses_compact_header(self):
-        """The popup must not render a second clock/date/collapse row."""
-        self.assertIn("expanded_header = Gtk.Box", self.status)
-        self.assertIn("expanded.pack_start(expanded_header", self.status)
-        self.assertNotIn("expanded.pack_start(header", self.status)
-
-    def test_compact_capsule_has_a_fixed_nonexpanding_allocation(self):
-        self.assertIn("self.compact_button.set_hexpand(False)", self.status)
-        self.assertIn("self.compact_button.set_vexpand(False)", self.status)
-        self.assertIn("self.compact_button.set_size_request", self.status)
-
-    def test_popup_position_is_reapplied_after_realize_to_prevent_drift(self):
-        self.assertIn(
-            'self.expanded_window.connect("realize", self._on_expanded_window_realize)',
-            self.status,
-        )
-        self.assertIn("def _on_expanded_window_realize", self.status)
-        self.assertIn("GLib.idle_add(self.position_expanded_window)", self.status)
-
-
 class DesktopContextMenuRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

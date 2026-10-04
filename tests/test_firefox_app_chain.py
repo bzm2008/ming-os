@@ -4,6 +4,19 @@ import tempfile
 import unittest
 
 
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The icon resolver resolves absolute candidates before the theme fallback, so
+    on a host where the temp root sits behind a symlink (macOS: /var ->
+    /private/var) an unresolved temp path never matches the resolved candidate.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPS = (ROOT / "modules" / "02_apps.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
@@ -36,7 +49,7 @@ class FirefoxDefaultContracts(unittest.TestCase):
 class AppImageInstallerContracts(unittest.TestCase):
     def test_user_appimage_install_creates_a_user_owned_desktop_launcher(self):
         installer = load_module("ming_appimage_installer", APPIMAGE_PATH)
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "Example.AppImage"
             # A minimal x86_64 type-2 AppImage header is enough for validation;
@@ -68,7 +81,7 @@ class AppImageInstallerContracts(unittest.TestCase):
 
     def test_appimage_installer_rejects_an_elf_without_the_appimage_magic(self):
         installer = load_module("ming_appimage_installer_magic", APPIMAGE_PATH)
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "NotAnAppImage.AppImage"
             source.write_bytes(
@@ -84,7 +97,7 @@ class AppImageInstallerContracts(unittest.TestCase):
 
     def test_appimage_install_reports_extract_and_run_fallback_without_fuse(self):
         installer = load_module("ming_appimage_installer_fallback", APPIMAGE_PATH)
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "Fallback.AppImage"
             source.write_bytes(
@@ -100,7 +113,7 @@ class AppImageInstallerContracts(unittest.TestCase):
 
     def test_appimage_installer_refuses_root_and_wrong_architecture_without_copying(self):
         installer = load_module("ming_appimage_installer_root", APPIMAGE_PATH)
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "Bad.AppImage"
             source.write_bytes(b"not an executable")
@@ -115,7 +128,7 @@ class AppImageInstallerContracts(unittest.TestCase):
 class SharedIconResolverContracts(unittest.TestCase):
     def test_resolves_absolute_and_desktop_relative_icon_paths_before_theme_fallback(self):
         common = load_module("ming_shell_common_icons", COMMON_PATH)
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             desktop_dir = root / "applications"
             desktop_dir.mkdir()

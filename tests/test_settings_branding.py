@@ -38,6 +38,15 @@ class SettingsBrandingContracts(unittest.TestCase):
         self.assertIn("content_box.set_spacing(12)", self.settings)
         self.assertIn("min-height: 40px;", self.settings)
 
+    def test_settings_css_uses_shared_mint_tokens_and_mac_surface_markers(self):
+        self.assertIn('Path(__file__).with_name("ming-ui-tokens.py")', self.settings)
+        self.assertIn("TOKENS = load_ui_tokens()", self.settings)
+        self.assertIn('("__MING_CANVAS__", "canvas")', self.settings)
+        self.assertIn('("__MING_SURFACE__", "surface")', self.settings)
+        self.assertIn('("__MING_FOCUS__", "focus")', self.settings)
+        self.assertIn("padding: 20px 24px 28px 24px;", self.settings)
+        self.assertNotIn("linear-gradient", self.settings)
+
     def test_common_actions_home_simplifies_frequent_paths(self):
         self.assertIn('"home": "常用操作"', self.settings)
         self.assertIn('(\"view-grid-symbolic\", \"常用操作\", self.build_home)', self.settings)

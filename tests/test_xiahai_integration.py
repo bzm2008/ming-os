@@ -15,7 +15,10 @@ class XiahaiIntegrationContracts(unittest.TestCase):
         self.assertIn("MING_SKIP_XIAHAI", BUILD)
         self.assertIn("skip_xiahai", APPS)
         self.assertIn('if [[ "${MING_SKIP_XIAHAI}" != "1" ]]', BUILD)
-        self.assertIn('os.environ.get("MING_SKIP_XIAHAI") != "1" and "xiahai-xiaoming.dockitem"', BUILD)
+        # An internal build may skip the asset, but the release profile must keep
+        # refusing the skip (the old dockitem marker was retired with the dock).
+        self.assertIn('"${MING_SKIP_XIAHAI}" == "1"', BUILD)
+        self.assertIn("release profile requires the verified Xiahai Xiaoming asset", BUILD)
 
     def test_internal_build_reuse_flag_requires_checkpoint_validation(self):
         self.assertIn('MING_REUSE_CHROOT="${MING_REUSE_CHROOT:-0}"', BUILD)

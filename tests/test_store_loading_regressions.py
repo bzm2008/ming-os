@@ -124,20 +124,31 @@ class StoreLoadingRegressionTests(unittest.TestCase):
         )
 
     def test_source_selector_is_scoped_to_the_active_store_section(self):
-        spark = self.ui.source_options_for_section("spark")
-        sources = self.ui.source_options_for_section("sources")
-        self.assertEqual(("all", "spark-public"), spark)
-        self.assertEqual(
-            ("all", "ming-official", "debian-apt", "vendor-official", "wine-official"),
-            sources,
-        )
-        self.assertNotIn("spark-public", sources)
+        providers = self.ui.source_options_for_section("official")
+        self.assertEqual(("all", "ming-official", "debian-apt", "vendor-official"), providers)
+        self.assertNotIn("spark-public", providers)
+        self.assertEqual(("official",), self.ui.STORE_SECTIONS)
 
     def test_source_selector_maps_display_index_without_crossing_sections(self):
-        self.assertEqual("all", self.ui.source_id_for_selection("sources", 0))
-        self.assertEqual("debian-apt", self.ui.source_id_for_selection("sources", 2))
-        self.assertEqual("spark-public", self.ui.source_id_for_selection("spark", 1))
-        self.assertEqual("all", self.ui.source_id_for_selection("sources", 99))
+        self.assertEqual("all", self.ui.source_id_for_selection("official", 0))
+        self.assertEqual("debian-apt", self.ui.source_id_for_selection("official", 2))
+        self.assertEqual("all", self.ui.source_id_for_selection("official", 99))
+
+    def test_official_section_does_not_register_live_spark_repository(self):
+        core = CORE_PATH.read_text(encoding="utf-8")
+        default_registry = core.split("def default_catalog(", 1)[1]
+        self.assertNotIn('"spark-public": SparkPublicProvider(', default_registry)
+
+    def test_store_exposes_official_links_for_spark_and_domestic_apps(self):
+        catalog = ROOT / "assets" / "ming-store-catalog" / "vendor-official.json"
+        import json
+        items = json.loads(catalog.read_text(encoding="utf-8"))["applications"]
+        ids = {item["app_id"] for item in items}
+        self.assertTrue({"spark-store", "wechat", "wps", "qq", "dingtalk"} <= ids)
+        spark = next(item for item in items if item["app_id"] == "spark-store")
+        self.assertEqual("user-provided", spark["installation_mode"])
+        self.assertTrue(spark["vendor_homepage"].startswith("https://"))
+        self.assertFalse(spark.get("download_url"))
 
     def test_store_pages_have_a_bounded_loading_state_and_truthful_timeout(self):
         source = UI_PATH.read_text(encoding="utf-8")

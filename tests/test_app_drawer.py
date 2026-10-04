@@ -98,7 +98,7 @@ class AppDrawerCoreTests(unittest.TestCase):
 
     def test_drawer_uses_lighter_labels_and_a_fixed_spacing_rhythm(self):
         source = DRAWER_PATH.read_text(encoding="utf-8")
-        css = source[source.index("provider.load_from_data(b\"\"\""):source.index("        \"\"\")", source.index("provider.load_from_data(b\"\"\""))]
+        css = source[source.index("        css = \"\"\""):source.index("        provider.load_from_data(css)")]
         self.assertIn("padding: 16px;", css)
         self.assertIn("padding: 8px 12px;", css)
         self.assertIn("font-weight: 500;", css)
@@ -238,6 +238,18 @@ class AppDrawerCoreTests(unittest.TestCase):
         self.assertIn('"--source", "drawer"', launch)
         self.assertNotIn("Popen(list(app.argv)", launch)
         self.assertNotIn("COMMON.send_launch_request", launch)
+
+    def test_drawer_uses_shared_tokens_and_safe_compact_surface(self):
+        source = DRAWER_PATH.read_text(encoding="utf-8")
+        for marker in [
+            "ming-ui-tokens.py",
+            "MING_UI_TOKENS",
+            "set_size_request(360, 260)",
+            "ming-reduced-motion",
+            "ming-low-resource",
+            "@media (max-width: 760px)",
+        ]:
+            self.assertIn(marker, source)
 
 
 class LaunchBrokerCoreTests(unittest.TestCase):

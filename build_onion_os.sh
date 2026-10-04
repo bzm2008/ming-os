@@ -2130,7 +2130,7 @@ validate_required_desktop_runtime() {
     fi
 
     local command package
-    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send zenity xprop nm-online fc-match; do
+    for command in brightnessctl xdotool wmctrl pactl bluetoothctl upower pkexec lxpolkit notify-send zenity xprop nm-online fc-match Xvfb dbus-daemon; do
         if ! chroot_exec /bin/sh -c "command -v '${command}' >/dev/null 2>&1"; then
             log_error "required desktop command is missing: ${command}"
             return 1
@@ -2165,7 +2165,8 @@ validate_required_desktop_runtime() {
     fi
     for package in \
         python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
-        gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill \
+        gpgv \
+        gvfs gvfs-backends brightnessctl xdotool wmctrl rfkill xvfb dbus-x11 \
         pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils libasound2-plugins \
         libspa-0.2-bluetooth pavucontrol dbus-user-session dbus-x11 libpam-systemd bluez upower pkexec polkitd \
         lxpolkit libnotify-bin zenity x11-utils desktop-file-utils fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-mono \
@@ -2583,6 +2584,10 @@ RETIRED_RESIDUE_TEXT_MARKER = re.compile(
 # artifacts establish its trusted provider identity and must remain present.
 RETIRED_RESIDUE_ALLOWLIST = frozenset({
     "usr/share/ming-os/store/catalog/spark-public.json",
+    # This catalog is a display-only, user-provided artifact manifest.  It may
+    # mention spark-store as an app id, but it does not install the retired
+    # Spark/APM runtime or its privileged helpers.
+    "usr/share/ming-os/store/catalog/vendor-official.json",
     "etc/ming-os/store/spark-archive-keyring.gpg",
 })
 RETIRED_RESIDUE_SCAN_ROOTS = (
@@ -2807,7 +2812,7 @@ require_file("usr/local/sbin/ming-ota-ab-stage", "/boot/ming-slots/${target}")
 validate_generated_executable("usr/local/sbin/ming-ota-ab", "python")
 validate_generated_executable("usr/local/sbin/ming-ota-ab-stage", "bash")
 partition_config = require_file("etc/calamares/modules/partition.conf", "partitionLayout:")
-for marker in ["MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME", "requiredStorage: 48"]:
+for marker in ["MING-BOOT", "MING-ROOT-A", "MING-ROOT-B", "MING-HOME", "requiredStorage: 32"]:
     if marker not in partition_config:
         errors.append(f"Calamares OTA-ready layout missing {marker}")
 
@@ -2857,109 +2862,39 @@ for marker in [
     "无法打开此应用",
     "class LaunchFeedbackOverlay",
     "LAUNCH_FEEDBACK_TIMEOUT_MS = 4000",
-    "class StatusWidget",
     "dispatch_activation",
     'self.fixed.connect("button-release-event", self.on_fixed_button_release)',
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing bounded input marker {marker}")
 
-plank_watchdog = require_file("usr/local/bin/ming-plank-watchdog", "plank_window_visible")
-for marker in ["start_plank()", "stop_legacy_dock()", "while true; do", "ming-plank-watchdog.lock", "nohup plank"]:
-    if marker not in plank_watchdog:
-        errors.append(f"ming-plank-watchdog missing primary Dock marker {marker}")
-phone_watchdog = require_file("usr/local/bin/ming-phone-desktop-watchdog", "starting ming-phone-desktop")
-for marker in ["ming_log_dir()", "start_xfdesktop_fallback()", "ming-phone-desktop did not stay running", "stop_xfdesktop", "wait_phone_desktop_ready()", "ming-phone-desktop.ready"]:
-    if marker not in phone_watchdog:
-        errors.append(f"ming-phone-desktop-watchdog missing black-screen guard marker {marker}")
-if "if wait_phone_desktop_ready" not in phone_watchdog:
-    errors.append("ming-phone-desktop-watchdog must wait for Ming desktop readiness before stopping xfdesktop")
-if 'if wait_phone_desktop_ready "${log_file}"; then\n            stop_xfdesktop' not in phone_watchdog:
-    errors.append("ming-phone-desktop-watchdog must stop xfdesktop only after Ming desktop is running")
-session_autostart = require_file(
-    "home/user/.config/autostart/ming-session-healthcheck.desktop",
-    "ming-session-healthcheck --session",
-)
-if "X-GNOME-Autostart-enabled=true" not in session_autostart or "Hidden=false" not in session_autostart:
-    errors.append("unified session healthcheck autostart must be enabled")
-dock_autostart = require_file("home/user/.config/autostart/ming-dock.desktop", "/usr/bin/true")
-if "X-GNOME-Autostart-enabled=false" not in dock_autostart or "Hidden=true" not in dock_autostart:
-    errors.append("legacy Dock autostart must be disabled")
-phone_autostart = require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "/usr/bin/true")
-if "X-GNOME-Autostart-enabled=false" not in phone_autostart or "Hidden=true" not in phone_autostart:
-    errors.append("legacy phone desktop autostart must be disabled")
-for legacy_entry in (dock_autostart, phone_autostart):
-    legacy_exec = next(
-        (line for line in legacy_entry.splitlines() if line.startswith("Exec=")), "")
-    if legacy_exec != "Exec=/usr/bin/true":
-        errors.append("legacy desktop autostart must not launch a second session loop")
-
-plank_settings = require_file("home/user/.config/plank/dock1/settings", "DockItems=ming-settings.dockitem")
-# The retired GTK3 Dock filename may exist only as an upgrade shim.  The
-# shipped shim must be inert so an old environment variable cannot create a
-# second launcher surface.
-legacy_dock = require_file("usr/local/bin/ming-dock", "exit 0")
-if "import gi" in legacy_dock or "Gtk.Window" in legacy_dock:
-    errors.append("retired ming-dock must be an inert compatibility shim")
-legacy_status = require_file("usr/local/bin/ming-status-center", "ming-status-widget-toggle")
-legacy_library = require_file("usr/local/bin/ming-app-library", "ming-app-drawer")
-if "import gi" in legacy_status or "Gtk." in legacy_status:
-    errors.append("retired ming-status-center must delegate to the Ming widget")
-if "import gi" in legacy_library or "Gtk." in legacy_library:
-    errors.append("retired ming-app-library must delegate to the Ming drawer")
-# One responsive Dock profile owns all installed and Live sessions. Runtime
-# sizing selects 32/36/40 px from the screen short edge without changing the
-# centered geometry, 12 px gap, Ming theme or hover animation.
-for marker in [
-    # RC3's Offset=12 shifted the centered Dock; the shipped profile must use
-    # the active value "Offset=0" (the legacy marker "Offset=12" is rejected).
-    # zero offset and reserve the 12px bottom margin through the strut helper.
-    "MingDockProfile=2641-responsive-centered", "Alignment=3", "Offset=0",
-    "ZoomEnabled=true", "ZoomPercent=148", "HideMode=1", "Theme=Ming",
-    "ming-store.dockitem",
+taskbar_watchdog = require_file("usr/local/bin/ming-taskbar-watchdog", "taskbar_window_visible")
+for marker in ["start_taskbar()", "ming-taskbar.ready", "while true; do"]:
+    if marker not in taskbar_watchdog:
+        errors.append(f"ming-taskbar-watchdog missing marker {marker}")
+for retired_path in [
+    "usr/local/bin/ming-dock",
+    "usr/local/bin/ming-dock-watchdog",
+    "usr/local/sbin/ming-refresh-dock-launchers",
+    "usr/share/plank",
+    "home/user/.config/plank",
+    "etc/skel/.config/plank",
+    "home/user/.config/autostart/ming-dock.desktop",
+    "home/user/.config/autostart/ming-dock-only.desktop",
+    "usr/local/bin/ming-status-widget-toggle",
+    "usr/local/bin/ming-status-center",
+    "usr/share/applications/ming-status-center.desktop",
+    "home/user/.local/share/applications/ming-status-center.desktop",
+    "home/user/.config/ming-os/status-widget.json",
 ]:
-    if marker not in plank_settings:
-        errors.append(f"responsive Plank settings missing {marker}")
-if plank_settings.count("ming-app-library.dockitem") != 1:
-    errors.append("Plank settings must contain exactly one application drawer item")
-if "ming-disk-hub.dockitem" in plank_settings:
-    errors.append("Plank settings must not include the retired All Disks item")
-if "ming-firefox.dockitem" not in plank_settings:
-    errors.append("Plank settings must include ming-firefox.dockitem as the default browser")
-if os.environ.get("MING_SKIP_XIAHAI") != "1" and "xiahai-xiaoming.dockitem" not in plank_settings:
-    errors.append("Plank settings must include xiahai-xiaoming.dockitem as the default agent")
-for forbidden_dock in ["wechat.dockitem", "wps-office.dockitem"]:
-    if forbidden_dock in plank_settings:
-        errors.append(f"Plank settings must not include retired dock item {forbidden_dock}")
-for dock_item in plank_settings.split("DockItems=", 1)[-1].splitlines()[0].split(";;"):
-    if "claw" in dock_item.casefold():
-        errors.append(f"Plank settings contains a retired agent item: {dock_item}")
-
-plank_theme = require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")
-plank_default_theme = require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")
-for marker in [
-        "OuterStrokeColor=31;;98;;84;;54",
-        "FillStartColor=255;;255;;255;;226",
-        "FillEndColor=242;;250;;247;;238",
-        "[PlankDockTheme]",
-        "TopRoundness=14",
-        "BottomRoundness=0",
-        "BottomPadding=2",
-        "HorizPadding=16",
-        "ItemPadding=4",
-        "UrgentBounceTime=420",
-        "LaunchBounceTime=150",
-        "ItemMoveTime=130"]:
-    if marker not in plank_theme:
-        errors.append(f"Plank theme missing animation marker {marker}")
-    if marker not in plank_default_theme:
-        errors.append(f"Default Plank theme missing animation marker {marker}")
-
+    require_absent(retired_path, "retired Dock surface")
 require_file("usr/share/themes/Ming-Dark/gtk-3.0/gtk.css", "#151A18")
 require_file("usr/share/themes/Ming-Dark/xfce-notify-4.0/gtk.css", "window#XfceNotifyWindow")
 require_file("usr/share/themes/Ming-Dark/index.theme", "GtkTheme=Ming-Dark")
 
 for path, marker in [
+    ("usr/local/lib/ming-os/ming-ui-tokens.py", "TOKENS"),
+    ("usr/local/bin/ming-session-profile", '"schema_version": 1'),
     ("usr/local/lib/ming-os/ming-shell-common.py", "DesktopEntry"),
     ("usr/local/bin/ming-app-drawer", "drawer_geometry"),
     ("usr/local/bin/ming-launch", "LaunchRequest"),
@@ -2986,6 +2921,32 @@ require_file(
     "usr/local/lib/ming-os/ming-store-core.py", "WineOfficialProvider")
 store_control = require_file(
     "usr/local/sbin/ming-store-control", "REQUEST_ID")
+agent_runtime = require_file(
+    "usr/local/bin/ming-agent-runtime", "AgentSessionManager")
+if "foreground_display_rejected" not in agent_runtime:
+    errors.append("ming-agent-runtime must reject foreground display reuse")
+if "-nolisten" not in agent_runtime or "Xvfb" not in agent_runtime:
+    errors.append("ming-agent-runtime must isolate Xvfb sessions")
+agent_bridge = require_file(
+    "usr/local/bin/ming-agent-bridge", "ming.agent.v1")
+if "socket" in agent_bridge or "http.server" in agent_bridge:
+    errors.append("ming-agent-bridge must not open a network listener")
+agent_capabilities = require_file(
+    "usr/lib/ming-os/agent/agent-capabilities.json", "ming.agent.v1")
+agent_core = require_file(
+    "usr/local/lib/ming-os/ming-agent-core.py", "ForegroundGrantManager")
+agent_cli = require_file(
+    "usr/local/bin/ming-agent", "capabilities")
+if "arbitrary_shell" not in agent_cli or "foreground" not in agent_cli:
+    errors.append("ming-agent CLI must expose controlled foreground and shell-free capabilities")
+agent_service = require_file(
+    "usr/local/bin/ming-agent-service", "org.mingos.Agent1")
+if "FOREGROUND_ASSIST = False" not in agent_service:
+    errors.append("ming-agent-service must keep foreground assist disabled")
+agent_service_unit = require_file(
+    "usr/lib/systemd/user/ming-agent.service", "org.mingos.Agent1")
+if "WantedBy=" in agent_service_unit:
+    errors.append("ming-agent.service must not be enabled by the base image")
 android_runtime = require_file(
     "usr/local/bin/ming-android-runtime", "class AndroidRuntime")
 validate_generated_executable("usr/local/bin/ming-android-runtime", "python")
@@ -3276,7 +3237,7 @@ for wallpaper_path, expected_size in expected_wallpaper_sizes.items():
             f"expected {expected_size[0]}x{expected_size[1]}, got {dimensions[0]}x{dimensions[1]}"
         )
 appearance = require_file("usr/local/bin/ming-apply-appearance", "/usr/share/backgrounds/ming-os/default.png")
-for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog", "ming-plank-watchdog"]:
+for marker in ["/desktop-icons/style", "-s 0", "ming-phone-desktop-watchdog"]:
     if marker not in appearance:
         errors.append(f"ming-apply-appearance missing native desktop marker {marker}")
 for forbidden in ["xfce4-panel --quit", "-s 2"]:
@@ -3322,7 +3283,6 @@ for helper in [
     "usr/local/bin/ming-lock",
     "usr/local/bin/ming-power-action",
     "usr/local/bin/ming-picom",
-    "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-desktop-healthcheck",
     "usr/local/bin/ming-window-control",
     "usr/local/bin/ming-window-manager-watchdog",
@@ -3433,7 +3393,6 @@ bash_generated_helpers = [
     "usr/local/sbin/ming-intel-xorg-setup",
     "usr/local/bin/ming-window-control",
     "usr/local/bin/ming-desktop-healthcheck",
-    "usr/local/bin/ming-plank-watchdog",
     "usr/local/bin/ming-window-manager-watchdog",
     "usr/local/sbin/ming-oom-policy",
     "usr/local/sbin/ming-timer-policy",
@@ -3492,8 +3451,8 @@ for marker in ["ming-display-control", "100% 标准", "1920 × 1080", "保留此
     if marker not in settings:
         errors.append(f"ming-settings missing display control marker {marker}")
 for marker in [
-    "status-widget.json", "widget_state_path", "save_widget_state", "os.replace",
-    "Gtk.Revealer", "collapsed", "收起", "展开",
+    "self.status = None",
+    "dispatch_activation",
 ]:
     if marker not in phone_desktop:
         errors.append(f"ming-phone-desktop missing compact widget marker {marker}")
@@ -3506,10 +3465,9 @@ window_health = require_file("usr/local/bin/ming-desktop-healthcheck", "window_m
 for marker in ["x11_call()", "x11_id_is_valid()", "timeout --foreground 2s", "json.dumps"]:
     if marker not in window_health:
         errors.append(f"ming-desktop-healthcheck missing safe X11/JSON marker {marker}")
-plank_watchdog = require_file("usr/local/bin/ming-plank-watchdog", "plank_window_visible")
-for marker in ["x11_call()", "valid_window_id()", "timeout --foreground 2s"]:
-    if marker not in plank_watchdog:
-        errors.append(f"ming-plank-watchdog missing bounded X11 marker {marker}")
+taskbar_watchdog = require_file("usr/local/bin/ming-taskbar-watchdog", "taskbar_window_visible")
+if "ming-taskbar.ready" not in taskbar_watchdog:
+    errors.append("ming-taskbar-watchdog missing ready marker")
 window_watchdog = require_file("usr/local/bin/ming-window-manager-watchdog", "failure_count >= 3")
 for marker in ["sleep 10", "ming-window-control repair", "window-manager.log"]:
     if marker not in window_watchdog:

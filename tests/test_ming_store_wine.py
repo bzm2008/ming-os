@@ -535,9 +535,12 @@ class MingStoreWineHandoffTests(unittest.TestCase):
             }), encoding="utf-8")
             handoff = root / ".local/state/ming-os/store/wine-handoffs"
             handoff.mkdir(parents=True)
+            # The handoff is owned by whoever runs the suite, so the mocked
+            # current-user id must match that owner instead of a fixed 1000.
+            current_uid = int(getattr(os, "getuid", lambda: 1000)())
             (handoff / (request_id + ".request.json")).write_text(json.dumps({
                 "schema": "ming.store.wine-handoff.v1", "request_id": request_id,
-                "uid": int(getattr(os, "getuid", lambda: 1000)()), "action": "install",
+                "uid": current_uid, "action": "install",
                 "provider": "wine-official", "app_id": item["app_id"],
                 "expected_version": item["version"], "created_at": "2026-08-28T12:00:00Z",
             }), encoding="utf-8")
@@ -559,7 +562,7 @@ class MingStoreWineHandoffTests(unittest.TestCase):
                     return {"ok": True, "state": "installed", "app_id": item["app_id"]}
 
             downloader = Downloader()
-            with mock.patch.object(toolbox.os, "getuid", lambda: 1000, create=True), \
+            with mock.patch.object(toolbox.os, "getuid", lambda: current_uid, create=True), \
                     mock.patch.object(toolbox, "_load_store_core", return_value=core), \
                     mock.patch.object(toolbox, "_load_wine_module", return_value=type(
                         "Wine", (), {"WineInstaller": Installer})):

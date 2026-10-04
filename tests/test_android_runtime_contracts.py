@@ -6,6 +6,20 @@ import unittest
 from unittest import mock
 
 
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The Android runtime rejects a config/storage root whose parent chain is a
+    symlink or a regular file, and resolves candidates before comparing them, so
+    on a host where the temp root sits behind a symlink (macOS: /var ->
+    /private/var) a raw temp path is refused outright.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "ming_android_runtime_contracts", ROOT / "assets" / "ming-android-runtime.py"
@@ -16,7 +30,7 @@ SPEC.loader.exec_module(MODULE)
 
 class AndroidRuntimeContracts(unittest.TestCase):
     def test_lab_state_store_serializes_config_updates_with_timeout(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             store = MODULE.AndroidLabStateStore(root, lock_timeout=0.01)
             store.set("com.example.demo", "debug_logs", False)
@@ -29,7 +43,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 held.release()
 
     def test_lab_state_store_rejects_symlinked_root(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             outside = root / "outside"
             outside.mkdir()
@@ -59,7 +73,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
         self.assertNotIn("adb connect", source)
 
     def test_runtime_environment_reports_memory_gpu_binder_lxc_dbus_and_wayland_gates(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             runtime = MODULE.AndroidRuntime(
                 home=root,
@@ -105,7 +119,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             def poll(self):
                 return next(self.polls, None)
 
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -133,7 +147,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
     def test_lab_arm_is_explicit_and_does_not_change_stable_state(self):
         self.assertFalse(MODULE.default_android_lab_state()["arm_translation"])
         self.assertFalse(MODULE.default_android_lab_state()["gpu_software_render"])
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             store = MODULE.AndroidLabStateStore(pathlib.Path(directory))
             state = store.set("org.example.demo", "arm_translation", True)
             self.assertTrue(state["arm_translation"])

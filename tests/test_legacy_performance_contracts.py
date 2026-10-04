@@ -120,11 +120,3 @@ class LegacyPerformanceContracts(unittest.TestCase):
         self.assertNotIn("Exec=onboard\n", DESKTOP)
         self.assertNotIn("Exec=touchegg\n", DESKTOP)
 
-    def test_status_widget_has_low_frequency_collapsed_sampling(self):
-        self.assertIn("STATUS_SUMMARY_REFRESH_SECONDS", PHONE)
-        self.assertIn("STATUS_RESOURCE_REFRESH_SECONDS", PHONE)
-        self.assertIn("collapsed", PHONE)
-
-
-if __name__ == "__main__":
-    unittest.main()

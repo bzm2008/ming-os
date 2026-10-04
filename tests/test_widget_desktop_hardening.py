@@ -10,51 +10,17 @@ SETTINGS = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 
 
-class WidgetGeometryContracts(unittest.TestCase):
-    def test_compact_capsule_has_a_stable_responsive_geometry_contract(self):
-        self.assertIn("STATUS_WIDGET_COMPACT_WIDTH", PHONE)
-        self.assertIn("def status_widget_compact_geometry", PHONE)
-        tree = ast.parse(PHONE)
-        function = next(
-            node for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "status_widget_compact_geometry"
-        )
-        namespace = {
-            "max": max,
-            "min": min,
-            "int": int,
-            "STATUS_WIDGET_COMPACT_WIDTH": 252,
-            "STATUS_WIDGET_COMPACT_NARROW_WIDTH": 242,
-            "STATUS_WIDGET_COMPACT_HEIGHT": 58,
-            "CLOCK_MARGIN_X": 26,
-        }
-        module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
-        exec(compile(module, "<phone-layout>", "exec"), namespace)
-        geometry = namespace["status_widget_compact_geometry"]
-        self.assertEqual(
-            geometry({"width": 1024, "height": 768}),
-            geometry({"width": 1024, "height": 600}),
-        )
-        self.assertLessEqual(geometry({"width": 1024, "height": 768})["width"], 260)
-        self.assertGreaterEqual(geometry({"width": 320, "height": 240})["width"], 220)
-
+class WinKeyRoutingContracts(unittest.TestCase):
     def test_win_key_dedup_window_covers_shortcut_and_signal_delivery(self):
-        self.assertIn("STATUS_TOGGLE_DEDUP_SECONDS = 0.65", PHONE)
+        # The retired widget's dedup window is gone with its implementation; the
+        # surviving contract is only that the Win key routes into a no-op entry
+        # point instead of mutating a widget.
+        self.assertNotIn("STATUS_TOGGLE_DEDUP_SECONDS", PHONE)
         toggle = PHONE.split("    def toggle_status_widget", 1)[1].split(
             "    def _on_toggle_signal", 1
         )[0]
-        self.assertIn("STATUS_TOGGLE_DEDUP_SECONDS", toggle)
-
-    def test_collapsing_widget_zeroes_popup_and_hides_all_expanded_children(self):
-        state = PHONE.split("    def apply_collapsed_state", 1)[1].split(
-            "    def on_resource_clicked", 1
-        )[0]
-        self.assertIn("set_reveal_child(False)", state)
-        self.assertIn("set_visible(False)", state)
-        self.assertIn("set_size_request(-1, 0)", state)
-        self.assertIn("expanded_window.hide()", state)
-
+        self.assertIn("return False", toggle)
+        self.assertNotIn("self.status.set_collapsed", toggle)
 
 class DesktopLayerContracts(unittest.TestCase):
     def test_feedback_surface_uses_an_opaque_non_rgba_window_on_xrender(self):

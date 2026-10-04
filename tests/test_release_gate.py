@@ -34,6 +34,7 @@ class ReleaseGateContracts(unittest.TestCase):
             "ming-settings-backend.py",
             "ming-files.py",
             "ming-files-model.py",
+            "ming-session-profile.py",
         ]:
             self.assertIn(name, self.desktop)
 
@@ -43,6 +44,17 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("rm -f /usr/local/bin/ming-disk-hub", self.desktop)
         self.assertIn("ming-migrate-all-disks", self.desktop)
         self.assertNotIn("xfce4-settings-manager'", self.desktop)
+
+    def test_visible_xfce_tools_are_hidden_behind_ming_surfaces(self):
+        hidden_block = self.desktop.split("hide_trimmed_xfce_entries() {", 1)[1].split(
+            "configure_user_templates()", 1
+        )[0]
+        for entry in (
+            "xfce4-appfinder.desktop", "xfce4-panel.desktop",
+            "xfce4-session-settings.desktop", "xfce4-settings-editor.desktop",
+            "xfce4-mime-settings.desktop", "thunar.desktop",
+        ):
+            self.assertIn(entry, hidden_block)
 
     def test_drawer_is_dock_only(self):
         self.assertIn('DockItems=ming-settings.dockitem;;ming-app-library.dockitem;;ming-files.dockitem', self.desktop)
@@ -101,15 +113,19 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("exec /usr/local/bin/ming-settings", self.desktop)
         self.assertNotIn("'高级设置', 'ming-settings', '给懂电脑的人使用', 'xfce4-settings-manager'", self.desktop)
 
-    def test_status_widget_has_notifications_audio_and_brightness(self):
-        for marker in [
-            "load_notification_log",
-            "音量",
-            "亮度",
-            "免打扰",
-            "清空通知",
-        ]:
-            self.assertIn(marker, self.phone)
+    def test_status_surfaces_have_notifications_audio_and_brightness(self):
+        # The surfaces moved out of the retired floating widget: audio and
+        # brightness live in the taskbar, notifications in their own daemon and
+        # do-not-disturb in the settings hub.
+        taskbar = (ROOT / "assets" / "ming-taskbar.py").read_text(encoding="utf-8")
+        notifications = (ROOT / "assets" / "ming-notifications.py").read_text(encoding="utf-8")
+        settings = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
+        for marker in ("音量", "亮度"):
+            self.assertIn(marker, taskbar)
+        self.assertIn("parse_notification_log", notifications)
+        self.assertIn("免打扰", settings)
+        # The retired widget must not come back with its private copies.
+        self.assertNotIn("class StatusWidget", self.phone)
 
     def test_live_installer_session_warns_that_live_data_is_temporary(self):
         for marker in (
@@ -306,22 +322,24 @@ class ReleaseGateContracts(unittest.TestCase):
         ]:
             self.assertIn(marker, self.build)
 
-    def test_rootfs_gate_matches_the_shipped_dock_theme_indicator_size(self):
+    def test_rootfs_gate_matches_the_shipped_taskbar_dock_surface(self):
+        # The plank dock (and its theme) was retired; the shipped dock surface is
+        # the GTK taskbar, so the gate pins the taskbar watchdog and requires the
+        # retired plank theme paths to be absent.
         self.assertIn(
-            'require_file("usr/share/plank/themes/Ming/dock.theme", "IndicatorSize=4")',
+            'require_file("usr/local/bin/ming-taskbar-watchdog", "taskbar_window_visible")',
             self.build,
         )
-        self.assertIn(
-            'require_file("usr/share/plank/themes/Default/dock.theme", "IndicatorSize=4")',
-            self.build,
-        )
-        self.assertIn("OuterStrokeColor=31;;98;;84;;54", self.build)
-        self.assertIn("FillStartColor=255;;255;;255;;226", self.build)
-        self.assertIn("FillEndColor=242;;250;;247;;238", self.build)
-        self.assertIn("[PlankDockTheme]", self.build)
-        self.assertIn("BottomPadding=2", self.build)
-        self.assertIn("Offset=12", self.build)
-        self.assertIn("MingDockProfile=2641-responsive-centered", self.build)
+        self.assertIn("ming-taskbar.ready", self.build)
+        self.assertIn('"usr/share/plank"', self.build)
+        for retired_marker in (
+            "usr/share/plank/themes/Ming/dock.theme",
+            "usr/share/plank/themes/Default/dock.theme",
+            "[PlankDockTheme]",
+            "IndicatorSize=4",
+            "MingDockProfile=2641-calm-glass-rail",
+        ):
+            self.assertNotIn(retired_marker, self.build)
 
     def test_rootfs_gate_requires_static_dark_theme_assets(self):
         for marker in (
@@ -370,12 +388,13 @@ class ReleaseGateContracts(unittest.TestCase):
             "etc/systemd/system/ming-intel-xorg-migration.service",
             "etc/systemd/system/ming-regdom.service",
             "etc/systemd/system/ming-hardware-preload.service",
-            "widget_state_path",
-            "save_widget_state",
-            "os.replace",
-            "Gtk.Revealer",
         ]:
             self.assertIn(marker, self.build)
+        # The floating status widget (and its persisted state) was retired with
+        # the legacy dock, so the gate now requires those artifacts to be gone.
+        for retired_widget_marker in ("widget_state_path", "save_widget_state", "Gtk.Revealer"):
+            self.assertNotIn(retired_widget_marker, self.build)
+        self.assertIn('"home/user/.config/ming-os/status-widget.json"', self.build)
 
     def test_build_gate_accepts_mode_selected_blank_ab_erase_flow(self):
         self.assertIn("ming-install-mode", self.build)
@@ -504,8 +523,21 @@ class ReleaseGateContracts(unittest.TestCase):
 
     def test_build_gate_requires_unified_session_coordinator_autostart(self):
         """The image must not re-enable retired per-component session watchdogs."""
-        self.assertIn('home/user/.config/autostart/ming-session-healthcheck.desktop', self.build)
-        self.assertIn('ming-session-healthcheck --session', self.build)
+        # The unified coordinator contract is now pinned through the surviving
+        # window-manager/taskbar watchdogs plus an explicit absence list.
+        self.assertIn(
+            'require_file("home/user/.config/autostart/ming-window-manager.desktop", '
+            '"ming-window-manager-watchdog --session")',
+            self.build,
+        )
+        self.assertIn("taskbar_watchdog = require_file", self.build)
+        self.assertIn('require_absent(retired_path, "retired Dock surface")', self.build)
+        for retired_autostart in (
+            '"home/user/.config/autostart/ming-dock.desktop"',
+            '"home/user/.config/autostart/ming-dock-only.desktop"',
+            '"usr/local/bin/ming-status-widget-toggle"',
+        ):
+            self.assertIn(retired_autostart, self.build)
         self.assertNotIn(
             'require_file("home/user/.config/autostart/ming-dock.desktop", "ming-plank-watchdog --session")',
             self.build,
@@ -514,8 +546,6 @@ class ReleaseGateContracts(unittest.TestCase):
             'require_file("home/user/.config/autostart/ming-phone-desktop.desktop", "ming-phone-desktop-watchdog --session")',
             self.build,
         )
-        self.assertIn("legacy_exec = next(", self.build)
-        self.assertIn('line.startswith("Exec=")', self.build)
         self.assertNotIn('if "ming-plank-watchdog --session" in legacy_entry', self.build)
 
     def test_display_runtime_gate_accepts_schema_valid_diagnostic_status(self):

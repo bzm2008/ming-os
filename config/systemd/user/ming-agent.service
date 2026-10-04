@@ -1,0 +1,15 @@
+[Unit]
+Description=Ming OS DSH agent session-bus bridge
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.mingos.Agent1
+ExecStart=/usr/local/bin/ming-agent-service
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+# Intentionally not enabled by the base image. The DSH application may start it.

@@ -134,119 +134,11 @@ class UpdateSingleFlowContractTests(unittest.TestCase):
         self.assertIn("兼容别名", help_block)
         self.assertIn("auto-shutdown", help_block)
 
-    def test_power_menu_only_offers_update_restart_after_a_background_confirmation(self):
-        self.assertIn("def background_update_available", self.phone)
-        self.assertIn('status.get("background_available")', self.phone)
-        power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
-        entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
-        self.assertIn("background_update_available()", entry)
-        self.assertIn("更新并重启", power)
-        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
-        self.assertIn("MING_UPDATE_BACKGROUND_CHECK", self.ota)
-        self.assertIn("BACKGROUND_AVAILABILITY_FILE", self.ota)
-
-    def test_power_menu_uses_update_restart_for_a_fully_automatic_major_upgrade(self):
-        power = method_block(self.phone, "    def show_confirmed_update_power_menu", "    def refresh(self):")
-
-        self.assertIn("更新并重启", power)
-        self.assertIn('["pkexec", "ming-update", "auto-restart"]', self.phone)
-        self.assertNotIn("auto-shutdown", power)
-
-    def test_power_menu_keeps_update_progress_and_failure_reason_visible(self):
-        update = method_block(
-            self.phone,
-            "    def open_update_and_restart_dialog",
-            "    def open_update_and_shutdown_dialog",
-        )
-
-        self.assertIn("start_update_restart_progress", update)
-        self.assertIn("stdout=subprocess.PIPE", self.phone)
-        self.assertIn("stderr=subprocess.STDOUT", self.phone)
-        self.assertIn("Gtk.Spinner", self.phone)
-        self.assertIn("更新未完成", self.phone)
-        self.assertNotIn("stdout=subprocess.DEVNULL", update)
-        self.assertNotIn("stderr=subprocess.DEVNULL", update)
-
-    def test_power_menu_blocks_major_ota_when_user_data_preflight_is_not_ready(self):
-        update = method_block(
-            self.phone,
-            "    def open_update_and_restart_dialog",
-            "    def open_update_and_shutdown_dialog",
-        )
-
-        self.assertIn('home_preservation.get("ready")', update)
-        self.assertIn("前往系统更新", update)
-        self.assertIn('self.open_command(["ming-control-center", "--page", "update"])', update)
-
-    def test_power_menu_fails_closed_when_it_cannot_refresh_update_status(self):
-        update = method_block(
-            self.phone,
-            "    def open_update_and_restart_dialog",
-            "    def open_update_and_shutdown_dialog",
-        )
-
-        self.assertIn("if not isinstance(status, dict)", update)
-        self.assertIn("无法确认更新状态", update)
-        self.assertIn("前往系统更新", update)
-
-    def test_power_menu_treats_a_nonzero_status_command_as_unavailable(self):
-        status = method_block(
-            self.phone,
-            "    def background_update_status",
-            "    def background_update_available",
-        )
-
-        self.assertIn("if result.returncode != 0", status)
-        self.assertIn("return None", status)
-
-    def test_background_update_status_returns_none_for_untrusted_status_output(self):
-        cases = [
-            FakeStatusSubprocess(types.SimpleNamespace(returncode=1, stdout='{\"background_available\": true}')),
-            FakeStatusSubprocess(types.SimpleNamespace(returncode=0, stdout="{not json")),
-            FakeStatusSubprocess(exc=OSError("missing ming-update")),
-        ]
-
-        for fake_subprocess in cases:
-            with self.subTest(fake_subprocess=fake_subprocess):
-                probe = load_status_probe(self.phone, fake_subprocess)
-                self.assertIsNone(probe.background_update_status())
-                self.assertEqual(["ming-update", "status", "--json"], fake_subprocess.calls[0][0])
-
-    def test_background_update_status_returns_successful_dict_unchanged(self):
-        fake_subprocess = FakeStatusSubprocess(
-            types.SimpleNamespace(
-                returncode=0,
-                stdout='{\"background_available\": true, \"update_type\": \"minor\"}',
-            )
-        )
-        probe = load_status_probe(self.phone, fake_subprocess)
-
-        self.assertEqual(
-            {"background_available": True, "update_type": "minor"},
-            probe.background_update_status(),
-        )
-
-    def test_power_menu_distinguishes_no_update_from_a_staged_reboot(self):
-        automatic = method_block(self.ota, "auto_shutdown_update() {", 'case "${1:-help}" in')
-
-        self.assertIn("MING_UPDATE_RESULT=no_update", automatic)
-        self.assertIn("MING_UPDATE_RESULT=staged", automatic)
-        self.assertIn('state["result"]', self.phone)
-        self.assertIn("当前已是最新版本，不会重启。", self.phone)
-
     def test_settings_keeps_the_last_unbracketed_authorization_error(self):
         update = method_block(self.settings, "    def on_update_check(self):", "    def on_update_apply(self):")
 
         self.assertIn("self.update_last_output", update)
         self.assertIn("authorization", update.lower())
-
-    def test_default_power_button_shows_ming_menu_before_session_action(self):
-        entry = method_block(self.phone, "    def open_power_menu(self, _button):", "    def refresh(self):")
-
-        self.assertIn("show_basic_power_menu", entry)
-        self.assertNotIn('["xfce4-session-logout"]', entry)
-        self.assertNotIn('["gnome-session-quit", "--logout"]', entry)
-        self.assertNotIn('["mate-session-save", "--logout-dialog"]', entry)
 
     def test_legacy_update_launcher_redirects_to_the_settings_page(self):
         self.assertEqual(1, self.ota.count("cat > /usr/local/bin/ming-update-gui"))

@@ -1,0 +1,23 @@
+{
+  "protocol": "ming.agent.v1",
+  "runtime": "ming-agent-bridge",
+  "mode": "isolated-session-with-explicit-foreground-grant",
+  "foreground_assist": false,
+  "capabilities": {
+    "session": ["create", "status", "stop"],
+    "screen": ["status", "windows", "screenshot", "activate", "click", "type", "key"],
+    "settings": ["list", "get", "set"],
+    "device": ["status", "wifi", "audio", "bluetooth", "ethernet"],
+    "apps": ["list", "launch"],
+    "files": ["list", "read", "write", "copy", "move", "trash", "open"],
+    "store": ["search", "details", "inventory", "updates", "log", "install", "update", "remove", "refresh"],
+    "system": ["status", "diagnostics", "power"],
+    "foreground": ["status", "grant", "revoke", "stop"]
+  },
+  "permissions": {
+    "foreground_grant": "session",
+    "foreground_default": "disabled",
+    "arbitrary_shell": false,
+    "polkit_for_system_writes": true
+  }
+}

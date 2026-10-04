@@ -11,6 +11,7 @@ import sys
 
 
 SUPPORTED_FILESYSTEMS = {"ntfs", "ntfs3", "exfat", "vfat", "fat32", "ext2", "ext3", "ext4"}
+UPDATE_BUNDLE_SUFFIX = ".ming-ota"
 LOCKED_FILESYSTEMS = {"crypto_luks", "luks", "bitlocker"}
 SYSTEM_PARTTYPE_PREFIXES = (
     "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",  # EFI system partition
@@ -39,6 +40,17 @@ def device_path(row):
     if not name:
         return ""
     return name if name.startswith("/dev/") else "/dev/" + name
+
+
+def is_removable(row):
+    """Return whether lsblk marked the backing device as removable."""
+    value = _text(row, "rm").casefold()
+    return value in {"1", "true", "yes"}
+
+
+def media_kind(filename):
+    """Classify a visible file without executing or inspecting its contents."""
+    return "update-media" if str(filename or "").casefold().endswith(UPDATE_BUNDLE_SUFFIX) else "not-update-media"
 
 
 def _normal_fstype(row):

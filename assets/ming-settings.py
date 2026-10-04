@@ -9,6 +9,7 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, Pango
 import subprocess
 import os
 import json
+import hashlib
 import getpass
 import importlib.util
 import threading
@@ -16,6 +17,36 @@ import shutil
 import re
 import sys
 import time
+from pathlib import Path
+
+
+def load_ui_tokens():
+    """Load the shared Ming Mint palette, with an installed-path fallback."""
+    candidates = (
+        Path(__file__).with_name("ming-ui-tokens.py"),
+        Path("/usr/local/lib/ming-os/ming-ui-tokens.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if isinstance(module.TOKENS, dict):
+                return module.TOKENS
+        except (AttributeError, OSError, TypeError):
+            continue
+    return {
+        "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+        "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+        "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+        "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+        "border": "#D7E4DE", "shadow": "#17483C",
+    }
+
+
+TOKENS = load_ui_tokens()
 
 USER = getpass.getuser()
 HOME = os.path.expanduser("~")
@@ -311,6 +342,30 @@ def storage_partition_snapshot():
     if rc != 0 or not payload.get("ok"):
         payload.setdefault("error", error or "无法读取本机分区。")
     return payload
+
+
+def offline_bundle_candidates():
+    """Find visible, regular Ming OTA bundles without executing media content."""
+    roots = [Path("/media") / USER, Path("/run/media") / USER, Path("/media"), Path("/run/media")]
+    found = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("*.ming-ota"):
+                if path.is_file() and not path.is_symlink() and path not in found:
+                    found.append(path)
+        except OSError:
+            continue
+    return sorted(found, key=lambda item: str(item))
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def pointer_device_snapshot():
@@ -746,6 +801,10 @@ class MingSettings(Adw.ApplicationWindow):
         window_width, window_height = responsive_window_size()
         self.set_default_size(window_width, window_height)
         self.add_css_class("ming-settings-window")
+        if os.environ.get("MING_LOW_RESOURCE") == "1":
+            self.add_css_class("ming-low-resource")
+        if os.environ.get("MING_REDUCED_MOTION") == "1":
+            self.add_css_class("ming-reduced-motion")
         self.backend_timers = {}
         self.page_built = set()
         self.page_builders = {}
@@ -852,10 +911,10 @@ class MingSettings(Adw.ApplicationWindow):
 
     def install_css(self):
         self.style_manager = Adw.StyleManager.get_default()
-        css = b"""
+        css = """
         window.ming-settings-window {
-            background: #F4F7F3;
-            color: #1B2320;
+            background: __MING_CANVAS__;
+            color: __MING_TEXT__;
             font-family: "Noto Sans CJK SC", sans-serif;
             font-size: 15px;
             font-weight: 400;
@@ -872,17 +931,19 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-sidebar {
-            background: #EEF3EF;
-            border-right: 1px solid alpha(#2F8A7D, 0.08);
+            background: __MING_SURFACE_SUBTLE__;
+            border-right: 1px solid alpha(__MING_ACCENT__, 0.08);
+            min-width: 220px;
         }
 
         .ming-settings-content {
-            background: linear-gradient(to bottom, #F7FAF6, #F1F5F0);
+            background: __MING_CANVAS__;
+            padding: 20px 24px 28px 24px;
         }
 
         .ming-settings-window headerbar {
-            background: #FFFFFF;
-            border-bottom: 1px solid alpha(#2F8A7D, 0.06);
+            background: __MING_SURFACE__;
+            border-bottom: 1px solid alpha(__MING_BORDER__, 0.72);
             min-height: 44px;
         }
 
@@ -898,12 +959,12 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window row.ming-nav-row:hover {
-            background: alpha(#2F8A7D, 0.06);
+            background: alpha(__MING_ACCENT__, 0.06);
         }
 
         .ming-settings-window row.ming-nav-row:selected {
-            background: alpha(#2F8A7D, 0.10);
-            color: #1B2320;
+            background: alpha(__MING_ACCENT__, 0.10);
+            color: __MING_TEXT__;
         }
 
         .ming-settings-window row.ming-time-sync-ok {
@@ -936,9 +997,9 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window preferencesgroup > box {
-            background: #FFFFFF;
+            background: __MING_SURFACE__;
             border-radius: 14px;
-            border: 1px solid alpha(#2F8A7D, 0.06);
+            border: 1px solid alpha(__MING_BORDER__, 0.82);
             padding: 8px;
         }
 
@@ -949,18 +1010,25 @@ class MingSettings(Adw.ApplicationWindow):
         }
 
         .ming-settings-window button.suggested-action {
-            background: #2F8A7D;
+            background: __MING_ACCENT__;
             color: #FFFFFF;
         }
 
         .ming-settings-window button.suggested-action:hover {
-            background: #27776C;
+            background: __MING_ACCENT_STRONG__;
+        }
+
+        .ming-settings-window button:focus-visible,
+        .ming-settings-window entry:focus-visible,
+        .ming-settings-window row:focus-visible {
+            outline: 2px solid __MING_FOCUS__;
+            outline-offset: 2px;
         }
 
         .ming-settings-window entry,
         .ming-settings-window passwordentry {
-            background: #FFFFFF;
-            color: #1B2320;
+            background: __MING_SURFACE__;
+            color: __MING_TEXT__;
             border-radius: 10px;
             min-height: 40px;
             padding: 6px 12px;
@@ -969,16 +1037,23 @@ class MingSettings(Adw.ApplicationWindow):
         .ming-settings-window progressbar trough {
             min-height: 8px;
             border-radius: 999px;
-            background: alpha(#2F8A7D, 0.08);
+            background: alpha(__MING_ACCENT__, 0.08);
         }
 
         .ming-settings-window progressbar progress {
             border-radius: 999px;
-            background: #2F8A7D;
+            background: __MING_ACCENT__;
         }
 
         .ming-settings-window label.dim-label {
-            color: alpha(#21302A, 0.66);
+            color: alpha(__MING_MUTED__, 0.82);
+        }
+
+        .ming-settings-window.ming-low-resource *,
+        .ming-settings-window.ming-reduced-motion * {
+            box-shadow: none;
+            transition-duration: 0ms;
+            animation-duration: 0ms;
         }
 
         .ming-settings-window.ming-settings-dark {
@@ -1068,6 +1143,19 @@ class MingSettings(Adw.ApplicationWindow):
             color: #E7EEE9;
         }
         """
+        for marker, token_name in (
+            ("__MING_CANVAS__", "canvas"),
+            ("__MING_SURFACE__", "surface"),
+            ("__MING_SURFACE_SUBTLE__", "surface_subtle"),
+            ("__MING_ACCENT__", "accent"),
+            ("__MING_ACCENT_STRONG__", "accent_strong"),
+            ("__MING_TEXT__", "text"),
+            ("__MING_MUTED__", "muted"),
+            ("__MING_BORDER__", "border"),
+            ("__MING_FOCUS__", "focus"),
+        ):
+            css = css.replace(marker, TOKENS[token_name])
+        css = css.encode("utf-8")
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
         display = Gdk.Display.get_default()
@@ -1501,6 +1589,23 @@ class MingSettings(Adw.ApplicationWindow):
         self.security_admin_button.connect("clicked", self.on_security_admin_setup)
         self.security_summary_row.add_suffix(self.security_admin_button)
         summary.add(self.security_summary_row)
+        self.agent_runtime_row = Adw.ActionRow(
+            title="后台 AI Agent 接口",
+            subtitle="正在检查隔离会话运行时；不会控制当前桌面。",
+        )
+        self.agent_grant_button = Gtk.Button(label="允许本次会话控制桌面")
+        self.agent_grant_button.set_valign(Gtk.Align.CENTER)
+        self.agent_grant_button.connect("clicked", self.on_agent_foreground_grant)
+        self.agent_revoke_button = Gtk.Button(label="撤销前台权限")
+        self.agent_revoke_button.set_valign(Gtk.Align.CENTER)
+        self.agent_revoke_button.connect("clicked", self.on_agent_foreground_revoke)
+        self.agent_stop_button = Gtk.Button(label="紧急停止")
+        self.agent_stop_button.set_valign(Gtk.Align.CENTER)
+        self.agent_stop_button.connect("clicked", self.on_agent_foreground_stop)
+        self.agent_runtime_row.add_suffix(self.agent_grant_button)
+        self.agent_runtime_row.add_suffix(self.agent_revoke_button)
+        self.agent_runtime_row.add_suffix(self.agent_stop_button)
+        summary.add(self.agent_runtime_row)
         box.append(summary)
 
         controls = Adw.PreferencesGroup(
@@ -1521,7 +1626,65 @@ class MingSettings(Adw.ApplicationWindow):
             controls.add(control)
         box.append(controls)
         GLib.idle_add(self.refresh_security_status)
+        GLib.idle_add(self.refresh_agent_runtime_status)
         return sc
+
+    def refresh_agent_runtime_status(self):
+        row = getattr(self, "agent_runtime_row", None)
+        if row is None:
+            return False
+
+        def done(rc, output, error):
+            if self.security_page.get_root() is not self:
+                return False
+            try:
+                result = json.loads(output or "{}") if rc == 0 else {}
+            except ValueError:
+                result = {}
+            if result.get("ok") and result.get("protocol") == "ming.agent.v1":
+                row.set_title("后台 AI Agent 接口已就绪")
+                row.set_subtitle("支持隔离图形会话；前台权限默认关闭，可按本次登录会话授予。")
+            else:
+                row.set_title("后台 AI Agent 接口未就绪")
+                row.set_subtitle(error or result.get("message") or "运行时依赖尚未安装。")
+            return False
+
+        run_capture_async(
+            ["/usr/local/bin/ming-agent-bridge", "capabilities"],
+            timeout=8, on_done=done)
+        return False
+
+    def _run_agent_foreground_action(self, args, success_text):
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}") if rc == 0 else {}
+            except ValueError:
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.toast(success_text, "info")
+                self.refresh_agent_runtime_status()
+            else:
+                self.toast(result.get("message") or error or "Agent 前台操作未完成。", "warning")
+            return False
+
+        run_capture_async(args, timeout=8, on_done=done)
+
+    def on_agent_foreground_grant(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "grant",
+             "--scope", "screen.read,screen.input,window.control,files.user,system.settings",
+             "--confirm"],
+            "已允许 Agent 在本次登录会话控制桌面。")
+
+    def on_agent_foreground_revoke(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "revoke"],
+            "Agent 前台权限已撤销。")
+
+    def on_agent_foreground_stop(self, _button):
+        self._run_agent_foreground_action(
+            ["/usr/local/bin/ming-agent", "foreground", "stop"],
+            "Agent 前台控制已紧急停止。")
 
     def refresh_security_status(self):
         def admin_done(rc, output, _error):
@@ -2756,8 +2919,146 @@ class MingSettings(Adw.ApplicationWindow):
         self.update_bar.set_margin_top(10)
         grp.add(self.update_bar)
 
+        offline = Adw.PreferencesGroup(
+            title="离线更新",
+            description="在线更新不可用时，从 U 盘读取已签名的 Ming OTA bundle。不会执行 U 盘中的脚本或任意 ISO。")
+        box.append(offline)
+        self.offline_bundle_path = ""
+        self.offline_bundle_sha256 = ""
+        self.offline_update_status = Adw.ActionRow(
+            title="未扫描离线介质", subtitle="插入包含 .ming-ota 文件的 U 盘后扫描。")
+        offline.add(self.offline_update_status)
+        offline_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        offline_actions.set_halign(Gtk.Align.END)
+        self.offline_scan_button = Gtk.Button(label="扫描 U 盘")
+        self.offline_scan_button.connect("clicked", self.on_offline_scan)
+        self.offline_stage_button = Gtk.Button(label="验证并暂存")
+        self.offline_stage_button.add_css_class("suggested-action")
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_stage_button.connect("clicked", self.on_offline_stage)
+        offline_actions.append(self.offline_scan_button)
+        offline_actions.append(self.offline_stage_button)
+        self.offline_reboot_button = Gtk.Button(label="立即重启")
+        self.offline_reboot_button.set_sensitive(False)
+        self.offline_reboot_button.connect("clicked", self.on_offline_reboot)
+        offline_actions.append(self.offline_reboot_button)
+        offline.add(offline_actions)
+
         GLib.idle_add(self.refresh_update_status)
+        GLib.idle_add(self.refresh_offline_status)
         return sc
+
+    def refresh_offline_status(self):
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("status") == "staged":
+                self.offline_update_status.set_title(
+                    "离线更新已暂存：Ming OS %s" % result.get("version", "未知"))
+                self.offline_update_status.set_subtitle(
+                    "构建 %s 已写入非活动系统；重启后由健康检查确认，失败时自动回滚。" %
+                    result.get("build_id", "未知"))
+                self.offline_reboot_button.set_sensitive(True)
+            elif rc != 0:
+                self.offline_update_status.set_title("离线暂存状态异常")
+                self.offline_update_status.set_subtitle(
+                    str(result.get("error") or error or "请重新扫描更新介质。"))
+            return False
+
+        run_capture_async(["ming-update", "offline-status", "--json"], timeout=10, on_done=done)
+        return False
+
+    def on_offline_reboot(self, _button):
+        self.offline_reboot_button.set_sensitive(False)
+        self.offline_update_status.set_subtitle("正在请求系统重启…")
+
+        def done(rc, output, error):
+            if rc != 0:
+                self.offline_update_status.set_subtitle(
+                    error or output or "重启未成功，请通过电源菜单手动重启。")
+                self.offline_reboot_button.set_sensitive(True)
+            return False
+
+        run_capture_async(["pkexec", "systemctl", "reboot"], timeout=15, on_done=done)
+
+    def on_offline_scan(self, _button):
+        self.offline_bundle_path = ""
+        self.offline_bundle_sha256 = ""
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_update_status.set_title("正在扫描可移动介质")
+        self.offline_update_status.set_subtitle("只读取 .ming-ota 文件，不会修改 U 盘。")
+
+        def scan_result(candidates, scan_error):
+            if scan_error or not candidates:
+                self.offline_update_status.set_title("未发现离线更新包")
+                self.offline_update_status.set_subtitle(
+                    scan_error or "请插入 U 盘并确认其中有 .ming-ota 文件。")
+                return False
+            path = candidates[0]
+            self.offline_update_status.set_title("正在验证离线更新包")
+            self.offline_update_status.set_subtitle(str(path))
+
+            def done(rc, output, error):
+                try:
+                    result = json.loads(output or "{}")
+                except (TypeError, ValueError):
+                    result = {}
+                if rc != 0 or not result.get("ok"):
+                    self.offline_update_status.set_title("离线更新包不可用")
+                    self.offline_update_status.set_subtitle(
+                        str(result.get("error") or result.get("reason") or error or "签名、版本或 payload 校验失败。"))
+                    return False
+                try:
+                    digest = file_sha256(path)
+                except OSError as exc:
+                    self.offline_update_status.set_title("无法读取离线更新包")
+                    self.offline_update_status.set_subtitle(str(exc))
+                    return False
+                self.offline_bundle_path = str(path)
+                self.offline_bundle_sha256 = digest
+                self.offline_update_status.set_title("可用离线更新：Ming OS %s" % result.get("version", "未知"))
+                self.offline_update_status.set_subtitle(
+                    "构建 %s · SHA256 %s · %s · %s 字节" % (
+                        result.get("build_id", "未知"), digest, result.get("trusted_comment", "已签名"),
+                        result.get("payload_size", "未知")))
+                self.offline_stage_button.set_sensitive(True)
+                return False
+
+            run_capture_async(
+                ["ming-update", "offline-scan", "--json", str(path)], timeout=30, on_done=done)
+            return False
+
+        run_task_async(offline_bundle_candidates, scan_result)
+
+    def on_offline_stage(self, _button):
+        if not self.offline_bundle_path or not self.offline_bundle_sha256:
+            return
+        self.offline_stage_button.set_sensitive(False)
+        self.offline_update_status.set_title("正在暂存离线更新")
+        self.offline_update_status.set_subtitle("需要管理员授权；暂存不会立即切换当前系统。")
+
+        def done(rc, output, error):
+            try:
+                result = json.loads(output or "{}")
+            except (TypeError, ValueError):
+                result = {}
+            if rc == 0 and result.get("ok"):
+                self.offline_update_status.set_title("离线更新已暂存")
+                self.offline_update_status.set_subtitle("更新已写入非活动系统；重启后由健康检查确认，失败时自动回滚。")
+                self.offline_reboot_button.set_sensitive(True)
+            else:
+                self.offline_update_status.set_title("离线更新暂存失败")
+                self.offline_update_status.set_subtitle(
+                    str(result.get("error") or result.get("reason") or error or output or "请重新扫描 U 盘。"))
+                self.offline_stage_button.set_sensitive(True)
+            return False
+
+        run_capture_async([
+            "pkexec", "ming-update", "offline-stage", "--json", self.offline_bundle_path,
+            "--sha256", self.offline_bundle_sha256,
+        ], timeout=60, on_done=done)
 
     @staticmethod
     def _update_status_payload(rc, output, error):
@@ -2818,8 +3119,8 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_action_button.set_label("检查更新")
             self.update_status.set_label(error or "此安装模式不支持该大版本 OTA。")
             self.update_detail.set_label(
-                "当前安装保留了其他系统，因此不会自动改写 A/B 系统槽。\n"
-                "已签名的 patch/minor 更新仍可使用。")
+                "当前安装保留了其他系统，因此不会自动执行需要重建系统的完整升级。\n"
+                "已签名的常规更新仍可使用。")
             self.update_detail.set_visible(True)
             return
         if available and ready and action == "apply":
@@ -2832,7 +3133,7 @@ class MingSettings(Adw.ApplicationWindow):
             self.update_manifest_sha256 = manifest_sha256.lower()
             if update_type == "major":
                 self.update_detail.set_label(
-                    "更新说明：\n%s\n\n升级准备：%s" % (
+                    "更新说明：\n%s\n\n升级准备：系统会自动选择安全的更新方式，并在启动检查通过后完成切换。\n%s" % (
                         notes or "暂无更新说明。",
                         preservation_message or "正在检查用户文件保留条件。",
                     ))

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ming OS 底部任务栏预览</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --wall-top: #cfe5dc;
+      --wall-bottom: #eff6f0;
+      --ink: #183d36;
+      --muted: #55736b;
+      --glass: rgba(248, 253, 250, .79);
+      --glass-solid: #f5fbf7;
+      --line: rgba(42, 119, 106, .24);
+      --accent: #2f8a7d;
+      --accent-soft: rgba(47, 138, 125, .14);
+      --shadow: 0 18px 50px rgba(29, 91, 78, .20);
+      --window: rgba(255, 255, 255, .73);
+      --window-line: rgba(55, 102, 91, .18);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --wall-top: #172b2a;
+      --wall-bottom: #0c1719;
+      --ink: #e8f5f0;
+      --muted: #9bb9b0;
+      --glass: rgba(20, 39, 39, .82);
+      --glass-solid: #172d2c;
+      --line: rgba(121, 205, 186, .23);
+      --accent: #65d1bd;
+      --accent-soft: rgba(101, 209, 189, .16);
+      --shadow: 0 18px 50px rgba(0, 0, 0, .38);
+      --window: rgba(21, 43, 43, .76);
+      --window-line: rgba(151, 213, 200, .15);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; color: var(--ink); background: var(--wall-bottom); }
+    button { font: inherit; }
+    .page { min-height: 100vh; padding: 26px; background: linear-gradient(145deg, var(--wall-top), var(--wall-bottom) 62%); overflow: hidden; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; max-width: 1180px; margin: 0 auto 18px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 13px; color: white; background: var(--accent); box-shadow: 0 9px 22px rgba(47,138,125,.28); font-weight: 800; }
+    .brand h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+    .toolbar-actions { display: flex; gap: 8px; }
+    .toolbar-actions button { border: 1px solid var(--line); border-radius: 11px; padding: 9px 12px; color: var(--ink); background: var(--glass); cursor: pointer; box-shadow: 0 5px 14px rgba(22, 76, 65, .08); }
+    .toolbar-actions button:hover, .toolbar-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .desktop { position: relative; width: min(1180px, 100%); height: min(700px, calc(100vh - 112px)); min-height: 560px; margin: 0 auto; border: 1px solid rgba(255,255,255,.54); border-radius: 28px; overflow: hidden; background: radial-gradient(circle at 20% 20%, rgba(255,255,255,.45), transparent 35%), linear-gradient(135deg, var(--wall-top), var(--wall-bottom)); box-shadow: 0 28px 80px rgba(29, 91, 78, .18); }
+    .desktop::before, .desktop::after { content: ""; position: absolute; border-radius: 999px; filter: blur(2px); opacity: .45; pointer-events: none; }
+    .desktop::before { width: 340px; height: 340px; right: -70px; top: -90px; background: rgba(255, 255, 255, .35); }
+    .desktop::after { width: 230px; height: 230px; left: -80px; bottom: 80px; background: rgba(47, 138, 125, .18); }
+    .desktop-label { position: absolute; top: 22px; left: 25px; color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+    .window { position: absolute; border: 1px solid var(--window-line); border-radius: 20px; background: var(--window); box-shadow: 0 20px 48px rgba(24, 70, 62, .13); backdrop-filter: blur(18px); }
+    .window-main { top: 82px; left: 11%; width: 58%; height: 48%; }
+    .window-side { top: 138px; right: 8%; width: 22%; height: 35%; }
+    .window-bar { display: flex; align-items: center; gap: 8px; padding: 13px 16px; border-bottom: 1px solid var(--window-line); }
+    .window-dots { display: flex; gap: 5px; }
+    .window-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+    .window-title { margin-left: 4px; color: var(--muted); font-size: 11px; }
+    .window-body { padding: 24px; }
+    .window-body h2 { max-width: 360px; margin: 0; font-size: clamp(22px, 3vw, 38px); line-height: 1.08; letter-spacing: -.05em; }
+    .window-body p { max-width: 380px; margin: 13px 0 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .window-action { display: inline-flex; align-items: center; gap: 7px; margin-top: 22px; padding: 10px 14px; border-radius: 10px; color: white; background: var(--accent); font-size: 12px; }
+    .side-lines { display: grid; gap: 11px; padding: 20px; }
+    .side-lines span { display: block; height: 9px; border-radius: 99px; background: var(--accent-soft); }
+    .side-lines span:nth-child(2) { width: 76%; }
+    .side-lines span:nth-child(3) { width: 88%; }
+    .side-lines span:nth-child(4) { width: 54%; }
+    .taskbar { position: absolute; z-index: 5; left: 50%; bottom: 16px; display: flex; align-items: center; width: min(930px, calc(100% - 34px)); min-height: 66px; padding: 8px 12px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 20px; color: var(--ink); background: var(--glass); box-shadow: var(--shadow); backdrop-filter: blur(22px) saturate(1.15); }
+    .taskbar-group { display: flex; align-items: center; gap: 5px; }
+    .taskbar-group.apps { flex: 0 0 auto; }
+    .taskbar-group.windows { flex: 1 1 auto; min-width: 0; margin-left: 8px; }
+    .taskbar-group.status { flex: 0 0 auto; gap: 10px; margin-left: 8px; }
+    .divider { width: 1px; height: 29px; margin: 0 8px; background: var(--line); }
+    .task-button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 42px; height: 42px; border: 0; border-radius: 13px; color: var(--ink); background: transparent; cursor: pointer; transition: transform .18s ease, background .18s ease; }
+    .task-button:hover, .task-button:focus-visible { transform: translateY(-4px); outline: none; background: var(--accent-soft); }
+    .task-button.selected { background: var(--accent-soft); }
+    .task-button.running::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 5px; height: 5px; border-radius: 99px; transform: translateX(-50%); background: var(--accent); }
+    .task-button.minimized { opacity: .52; }
+    .task-button svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .ming-button { color: white; background: var(--accent); box-shadow: 0 6px 16px rgba(47,138,125,.22); }
+    .ming-button:hover, .ming-button:focus-visible { background: var(--accent); }
+    .window-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 150px; padding: 8px 10px; border: 1px solid transparent; border-radius: 11px; color: var(--muted); background: transparent; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+    .window-chip:hover, .window-chip:focus-visible { outline: none; color: var(--ink); background: var(--accent-soft); }
+    .window-chip svg { flex: none; width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+    .status-text { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .status-text strong { display: block; color: var(--ink); font-size: 12px; font-weight: 600; }
+    .clock { min-width: 47px; text-align: right; }
+    .popover { position: absolute; z-index: 10; right: 22px; bottom: 90px; width: 250px; padding: 16px; border: 1px solid var(--line); border-radius: 18px; color: var(--ink); background: var(--glass-solid); box-shadow: var(--shadow); }
+    .popover[hidden] { display: none; }
+    .popover h3 { margin: 0 0 13px; font-size: 15px; }
+    .quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .quick-card { padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-soft); font-size: 12px; }
+    .quick-card strong { display: block; margin-bottom: 3px; font-size: 14px; }
+    .menu { position: absolute; z-index: 10; left: 20px; bottom: 90px; width: 245px; padding: 10px; border: 1px solid var(--line); border-radius: 18px; background: var(--glass-solid); box-shadow: var(--shadow); }
+    .menu[hidden] { display: none; }
+    .menu-search { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; color: var(--ink); background: var(--accent-soft); outline: none; font-size: 12px; }
+    .menu-list { display: grid; gap: 3px; margin-top: 9px; }
+    .menu-item { display: flex; align-items: center; gap: 9px; padding: 9px; border: 0; border-radius: 9px; color: var(--ink); background: transparent; text-align: left; cursor: pointer; font-size: 12px; }
+    .menu-item:hover { background: var(--accent-soft); }
+    .menu-item svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+    #toast { position: absolute; left: 50%; bottom: 100px; z-index: 12; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: var(--glass-solid); box-shadow: var(--shadow); opacity: 0; transform: translate(-50%, 8px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; font-size: 12px; }
+    #toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .low-resource .taskbar { backdrop-filter: none; box-shadow: 0 8px 18px rgba(29, 91, 78, .13); background: var(--glass-solid); }
+    .low-resource .task-button { transition: none; }
+    .low-resource .task-button:hover, .low-resource .task-button:focus-visible { transform: none; }
+    .low-resource .window { backdrop-filter: none; }
+    @media (max-width: 780px) {
+      .page { padding: 15px; }
+      .toolbar { align-items: flex-start; }
+      .toolbar-actions { flex-direction: column; }
+      .desktop { min-height: 630px; height: calc(100vh - 124px); border-radius: 22px; }
+      .window-main { top: 72px; left: 7%; width: 86%; height: 40%; }
+      .window-side { top: 330px; left: 7%; width: 58%; height: 22%; }
+      .taskbar { bottom: 11px; width: calc(100% - 22px); min-height: 60px; padding: 6px; }
+      .taskbar-group.windows { display: none; }
+      .taskbar-group.status { margin-left: auto; gap: 5px; }
+      .status-text { display: none; }
+      .clock { display: block; }
+      .task-button { width: 38px; height: 38px; }
+      .popover { right: 12px; bottom: 78px; }
+      .menu { left: 12px; bottom: 78px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <div class="page" id="page">
+    <div class="toolbar">
+      <div class="brand"><div class="brand-mark">M</div><div><h1>Ming OS 底部任务栏</h1><p>GTK3 / X11 · Ming Mint 玻璃风格预览</p></div></div>
+      <div class="toolbar-actions"><button id="theme-toggle" type="button">切换深色</button><button id="resource-toggle" type="button">低资源模式：关</button></div>
+    </div>
+    <main class="desktop" aria-label="Ming OS 桌面预览">
+      <span class="desktop-label">Ming OS desktop · 1366 × 768</span>
+      <section class="window window-main"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span class="window-title">Ming 文件 · 最近使用</span></div><div class="window-body"><h2>把常用入口放在底部，桌面保持安静。</h2><p>任务栏集中应用、窗口和系统状态；桌面继续留给内容和壁纸。悬停只做轻微上浮，不让老机器被动画拖慢。</p><span class="window-action">打开应用库 <b>→</b></span></div></section>
+      <section class="window window-side"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span class="window-title">快速状态</span></div><div class="side-lines"><span></span><span></span><span></span><span></span></div></section>
+      <div class="menu" id="menu" hidden><input class="menu-search" placeholder="搜索应用" aria-label="搜索应用"><div class="menu-list"><button class="menu-item" type="button" data-toast="打开应用库"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg>应用库</button><button class="menu-item" type="button" data-toast="打开 Ming 设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.8 1.8 0 0 0 .3 2l.1.1-1.8 1.8-.1-.1a1.8 1.8 0 0 0-2-.3 1.8 1.8 0 0 0-1.1 1.7V20h-2.6v-.2a1.8 1.8 0 0 0-1.1-1.7 1.8 1.8 0 0 0-2 .3l-.1.1-1.8-1.8.1-.1a1.8 1.8 0 0 0 .3-2 1.8 1.8 0 0 0-1.7-1.1H6v-2.6h.2a1.8 1.8 0 0 0 1.7-1.1 1.8 1.8 0 0 0-.3-2l-.1-.1 1.8-1.8.1.1a1.8 1.8 0 0 0 2 .3 1.8 1.8 0 0 0 1.1-1.7V4h2.6v.2a1.8 1.8 0 0 0 1.1 1.7 1.8 1.8 0 0 0 2-.3l.1-.1 1.8 1.8-.1.1a1.8 1.8 0 0 0-.3 2 1.8 1.8 0 0 0 1.7 1.1h.2v2.6h-.2a1.8 1.8 0 0 0-1.7 1.1Z"></path></svg>Ming 设置</button><button class="menu-item" type="button" data-toast="打开电源菜单"><svg viewBox="0 0 24 24"><path d="M12 3v8"></path><path d="M6.4 6.4a8 8 0 1 0 11.2 0"></path></svg>电源</button></div></div>
+      <div class="popover" id="quick" hidden><h3>快速设置</h3><div class="quick-grid"><div class="quick-card"><strong>网络</strong>已连接</div><div class="quick-card"><strong>音量</strong>42%</div><div class="quick-card"><strong>显示</strong>亮度 76%</div><div class="quick-card"><strong>电源</strong>接通电源</div></div></div>
+      <nav class="taskbar" aria-label="Ming OS 底部任务栏"><div class="taskbar-group apps"><button class="task-button ming-button" id="menu-button" aria-label="Ming 菜单" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M6 5h12M6 12h12M6 19h12"></path></svg></button><button class="task-button" id="search-button" aria-label="搜索应用"><svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="5.6"></circle><path d="m15 15 4.2 4.2"></path></svg></button><span class="divider"></span><button class="task-button running" aria-label="应用库" data-toast="打开应用库"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg></button><button class="task-button" aria-label="Ming 设置" data-toast="打开 Ming 设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3"></path></svg></button><button class="task-button" aria-label="文件" data-toast="打开文件"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"></path><path d="M4 9h16"></path></svg></button><button class="task-button selected" aria-label="Firefox" data-toast="打开 Firefox"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M7 9.5c2.8 1.1 6.3.5 8.8-1.2M8 15c2.1 2.4 5.8 2.8 8.2.7"></path></svg></button><button class="task-button" aria-label="商店" data-toast="打开商店"><svg viewBox="0 0 24 24"><path d="M5 9h14l-1 10H6z"></path><path d="M8 9a4 4 0 0 1 8 0"></path></svg></button><button class="task-button" aria-label="终端" data-toast="打开终端"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="m8 10 3 2-3 2M13 15h3"></path></svg></button></div><div class="taskbar-group windows"><span class="divider"></span><button class="window-chip" type="button" data-toast="切换到 Ming 文件"><svg viewBox="0 0 24 24"><path d="M4 6.5h16v11H4z"></path><path d="M8 19.5h8"></path></svg>Ming 文件</button><button class="window-chip" type="button" data-toast="切换到 Firefox"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle></svg>Firefox · 新标签页</button></div><div class="taskbar-group status"><button class="task-button" id="quick-button" aria-label="快速设置"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h3M11 17h9"></path><circle cx="16" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle></svg></button><span class="status-text"><strong>网络</strong>已连接</span><span class="status-text"><strong>音量</strong>42%</span><span class="status-text"><strong>电源</strong>76%</span><span class="status-text clock"><strong>09:41</strong>周三</span></div></nav>
+      <div id="toast" role="status" aria-live="polite"></div>
+    </main>
+  </div>
+  <script>
+    const page = document.getElementById('page');
+    const menu = document.getElementById('menu');
+    const quick = document.getElementById('quick');
+    const toast = document.getElementById('toast');
+    const showToast = (message) => { toast.textContent = message; toast.classList.add('show'); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => toast.classList.remove('show'), 1500); };
+    document.getElementById('theme-toggle').addEventListener('click', (event) => { const dark = document.documentElement.dataset.theme === 'dark'; document.documentElement.dataset.theme = dark ? 'light' : 'dark'; event.currentTarget.textContent = dark ? '切换深色' : '切换浅色'; });
+    document.getElementById('resource-toggle').addEventListener('click', (event) => { const active = page.classList.toggle('low-resource'); event.currentTarget.textContent = `低资源模式：${active ? '开' : '关'}`; });
+    document.getElementById('menu-button').addEventListener('click', () => { const open = menu.hidden; menu.hidden = !open; quick.hidden = true; });
+    document.getElementById('search-button').addEventListener('click', () => { menu.hidden = false; quick.hidden = true; menu.querySelector('input').focus(); });
+    document.getElementById('quick-button').addEventListener('click', () => { const open = quick.hidden; quick.hidden = !open; menu.hidden = true; });
+    document.querySelectorAll('[data-toast]').forEach((button) => button.addEventListener('click', () => showToast(button.dataset.toast)));
+    document.addEventListener('click', (event) => { if (!event.target.closest('.taskbar, .menu, .popover')) { menu.hidden = true; quick.hidden = true; } });
+  </script>
+</body>
+</html>

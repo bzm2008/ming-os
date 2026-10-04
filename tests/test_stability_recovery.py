@@ -13,6 +13,23 @@ import importlib.util
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def bash_major_version():
+    """Major version of the bash that runs generated helpers, 0 when unknown.
+
+    The image ships Debian bash 5, but a developer host may still provide bash
+    3.2 (macOS), where constructs such as ${var,,} are a fatal
+    "bad substitution" rather than a portability footnote.
+    """
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    match = re.search(r"version (\d+)", completed.stdout or "")
+    return int(match.group(1)) if match else 0
 BASE = (ROOT / "modules" / "01_base.sh").read_text(encoding="utf-8")
 DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 PHONE = (ROOT / "assets" / "ming-phone-desktop.py").read_text(encoding="utf-8")
@@ -174,24 +191,6 @@ class DisplayControlPureTests(unittest.TestCase):
             confirmed = control.confirm(staged["token"])
             self.assertTrue(confirmed["ok"])
             self.assertEqual(1, len(cancelled))
-
-
-class StatusWidgetStatePureTests(unittest.TestCase):
-    def test_widget_state_is_schema_v2_and_recovers_collapsed_from_corruption(self):
-        prefix = PHONE.split("\nimport gi\n", 1)[0]
-        self.assertIn("def load_widget_state", prefix)
-        self.assertIn("def save_widget_state", prefix)
-        namespace = {"__file__": str(ROOT / "assets" / "ming-phone-desktop.py")}
-        exec(prefix, namespace)
-        with tempfile.TemporaryDirectory() as temporary:
-            state_path = pathlib.Path(temporary) / "status-widget.json"
-            default_state = {"schema_version": 2, "collapsed": True, "metric_mode": "memory"}
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
-            state_path.write_text("not json", encoding="utf-8")
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
-            namespace["save_widget_state"](True, state_path)
-            self.assertEqual(default_state, json.loads(state_path.read_text(encoding="utf-8")))
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
 
 
 class ApplicationCatalogRefreshTests(unittest.TestCase):
@@ -378,6 +377,11 @@ class StabilityRecoveryContracts(unittest.TestCase):
             "MINGDESKHEALTH")
         self.assertIn("json.dumps", control)
         self.assertIn("json.dumps", health)
+        if bash_major_version() < 4:
+            self.skipTest(
+                "the generated helpers use ${var,,} (bash 4+); "
+                "macOS ships bash 3.2, while the image runs Debian bash 5"
+            )
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             fake_bin = root / "bin"
@@ -551,33 +555,6 @@ fi
         self.assertIn("ming-display-control", SETTINGS)
         self.assertIn("100% 标准", SETTINGS)
         self.assertIn("1920 × 1080", SETTINGS)
-
-    def test_status_widget_compact_state_is_persistent_and_uses_a_revealer(self):
-        for marker in (
-            "status-widget.json",
-            "Gtk.Revealer",
-            "collapsed",
-            "收起",
-            "展开",
-        ):
-            self.assertIn(marker, PHONE)
-
-    def test_status_widget_uses_a_single_height_animation_instead_of_an_immediate_size_jump(self):
-        self.assertIn("self._height_animation", PHONE)
-        self.assertIn("animate_collapsed_state", PHONE)
-        self.assertIn("content_revealer.set_reveal_child", PHONE)
-        self.assertNotIn("self.set_size_request(-1, self.preferred_height())", PHONE)
-
-    def test_status_widget_uses_the_final_264_named_height_contract(self):
-        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT = 58", PHONE)
-        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 220", PHONE)
-        status = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
-        self.assertIn("STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed", status)
-        self.assertIn("else STATUS_WIDGET_EXPANDED_HEIGHT", status)
-        self.assertIn(
-            "self.status.set_size_request(widget_w, self.status.preferred_height())",
-            PHONE,
-        )
 
     def test_rootfs_gate_requires_recovery_helpers_and_modesetting(self):
         for marker in (

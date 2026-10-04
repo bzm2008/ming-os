@@ -5,6 +5,7 @@ import pathlib
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -137,17 +138,55 @@ class ShellCommonTests(unittest.TestCase):
         message = self.common.recv_json_line(left, timeout=0.5)
         self.assertEqual("toggle", message["action"])
 
-    def test_recv_json_line_rejects_missing_newline_and_oversize(self):
-        for payload in (b'{"action":"toggle"}', b"x" * (64 * 1024 + 1)):
-            left, right = socket.socketpair()
-            try:
-                right.sendall(payload)
-                right.shutdown(socket.SHUT_WR)
-                with self.assertRaises(ValueError):
-                    self.common.recv_json_line(left, timeout=0.2)
-            finally:
-                left.close()
-                right.close()
+    @staticmethod
+    def _send_and_half_close(connection, payload):
+        # Runs in a background thread: the peer must be read concurrently. The
+        # oversize payload (64 KiB + 1) exceeds the socketpair send buffer (8 KiB
+        # on macOS), so a synchronous sendall() would block forever and hang the
+        # whole discovery run. The peer may close early after rejecting the line,
+        # in which case the write legitimately fails.
+        try:
+            connection.sendall(payload)
+            connection.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass  # only used by the oversize case, where early close is expected
+
+    def test_recv_json_line_rejects_missing_newline(self):
+        # Small payload fits the socketpair buffer: a synchronous send is safe
+        # and must NOT raise — the peer only times out, it never closes early.
+        # A send-side OSError here would mean the product unexpectedly closed
+        # the connection, which this split-out case exists to catch.
+        left, right = socket.socketpair()
+        try:
+            right.sendall(b'{"action":"toggle"}')
+            right.shutdown(socket.SHUT_WR)
+            with self.assertRaises(ValueError):
+                self.common.recv_json_line(left, timeout=0.2)
+        finally:
+            left.close()
+            right.close()
+
+    def test_recv_json_line_rejects_oversize(self):
+        # The oversize payload (64 KiB + 1) exceeds the socketpair send buffer
+        # (8 KiB on macOS), so a synchronous sendall() would block forever and
+        # hang the whole discovery run. Send from a background thread while
+        # the peer reads concurrently; the peer rejecting and closing early is
+        # the expected outcome, making the send-side OSError legitimate here.
+        payload = b"x" * (64 * 1024 + 1)
+        left, right = socket.socketpair()
+        try:
+            sender = threading.Thread(
+                target=self._send_and_half_close, args=(right, payload), daemon=True
+            )
+            sender.start()
+            with self.assertRaises(ValueError):
+                self.common.recv_json_line(left, timeout=0.2)
+            sender.join(timeout=5)
+            if sender.is_alive():
+                self.fail("sender thread blocked longer than 5s — possible deadlock")
+        finally:
+            left.close()
+            right.close()
 
     def test_run_command_is_structured_and_has_bounded_timeout(self):
         result = self.common.run_command([sys.executable, "-c", "print('ok')"], timeout=2)

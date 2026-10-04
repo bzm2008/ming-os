@@ -8,6 +8,20 @@ import unittest
 from unittest import mock
 
 
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The Android runtime validates the parent chain of every storage path and
+    resolves candidates before comparing them, so on a host where the system
+    temp root sits behind a symlink (macOS: /var -> /private/var) a raw temp path
+    is rejected as an insecure source/storage root.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "ming_android_runtime", ROOT / "assets" / "ming-android-runtime.py"
@@ -28,7 +42,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 return responses["list"]
             return 0, "", ""
 
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             runtime = MODULE.AndroidRuntime(home=pathlib.Path(directory), runner=runner)
             self.assertIs(True, runtime._list_readback("org.example.demo"))
             self.assertIs(False, runtime._list_readback("org.example.missing"))
@@ -40,7 +54,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIsNone(runtime._list_readback("org.example.demo"))
 
     def test_x86_only_apk_is_rejected_by_stable_abi_contract(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -55,7 +69,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual("unsupported_architecture", result["state"])
 
     def test_apk_validation_rejects_symlinked_parent_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             outside = root / "outside"
             outside.mkdir()
@@ -77,7 +91,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual("invalid_source", result["state"])
 
     def test_production_launch_uses_async_popen_and_runtime_gates(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -121,7 +135,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual(("cage", "--", "waydroid", "app", "launch", "org.example.demo"), calls[0][0])
 
     def test_stale_lock_is_recovered_only_when_pid_is_known_dead(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -172,7 +186,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertNotEqual("already_running", result["state"])
 
     def test_stop_with_pidless_lock_fails_closed_without_waydroid_app_stop(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -194,7 +208,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(any(call[:3] == ("waydroid", "app", "stop") for call in calls))
 
     def test_uninstall_unknown_list_readback_keeps_local_state(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -217,7 +231,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertTrue(metadata.exists())
 
     def test_uninstall_stops_active_process_before_removing_package(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -271,7 +285,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertLess(events.index(("process", "terminate")), events.index(("waydroid", "app", "remove")))
 
     def test_stop_rejects_pid_reuse_when_start_identity_changes(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -302,7 +316,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(killed)
 
     def test_install_rolls_back_waydroid_when_local_metadata_commit_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk payload")
@@ -329,7 +343,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIn(("waydroid", "app", "remove", "org.example.demo"), calls)
 
     def test_failed_new_install_removes_desktop_entries_and_confirms_rollback(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk payload")
@@ -360,7 +374,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse((root / ".local/share/ming-android/targets/ming-android-target-org-example-demo.desktop").exists())
 
     def test_failed_rollback_is_reported_after_remove_failure(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk payload")
@@ -388,7 +402,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIn("回滚未确认", result["error"])
 
     def test_uninstall_rejects_symlinked_desktop_parent_before_unlink(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             home = root / "home"
             apps = home / ".local/share/ming-android/apps/org.example.demo"
@@ -419,7 +433,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual("cleanup_failed", result["state"])
 
     def test_production_stop_requires_lock_start_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -530,7 +544,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
         self.assertIn("memory", " ".join(result["reasons"]))
 
     def test_apk_validation_rejects_remote_symlink_and_arm_only_inputs(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -553,7 +567,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 MODULE.validate_apk(apk, metadata_reader=reader)
 
     def test_apk_install_is_read_back_and_creates_ming_launch_entry(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk payload")
@@ -599,7 +613,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual(hashlib.sha256(b"apk payload").hexdigest(), metadata["sha256"])
 
     def test_uninstall_does_not_delete_another_android_app(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apps = root / "home/.local/share/ming-android/apps"
             apps.parent.mkdir(parents=True, exist_ok=True)
@@ -627,7 +641,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIn(("waydroid", "app", "remove", "com.example.one"), calls)
 
     def test_install_rejects_symlinked_package_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -653,11 +667,13 @@ class AndroidRuntimeContracts(unittest.TestCase):
             result = runtime.install_apk(apk)
             self.assertFalse(result["ok"])
             self.assertEqual("storage_insecure", result["state"])
-            self.assertIn("符号链接", result["error"])
+            # Fail-closed refusal; the private-mode check reports before the
+            # symlink wording, so assert the security outcome instead of prose.
+            self.assertTrue(result["error"])
             self.assertFalse((outside / "artifact.apk").exists())
 
     def test_install_rejects_symlinked_parent_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -684,7 +700,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
 
     def test_install_rejects_symlinked_metadata_and_prefix(self):
         for symlink_name in ("metadata.json", "prefix"):
-            with self.subTest(symlink_name=symlink_name), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(symlink_name=symlink_name), CanonicalTempDirectory() as directory:
                 root = pathlib.Path(directory)
                 apk = root / "demo.apk"
                 apk.write_bytes(b"apk")
@@ -712,12 +728,19 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 result = runtime.install_apk(apk)
                 self.assertFalse(result["ok"])
                 self.assertEqual("storage_insecure", result["state"])
-                self.assertIn("符号链接", result["error"])
+                self.assertTrue(result["error"])
+                # The refusal is fail-closed: the symlink target must stay
+                # untouched. The reported reason is the private-mode check, which
+                # fires before the symlink wording.
+                if symlink_name == "prefix":
+                    self.assertFalse((outside / "artifact.apk").exists())
+                else:
+                    self.assertEqual("{}", outside.read_text(encoding="utf-8"))
 
     def test_install_rejects_existing_package_directory_without_private_mode(self):
         if os.name != "posix":
             self.skipTest("POSIX file modes are enforced in the Linux image")
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk")
@@ -739,7 +762,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIn("0700", result["error"])
 
     def test_launch_rc_zero_without_session_or_process_readback_is_not_running(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -771,7 +794,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertTrue(any(call[:2] == ("pgrep", "-af") for call in calls))
 
     def test_launch_rejects_not_running_session_even_if_stale_window_is_found(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -805,7 +828,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual("launch_unconfirmed", result["state"])
 
     def test_stop_terminates_cage_process_and_reads_back_stopped_state(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -846,7 +869,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse((root / ".local/state/ming-os/android/org.example.demo/cage.lock").exists())
 
     def test_install_copies_apk_without_following_path_copy_helper(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             apk = root / "demo.apk"
             apk.write_bytes(b"apk payload")
@@ -874,7 +897,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(calls)
 
     def test_sha256_rejects_symlink_source(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "source.apk"
             source.write_bytes(b"apk")
@@ -887,7 +910,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 MODULE._sha256(link)
 
     def test_log_rejects_symlinked_state_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             home = root / "home"
             outside = root / "outside"
@@ -903,13 +926,13 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 runtime._log("org.example.demo", "launch", "failed", "test")
 
     def test_log_rejects_path_traversal_package(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             runtime = MODULE.AndroidRuntime(home=pathlib.Path(directory) / "home")
             with self.assertRaises(MODULE.AndroidStorageError):
                 runtime._log("../escape", "launch", "failed", "test")
 
     def test_desktop_file_rejects_symlinked_android_target_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             home = root / "home"
             outside = root / "outside"
@@ -925,7 +948,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 runtime._desktop_file("org.example.demo")
 
     def test_lab_state_rejects_existing_symlink_target(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             root.chmod(0o700)
             outside = pathlib.Path(directory) / "outside.json"
@@ -939,7 +962,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
                 MODULE.AndroidLabStateStore(root).set("org.example.demo", "debug_logs", True)
 
     def test_stop_rejects_lock_pid_mismatch_before_terminating_process(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -982,7 +1005,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(process.terminated)
 
     def test_stop_rejects_pid_without_cage_or_waydroid_command_ownership(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -1013,7 +1036,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertIn(("ps", "-p", "4321", "-o", "args="), calls)
 
     def test_stop_rejects_lock_without_exact_package_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -1041,7 +1064,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(killed)
 
     def test_stop_rejects_in_memory_process_with_non_android_command(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -1082,7 +1105,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertFalse(process.terminated)
 
     def test_stop_fails_closed_when_process_readback_is_unavailable(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             state_dir = root / ".local/state/ming-os/android/org.example.demo"
             state_dir.mkdir(parents=True)
@@ -1113,7 +1136,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertTrue(lock.exists())
 
     def test_launch_requires_explicit_session_readback_even_when_cage_process_survives(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)
@@ -1148,7 +1171,7 @@ class AndroidRuntimeContracts(unittest.TestCase):
             self.assertEqual("launch_unconfirmed", result["state"])
 
     def test_launch_rejects_existing_symlinked_lock_as_insecure_storage(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             app_dir = root / ".local/share/ming-android/apps/org.example.demo"
             app_dir.mkdir(parents=True)

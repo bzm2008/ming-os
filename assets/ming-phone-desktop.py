@@ -16,27 +16,45 @@ import time
 from pathlib import Path
 
 
-def widget_state_path():
-    return Path.home() / ".config" / "ming-os" / "status-widget.json"
+def load_ui_tokens():
+    candidates = (
+        Path(__file__).with_name("ming-ui-tokens.py"),
+        Path("/usr/local/lib/ming-os/ming-ui-tokens.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.TOKENS
+    return {
+        "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+        "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+        "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+        "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+        "border": "#D7E4DE", "shadow": "#17483C",
+    }
+
+
+TOKENS = {
+    "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_elevated": "#FBFDFB",
+    "surface_subtle": "#EEF5F1", "accent": "#2F8A7D", "accent_strong": "#1F7668",
+    "text": "#1B2320", "muted": "#5B6B64", "success": "#2E8B68",
+    "warning": "#B7791F", "danger": "#C24B4B", "focus": "#3AAE99",
+    "border": "#D7E4DE", "shadow": "#17483C",
+}
 
 
 def appearance_config_path():
     return Path.home() / ".config" / "ming-os" / "appearance.json"
 
 
-METRIC_MODES = ("memory", "cpu", "network")
-WIDGET_STATE_SCHEMA_VERSION = 2
-COMPACT_BATTERY_REFRESH_SECONDS = 60
-STATUS_SUMMARY_REFRESH_SECONDS = 45
-STATUS_RESOURCE_REFRESH_SECONDS = 30
 LAUNCH_PROXY = "/usr/local/bin/ming-launch"
-MING_WIDGET_MARK_ICON = "ming-mark"
 # The capsule is deliberately narrower than the expanded control panel.  Keep
 # these dimensions stable so battery/network readbacks cannot resize it.
-STATUS_WIDGET_COMPACT_WIDTH = 252
-STATUS_WIDGET_COMPACT_HEIGHT = 58
-STATUS_WIDGET_COMPACT_NARROW_WIDTH = 242
-STATUS_TOGGLE_DEDUP_SECONDS = 0.65
 CLOCK_MARGIN_X = 26
 
 
@@ -53,57 +71,6 @@ def is_status_widget_toggle_key(keyval):
         getattr(gdk, "KEY_Win_L", 0),
         getattr(gdk, "KEY_Win_R", 0),
     }
-
-
-def normalize_metric_mode(value):
-    return value if value in METRIC_MODES else "memory"
-
-
-def load_widget_state(path=None):
-    """Load compact state and the resource metric mode with safe defaults."""
-    target = Path(path) if path else widget_state_path()
-    default = {
-        "schema_version": WIDGET_STATE_SCHEMA_VERSION,
-        "collapsed": True,
-        "metric_mode": "memory",
-    }
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-    if (not isinstance(data, dict)
-            or data.get("schema_version") != WIDGET_STATE_SCHEMA_VERSION
-            or not isinstance(data.get("collapsed"), bool)):
-        return default
-    return {
-        "schema_version": WIDGET_STATE_SCHEMA_VERSION,
-        "collapsed": data["collapsed"],
-        "metric_mode": normalize_metric_mode(data.get("metric_mode")),
-    }
-
-
-def save_widget_state(collapsed, path=None, metric_mode="memory"):
-    """Atomically persist widget state without touching desktop layouts."""
-    target = Path(path) if path else widget_state_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(".%s.%s.tmp" % (target.name, os.getpid()))
-    descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({
-                "schema_version": WIDGET_STATE_SCHEMA_VERSION,
-                "collapsed": bool(collapsed),
-                "metric_mode": normalize_metric_mode(metric_mode),
-            }, handle, ensure_ascii=False, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        target.chmod(0o600)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def preserve_confirmed_control_value(previous, value, available, minimum=0):
@@ -135,59 +102,6 @@ def system_prefers_dark():
     return "prefer-dark" in (completed.stdout or "")
 
 
-def status_widget_overlay_geometry(pill_geometry, panel_size, screen_size):
-    """Return stable compact-pill and clamped expanded-panel geometry.
-
-    The pill is intentionally returned unchanged: expanding the controls must
-    never make the desktop reserve a taller overlay.  The panel is placed
-    below the pill when possible and flips above it if the bottom edge would
-    leave the screen.
-    """
-    pill = dict(pill_geometry or {})
-    screen_w = max(1, int((screen_size or {}).get("width", 1)))
-    screen_h = max(1, int((screen_size or {}).get("height", 1)))
-    panel_w = min(screen_w, max(1, int((panel_size or {}).get("width", 1))))
-    panel_h = min(screen_h, max(1, int((panel_size or {}).get("height", 1))))
-    pill_x = int(pill.get("x", 0))
-    pill_y = int(pill.get("y", 0))
-    pill_w = int(pill.get("width", 0))
-    pill_h = int(pill.get("height", 0))
-    panel_x = min(max(0, pill_x + pill_w - panel_w), max(0, screen_w - panel_w))
-    pill_top = min(max(0, pill_y), screen_h)
-    pill_bottom = min(max(pill_top, pill_y + pill_h), screen_h)
-    space_below = max(0, screen_h - pill_bottom)
-    space_above = max(0, pill_top)
-    if panel_h <= space_below and space_below:
-        panel_y = pill_bottom
-    elif panel_h <= space_above and space_above:
-        panel_y = pill_top - panel_h
-    elif space_below >= space_above and space_below:
-        panel_h = space_below
-        panel_y = pill_bottom
-    elif space_above:
-        panel_h = space_above
-        panel_y = pill_top - panel_h
-    else:
-        panel_y = 0
-        panel_h = screen_h
-    return {
-        "pill": pill,
-        "panel": {"x": panel_x, "y": panel_y, "width": panel_w, "height": panel_h},
-    }
-
-
-def status_widget_compact_geometry(screen_size):
-    """Return a fixed-size capsule that fits narrow monitors without growth."""
-    screen_w = max(1, int((screen_size or {}).get("width", 1)))
-    available_width = max(1, screen_w - 2 * CLOCK_MARGIN_X)
-    width = min(
-        STATUS_WIDGET_COMPACT_WIDTH,
-        STATUS_WIDGET_COMPACT_NARROW_WIDTH,
-        available_width,
-    )
-    return {"width": width, "height": STATUS_WIDGET_COMPACT_HEIGHT}
-
-
 def load_appearance_theme(path=None):
     target = Path(path) if path else appearance_config_path()
     try:
@@ -216,125 +130,6 @@ def _metric_result(mode, value=None, unit="", available=False, sample_time=0,
         "interface": interface,
         "reason": reason,
     }
-
-
-def read_resource_metric(mode, previous=None, now=None, proc_root="/proc"):
-    """Read one bounded resource metric without spawning a diagnostic command."""
-    mode = normalize_metric_mode(mode)
-    previous = previous if isinstance(previous, dict) else {}
-    now = time.monotonic() if now is None else float(now)
-    root = Path(proc_root)
-    if mode == "memory":
-        values = {}
-        for line in _proc_lines(root / "meminfo"):
-            key, separator, value = line.partition(":")
-            if separator:
-                match = re.search(r"\d+", value)
-                if match:
-                    values[key] = int(match.group())
-        total = values.get("MemTotal", 0)
-        available = values.get("MemAvailable", values.get("MemFree", 0))
-        if total <= 0:
-            return _metric_result(mode, reason="无法读取 /proc/meminfo。")
-        used = max(0, min(total, total - available))
-        return _metric_result(
-            mode, round(used * 100.0 / total, 1), "%", True, int(now), reason="")
-
-    if mode == "cpu":
-        line = next((line for line in _proc_lines(root / "stat")
-                     if line.startswith("cpu ")), "")
-        fields = line.split()[1:]
-        if len(fields) < 4:
-            return _metric_result(mode, reason="无法读取 /proc/stat。")
-        try:
-            counters = [int(item) for item in fields[:8]]
-        except ValueError:
-            return _metric_result(mode, reason="CPU 采样数据无效。")
-        if not previous or "counters" not in previous:
-            return _metric_result(mode, available=False, sample_time=int(now),
-                                  reason="正在采样 CPU。")
-        total_delta = sum(counters) - sum(previous.get("counters", []))
-        idle_delta = sum(counters[3:5]) - sum(previous.get("counters", [0] * 8)[3:5])
-        if total_delta <= 0:
-            return _metric_result(mode, available=False, sample_time=int(now),
-                                  reason="CPU 采样间隔不足。")
-        value = max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0))
-        return _metric_result(mode, round(value, 1), "%", True, int(now), reason="")
-
-    route_interface = ""
-    for line in _proc_lines(root / "net" / "route")[1:]:
-        fields = line.split()
-        if len(fields) >= 2 and fields[1] == "00000000" and fields[0] != "lo":
-            route_interface = fields[0]
-            break
-    records = {}
-    for line in _proc_lines(root / "net" / "dev"):
-        if ":" not in line:
-            continue
-        name, data = line.split(":", 1)
-        name = name.strip()
-        if name == "lo":
-            continue
-        fields = data.split()
-        if len(fields) >= 9:
-            try:
-                records[name] = (int(fields[0]), int(fields[8]))
-            except ValueError:
-                continue
-    interface = route_interface or (next(iter(records), ""))
-    if not interface or interface not in records:
-        return _metric_result(mode, interface=interface, reason="未检测到可用网络接口。")
-    rx, tx = records[interface]
-    if previous.get("interface") != interface or "bytes" not in previous:
-        return _metric_result(mode, interface=interface, sample_time=int(now),
-                              reason="正在采样网络速度。")
-    elapsed = max(0.1, now - float(previous.get("sample_time", now)))
-    old_rx, old_tx = previous["bytes"]
-    value = max(0.0, (rx + tx - old_rx - old_tx) / elapsed / 1024.0)
-    return _metric_result(mode, round(value, 1), "KB/s", True, int(now), interface, "")
-
-
-class ResourceMetricSampler:
-    def __init__(self):
-        self.previous = {}
-
-    def sample(self, mode):
-        mode = normalize_metric_mode(mode)
-        now = time.monotonic()
-        result = read_resource_metric(mode, self.previous.get(mode), now=now)
-        if mode == "cpu":
-            line = next((line for line in _proc_lines("/proc/stat")
-                         if line.startswith("cpu ")), "")
-            try:
-                counters = [int(item) for item in line.split()[1:9]]
-            except (TypeError, ValueError):
-                counters = []
-            if counters:
-                self.previous[mode] = {"counters": counters, "sample_time": now}
-        elif mode == "network":
-            interface = result.get("interface")
-            if interface:
-                records = {}
-                for line in _proc_lines("/proc/net/dev"):
-                    if ":" not in line:
-                        continue
-                    name, data = line.split(":", 1)
-                    fields = data.split()
-                    if name.strip() != "lo" and len(fields) >= 9:
-                        try:
-                            records[name.strip()] = (int(fields[0]), int(fields[8]))
-                        except ValueError:
-                            pass
-                if interface in records:
-                    self.previous[mode] = {
-                        "interface": interface, "bytes": records[interface],
-                        "sample_time": now,
-                    }
-        return result
-
-    def sample_all(self):
-        """Collect the three preview metrics in one expanded-panel pass."""
-        return {mode: self.sample(mode) for mode in METRIC_MODES}
 
 
 def desktop_directory():
@@ -620,7 +415,7 @@ WALLPAPER_PATHS = [
 
 CSS = b"""
 window.ming-desktop {
-  background-color: #EFF7F2;
+  background-color: __MING_CANVAS__;
   font-family: "Noto Sans CJK SC", sans-serif;
   font-weight: 400;
 }
@@ -693,8 +488,8 @@ window.ming-desktop {
 .status-widget {
   border-radius: 14px;
   padding: 8px 16px;
-  background: #F9FCFA;
-  border: 1px solid rgba(255, 255, 255, 0.78);
+  background: __MING_SURFACE_ELEVATED__;
+  border: 1px solid __MING_BORDER__;
   box-shadow: 0 12px 34px rgba(21, 68, 56, 0.12), inset 0 1px 0 rgba(255,255,255,0.78);
 }
 .status-widget-compact {
@@ -705,15 +500,15 @@ window.ming-desktop {
 }
 .status-compact-pill {
   min-height: 38px;
-  border-radius: 27px;
-  padding: 8px 12px;
-  background: #FFFFFF;
-  border: 1px solid rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 26px rgba(21, 68, 56, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
+  border-radius: 21px;
+  padding: 8px 14px;
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  box-shadow: 0 8px 24px rgba(23, 72, 60, 0.14), inset 0 1px 0 rgba(255,255,255,0.84);
   color: #17231F;
 }
 .status-compact-pill:hover { background: #F4F8F5; }
-.status-compact-time { font-size: 19px; font-weight: 700; color: #17231F; }
+.status-compact-time { font-size: 18px; font-weight: 700; color: #17231F; }
 .status-compact-date { font-size: 10.5px; font-weight: 500; color: #2D695C; }
 .status-compact-battery { font-size: 10.5px; font-weight: 500; color: #517168; }
 .status-compact-arrow { font-size: 15px; font-weight: 700; color: #2F8A7D; }
@@ -721,33 +516,39 @@ window.ming-desktop {
   min-width: 0;
   padding: 11px;
   border-radius: 14px;
-  background: #FFFFFF;
-  border: 1px solid rgba(47, 138, 125, 0.14);
-  box-shadow: 0 16px 34px rgba(21, 68, 56, 0.19);
+  /* background: #FFFFFF is the opaque expanded surface before token expansion. */
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  box-shadow: 0 18px 42px rgba(23, 72, 60, 0.22), inset 0 1px 0 rgba(255,255,255,0.88);
 }
 .status-expanded-title {
-  color: #2F8A7D;
-  font-size: 12px;
+  color: __MING_ACCENT_STRONG__;
+  font-size: 13px;
   font-weight: 700;
 }
 .status-resource-grid { margin: 1px 0 2px; }
 .status-resource-card {
-  min-width: 84px;
-  padding: 7px 6px;
-  border-radius: 8px;
-  background: #EDF7F2;
-  border: 1px solid rgba(47, 138, 125, 0.10);
+  min-width: 88px;
+  padding: 9px 7px;
+  border-radius: 12px;
+  background: #EEF5F1;
+  border: 1px solid rgba(47, 138, 125, 0.12);
 }
 .status-resource-name { color: #55766B; font-size: 10px; }
 .status-resource-value { color: #245C50; font-size: 14px; font-weight: 700; }
 .status-button {
-  border-radius: 9px;
-  padding: 4px 8px;
-  background: #FFFFFF;
-  border: 1px solid rgba(47, 138, 125, 0.10);
-  color: #21302A;
+  min-height: 34px;
+  border-radius: 10px;
+  padding: 5px 9px;
+  background: __MING_SURFACE__;
+  border: 1px solid __MING_BORDER__;
+  color: __MING_TEXT__;
 }
 .status-button:hover { background: #F4F8F5; }
+.status-button:focus, .status-compact-pill:focus {
+  outline: 2px solid __MING_FOCUS__;
+  outline-offset: 2px;
+}
 .ming-desktop-dark .clock-widget,
 .ming-desktop-dark .status-widget {
   background: #202824;
@@ -784,8 +585,8 @@ window.ming-desktop {
 .ming-desktop-dark .status-resource-name { color: #A9BDB5; }
 .ming-desktop-dark .status-resource-value { color: #E7EEE9; }
 .status-scale trough {
-  min-height: 7px;
-  border-radius: 4px;
+  min-height: 8px;
+  border-radius: 5px;
   background: transparent;
   border: 0;
 }
@@ -806,6 +607,10 @@ window.ming-desktop {
   min-height: 7px;
   border-radius: 4px;
   background: transparent;
+}
+.status-scale:focus {
+  outline: 2px solid __MING_FOCUS__;
+  outline-offset: 2px;
 }
 .status-scale slider {
   min-width: 1px;
@@ -849,6 +654,23 @@ def log(msg):
             handle.write(datetime.datetime.now().strftime("[%F %T] ") + msg + "\n")
     except Exception:
         pass
+
+
+def render_ui_css(source):
+    """Resolve shared visual tokens only when the GTK session starts."""
+    try:
+        loaded = load_ui_tokens()
+        if isinstance(loaded, dict):
+            TOKENS.update(loaded)
+    except Exception as exc:
+        log("shared UI tokens unavailable: %s" % exc)
+    rendered = source
+    for name, value in TOKENS.items():
+        rendered = rendered.replace(
+            ("__MING_%s__" % name.upper()).encode("ascii"),
+            str(value).encode("ascii"),
+        )
+    return rendered
 
 
 def load_notifications_helper():
@@ -984,6 +806,7 @@ def legacy_desktop_entry(path):
     codes are removed, the executable is resolved first, and the returned
     argv is passed directly to ``subprocess.Popen``.
     """
+    import configparser
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
@@ -1221,6 +1044,7 @@ def normalized_desktop_exec_program(exec_line):
 
 def desktop_entry_dedup_fields(path):
     """Read non-display launcher fields; names are intentionally excluded."""
+    import configparser
     target = Path(path)
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
@@ -1770,7 +1594,9 @@ def sync_layout(width=1366):
         layout = migrated
     catalog_paths = {str(app["path"]) for app in apps}
     previous_catalog = layout.get("catalog_paths")
-    catalog_is_initialized = isinstance(previous_catalog, list)
+    # An empty catalog is the first-run marker, not an initialized snapshot;
+    # only a non-empty prior catalog can identify newly installed apps.
+    catalog_is_initialized = isinstance(previous_catalog, list) and bool(previous_catalog)
     previous_catalog = {
         str(path) for path in previous_catalog
         if isinstance(path, (str, os.PathLike))
@@ -1833,18 +1659,39 @@ def sync_layout(width=1366):
                 items.append(restored)
                 known.add(identity)
     index = len(items)
+    existing_basenames = {
+        Path(str(item.get("path"))).name.casefold()
+        for item in items
+        if item.get("path")
+    }
+    for item in items:
+        existing_basenames.update(
+            Path(str(child)).name.casefold()
+            for child in item.get("children", [])
+            if isinstance(child, (str, os.PathLike))
+        )
+    newly_installed_paths = []
     for app in visible_apps:
         identity = layout_item_identity(app)
-        if identity in known:
+        if identity in known or (
+                (not catalog_is_initialized and items)
+                or
+                catalog_is_initialized
+                and app["basename"].casefold() in existing_basenames):
             continue
         app["x"], app["y"] = next_position(index, width)
+        # Keep the user's layout semantics while marking newly discovered
+        # applications for a desktop launcher refresh after installation.
         app["pinned"] = False
+        if catalog_is_initialized and app["basename"] not in CORE_NAMES:
+            newly_installed_paths.append(str(app["path"]))
         items.append(app)
         known.add(identity)
         index += 1
     layout["version"] = LAYOUT_VERSION
     layout["items"] = items
     layout["catalog_paths"] = sorted(catalog_paths)
+    layout["newly_installed_paths"] = sorted(newly_installed_paths)
     if items:
         save_layout(layout)
         sync_files(layout)
@@ -2154,7 +2001,10 @@ def sync_files(layout):
                     relative = _manifest_relative(copied) if copied else None
                     if relative and copied != Path(child_path).resolve():
                         managed_files.add(relative)
-        elif item.get("path") and (Path(item["path"]).name in CORE_NAMES or item.get("pinned")):
+        elif item.get("path") and (
+                Path(item["path"]).name in CORE_NAMES
+                or item.get("pinned")
+                or str(item["path"]) in set(layout.get("newly_installed_paths", []))):
             is_core = Path(item["path"]).name in CORE_NAMES
             copied = copy_desktop(
                 item["path"],
@@ -2485,1470 +2335,6 @@ class LaunchFeedbackOverlay(Gtk.EventBox):
         return False
 
 
-class StatusSlider(Gtk.EventBox):
-    """Theme-independent slider with its own mouse/touch input window."""
-
-    __gsignals__ = {
-        "value-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
-    }
-
-    def __init__(self, lower, upper):
-        super().__init__()
-        self.lower = float(lower)
-        self.upper = float(upper)
-        self.value = float(lower)
-        self.dragging = False
-        self.touch_sequence = None
-        self.suppress_mouse_until = 0
-        self.set_visible_window(False)
-        self.set_above_child(True)
-        self.add_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK
-            | Gdk.EventMask.BUTTON_RELEASE_MASK
-            | Gdk.EventMask.POINTER_MOTION_MASK
-            | Gdk.EventMask.TOUCH_MASK
-            | Gdk.EventMask.KEY_PRESS_MASK
-        )
-        self.canvas = Gtk.DrawingArea()
-        self.canvas.set_size_request(-1, 22)
-        self.canvas.connect("draw", self.on_draw)
-        self.add(self.canvas)
-        self.connect("button-press-event", self.on_button_press)
-        self.connect("motion-notify-event", self.on_motion)
-        self.connect("button-release-event", self.on_button_release)
-        self.connect("touch-event", self.on_touch)
-        self.connect("notify::sensitive", lambda *_args: self.canvas.queue_draw())
-
-    def set_value(self, value):
-        value = max(self.lower, min(self.upper, float(value)))
-        if abs(value - self.value) < 0.001:
-            self.canvas.queue_draw()
-            return
-        self.value = value
-        self.canvas.queue_draw()
-        self.emit("value-changed")
-
-    def get_value(self):
-        return self.value
-
-    def value_from_x(self, x):
-        width = max(1.0, float(self.get_allocated_width()))
-        track_x = 8.0
-        track_width = max(1.0, width - 16.0)
-        fraction = max(0.0, min(1.0, (float(x) - track_x) / track_width))
-        return self.lower + (self.upper - self.lower) * fraction
-
-    def update_from_event(self, event):
-        self.set_value(self.value_from_x(getattr(event, "x", 0.0)))
-
-    def on_button_press(self, _widget, event):
-        if not self.get_sensitive() or getattr(event, "button", 0) != 1:
-            return False
-        if GLib.get_monotonic_time() < self.suppress_mouse_until:
-            return True
-        self.dragging = True
-        self.update_from_event(event)
-        return True
-
-    def on_motion(self, _widget, event):
-        if not self.dragging or not self.get_sensitive():
-            return False
-        self.update_from_event(event)
-        return True
-
-    def on_button_release(self, _widget, event):
-        if not self.dragging or getattr(event, "button", 0) != 1:
-            return False
-        self.update_from_event(event)
-        self.dragging = False
-        return True
-
-    @staticmethod
-    def event_sequence(event):
-        try:
-            return event.get_event_sequence()
-        except Exception:
-            return getattr(event, "sequence", None)
-
-    def on_touch(self, _widget, event):
-        if not self.get_sensitive():
-            return False
-        event_type = event.type
-        sequence = self.event_sequence(event)
-        if event_type == Gdk.EventType.TOUCH_BEGIN:
-            if self.touch_sequence is not None and sequence != self.touch_sequence:
-                return True
-            self.touch_sequence = sequence
-            self.update_from_event(event)
-            return True
-        if sequence != self.touch_sequence:
-            return True
-        if event_type == Gdk.EventType.TOUCH_UPDATE:
-            self.update_from_event(event)
-            return True
-        if event_type == Gdk.EventType.TOUCH_END:
-            self.update_from_event(event)
-            self.touch_sequence = None
-            self.suppress_mouse_until = GLib.get_monotonic_time() + 650000
-            return True
-        if event_type == Gdk.EventType.TOUCH_CANCEL:
-            self.touch_sequence = None
-            self.suppress_mouse_until = GLib.get_monotonic_time() + 650000
-            return True
-        return False
-
-    @staticmethod
-    def rounded_rect(cr, x, y, width, height, radius):
-        radius = max(0.0, min(radius, width / 2.0, height / 2.0))
-        cr.new_sub_path()
-        cr.arc(x + width - radius, y + radius, radius, -1.5708, 0)
-        cr.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
-        cr.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
-        cr.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
-        cr.close_path()
-
-    def on_draw(self, _widget, cr):
-        allocation = self.canvas.get_allocation()
-        width = max(1.0, float(allocation.width))
-        height = max(1.0, float(allocation.height))
-        fraction = 0.0 if self.upper <= self.lower else (
-            (self.value - self.lower) / (self.upper - self.lower))
-        fraction = max(0.0, min(1.0, fraction))
-        track_x = 8.0
-        track_width = max(1.0, width - 16.0)
-        center_y = height / 2.0
-        radius = 4.0
-        marker_radius = 7.0
-        enabled = self.get_sensitive()
-
-        cr.set_source_rgba(0.16, 0.27, 0.23, 0.18 if enabled else 0.08)
-        self.rounded_rect(
-            cr, track_x, center_y - radius, track_width, radius * 2, radius)
-        cr.fill()
-        if enabled and fraction > 0:
-            cr.set_source_rgb(0.184, 0.541, 0.490)
-            self.rounded_rect(
-                cr, track_x, center_y - radius,
-                max(radius * 2, track_width * fraction), radius * 2, radius)
-            cr.fill()
-        marker_x = track_x + track_width * fraction
-        cr.set_source_rgb(1.0, 1.0, 1.0)
-        cr.arc(marker_x, center_y, marker_radius, 0, 6.2832)
-        cr.fill_preserve()
-        cr.set_source_rgba(0.184, 0.541, 0.490, 1.0 if enabled else 0.42)
-        cr.set_line_width(2.0)
-        cr.stroke()
-        return False
-
-
-class ControlRequestState:
-    """Track one debounced hardware-control request without stale readbacks."""
-
-    def __init__(self):
-        self.generation = 0
-        self.pending = False
-        self.optimistic_value = None
-        self.confirmed_value = None
-
-    def begin(self, value):
-        self.generation += 1
-        self.pending = True
-        self.optimistic_value = value
-        return self.generation
-
-    def accepts(self, generation):
-        return generation == self.generation
-
-    def settle(self, generation, value):
-        if not self.accepts(generation):
-            return False
-        self.pending = False
-        self.optimistic_value = value
-        self.confirmed_value = value
-        return True
-
-    def should_hold_status(self):
-        return self.pending
-
-
-class StatusWidget(Gtk.Box):
-    def __init__(self):
-        # Keep the status container windowless so Gtk.Scale remains the event
-        # target.  Gtk.EventBox creates an input window around the whole card,
-        # which prevents GtkRange's native drag handling from seeing motion.
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_valign(Gtk.Align.START)
-        self.set_vexpand(False)
-        self.set_margin_top(0)
-        widget_state = load_widget_state()
-        self.collapsed = widget_state["collapsed"]
-        self.metric_mode = widget_state["metric_mode"]
-        self.metric_sampler = ResourceMetricSampler()
-        self.metric_generation = 0
-        self.metric_refreshing = False
-        self._destroyed = False
-        self._summary_timer_source = 0
-        self._resource_timer_source = 0
-        self.battery_text = ""
-        self.battery_refreshing = False
-        self.battery_next_refresh_at = 0.0
-        self.refreshing = False
-        self.notifications = load_notifications_helper()
-        device_module = load_device_control()
-        self.device_controller = device_module.DeviceController() if device_module else None
-        self.volume_timer = None
-        self.brightness_timer = None
-        self.brightness_backend = ""
-        self.updating_controls = False
-        self.control_states = {
-            "volume": ControlRequestState(),
-            "brightness": ControlRequestState(),
-        }
-        self.updating_dnd = False
-        self.action_starts = {}
-        self._height_animation = None
-        self._height_animation_source = 0
-        self._collapse_hide_source = 0
-        self._expanded_window_realized = False
-        self._expanded_geometry = None
-        self._context_menu = None
-        self._context_menu_item = None
-        self.last_context_result = None
-        self._last_context_event = None
-        self._display_height = (
-            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
-            else STATUS_WIDGET_EXPANDED_HEIGHT)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        box.get_style_context().add_class("status-widget")
-        box.set_halign(Gtk.Align.FILL)
-        box.set_hexpand(True)
-        box.set_valign(Gtk.Align.START)
-        box.set_vexpand(False)
-        box.set_margin_top(0)
-        self.widget_box = box
-
-        self.compact_button = Gtk.Button()
-        self.compact_button.get_style_context().add_class("status-compact-pill")
-        # The capsule is a stable hit target.  Expanded controls are rendered
-        # in a separate popup and must never participate in this allocation.
-        self.compact_button.set_hexpand(False)
-        self.compact_button.set_vexpand(False)
-        self.compact_button.set_halign(Gtk.Align.END)
-        self.compact_button.set_valign(Gtk.Align.START)
-        self.compact_button.set_size_request(
-            STATUS_WIDGET_COMPACT_WIDTH, STATUS_WIDGET_COMPACT_HEIGHT)
-        compact = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        compact.set_hexpand(False)
-        compact.set_vexpand(False)
-        compact.set_size_request(
-            STATUS_WIDGET_COMPACT_WIDTH - 24, STATUS_WIDGET_COMPACT_HEIGHT - 2)
-        self.compact_time_label = Gtk.Label()
-        self.compact_time_label.get_style_context().add_class("status-compact-time")
-        compact.pack_start(self.compact_time_label, False, False, 0)
-        self.compact_date_label = Gtk.Label()
-        self.compact_date_label.get_style_context().add_class("status-compact-date")
-        compact.pack_start(self.compact_date_label, False, False, 0)
-        self.compact_wifi_icon = Gtk.Image.new_from_icon_name(
-            "network-wireless-symbolic", Gtk.IconSize.MENU)
-        self.compact_wifi_icon.set_tooltip_text("Wi-Fi 状态")
-        compact.pack_start(self.compact_wifi_icon, False, False, 0)
-        self.compact_battery_separator = Gtk.Label(label="|")
-        self.compact_battery_separator.set_no_show_all(True)
-        self.compact_battery_separator.set_visible(False)
-        self.compact_battery_icon = Gtk.Image.new_from_icon_name(
-            "battery-good-symbolic", Gtk.IconSize.MENU)
-        self.compact_battery_icon.set_tooltip_text("电池状态")
-        self.compact_battery_icon.set_no_show_all(True)
-        self.compact_battery_icon.set_visible(False)
-        compact.pack_start(self.compact_battery_icon, False, False, 0)
-        self.compact_battery_label = Gtk.Label()
-        self.compact_battery_label.get_style_context().add_class("status-compact-battery")
-        self.compact_battery_label.set_no_show_all(True)
-        self.compact_battery_label.set_visible(False)
-        compact.pack_start(self.compact_battery_label, False, False, 0)
-        self.compact_logo_image = Gtk.Image()
-        mark_paths = (
-            Path("/usr/share/icons/Ming-Mint/scalable/apps/ming-mark.svg"),
-            Path("/usr/share/icons/hicolor/scalable/apps/ming-mark.svg"),
-        )
-        mark_path = next((path for path in mark_paths if path.is_file()), None)
-        if mark_path is not None:
-            self.compact_logo_image.set_from_file(str(mark_path))
-        else:
-            self.compact_logo_image.set_from_icon_name(
-                MING_WIDGET_MARK_ICON, Gtk.IconSize.MENU)
-        self.compact_logo_image.set_pixel_size(18)
-        self.compact_logo_image.set_tooltip_text("展开状态控制")
-        compact.pack_start(self.compact_logo_image, False, False, 0)
-        self.compact_arrow_label = Gtk.Label(label="⌄")
-        self.compact_arrow_label.get_style_context().add_class("status-compact-arrow")
-        compact.pack_start(self.compact_arrow_label, False, False, 0)
-        self.compact_button.add(compact)
-        self.compact_button.set_tooltip_text("展开/收起状态控制")
-        self.compact_button.connect(
-            "clicked", lambda _button: self.set_collapsed(not self.collapsed))
-
-        self.time_label = self.compact_time_label
-        self.date_label = self.compact_date_label
-        self.header_battery_label = self.compact_battery_label
-        self.compact_network_text = "网络 --"
-        self.collapse_button = Gtk.Button()
-        self.collapse_button.get_style_context().add_class("status-button")
-        collapse_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
-        self.collapse_logo_image = Gtk.Image()
-        collapse_mark_path = next((path for path in mark_paths if path.is_file()), None)
-        if collapse_mark_path is not None:
-            self.collapse_logo_image.set_from_file(str(collapse_mark_path))
-        else:
-            self.collapse_logo_image.set_from_icon_name(
-                MING_WIDGET_MARK_ICON, Gtk.IconSize.MENU)
-        self.collapse_logo_image.set_pixel_size(16)
-        collapse_content.pack_start(self.collapse_logo_image, False, False, 0)
-        collapse_content.pack_start(Gtk.Label(label="⌃"), False, False, 0)
-        self.collapse_button.add(collapse_content)
-        self.collapse_button.set_tooltip_text("收起状态控制")
-        self.collapse_button.connect("clicked", lambda _button: self.set_collapsed(True))
-        # The collapse control is attached to ``expanded_header`` below.  Do
-        # not parent it to the unused legacy header first: GTK widgets may
-        # only have one parent, and the old double-parenting caused the button
-        # to disappear from the popup on some GTK versions.
-
-        actions = Gtk.Grid()
-        actions.set_column_spacing(6)
-        actions.set_row_spacing(6)
-        actions.set_column_homogeneous(True)
-        self.action_commands = {}
-        self.wifi_button = self.action_button("Wi-Fi --", "ming-control-center")
-        self.action_commands[self.wifi_button] = ["ming-control-center", "--page", "network"]
-        self.bluetooth_button = self.action_button("蓝牙 --", "ming-control-center")
-        self.action_commands[self.bluetooth_button] = ["ming-control-center", "--page", "network"]
-        # Keep a small resource-cycle command for keyboard users; the expanded
-        # panel itself renders all three metrics at once to match the preview.
-        self.resource_button = self.action_button("资源", callback=self.on_resource_clicked)
-        self.notification_button = self.action_button("通知", callback=self.open_notifications)
-        self.settings_button = self.action_button("设置", "ming-control-center")
-        self.action_commands[self.settings_button] = ["ming-control-center", "--page", "advanced"]
-        self.power_button = self.action_button("电源", callback=self.open_power_menu)
-        self.display_button = self.action_button(
-            "显示", ["ming-control-center", "--page", "display"])
-        self.wifi_label = self.wifi_button.ming_label
-        self.bluetooth_label = self.bluetooth_button.ming_label
-        self.resource_label = self.resource_button.ming_label
-        # Keep old callers working while displaying battery independently from
-        # the resource sampler, which regularly replaces its label text.
-        self.battery_button = self.resource_button
-        self.battery_label = self.compact_battery_label
-        self.notification_label = self.notification_button.ming_label
-        self.settings_label = self.settings_button.ming_label
-        self.power_label = self.power_button.ming_label
-        actions.attach(self.wifi_button, 0, 0, 1, 1)
-        actions.attach(self.bluetooth_button, 1, 0, 1, 1)
-        actions.attach(self.notification_button, 2, 0, 1, 1)
-        actions.attach(self.settings_button, 0, 1, 1, 1)
-        actions.attach(self.display_button, 1, 1, 1, 1)
-        actions.attach(self.power_button, 2, 1, 1, 1)
-
-        controls = Gtk.Grid()
-        controls.set_column_spacing(8)
-        controls.set_row_spacing(4)
-        self.volume_label = Gtk.Label(label="音量")
-        self.volume_label.set_halign(Gtk.Align.START)
-        self.volume_label.set_hexpand(True)
-        self.volume_label.set_width_chars(8)
-        self.volume_scale = StatusSlider(0, 100)
-        self.volume_scale.set_hexpand(True)
-        self.volume_scale.get_style_context().add_class("status-scale")
-        self.volume_scale.connect("value-changed", self.on_volume_changed)
-        self.brightness_label = Gtk.Label(label="亮度")
-        self.brightness_label.set_halign(Gtk.Align.START)
-        self.brightness_label.set_hexpand(True)
-        self.brightness_label.set_width_chars(8)
-        self.brightness_scale = StatusSlider(1, 100)
-        self.brightness_scale.set_hexpand(True)
-        self.brightness_scale.get_style_context().add_class("status-scale")
-        self.brightness_scale.connect("value-changed", self.on_brightness_changed)
-        self.audio_button = self.action_button(
-            "声音", ["ming-control-center", "--page", "advanced"])
-        # The sound shortcut shares a row with the volume label.  Keep the
-        # label readable instead of letting it consume the whole last column.
-        self.audio_button.set_hexpand(False)
-        controls.attach(self.volume_label, 0, 0, 2, 1)
-        controls.attach(self.audio_button, 2, 0, 1, 1)
-        controls.attach(self.volume_scale, 0, 1, 3, 1)
-        controls.attach(self.brightness_label, 0, 2, 2, 1)
-        controls.attach(self.brightness_scale, 0, 3, 3, 1)
-
-        resource_grid = Gtk.Grid()
-        resource_grid.set_column_spacing(6)
-        resource_grid.set_row_spacing(0)
-        resource_grid.set_column_homogeneous(True)
-        self.resource_labels = {}
-        for column, (mode, label) in enumerate(
-                (("memory", "内存"), ("cpu", "CPU"), ("network", "网速"))):
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            card.get_style_context().add_class("status-resource-card")
-            name = Gtk.Label(label=label)
-            name.set_halign(Gtk.Align.CENTER)
-            name.get_style_context().add_class("status-resource-name")
-            value = Gtk.Label(label="--")
-            value.set_halign(Gtk.Align.CENTER)
-            value.get_style_context().add_class("status-resource-value")
-            card.pack_start(name, False, False, 0)
-            card.pack_start(value, False, False, 0)
-            resource_grid.attach(card, column, 0, 1, 1)
-            self.resource_labels[mode] = value
-
-        expanded = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        expanded.set_valign(Gtk.Align.START)
-        expanded.set_vexpand(False)
-        expanded.set_margin_top(0)
-        # Do not reuse ``header`` here.  It belongs to the legacy in-card
-        # clock representation and contains the same time/date fields as the
-        # compact capsule.  Reusing it made the expanded popup show a second
-        # clock row and a second collapse affordance.  The popup has one small
-        # title row instead.
-        expanded_title = Gtk.Label(label="快速控制 · 资源状态")
-        expanded_title.set_halign(Gtk.Align.START)
-        expanded_title.get_style_context().add_class("status-expanded-title")
-        expanded_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        expanded_header.set_halign(Gtk.Align.FILL)
-        expanded_header.set_hexpand(True)
-        expanded_header.set_size_request(-1, 30)
-        expanded_header.pack_start(expanded_title, True, True, 0)
-        # ``collapse_button`` is owned by the popup only; the capsule keeps its
-        # own single logo/arrow button.  This avoids duplicate controls when
-        # Gtk.show_all() is called during a desktop refresh.
-        expanded_header.pack_end(self.collapse_button, False, False, 0)
-        expanded.pack_start(expanded_header, False, False, 0)
-        expanded.pack_start(actions, False, False, 0)
-        expanded.pack_start(resource_grid, False, False, 0)
-        expanded.pack_start(controls, False, False, 0)
-        self.content_revealer = Gtk.Revealer()
-        self.content_revealer.set_valign(Gtk.Align.START)
-        self.content_revealer.set_vexpand(False)
-        self.content_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
-        self.content_revealer.set_transition_duration(180)
-        self.content_revealer.add(expanded)
-        expanded_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        expanded_panel.get_style_context().add_class("status-expanded-panel")
-        expanded_panel.set_valign(Gtk.Align.START)
-        expanded_panel.set_vexpand(False)
-        expanded_panel.set_size_request(
-            STATUS_WIDGET_EXPANDED_WIDTH, STATUS_WIDGET_EXPANDED_PANEL_HEIGHT)
-        expanded_panel.add(self.content_revealer)
-        self.expanded_panel = expanded_panel
-        self.expanded_window = Gtk.Window(type=Gtk.WindowType.POPUP)
-        # Gtk.WindowTypeHint.POPUP_MENU is exposed through Gdk in GTK 3.
-        self.expanded_window.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
-        self.expanded_window.set_decorated(False)
-        self.expanded_window.set_resizable(False)
-        # Keep the expanded panel a bounded, normal-opacity window.  In
-        # software-rendered Live sessions an uninitialised popup can otherwise
-        # become a black, input-blocking surface when the Win key is pressed.
-        self.expanded_window.set_modal(False)
-        self.expanded_window.set_opacity(1.0)
-        self.expanded_window.set_skip_taskbar_hint(True)
-        self.expanded_window.set_skip_pager_hint(True)
-        self.expanded_window.set_position(Gtk.WindowPosition.NONE)
-        self.expanded_window.connect("realize", self._on_expanded_window_realize)
-        self.expanded_window.add(expanded_panel)
-        box.pack_start(self.compact_button, False, False, 0)
-        # The expanded controls live in expanded_window, so this box keeps a
-        # fixed compact-pill allocation in every state.
-        # box.pack_start(self.content_revealer, False, False, 0)
-        self.pack_start(box, False, False, 0)
-        self.apply_collapsed_state(animate=False)
-        self.refresh()
-        self.refresh_resource_metric()
-        self._summary_timer_source = GLib.timeout_add_seconds(
-            STATUS_SUMMARY_REFRESH_SECONDS, self.refresh)
-        self._resource_timer_source = GLib.timeout_add_seconds(
-            STATUS_RESOURCE_REFRESH_SECONDS, self.refresh_resource_metric_timer)
-        self.connect("destroy", self.on_destroy)
-
-    def on_destroy(self, *_args):
-        if self._destroyed:
-            return False
-        self._destroyed = True
-        self.metric_generation += 1
-        self.metric_refreshing = False
-        for attribute in (
-                "_summary_timer_source", "_resource_timer_source",
-                "_collapse_hide_source", "_height_animation_source"):
-            source = getattr(self, attribute, 0)
-            if source:
-                try:
-                    GLib.source_remove(source)
-                except Exception as exc:
-                    log("could not remove status widget source %s: %s" % (source, exc))
-                setattr(self, attribute, 0)
-        popup = getattr(self, "expanded_window", None)
-        if popup is not None:
-            try:
-                popup.destroy()
-            except Exception as exc:
-                log("could not destroy status widget popup: %s" % exc)
-        return False
-
-    def geometry_snapshot(self):
-        outer = self.get_allocation()
-        card = self.widget_box.get_allocation()
-        content = self.content_revealer.get_allocation()
-        return {
-            "outer_y": int(outer.y),
-            "outer_height": int(outer.height),
-            "card_y": int(card.y),
-            "card_height": int(card.height),
-            "content_y": int(content.y),
-            "content_height": int(content.height),
-            "collapsed": bool(self.collapsed),
-        }
-
-    def verify_top_alignment(self):
-        geometry = self.geometry_snapshot()
-        log("status widget geometry %s" % json.dumps(geometry, sort_keys=True))
-        expected_content_y = geometry["card_y"]
-        if (geometry["outer_y"] != CLOCK_MARGIN_Y
-                or geometry["card_y"] != 0
-                or not status_widget_top_gap_is_valid(
-                    geometry["content_y"], expected_content_y
-                )):
-            log("geometry top-alignment failed: %s" % json.dumps(geometry, sort_keys=True))
-        return False
-
-    def preferred_height(self):
-        # The desktop only reserves the compact pill height.  Expanded
-        # controls are a separate transient window and do not move tiles.
-        return STATUS_WIDGET_COMPACT_HEIGHT
-
-    def set_collapsed(self, collapsed):
-        self.collapsed = bool(collapsed)
-        self.metric_generation += 1
-        try:
-            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
-        except OSError as exc:
-            log("could not save status widget state: %s" % exc)
-        self.apply_collapsed_state(animate=True)
-        if not self.collapsed:
-            self.refresh_resource_metric()
-
-    def apply_collapsed_state(self, animate=False):
-        style = self.widget_box.get_style_context()
-        if self.collapsed:
-            style.add_class("status-widget-compact")
-        else:
-            style.remove_class("status-widget-compact")
-        self.compact_button.set_visible(True)
-        expanded = self.content_revealer.get_child()
-        if self.collapsed:
-            # A Revealer can retain its child allocation for one frame after
-            # show_all() or an interrupted transition.  Hide and zero the
-            # complete expanded subtree so no action buttons leak into the
-            # compact pill area.
-            self.content_revealer.set_reveal_child(False)
-            if self._collapse_hide_source:
-                GLib.source_remove(self._collapse_hide_source)
-            self._collapse_hide_source = GLib.timeout_add(220, self._complete_collapse)
-        else:
-            self.content_revealer.set_visible(True)
-            self.content_revealer.set_size_request(-1, -1)
-            if expanded is not None:
-                expanded.set_visible(True)
-                expanded.set_size_request(-1, -1)
-            self.position_expanded_window()
-            self.expanded_window.show_all()
-            self.content_revealer.set_reveal_child(True)
-        target_height = (
-            STATUS_WIDGET_COMPACT_HEIGHT if self.collapsed
-            else STATUS_WIDGET_EXPANDED_HEIGHT)
-        if animate:
-            self.animate_collapsed_state(target_height)
-        else:
-            self._height_animation = None
-            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
-            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
-            desktop = self.get_toplevel()
-            if hasattr(desktop, "place_overlays"):
-                desktop.place_overlays()
-
-    def _complete_collapse(self):
-        self._collapse_hide_source = 0
-        if not self.collapsed:
-            return False
-        expanded = self.content_revealer.get_child()
-        self.content_revealer.set_visible(False)
-        self.content_revealer.set_size_request(-1, 0)
-        if expanded is not None:
-            expanded.set_visible(False)
-            expanded.set_size_request(-1, 0)
-        self.expanded_window.hide()
-        return False
-
-    def position_expanded_window(self):
-        """Place the transient panel relative to the fixed compact pill."""
-        desktop = self.get_toplevel()
-        if not isinstance(desktop, Gtk.Window):
-            return False
-        try:
-            screen = desktop.get_screen()
-            screen_size = {"width": screen.get_width(), "height": screen.get_height()}
-            allocation = self.get_allocation()
-            origin_x, origin_y = getattr(desktop, "window_origin", (0, 0))
-            pill = {
-                "x": origin_x + int(allocation.x),
-                "y": origin_y + int(allocation.y),
-                "width": max(1, int(allocation.width)),
-                "height": STATUS_WIDGET_COMPACT_HEIGHT,
-            }
-            geometry = status_widget_overlay_geometry(
-                pill, {"width": STATUS_WIDGET_EXPANDED_WIDTH,
-                       "height": STATUS_WIDGET_EXPANDED_PANEL_HEIGHT}, screen_size)
-            if self.expanded_window.get_transient_for() is not desktop:
-                self.expanded_window.set_transient_for(desktop)
-            self._expanded_geometry = geometry
-            self.expanded_window.set_default_size(
-                geometry["panel"]["width"], geometry["panel"]["height"])
-            if self.expanded_window.get_realized():
-                self.expanded_window.resize(
-                    geometry["panel"]["width"], geometry["panel"]["height"])
-            self.expanded_panel.set_size_request(
-                geometry["panel"]["width"], geometry["panel"]["height"])
-            self.expanded_window.move(geometry["panel"]["x"], geometry["panel"]["y"])
-            return True
-        except Exception as exc:
-            log("could not position status widget popup: %s" % exc)
-            return False
-
-    def _on_expanded_window_realize(self, *_args):
-        """Reapply clamped root coordinates after GTK assigns popup geometry."""
-        self._expanded_window_realized = True
-        GLib.idle_add(self.position_expanded_window)
-        return False
-
-    def on_resource_clicked(self, _button):
-        current = normalize_metric_mode(self.metric_mode)
-        self.metric_mode = METRIC_MODES[
-            (METRIC_MODES.index(current) + 1) % len(METRIC_MODES)]
-        try:
-            save_widget_state(self.collapsed, metric_mode=self.metric_mode)
-        except OSError as exc:
-            log("could not save status metric mode: %s" % exc)
-        self.metric_generation += 1
-        self.refresh_resource_metric()
-
-    def refresh_resource_metric(self):
-        if self._destroyed or self.collapsed:
-            self.metric_refreshing = False
-            return False
-        if self.metric_refreshing:
-            return True
-        self.metric_refreshing = True
-        generation = self.metric_generation
-
-        def collect():
-            try:
-                results = self.metric_sampler.sample_all()
-            except Exception as exc:
-                results = {
-                    mode: _metric_result(mode, reason="性能采样失败：%s" % exc)
-                    for mode in METRIC_MODES
-                }
-            GLib.idle_add(self.apply_resource_metrics, generation, results)
-
-        threading.Thread(target=collect, daemon=True).start()
-        return True
-
-    def refresh_resource_metric_timer(self):
-        if getattr(self, "_destroyed", False) or self.collapsed:
-            self.metric_refreshing = False
-            return False
-        return bool(self.refresh_resource_metric())
-
-    def apply_resource_metric(self, generation, result):
-        return self.apply_resource_metrics(generation, {result.get("mode", self.metric_mode): result})
-
-    def apply_resource_metrics(self, generation, results):
-        if self._destroyed or generation != self.metric_generation or self.collapsed:
-            self.metric_refreshing = False
-            return False
-        self.metric_refreshing = False
-        labels = {"memory": "内存", "cpu": "CPU", "network": "网速"}
-        for mode in METRIC_MODES:
-            result = (results or {}).get(mode) or _metric_result(mode, reason="不可用")
-            label = labels[mode]
-            value = ("%s%s" % (result.get("value"), result.get("unit", ""))
-                     if result.get("available") else
-                     ("采样中" if result.get("reason") else "不可用"))
-            metric_label = self.resource_labels.get(mode)
-            if metric_label is not None:
-                metric_label.set_text(value)
-            log("resource metric %s" % json.dumps(
-                dict(result, label=label), ensure_ascii=False, sort_keys=True))
-        return False
-
-    def animate_collapsed_state(self, target_height):
-        """Match the Revealer transition with a bounded outer-card resize."""
-        reduced_motion = False
-        try:
-            settings = Path.home() / ".config/ming-os/settings.json"
-            reduced_motion = bool(json.loads(settings.read_text(encoding="utf-8")).get("reduced_motion"))
-        except (OSError, ValueError, AttributeError):
-            pass
-        if reduced_motion:
-            self._height_animation = None
-            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
-            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
-            desktop = self.get_toplevel()
-            if hasattr(desktop, "place_overlays"):
-                desktop.place_overlays()
-            return
-        now = GLib.get_monotonic_time()
-        self._height_animation = {
-            "start": float(self._display_height), "target": float(target_height), "started": now,
-        }
-        if self._height_animation_source:
-            return
-
-        def step():
-            animation = self._height_animation
-            if not animation:
-                self._height_animation_source = 0
-                return False
-            progress = min(1.0, (GLib.get_monotonic_time() - animation["started"]) / 180000.0)
-            eased = COMMON.ease_out_cubic(progress)
-            self._display_height = animation["start"] + (
-                animation["target"] - animation["start"]) * eased
-            # Keep the desktop allocation fixed while the popup animates.
-            self.set_size_request(-1, STATUS_WIDGET_COMPACT_HEIGHT)
-            desktop = self.get_toplevel()
-            if hasattr(desktop, "place_overlays"):
-                desktop.place_overlays()
-            if progress < 1.0:
-                return True
-            self._display_height = STATUS_WIDGET_COMPACT_HEIGHT
-            self._height_animation = None
-            self._height_animation_source = 0
-            return False
-
-        self._height_animation_source = GLib.timeout_add(16, step)
-
-    def action_button(self, label, command=None, callback=None):
-        button = Gtk.Button()
-        button.set_hexpand(True)
-        button.get_style_context().add_class("status-button")
-        child = Gtk.Label(label=label)
-        child.set_ellipsize(Pango.EllipsizeMode.END)
-        child.set_max_width_chars(13)
-        button.add(child)
-        button.ming_label = child
-        if callback:
-            button.connect("clicked", callback)
-        else:
-            button.connect(
-                "clicked",
-                lambda clicked: self.open_command(
-                    self.action_commands.get(clicked, command)))
-        return button
-
-    def open_command(self, command):
-        argv = list(command) if isinstance(command, (list, tuple)) else [command]
-        key = tuple(argv)
-        now = time.monotonic()
-        previous = self.action_starts.get(key, 0.0)
-        if now - previous < ACTIVATION_DEDUP_MS / 1000.0:
-            log("status action deduplicated command=%s" % argv)
-            return
-        self.action_starts[key] = now
-        error_log = None
-        try:
-            ACTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            error_log = ACTION_LOG_PATH.open("a", encoding="utf-8")
-            error_log.write("\n[%s] launching %s\n" % (
-                datetime.datetime.now().strftime("%F %T"), shlex.join(argv)))
-            error_log.flush()
-            process = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=error_log,
-            )
-            threading.Thread(
-                target=self.monitor_action_process,
-                args=(process, argv, error_log),
-                daemon=True,
-            ).start()
-        except Exception as exc:
-            if error_log:
-                error_log.close()
-            log("status action failed %s: %s" % (argv, exc))
-            self.notify_action_failure()
-
-    def monitor_action_process(self, process, argv, error_log):
-        try:
-            process.wait(timeout=1.5)
-            if process.returncode != 0:
-                log("status action exited rc=%s command=%s log=%s" % (
-                    process.returncode, argv, ACTION_LOG_PATH))
-                GLib.idle_add(self.notify_action_failure)
-        except subprocess.TimeoutExpired:
-            log("status action remains active command=%s" % argv)
-        except Exception as exc:
-            log("status action monitor failed %s: %s" % (argv, exc))
-        finally:
-            error_log.close()
-
-    @staticmethod
-    def notify_action_failure():
-        try:
-            subprocess.Popen(
-                ["notify-send", "Ming OS", "设置入口启动失败，日志：status-actions.log"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-        return False
-
-    def schedule_control(self, kind, value, generation):
-        attr = "%s_timer" % kind
-        timer = getattr(self, attr)
-        if timer:
-            GLib.source_remove(timer)
-
-        def apply_value():
-            setattr(self, attr, None)
-            state = self.control_states[kind]
-            if not state.accepts(generation):
-                return False
-            threading.Thread(
-                target=self.set_control_value,
-                args=(kind, value, generation),
-                daemon=True,
-            ).start()
-            return False
-
-        setattr(self, attr, GLib.timeout_add(120, apply_value))
-
-    def on_volume_changed(self, control):
-        if not self.updating_controls:
-            value = max(0, min(100, int(round(control.get_value()))))
-            generation = self.control_states["volume"].begin(value)
-            self.volume_label.set_text("音量 %d%%" % value)
-            self.schedule_control("volume", value, generation)
-            self.volume_scale.queue_draw()
-
-    def on_brightness_changed(self, control):
-        if not self.updating_controls:
-            value = max(1, min(100, int(round(control.get_value()))))
-            generation = self.control_states["brightness"].begin(value)
-            brightness_name = (
-                "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
-            self.brightness_label.set_text("%s %d%%" % (brightness_name, value))
-            self.schedule_control("brightness", value, generation)
-            self.brightness_scale.queue_draw()
-
-    def set_control_value(self, kind, value, generation):
-        try:
-            if not self.device_controller:
-                result = {"ok": False, "error": "设备控制服务不可用", "value": None}
-            elif kind == "volume":
-                repair = self.device_controller.audio_repair_playback()
-                if repair.get("ok"):
-                    result = self.device_controller.set_volume(value)
-                else:
-                    result = {
-                        "ok": False,
-                        "error": repair.get("error") or "无法恢复默认音频输出",
-                        "value": None,
-                    }
-            else:
-                result = self.device_controller.set_brightness(value)
-            GLib.idle_add(self.apply_control_result, kind, generation, result)
-        except Exception as exc:
-            log(f"{kind} control failed: {exc}")
-            GLib.idle_add(
-                self.apply_control_result,
-                kind,
-                generation,
-                {"ok": False, "error": str(exc), "value": None},
-            )
-
-    def apply_control_result(self, kind, generation, result):
-        state = self.control_states[kind]
-        if not state.accepts(generation):
-            log("ignored stale %s control response generation=%s" % (kind, generation))
-            return False
-        self.updating_controls = True
-        value = result.get("value")
-        if result.get("ok") and value is not None:
-            state.settle(generation, value)
-            if kind == "volume":
-                self.volume_scale.set_value(value)
-                self.volume_label.set_text("音量 %d%%" % value)
-                self.volume_scale.queue_draw()
-            else:
-                self.brightness_backend = result.get("backend", self.brightness_backend)
-                brightness_name = (
-                    "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
-                self.brightness_scale.set_value(value)
-                self.brightness_label.set_text("%s %d%%" % (brightness_name, value))
-                self.brightness_scale.queue_draw()
-        else:
-            message = result.get("error") or "控制失败"
-            log("%s control rejected: %s" % (kind, message))
-            if kind == "volume":
-                fallback_value = state.confirmed_value
-                if fallback_value is not None:
-                    state.settle(generation, fallback_value)
-                    self.volume_scale.set_value(fallback_value)
-                    self.volume_label.set_text("音量 %d%%（设置失败）" % fallback_value)
-                    self.volume_scale.queue_draw()
-                else:
-                    state.pending = False
-                    state.optimistic_value = None
-                    self.volume_label.set_text("音量设置失败，点击重试")
-            else:
-                self.brightness_backend = result.get("backend", self.brightness_backend)
-                fallback_value = (state.confirmed_value if state.confirmed_value is not None else value)
-                if state.confirmed_value is None:
-                    fallback_value = value if value is not None else state.confirmed_value
-                if fallback_value is not None:
-                    state.settle(generation, fallback_value)
-                    self.brightness_scale.set_value(fallback_value)
-                    brightness_name = (
-                        "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
-                    self.brightness_label.set_text(
-                        "%s %d%%（设置失败）" % (brightness_name, fallback_value))
-                    self.brightness_scale.queue_draw()
-                else:
-                    state.pending = False
-                    state.optimistic_value = None
-                    self.brightness_label.set_text("亮度设置失败，点击重试")
-        self.updating_controls = False
-        return False
-
-    def notification_log_path(self):
-        return next((path for path in NOTIFICATION_LOG_PATHS if path.exists()), NOTIFICATION_LOG_PATHS[0])
-
-    def read_notification_items(self):
-        if not self.notifications:
-            return []
-        try:
-            path = self.notification_log_path()
-            return self.notifications.load_notification_log(path, limit=50)
-        except Exception as exc:
-            log(f"notification history read failed: {exc}")
-            return []
-
-    def open_notifications(self, button):
-        popover = Gtk.Popover.new(button)
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        panel.set_size_request(320, 330)
-        panel.get_style_context().add_class("notification-panel")
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        title = Gtk.Label(label="最近通知")
-        title.set_halign(Gtk.Align.START)
-        title.get_style_context().add_class("notification-title")
-        clear = Gtk.Button(label="清空通知")
-        clear.connect("clicked", lambda _button: self.clear_notifications(popover))
-        header.pack_start(title, True, True, 0)
-        header.pack_start(clear, False, False, 0)
-        panel.pack_start(header, False, False, 0)
-
-        dnd_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        dnd_row.pack_start(Gtk.Label(label="免打扰"), True, True, 0)
-        dnd = Gtk.Switch()
-        current = command_text(["xfconf-query", "-c", "xfce4-notifyd", "-p", "/do-not-disturb"], "false")
-        dnd.set_active(current.strip().lower() == "true")
-        dnd.connect("notify::active", self.on_dnd_changed)
-        dnd_row.pack_start(dnd, False, False, 0)
-        panel.pack_start(dnd_row, False, False, 0)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        history = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        items = list(reversed(self.read_notification_items()[-50:]))
-        if not items:
-            empty = Gtk.Label(label="暂无通知")
-            empty.set_margin_top(32)
-            history.pack_start(empty, False, False, 0)
-        for item in items:
-            summary = Gtk.Label(label=getattr(item, "summary", "通知") or "通知")
-            summary.set_halign(Gtk.Align.START)
-            summary.set_ellipsize(Pango.EllipsizeMode.END)
-            summary.get_style_context().add_class("notification-title")
-            meta_text = " · ".join(
-                value for value in (
-                    getattr(item, "app_name", ""),
-                    str(getattr(item, "timestamp", "")),
-                ) if value
-            )
-            meta = Gtk.Label(label=meta_text)
-            meta.set_halign(Gtk.Align.START)
-            meta.set_ellipsize(Pango.EllipsizeMode.END)
-            meta.get_style_context().add_class("notification-body")
-            body = Gtk.Label(label=getattr(item, "body", "") or getattr(item, "app_name", ""))
-            body.set_halign(Gtk.Align.START)
-            body.set_line_wrap(True)
-            body.set_lines(2)
-            body.set_ellipsize(Pango.EllipsizeMode.END)
-            body.get_style_context().add_class("notification-body")
-            history.pack_start(summary, False, False, 0)
-            history.pack_start(meta, False, False, 0)
-            history.pack_start(body, False, False, 0)
-        scroll.add(history)
-        panel.pack_start(scroll, True, True, 0)
-        popover.add(panel)
-        popover.show_all()
-
-    def clear_notifications(self, popover):
-        try:
-            if self.notifications:
-                self.notifications.clear_notification_log_atomic(self.notification_log_path())
-            self.notification_label.set_text("通知")
-        except Exception as exc:
-            log(f"clear notification history failed: {exc}")
-        popover.popdown()
-
-    def on_dnd_changed(self, control, _param):
-        if self.updating_dnd:
-            return
-        enabled = control.get_active()
-        argv = ["xfconf-query", "-c", "xfce4-notifyd", "-p", "/do-not-disturb", "-s", str(enabled).lower()]
-        if self.notifications:
-            try:
-                command = self.notifications.dnd_command(enabled)
-                argv = list(command.argv)
-            except Exception as exc:
-                log(f"DND helper failed: {exc}")
-
-        def apply_and_readback():
-            try:
-                subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-                effective = command_text(
-                    ["xfconf-query", "-c", "xfce4-notifyd", "-p", "/do-not-disturb"],
-                    "false",
-                ).strip().lower() == "true"
-                GLib.idle_add(self.apply_dnd_readback, control, effective)
-            except Exception as exc:
-                log(f"DND update failed: {exc}")
-                GLib.idle_add(self.apply_dnd_readback, control, not enabled)
-        threading.Thread(
-            target=apply_and_readback,
-            daemon=True,
-        ).start()
-
-    def apply_dnd_readback(self, control, effective):
-        self.updating_dnd = True
-        control.set_active(effective)
-        self.updating_dnd = False
-        return False
-
-    def background_update_status(self):
-        """Read the sole machine-readable OTA status contract for this menu."""
-        try:
-            result = subprocess.run(
-                ["ming-update", "status", "--json"],
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode != 0:
-                log("power menu update status exited rc=%s" % result.returncode)
-                return None
-            status = json.loads(result.stdout)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            log("power menu update status failed: %s" % exc)
-            return None
-        return status if isinstance(status, dict) else None
-
-    def background_update_available(self):
-        """Trust only the root-owned result written by an automatic check."""
-        status = self.background_update_status()
-        return bool(isinstance(status, dict) and status.get("background_available"))
-
-    @staticmethod
-    def update_progress_text(message):
-        text = str(message or "").strip()
-        if text.startswith("[") and "]" in text:
-            text = text.split("]", 1)[1].strip()
-        return text[:480]
-
-    def start_update_restart_progress(self):
-        dialog = Gtk.Dialog(
-            title="Ming OS 更新", transient_for=self.get_toplevel(),
-            flags=Gtk.DialogFlags.MODAL,
-        )
-        dialog.set_default_size(440, -1)
-        content = dialog.get_content_area()
-        content.set_spacing(12)
-        content.set_margin_top(18)
-        content.set_margin_bottom(18)
-        content.set_margin_start(20)
-        content.set_margin_end(20)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        spinner = Gtk.Spinner()
-        message = Gtk.Label(label="正在等待管理员授权…", xalign=0)
-        message.set_line_wrap(True)
-        message.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        row.pack_start(spinner, False, False, 0)
-        row.pack_start(message, True, True, 0)
-        content.pack_start(row, True, True, 0)
-        close_button = dialog.add_button("正在更新…", Gtk.ResponseType.CLOSE)
-        close_button.set_sensitive(False)
-        state = {
-            "active": True,
-            "last": "正在等待管理员授权…",
-            "error": "",
-            "result": "",
-        }
-
-        def on_response(current, _response):
-            if not state["active"]:
-                current.destroy()
-
-        def on_delete(_current, _event):
-            # Package and disk operations cannot be safely cancelled mid-flight.
-            return state["active"]
-
-        def show_line(raw_line):
-            raw_line = str(raw_line or "")
-            if raw_line.startswith("MING_UPDATE_RESULT="):
-                state["result"] = raw_line.split("=", 1)[1].strip()
-                return False
-            line = self.update_progress_text(raw_line)
-            if line:
-                state["last"] = line
-                if "[ERROR]" in raw_line:
-                    state["error"] = line
-                message.set_text(line)
-            return False
-
-        def finish(rc, launch_error=""):
-            state["active"] = False
-            spinner.stop()
-            close_button.set_sensitive(True)
-            close_button.set_property("label", "关闭")
-            if rc == 0:
-                if state["result"] == "no_update":
-                    dialog.set_title("Ming OS 已是最新版本")
-                    message.set_text("当前已是最新版本，不会重启。")
-                elif state["result"] == "staged":
-                    dialog.set_title("Ming OS 更新已准备完成")
-                    message.set_text("更新已准备完成，系统正在自动重启。")
-                else:
-                    dialog.set_title("Ming OS 更新流程已结束")
-                    message.set_text("更新流程已结束，请检查系统更新状态。")
-            else:
-                detail = state["error"] or self.update_progress_text(launch_error) or state["last"]
-                dialog.set_title("Ming OS 更新未完成")
-                message.set_text("更新未完成：%s" % detail)
-            return False
-
-        def worker():
-            try:
-                process = subprocess.Popen(
-                    ["pkexec", "ming-update", "auto-restart"],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
-                )
-                if process.stdout is not None:
-                    for raw_line in process.stdout:
-                        GLib.idle_add(show_line, raw_line.rstrip())
-                rc = process.wait()
-                GLib.idle_add(finish, rc)
-            except OSError as exc:
-                log("update and restart launch failed: %s" % exc)
-                GLib.idle_add(finish, 1, str(exc))
-
-        dialog.connect("response", on_response)
-        dialog.connect("delete-event", on_delete)
-        dialog.show_all()
-        spinner.start()
-        threading.Thread(target=worker, daemon=True).start()
-
-    def open_update_and_restart_dialog(self, _item=None):
-        status = self.background_update_status()
-        if not isinstance(status, dict):
-            unavailable = Gtk.MessageDialog(
-                transient_for=self.get_toplevel(), flags=0,
-                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-                text="无法确认更新状态",
-            )
-            unavailable.format_secondary_text(
-                "为避免启动未验证的更新，请前往系统更新重新检查。")
-            unavailable.add_button("取消", Gtk.ResponseType.CANCEL)
-            unavailable.add_button("前往系统更新", Gtk.ResponseType.OK)
-
-            def open_update_page(current, response):
-                current.destroy()
-                if response == Gtk.ResponseType.OK:
-                    self.open_command(["ming-control-center", "--page", "update"])
-
-            unavailable.connect("response", open_update_page)
-            unavailable.show_all()
-            return
-        home_preservation = status.get("home_preservation")
-        home_preservation = home_preservation if isinstance(home_preservation, dict) else {}
-        preparation = str(home_preservation.get("message") or "")
-        major_update = status.get("update_type") == "major"
-        if major_update and not bool(home_preservation.get("ready")):
-            blocked = Gtk.MessageDialog(
-                transient_for=self.get_toplevel(), flags=0,
-                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-                text="major OTA 还不能安全开始",
-            )
-            blocked.format_secondary_text(
-                preparation or "请先连接独立备份盘，再重新检查系统更新。")
-            blocked.add_button("取消", Gtk.ResponseType.CANCEL)
-            blocked.add_button("前往系统更新", Gtk.ResponseType.OK)
-
-            def open_update_page(current, response):
-                current.destroy()
-                if response == Gtk.ResponseType.OK:
-                    self.open_command(["ming-control-center", "--page", "update"])
-
-            blocked.connect("response", open_update_page)
-            blocked.show_all()
-            return
-        secondary = "系统会自动完成已确认更新，完成后自动重启。没有可用更新时不会重启。"
-        if major_update and preparation:
-            secondary += "\n\n升级准备：%s" % preparation
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(), flags=0,
-            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
-            text="确认更新并重启？",
-        )
-        dialog.format_secondary_text(secondary)
-        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        dialog.add_button("更新并重启", Gtk.ResponseType.OK)
-
-        def respond(current, response):
-            current.destroy()
-            if response != Gtk.ResponseType.OK:
-                return
-            self.start_update_restart_progress()
-
-        dialog.connect("response", respond)
-        dialog.show_all()
-
-    def open_update_and_shutdown_dialog(self, _item=None):
-        """Compatibility alias for launchers created before automatic restart."""
-        self.open_update_and_restart_dialog(_item)
-
-    def show_confirmed_update_power_menu(self, button):
-        """Keep the usual session actions while adding the gated update action."""
-        self.show_ming_power_menu(button, include_update=True)
-
-    def show_basic_power_menu(self, button, include_update=False):
-        """Show Ming's own power choices before invoking session actions."""
-        self.show_ming_power_menu(button, include_update=include_update)
-
-    def show_ming_power_menu(self, button, include_update=False):
-        """Show Ming's own power choices before invoking session actions."""
-        menu = Gtk.Menu()
-
-        def add_item(label, commands):
-            item = Gtk.MenuItem(label=label)
-            if callable(commands):
-                item.connect("activate", commands)
-                menu.append(item)
-                return
-            choices = commands if commands and isinstance(commands[0], list) else [commands]
-
-            def activate(_item):
-                for command in choices:
-                    if not shutil.which(command[0]):
-                        continue
-                    try:
-                        subprocess.Popen(
-                            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        return
-                    except OSError as exc:
-                        log("power action failed %s: %s" % (command[0], exc))
-
-            item.connect("activate", activate)
-            menu.append(item)
-
-        add_item("锁定屏幕", ["ming-lock"])
-        if include_update:
-            add_item("更新并重启", self.open_update_and_restart_dialog)
-        menu.append(Gtk.SeparatorMenuItem())
-        add_item("注销", ["ming-power-action", "logout"])
-        add_item("重新启动", ["ming-power-action", "reboot"])
-        add_item("关机", ["ming-power-action", "poweroff"])
-        menu.show_all()
-        menu.popup_at_widget(button, Gdk.Gravity.SOUTH, Gdk.Gravity.NORTH, None)
-
-    def open_power_menu(self, _button):
-        self.show_basic_power_menu(
-            _button, include_update=self.background_update_available())
-
-    def refresh(self):
-        now = datetime.datetime.now()
-        weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-        time_text = now.strftime("%H:%M")
-        date_text = "%s %s" % (weekdays[now.weekday()], now.strftime("%m/%d"))
-        self.time_label.set_text(time_text)
-        self.date_label.set_text(date_text)
-        self.compact_time_label.set_text(time_text)
-        self.compact_date_label.set_text(date_text)
-        if self.collapsed:
-            self.refresh_compact_status()
-            return True
-        if not self.refreshing:
-            self.refreshing = True
-            threading.Thread(target=self.collect_status, daemon=True).start()
-        return True
-
-    def refresh_compact_status(self):
-        now = time.monotonic()
-        if self.battery_refreshing or now < self.battery_next_refresh_at:
-            return False
-        self.battery_refreshing = True
-        self.battery_next_refresh_at = now + COMPACT_BATTERY_REFRESH_SECONDS
-        threading.Thread(target=self.collect_compact_status, daemon=True).start()
-        return True
-
-    def collect_compact_status(self):
-        controller = self.device_controller
-        battery = self.collect_compact_component(
-            controller.battery_status) if controller else {}
-        wifi = self.collect_compact_component(
-            controller.wifi_status) if controller else {}
-        ethernet = self.collect_compact_component(
-            controller.ethernet_status, probe_internet=False) if controller else {}
-        GLib.idle_add(self.apply_compact_status, battery, wifi, ethernet)
-
-    @staticmethod
-    def collect_compact_component(callback, *args, **kwargs):
-        try:
-            return callback(*args, **kwargs)
-        except Exception as exc:
-            log(f"compact status component failed: {exc}")
-            return {}
-
-    def apply_compact_status(self, battery, wifi, ethernet):
-        wifi_ready = isinstance(wifi, dict) and wifi.get("state") == "ready"
-        ethernet_devices = ethernet.get("devices", []) if isinstance(ethernet, dict) else []
-        ethernet_ready = any(
-            isinstance(device, dict)
-            and str(device.get("state", "")).casefold().startswith("connected")
-            for device in ethernet_devices
-        )
-        self.compact_network_text = (
-            "网络 在线" if ethernet_ready else
-            "网络 可用" if wifi_ready else "网络 --"
-        )
-        wifi_icon = (
-            "network-wired-symbolic" if ethernet_ready else
-            "network-wireless-symbolic" if wifi_ready else
-            "network-wireless-disabled-symbolic"
-        )
-        self.compact_wifi_icon.set_from_icon_name(wifi_icon, Gtk.IconSize.MENU)
-        return self.apply_battery_status(battery)
-
-    def apply_battery_status(self, battery):
-        battery = battery if isinstance(battery, dict) else {}
-        show_battery = bool(battery.get("portable") and battery.get("available"))
-        battery_text = "电量 %s" % battery.get("text", "--") if show_battery else ""
-        self.battery_text = battery_text
-        self.header_battery_label.set_text(battery_text)
-        self.header_battery_label.set_visible(show_battery)
-        self.compact_battery_separator.set_visible(False)
-        self.compact_battery_icon.set_visible(show_battery)
-        self.compact_battery_label.set_text(str(battery.get("text", "--")) if show_battery else "")
-        self.compact_battery_label.set_visible(show_battery)
-        if show_battery:
-            state = str(battery.get("state", "")).casefold()
-            icon = "battery-charging-symbolic" if "charg" in state else "battery-good-symbolic"
-            self.compact_battery_icon.set_from_icon_name(icon, Gtk.IconSize.MENU)
-        self.battery_refreshing = False
-        return False
-
-    def collect_status(self):
-        try:
-            status = self.device_controller.status() if self.device_controller else {}
-        except Exception as exc:
-            log(f"device status collection failed: {exc}")
-            status = {}
-        notification_count = len(self.read_notification_items())
-        GLib.idle_add(self.apply_status, status, notification_count)
-
-    def apply_status(self, status, notification_count):
-        wifi = status.get("wifi", {})
-        wifi_text = {
-            "ready": "可用",
-            "rfkill_blocked": "已禁用",
-            "firmware_missing": "缺固件",
-            "driver_missing": "缺驱动",
-            "no_hardware": "无设备",
-        }.get(wifi.get("state"), "不可用")
-        bluetooth = status.get("bluetooth", {})
-        battery = status.get("battery", {})
-        audio = status.get("audio", {})
-        brightness = status.get("brightness", {})
-        self.wifi_label.set_text("Wi-Fi %s" % wifi_text)
-        self.bluetooth_label.set_text("蓝牙 %s" % bluetooth.get("text", "不可用"))
-        self.apply_battery_status(battery)
-        self.notification_label.set_text(
-            "通知 %d" % notification_count if notification_count else "通知")
-        self.updating_controls = True
-        audio_available = bool(audio.get("available"))
-        volume = audio.get("value") if audio_available else 0
-        self.volume_scale.set_sensitive(audio_available)
-        volume_state = self.control_states["volume"]
-        if not volume_state.should_hold_status():
-            confirmed_volume = preserve_confirmed_control_value(
-                volume_state.confirmed_value, volume, audio_available, minimum=0)
-            self.volume_scale.set_value(confirmed_volume if confirmed_volume is not None else 0)
-            volume_state.confirmed_value = confirmed_volume
-            if audio_available and confirmed_volume is not None:
-                self.volume_label.set_text("音量 %d%%" % confirmed_volume)
-            elif confirmed_volume is not None:
-                self.volume_label.set_text("音量 %d%%（读回暂时失败）" % confirmed_volume)
-            else:
-                self.volume_label.set_text("未检测到输出设备")
-        elif volume_state.optimistic_value is not None:
-            self.volume_scale.set_value(volume_state.optimistic_value)
-            self.volume_label.set_text("音量 %d%%" % volume_state.optimistic_value)
-        brightness_available = bool(brightness.get("available"))
-        brightness_value = brightness.get("value") if brightness_available else 1
-        self.brightness_backend = brightness.get("backend", "")
-        brightness_name = (
-            "软件亮度" if self.brightness_backend == "xrandr-software" else "亮度")
-        self.brightness_scale.set_sensitive(brightness_available)
-        brightness_state = self.control_states["brightness"]
-        if not brightness_state.should_hold_status():
-            confirmed_brightness = preserve_confirmed_control_value(
-                brightness_state.confirmed_value,
-                brightness_value,
-                brightness_available,
-                minimum=1,
-            )
-            self.brightness_scale.set_value(
-                confirmed_brightness if confirmed_brightness is not None else 1)
-            brightness_state.confirmed_value = confirmed_brightness
-            if brightness_available and confirmed_brightness is not None:
-                self.brightness_label.set_text(
-                    "%s %d%%" % (brightness_name, confirmed_brightness))
-            elif confirmed_brightness is not None:
-                self.brightness_label.set_text(
-                    "%s %d%%（读回暂时失败）" % (brightness_name, confirmed_brightness))
-            else:
-                self.brightness_label.set_text("当前设备不支持")
-        elif brightness_state.optimistic_value is not None:
-            self.brightness_scale.set_value(brightness_state.optimistic_value)
-            self.brightness_label.set_text(
-                "%s %d%%" % (brightness_name, brightness_state.optimistic_value))
-        self.brightness_label.set_visible(True)
-        self.brightness_scale.set_visible(True)
-        self.display_button.set_visible(True)
-        self.updating_controls = False
-        self.volume_scale.queue_draw()
-        self.brightness_scale.queue_draw()
-        self.refresh_resource_metric()
-        self.refreshing = False
-        return False
-
-
 class WallpaperCanvas(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
@@ -3991,6 +2377,8 @@ class WallpaperCanvas(Gtk.DrawingArea):
 class PhoneDesktop(Gtk.Window):
     def __init__(self):
         super().__init__(title="Ming 桌面")
+        # The GTK3/X11 taskbar owns system status controls in the new shell.
+        self.taskbar_mode = os.environ.get("MING_TASKBAR_MODE", "0") == "1"
         try:
             READY_MARKER.unlink()
         except FileNotFoundError:
@@ -3999,6 +2387,10 @@ class PhoneDesktop(Gtk.Window):
             pass
         self.set_name("ming-desktop-window")
         self.get_style_context().add_class("ming-desktop")
+        if os.environ.get("MING_LOW_RESOURCE") == "1":
+            self.get_style_context().add_class("ming-low-resource")
+        if os.environ.get("MING_REDUCED_MOTION") == "1":
+            self.get_style_context().add_class("ming-reduced-motion")
         self.appearance_monitor = None
         self.apply_desktop_theme(load_appearance_theme())
         self.set_decorated(False)
@@ -4017,7 +2409,7 @@ class PhoneDesktop(Gtk.Window):
         self.resize(screen_w, screen_h)
         self.move(0, 0)
         self.connect("destroy", self.on_destroy)
-        self.register_status_widget_pid()
+        # The taskbar owns system status controls; no floating status widget is created.
         # Gtk.Fixed and transparent EventBox children can be no-window widgets
         # on the VirtualBox/Xrender path.  Receive root-window events as the
         # final, renderer-independent desktop input route.
@@ -4039,7 +2431,7 @@ class PhoneDesktop(Gtk.Window):
             log("status widget signal toggle unavailable")
 
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        provider.load_from_data(render_ui_css(CSS))
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, 700)
 
         self.wallpaper = WallpaperCanvas()
@@ -4073,10 +2465,8 @@ class PhoneDesktop(Gtk.Window):
         self.fixed_touch_state = InteractionState()
         self.drag_positions = {}
         self.layer_enforcement_pending = False
-        self._last_status_toggle_at = 0.0
         self._context_menu = None
         self.last_context_result = None
-        self.status = StatusWidget()
         self.launch_feedback = LaunchFeedbackOverlay()
         self.launch_feedback.set_sensitive(False)
         self.connect("map-event", lambda *_args: self.enforce_desktop_layer())
@@ -4090,33 +2480,6 @@ class PhoneDesktop(Gtk.Window):
         # Ming Store and package installers trigger refresh_desktop immediately. This
         # timer is only a bounded fallback for changes made outside Ming tools.
         GLib.timeout_add_seconds(15, self.refresh_if_apps_changed)
-
-    def register_status_widget_pid(self):
-        """Publish one user-owned PID for the Win-key broker.
-
-        The broker first trusts this marker and validates the process owner and
-        command before signalling it.  A stale marker is harmless and is
-        replaced by the next desktop instance.
-        """
-        pid_file = status_widget_pid_file()
-        try:
-            pid_file.parent.mkdir(parents=True, exist_ok=True)
-            temporary = pid_file.with_name(
-                ".%s.%s.tmp" % (pid_file.name, os.getpid()))
-            descriptor = os.open(
-                str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-                handle.write(str(os.getpid()) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, pid_file)
-            pid_file.chmod(0o600)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-        except OSError as exc:
-            log("could not write status widget pid marker: %s" % exc)
 
     def on_destroy(self, *_args):
         pid_file = status_widget_pid_file()
@@ -4171,14 +2534,6 @@ class PhoneDesktop(Gtk.Window):
         return False
 
     def toggle_status_widget(self):
-        now = time.monotonic()
-        # Xfce may deliver the same Super press through both the shortcut
-        # command and the desktop key handler.  A single debounce window keeps
-        # one physical press from expanding and immediately collapsing again.
-        if now - self._last_status_toggle_at < STATUS_TOGGLE_DEDUP_SECONDS:
-            return False
-        self._last_status_toggle_at = now
-        self.status.set_collapsed(not self.status.collapsed)
         return False
 
     def _on_toggle_signal(self, _signum, _frame):
@@ -4187,6 +2542,8 @@ class PhoneDesktop(Gtk.Window):
         GLib.idle_add(self.toggle_status_widget)
 
     def on_key_press(self, _window, event):
+        if self.taskbar_mode:
+            return False
         if is_status_widget_toggle_key(getattr(event, "keyval", 0)):
             self.toggle_status_widget()
             return True
@@ -4368,7 +2725,7 @@ class PhoneDesktop(Gtk.Window):
         if event_window is not None and event_window not in (root_window, fixed_window):
             return False
         x, y = self.fixed_event_coords(event)
-        for overlay in (self.status, self.launch_feedback):
+        for overlay in (self.launch_feedback,):
             if not overlay.get_visible():
                 continue
             allocation = overlay.get_allocation()
@@ -4659,35 +3016,12 @@ class PhoneDesktop(Gtk.Window):
         # Gtk.Widget.show_all() re-shows explicitly hidden children.  Reapply
         # the persisted widget state after rendering so compact mode never
         # leaves both the compact row and expanded controls visible.
-        self.status.apply_collapsed_state()
         if not self.launch_feedback.item:
             self.launch_feedback.hide()
         self.enforce_desktop_layer()
 
     def place_overlays(self):
         screen_w = max(320, self.get_screen().get_width())
-        widget_geometry = status_widget_compact_geometry({
-            "width": screen_w, "height": self.get_screen().get_height(),
-        })
-        widget_w = widget_geometry["width"]
-        widget_h = widget_geometry["height"]
-        self.status.set_size_request(widget_w, self.status.preferred_height())
-        # Keep the compact height explicit even if a future theme changes the
-        # preferred height implementation.
-        self.status.set_size_request(widget_w, widget_h)
-        # Pin the visible capsule itself as well as its outer allocation.  The
-        # expanded popup is a separate window and must never resize this pill.
-        self.status.widget_box.set_size_request(widget_w, widget_h)
-        self.status.compact_button.set_size_request(widget_w, widget_h)
-        x = max(CLOCK_MARGIN_X, screen_w - widget_w - CLOCK_MARGIN_X)
-        y = CLOCK_MARGIN_Y
-        if self.status.get_parent() is None:
-            self.fixed.put(self.status, x, y)
-        else:
-            self.fixed.move(self.status, x, y)
-        if not self.status.collapsed:
-            self.status.position_expanded_window()
-        GLib.idle_add(self.status.verify_top_alignment)
         feedback_w = 340 if screen_w >= 900 else 250
         self.launch_feedback.set_size_request(feedback_w, 84)
         feedback_x = max(20, int((screen_w - feedback_w) / 2))

@@ -12,23 +12,48 @@ SCRIPT = ROOT / "assets" / "ming-ota-backup.sh"
 OTA_MODULE = ROOT / "modules" / "06_ota_update.sh"
 BASE_MODULE = ROOT / "modules" / "01_base.sh"
 
+NEEDS_GNU_COREUTILS = (
+    "ming-ota-backup.sh resolves paths with GNU `realpath -m` and sizes trees "
+    "with GNU `du -sb`; this host does not provide those semantics (macOS ships "
+    "BSD realpath/du). The contracts run unchanged on Debian and inside WSL."
+)
+
+
+def gnu_coreutils_probe():
+    """True when the runtime that executes the script offers GNU coreutils.
+
+    Probes the same runtime the tests use: the host on POSIX, WSL on Windows.
+    """
+    prefix = ["wsl.exe", "-d", "Ubuntu", "--"] if os.name == "nt" else []
+    for probe in (["realpath", "-m", "."], ["du", "-sb", "."]):
+        try:
+            completed = subprocess.run(
+                prefix + probe, capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if completed.returncode != 0:
+            return False
+    return True
+
 
 class OtaBackupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if os.name != "nt":
-            return
-        try:
-            probe = subprocess.run(
-                ["wsl.exe", "-d", "Ubuntu", "--", "sh", "-c", "test -r /etc/passwd"],
-                capture_output=True,
-                check=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise unittest.SkipTest("A working Linux runtime is unavailable")
-        if probe.returncode != 0:
-            raise unittest.SkipTest("A working Linux runtime is unavailable")
+        if os.name == "nt":
+            try:
+                probe = subprocess.run(
+                    ["wsl.exe", "-d", "Ubuntu", "--", "sh", "-c", "test -r /etc/passwd"],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise unittest.SkipTest("A working Linux runtime is unavailable")
+            if probe.returncode != 0:
+                raise unittest.SkipTest("A working Linux runtime is unavailable")
+        if not gnu_coreutils_probe():
+            raise unittest.SkipTest(NEEDS_GNU_COREUTILS)
 
     @staticmethod
     def shell_path(value):
@@ -400,7 +425,7 @@ class OtaModuleContracts(unittest.TestCase):
                 return f"/{value[0].lower()}{value[2:].replace(os.sep, '/')}"
             return value
 
-        runner = []
+        runner = ["bash"]
         if os.name == "nt":
             git_bash = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
             if not git_bash.is_file():

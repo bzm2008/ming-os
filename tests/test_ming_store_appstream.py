@@ -6,6 +6,31 @@ import tempfile
 import unittest
 
 
+try:
+    import yaml  # noqa: F401
+    HAVE_PYYAML = True
+except ImportError:
+    # The product treats AppStream YAML as optional on minimal systems, so the
+    # DEP-11 contracts can only be exercised where PyYAML is installed.
+    HAVE_PYYAML = False
+
+DEP11_NEEDS_PYYAML = "parsing Debian DEP-11 metadata requires PyYAML"
+
+
+class CanonicalTempDirectory(tempfile.TemporaryDirectory):
+    """A TemporaryDirectory whose name is already fully resolved.
+
+    The rootfs scans resolve every candidate path and require it to stay inside
+    the resolved root, so on a host where the system temp root sits behind a
+    symlink (macOS: /var -> /private/var) a raw temp root would filter out every
+    fixture and report an empty (invalid) AppStream inventory.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = str(pathlib.Path(self.name).resolve())
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "assets" / "ming-store-core.py"
 UI_PATH = ROOT / "assets" / "ming-store.py"
@@ -60,7 +85,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
         self.assertEqual("apt-repository-signature", item["identity"]["type"])
 
     def test_debian_provider_uses_appstream_when_metadata_is_available(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             path = pathlib.Path(directory) / "components.xml"
             path.write_text(self.appstream_xml(1001), encoding="utf-8")
             provider = self.core.DebianAptProvider(
@@ -74,7 +99,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
         )
 
     def test_rootfs_appstream_inventory_scans_real_metadata_and_deduplicates_packages(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             metainfo = root / "usr" / "share" / "metainfo"
             cache = root / "var" / "cache" / "app-info" / "xmls"
@@ -100,7 +125,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
         )
 
     def test_rootfs_appstream_inventory_ignores_catalog_json_and_symlinks(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             metainfo = root / "usr" / "share" / "metainfo"
             catalog = root / "usr" / "share" / "ming-os" / "store" / "catalog"
@@ -118,8 +143,9 @@ class MingStoreAppStreamTests(unittest.TestCase):
         self.assertEqual(1, inventory["count"])
         self.assertEqual(1, len(inventory["paths"]))
 
+    @unittest.skipUnless(HAVE_PYYAML, DEP11_NEEDS_PYYAML)
     def test_rootfs_appstream_inventory_reads_debian_dep11_yaml(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             metadata = root / "var" / "cache" / "swcatalog" / "yaml"
             metadata.mkdir(parents=True)
@@ -147,7 +173,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
         })
 
     def test_rootfs_appstream_gate_requires_real_metadata_and_1000_apps(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             with self.assertRaises(self.core.InvalidCatalog):
                 self.core.validate_appstream_rootfs(root)
@@ -168,7 +194,7 @@ class MingStoreAppStreamTests(unittest.TestCase):
 
     def test_strict_rootfs_gate_rejects_untrusted_metainfo_without_apt_index(self):
         """Release inventory must come from the copied, trusted DEP-11 path."""
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             metainfo = root / "usr" / "share" / "metainfo"
             metainfo.mkdir(parents=True)
@@ -180,8 +206,9 @@ class MingStoreAppStreamTests(unittest.TestCase):
                     root, strict=True, require_package_index=True,
                 )
 
+    @unittest.skipUnless(HAVE_PYYAML, DEP11_NEEDS_PYYAML)
     def test_strict_rootfs_gate_intersects_dep11_with_apt_package_index(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             metadata = root / "var" / "cache" / "swcatalog" / "yaml"
             metadata.mkdir(parents=True)
@@ -206,9 +233,10 @@ class MingStoreAppStreamTests(unittest.TestCase):
             )
             self.assertEqual(1000, inventory["count"])
 
+    @unittest.skipUnless(HAVE_PYYAML, DEP11_NEEDS_PYYAML)
     def test_strict_rootfs_gate_ignores_metainfo_even_with_an_index(self):
         """Only copied DEP-11 records may contribute to a release inventory."""
-        with tempfile.TemporaryDirectory() as directory:
+        with CanonicalTempDirectory() as directory:
             root = pathlib.Path(directory)
             trusted = root / "var" / "cache" / "swcatalog" / "yaml"
             trusted.mkdir(parents=True)

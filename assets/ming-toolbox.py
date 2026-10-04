@@ -13,6 +13,22 @@ import sys
 import threading
 
 
+def _load_ui_tokens():
+    path = pathlib.Path(__file__).with_name("ming-ui-tokens.py")
+    try:
+        spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return dict(module.TOKENS)
+    except (OSError, ImportError, AttributeError):
+        return {"canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_subtle": "#EEF5F1",
+                "accent": "#2F8A7D", "text": "#1B2320", "muted": "#5B6B64",
+                "border": "#D7E4DE", "focus": "#3AAE99"}
+
+
+MING_UI_TOKENS = _load_ui_tokens()
+
+
 SECTIONS = ("official", "toolbox", "lab")
 DRIVER_SECTION = "drivers"
 ALL_SECTIONS = SECTIONS + (DRIVER_SECTION,)
@@ -671,7 +687,7 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
         import gi
         gi.require_version("Gtk", "4.0")
         gi.require_version("Adw", "1")
-        from gi.repository import Adw, Gio, Gtk
+        from gi.repository import Adw, Gdk, Gio, Gtk
     except (ImportError, ValueError):
         _show_dialog("Ming 工具箱", "图形组件暂不可用，请稍后重试。", error=True)
         return 1
@@ -683,6 +699,27 @@ def _gtk_main(section="toolbox", install_file="", wine_app_id="", wine_request_i
             super().__init__(application=application)
             self.set_title("Ming 工具箱")
             self.set_default_size(820, 600)
+            self.set_size_request(560, 420)
+            self.add_css_class("ming-window-surface")
+            if os.environ.get("MING_LOW_RESOURCE") == "1":
+                self.add_css_class("ming-low-resource")
+            if os.environ.get("MING_REDUCED_MOTION") == "1":
+                self.add_css_class("ming-reduced-motion")
+            provider = Gtk.CssProvider()
+            provider.load_from_data(f"""
+                window.ming-window-surface {{ background: {MING_UI_TOKENS['canvas']}; color: {MING_UI_TOKENS['text']}; }}
+                preferencespage, preferencesgroup {{ background: {MING_UI_TOKENS['surface']}; }}
+                preferencesgroup {{ border-radius: 12px; margin: 8px; padding: 4px; }}
+                button:focus-visible {{ outline: 2px solid {MING_UI_TOKENS['focus']}; outline-offset: 2px; }}
+                .ming-reduced-motion * {{ transition-duration: 0ms; animation-duration: 0ms; }}
+                .ming-low-resource {{ box-shadow: none; }}
+                @media (max-width: 760px) {{ preferencesgroup {{ margin: 4px; }} }}
+            """.encode("utf-8"))
+            display = Gdk.Display.get_default()
+            if display:
+                Gtk.StyleContext.add_provider_for_display(
+                    display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                )
             self.home = controller.home
             tabs = Adw.ViewStack()
             self.tabs = tabs

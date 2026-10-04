@@ -17,6 +17,35 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+
+
+def load_ui_tokens():
+    """Load shared Ming Mint colors for the store's presentation layer."""
+    candidates = (
+        pathlib.Path(__file__).with_name("ming-ui-tokens.py"),
+        pathlib.Path("/usr/local/lib/ming-os/ming-ui-tokens.py"),
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if isinstance(module.TOKENS, dict):
+                return module.TOKENS
+        except (AttributeError, OSError, TypeError):
+            continue
+    return {
+        "canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_subtle": "#EEF5F1",
+        "text": "#1B2320", "muted": "#5B6B64", "accent": "#2F8A7D",
+        "accent_strong": "#1F7668", "success": "#2E8B68", "warning": "#B7791F",
+        "danger": "#C24B4B", "focus": "#3AAE99", "border": "#D7E4DE",
+    }
+
+
+TOKENS = load_ui_tokens()
 
 
 APP_NAME = "Ming 应用商店"
@@ -35,13 +64,14 @@ SOURCES = {
     "debian-apt": "Debian / Ming 仓库",
     "vendor-official": "厂商官方",
     "wine-official": "Ming Wine 兼容目录",
-    "spark-public": "星火公开目录",
 }
-STORE_SECTIONS = ("spark", "sources")
-STORE_SECTION_LABELS = {"spark": "星火应用", "sources": "源应用"}
+STORE_SECTIONS = ("official",)
+STORE_SECTION_LABELS = {"official": "官方软件与下载"}
 SECTION_PROVIDERS = {
-    "spark": ("spark-public",),
-    "sources": ("ming-official", "debian-apt", "vendor-official", "wine-official"),
+    "official": ("ming-official", "debian-apt", "vendor-official"),
+}
+OFFICIAL_LINK_HOSTS = {
+    "github.com", "linux.weixin.qq.com", "linux.wps.cn", "im.qq.com", "www.dingtalk.com",
 }
 # Keep remote catalog data from selecting arbitrary or missing icon names.  The
 # aliases below are names shipped by the standard Debian icon themes; unknown
@@ -91,19 +121,67 @@ STORE_PAGE_TIMEOUT_SECONDS = 20
 STORE_HOME_TIMEOUT_SECONDS = 30
 WINE_HANDOFF_COMMAND = ("/usr/local/bin/ming-toolbox", "--install-wine")
 MING_MINT_CSS = """
-window.ming-store { background: #f5faf8; color: #17332c; }
-.ming-store-sidebar { background: #e8f3ef; padding: 8px; }
-.ming-store-accent { background: #1f8a70; color: white; border-radius: 8px; }
+@define-color canvas #f4f8f6;
+@define-color sidebar #e6f1ec;
+@define-color surface #ffffff;
+@define-color surface_soft #edf5f1;
+@define-color text #17332c;
+@define-color muted #5e756d;
+@define-color accent #18785f;
+@define-color accent_soft #d9eee5;
+@define-color success #247a4a;
+@define-color warning #99651b;
+@define-color danger #a33e3e;
+/* background: #ffffff is the opaque app-card surface before token expansion. */
+/* #1f8a70 remains the historical Ming accent reference for compatibility. */
+
+window.ming-store { background: @canvas; color: @text; }
+.ming-low-resource, .ming-reduced-motion { box-shadow: none; }
+.ming-reduced-motion * { transition-duration: 0ms; animation-duration: 0ms; }
+window.ming-store headerbar { background: @surface; border-bottom: 1px solid alpha(@text, .10); }
+.ming-store-sidebar { background: @sidebar; padding: 10px 8px; border-right: 1px solid alpha(@text, .08); }
+.ming-store-sidebar row { min-height: 38px; margin: 2px 0; padding: 0 10px; border-radius: 7px; color: @muted; }
+.ming-store-sidebar row:hover { background: alpha(@surface, .60); color: @text; }
+.ming-store-sidebar row:selected { background: @accent_soft; color: @accent; font-weight: 700; }
+.ming-store-sidebar row:focus-visible { outline: 2px solid alpha(@accent, .55); outline-offset: -2px; }
+.ming-store-accent { background: @accent; color: white; border-radius: 7px; }
+.ming-store-controls { background: @surface; border-bottom: 1px solid alpha(@text, .08); }
+.ming-store-controls entry, .ming-store-controls dropdown { min-height: 34px; }
+.ming-store-controls entry:focus, .ming-store-controls dropdown:focus { outline: 2px solid alpha(@accent, .45); outline-offset: 1px; }
+.ming-store-section-toggle { background: @surface_soft; border-radius: 7px; padding: 2px; }
+.ming-store-section-toggle togglebutton { min-height: 30px; padding: 0 10px; border-radius: 5px; }
+.ming-store-section-toggle togglebutton:checked { background: @accent_soft; color: @accent; font-weight: 700; }
 .ming-store-results { padding: 16px; }
-.ming-store-card { background: #ffffff; border-radius: 8px; padding: 12px; }
+.ming-store-card { background: @surface; border: 1px solid alpha(@text, .08); border-radius: 8px; padding: 12px; }
 .ming-store-app-card { width: 240px; min-width: 240px; max-width: 240px; min-height: 218px; }
-.ming-store-card:hover { border: 1px solid rgba(31, 138, 112, .30); }
-.ming-store-card-icon { min-width: 64px; min-height: 64px; }
+.ming-store-card:hover { border-color: alpha(@accent, .45); box-shadow: 0 2px 8px alpha(@text, .08); }
+.ming-store-card:focus-within { border-color: alpha(@accent, .65); outline: 2px solid alpha(@accent, .22); outline-offset: 1px; }
+.ming-store-card-icon { min-width: 64px; min-height: 64px; margin-bottom: 2px; }
 .ming-store-card-title { font-size: 15px; font-weight: 700; }
-.ming-store-card-summary { color: #4c655c; min-height: 42px; }
-.ming-store-card-meta { color: #6a7e76; font-size: 11px; }
+.ming-store-card-summary { color: @muted; min-height: 42px; }
+.ming-store-card-meta { color: @muted; font-size: 11px; }
 .ming-store-card-actions { margin-top: 8px; }
+.ming-store-card button { min-height: 30px; border-radius: 6px; }
+.ming-store-card button.suggested-action { background: @accent; color: white; }
+.ming-store-message { min-height: 62px; border-left: 3px solid alpha(@accent, .65); padding: 12px 14px; }
+.ming-store-message-loading { border-left-color: @accent; background: alpha(@accent_soft, .48); }
+.ming-store-message-empty { border-left-color: alpha(@muted, .55); background: alpha(@surface_soft, .70); }
+.ming-store-message-error { border-left-color: @danger; background: alpha(#f6dddd, .70); }
+.ming-store-message-warning { border-left-color: @warning; background: alpha(#f7ecd5, .75); }
+.ming-store-message-success { border-left-color: @success; background: alpha(#dff2e5, .75); }
+.ming-store-status { font-size: 11px; }
+.ming-store-status-success { color: @success; }
+.ming-store-status-warning { color: @warning; }
+.ming-store-status-error { color: @danger; }
+.ming-store-status-pending { color: @accent; }
 """
+for _marker, _token_name in (
+    ("#f4f8f6", "canvas"), ("#e6f1ec", "surface_subtle"),
+    ("#ffffff", "surface"), ("#17332c", "text"), ("#5e756d", "muted"),
+    ("#18785f", "accent"), ("#247a4a", "success"), ("#99651b", "warning"),
+    ("#a33e3e", "danger"),
+):
+    MING_MINT_CSS = MING_MINT_CSS.replace(_marker, TOKENS[_token_name].lower())
 SAFE_REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
 TRANSACTION_PHASE_LABELS = {
     "resolving": "正在解析可信软件来源",
@@ -138,15 +216,26 @@ def layout_mode(width):
 def source_options_for_section(section):
     """Return provider IDs exposed by the active top-level store section.
 
-    The UI and query layer must use the same scoped list.  In particular, the
-    public Spark directory is not a selectable source in the native-source
-    section, even though both sections share the same catalog registry.
+    The UI exposes one official catalog. Live third-party repository adapters
+    are intentionally absent from this user-facing path.
     """
     try:
         providers = SECTION_PROVIDERS[str(section)]
     except KeyError as exc:
         raise ValueError("商店栏目无效。") from exc
     return ("all",) + tuple(providers)
+
+
+def official_link(item):
+    """Return a catalog-approved HTTPS website, never an arbitrary URL."""
+    value = str((item or {}).get("vendor_homepage") or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return ""
+    return value if parsed.hostname in OFFICIAL_LINK_HOSTS else ""
 
 
 def source_labels_for_section(section):
@@ -1087,9 +1176,13 @@ class StoreController:
 
 
 def _build_window(application, controller, initial_query="", local_deb=None):
-    from gi.repository import Adw, GLib, Gtk
+    from gi.repository import Adw, Gio, GLib, Gtk
 
     window = Adw.ApplicationWindow(application=application)
+    if os.environ.get("MING_LOW_RESOURCE") == "1":
+        window.add_css_class("ming-low-resource")
+    if os.environ.get("MING_REDUCED_MOTION") == "1":
+        window.add_css_class("ming-reduced-motion")
     window.set_title(APP_NAME)
     window.set_default_size(980, 680)
     window.add_css_class("ming-store")
@@ -1100,17 +1193,16 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     header.set_title_widget(title)
     search = Gtk.SearchEntry(placeholder_text="搜索软件")
     search.set_text(initial_query)
-    source = Gtk.DropDown.new_from_strings(list(source_labels_for_section("spark")))
+    source = Gtk.DropDown.new_from_strings(list(source_labels_for_section("official")))
     section_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-    section_spark = Gtk.ToggleButton(label=STORE_SECTION_LABELS["spark"])
-    section_sources = Gtk.ToggleButton(label=STORE_SECTION_LABELS["sources"])
-    section_sources.set_group(section_spark)
-    section_spark.set_active(True)
-    section_box.append(section_spark)
-    section_box.append(section_sources)
+    section_box.add_css_class("ming-store-section-toggle")
+    section_official = Gtk.Label(label=STORE_SECTION_LABELS["official"])
+    section_official.add_css_class("ming-store-section-label")
+    section_box.append(section_official)
     refresh_catalog = Gtk.Button(label="刷新目录")
     refresh_catalog.set_tooltip_text("重新读取当前栏目的软件目录")
     controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    controls.add_css_class("ming-store-controls")
     for margin in ("start", "end", "top", "bottom"):
         getattr(controls, "set_margin_" + margin)(8 if margin in ("top", "bottom") else 12)
     search.set_hexpand(True)
@@ -1125,6 +1217,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     sidebar.add_css_class("ming-store-sidebar")
     for name in NAVIGATION:
         row = Gtk.ListBoxRow()
+        row.add_css_class("ming-store-navigation-row")
         row.set_child(Gtk.Label(label=NAVIGATION_LABELS[name], xalign=0))
         row.page_name = name
         sidebar.append(row)
@@ -1143,7 +1236,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
     scroller = Gtk.ScrolledWindow(child=results, hexpand=True, vexpand=True)
     split.set_content(scroller)
     current_page = {"name": "home"}
-    current_section = {"name": "spark"}
+    current_section = {"name": "official"}
     page_generation = {"value": 0}
 
     breakpoint = Adw.Breakpoint.new(
@@ -1160,9 +1253,12 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         while results.get_first_child() is not None:
             results.remove(results.get_first_child())
 
-    def add_message(title_text, subtitle=""):
+    def add_message(title_text, subtitle="", tone="neutral"):
         row = Adw.ActionRow(title=title_text, subtitle=subtitle)
         row.add_css_class("ming-store-card")
+        row.add_css_class("ming-store-message")
+        if tone in ("loading", "empty", "error", "warning", "success"):
+            row.add_css_class("ming-store-message-" + tone)
         child = Gtk.FlowBoxChild()
         child.set_child(row)
         results.append(child)
@@ -1174,7 +1270,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         finished = {"value": False}
         timeout_id = {"value": 0}
         clear_results()
-        add_message(*page_load_presentation())
+        add_message(*page_load_presentation(), tone="loading")
 
         def cancel_timeout():
             source_id = timeout_id["value"]
@@ -1192,7 +1288,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             # Invalidate callbacks already queued by a slow provider.
             page_generation["value"] += 1
             clear_results()
-            add_message(*page_load_presentation(timed_out=True))
+            add_message(*page_load_presentation(timed_out=True), tone="warning")
             timeout_id["value"] = 0
             return False
 
@@ -1213,9 +1309,9 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 cancel_timeout()
                 clear_results()
                 if error:
-                    add_message(*page_load_presentation(error=error))
+                    add_message(*page_load_presentation(error=error), tone="error")
                 elif not payload:
-                    add_message(empty_title, empty_subtitle)
+                    add_message(empty_title, empty_subtitle, tone="empty")
                 else:
                     renderer(payload)
                 return False
@@ -1232,6 +1328,8 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         if status_label is not None:
             status_label.set_text(message)
             status_label.set_visible(True)
+            status_label.add_css_class("ming-store-status")
+            status_label.add_css_class("ming-store-status-pending")
         elif hasattr(row, "set_subtitle"):
             row.set_subtitle(message)
         return False
@@ -1242,6 +1340,10 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         if status_label is not None:
             status_label.set_text(presentation["message"])
             status_label.set_visible(True)
+            status_label.add_css_class("ming-store-status")
+            for tone in ("success", "warning", "error", "pending"):
+                status_label.remove_css_class("ming-store-status-" + tone)
+            status_label.add_css_class("ming-store-status-" + presentation["tone"])
         else:
             row.set_subtitle(presentation["message"])
         button.set_label(presentation["retry_label"])
@@ -1284,6 +1386,19 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         labels = {"install": "安装", "update": "更新", "remove": "卸载", "refresh": "重试刷新"}
         button = Gtk.Button(label=labels[action], valign=Gtk.Align.CENTER)
         button.store_action = action
+        homepage = official_link(item)
+        if homepage and item.get("installation_mode") == "user-provided":
+            website_button = Gtk.Button(label="访问官网", valign=Gtk.Align.CENTER)
+            website_button.set_tooltip_text("打开软件官方页面；不会自动安装")
+            website_button.connect(
+                "clicked",
+                lambda *_args: Gio.AppInfo.launch_default_for_uri(homepage, None),
+            )
+            action_box = getattr(row, "_action_box", None)
+            if action_box is not None:
+                action_box.append(website_button)
+            else:
+                row.add_suffix(website_button)
         if controller.live_mode():
             button.set_sensitive(False)
             button.set_tooltip_text("Live 模式只能浏览，请先安装系统并完成账户设置。")
@@ -1450,7 +1565,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         finished = {"value": False}
         timeout_id = {"value": 0}
         clear_results()
-        add_message(*home_empty_presentation([], [], refreshing=True))
+        add_message(*home_empty_presentation([], [], refreshing=True), tone="loading")
 
         def cancel_home_timeout():
             source_id = timeout_id["value"]
@@ -1468,7 +1583,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             # keep the generation valid and only tell the user loading is
             # slow.  The late snapshot/refresh callbacks below still render
             # normally and replace this notice.
-            add_message("来源响应较慢", "软件目录仍在加载，完成后会自动显示。")
+            add_message("来源响应较慢", "软件目录仍在加载，完成后会自动显示。", tone="warning")
             timeout_id["value"] = 0
             return False
 
@@ -1486,16 +1601,18 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 title_subtitle = home_empty_presentation(
                     items, statuses, refreshing=refreshing)
                 if title_subtitle:
-                    add_message(*title_subtitle)
+                    tone = "loading" if refreshing else ("error" if any(
+                        not status.get("ok") for status in statuses or ()) else "empty")
+                    add_message(*title_subtitle, tone=tone)
                 return
             warnings = [status for status in statuses or () if not status.get("ok")]
             for item in items:
                 add_software_row(item)
             if warnings:
                 add_message("来源暂不可用", warnings[0].get(
-                    "message", "正在使用缓存目录，请稍后重试。"))
+                    "message", "正在使用缓存目录，请稍后重试。"), tone="warning")
             if refreshing:
-                add_message("正在刷新目录", "已显示缓存或本地目录，联网刷新完成后会自动更新。")
+                add_message("正在刷新目录", "已显示缓存或本地目录，联网刷新完成后会自动更新。", tone="loading")
             if page.get("has_more"):
                 add_message(
                     "目录较大",
@@ -1516,7 +1633,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                     return False
                 clear_results()
                 if snapshot_error:
-                    add_message(*page_load_presentation(error=snapshot_error))
+                    add_message(*page_load_presentation(error=snapshot_error), tone="error")
                 else:
                     render_home_page(snapshot, statuses=(), refreshing=True)
                 return False
@@ -1548,7 +1665,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                     return False
                 if refresh_error:
                     clear_results()
-                    add_message("来源暂不可用", str(refresh_error))
+                    add_message("来源暂不可用", str(refresh_error), tone="error")
                 else:
                     render_home_page(refreshed, statuses=statuses, refreshing=False)
                 finished["value"] = True
@@ -1701,7 +1818,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
         page_generation["value"] += 1
         generation = page_generation["value"]
         clear_results()
-        add_message("正在检查本地 DEB", "正在读取包名、版本和架构，不会直接执行该文件。")
+        add_message("正在检查本地 DEB", "正在读取包名、版本和架构，不会直接执行该文件。", tone="loading")
 
         def worker():
             try:
@@ -1714,7 +1831,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                     return False
                 if error:
                     clear_results()
-                    add_message("无法读取本地 DEB", error)
+                    add_message("无法读取本地 DEB", error, tone="error")
                 else:
                     render_local_deb(path, detail)
                 return False
@@ -1740,17 +1857,6 @@ def _build_window(application, controller, initial_query="", local_deb=None):
             show_page(getattr(row, "page_name", "home"))
 
     sidebar.connect("row-selected", on_navigation)
-    def on_section_changed(button, section_name):
-        if not button.get_active():
-            return
-        current_section["name"] = section_name
-        source.set_model(Gtk.StringList.new(list(source_labels_for_section(section_name))))
-        source.set_selected(0)
-        source.set_visible(True)
-        show_page(current_page["name"])
-
-    section_spark.connect("toggled", on_section_changed, "spark")
-    section_sources.connect("toggled", on_section_changed, "sources")
     search.connect("search-changed", lambda *_args: show_home() if current_page["name"] == "home" else None)
     source.connect("notify::selected", lambda *_args: show_home() if current_page["name"] == "home" else None)
     def refresh_current_catalog(_button):
@@ -1766,7 +1872,7 @@ def _build_window(application, controller, initial_query="", local_deb=None):
                 refresh_catalog.set_sensitive(True)
                 if error:
                     clear_results()
-                    add_message("来源暂不可用", error)
+                    add_message("来源暂不可用", error, tone="error")
                 else:
                     show_page(current_page["name"])
                 return False

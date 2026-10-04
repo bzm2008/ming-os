@@ -60,6 +60,7 @@ readonly REQUIRED_DESKTOP_RUNTIME_PACKAGES=(
     desktop-file-utils
     zenity
     im-config
+    gpgv
     blueman
     wine
     wine64
@@ -114,8 +115,11 @@ install_xfce_desktop() {
         xfce4-power-manager-plugins || return 1
 
     apt install -y --no-install-recommends \
+        xvfb \
+        dbus-x11 || return 1
+
+    apt install -y --no-install-recommends \
         picom \
-        plank \
         librsvg2-bin \
         librsvg2-common \
         imagemagick || return 1

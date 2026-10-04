@@ -3,9 +3,14 @@
 RC2 uses Calamares' native `partitionLayout` for an explicitly selected whole-disk
 installation. It creates root A, root B, a shared `/boot` and a separate `/home`,
 then writes the root-owned `/etc/ming-update/slots.json` from actual label and UUID
-readback. The recipe requires a 48 GiB disk and never becomes the preselected choice.
+readback. The recipe requires a 32 GiB disk and never becomes the preselected choice.
 The shared `/boot` is required so BIOS and UEFI boots read and update the same
 GRUB environment regardless of which root slot is mounted.
+
+Traditional BIOS/MBR installs use the same `ming-ab-v1` slot and rollback
+contract on an `msdos` disk with four primary ext4 partitions (`/boot`, root A,
+root B, and `/home`). They do not create an ESP or BIOS Boot partition and must
+be installed by booting the ISO in Legacy/CSM mode.
 Each GRUB entry must load its own `/boot/ming-slots/A|B/vmlinuz` and
 `initrd.img`; updating one slot never replaces the rollback slot's kernel.
 Live ISO uses `/live/initrd` without the `.img` suffix; installed A/B slots use
@@ -31,7 +36,7 @@ root-only staging directory.
 
 Release acceptance still required:
 
-- verify the Calamares recipe on empty 48 GiB and larger BIOS and UEFI disks;
+- verify the Calamares recipe on empty 32 GiB and larger BIOS and UEFI disks;
 - verify both `Ming OS slot A/B` GRUB entries can boot and share one GRUB environment;
 - verify the layout manifest remains available through updates and rollback;
 - run power-loss, corrupt-image, no-space and failed-health VM tests.

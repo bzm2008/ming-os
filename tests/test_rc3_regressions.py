@@ -27,8 +27,8 @@ class Rc3DockContracts(unittest.TestCase):
             "PLANKSETTINGS", 1
         )[0]
         self.assertIn("IconSize=40", settings)
-        self.assertIn("ZoomPercent=148", settings)
-        self.assertIn("MingDockProfile=2641-responsive-centered", settings)
+        self.assertIn("ZoomPercent=136", settings)
+        self.assertIn("MingDockProfile=2641-calm-glass-rail", settings)
         self.assertIn("Offset=12", settings)
         self.assertNotIn("VisualBottomGap=18", settings)
         self.assertIn("reserve_bottom_workarea", DESKTOP)
@@ -204,7 +204,7 @@ class Rc3AppearanceContracts(unittest.TestCase):
             SETTINGS.index("    def apply_settings_theme", SETTINGS.index("    def install_css(self):"))
         ]
         for declaration in (
-            "background: #EEF3EF;",
+            "background: __MING_CANVAS__;",
             "background: #FFFFFF;",
             "background: #202824;",
         ):
@@ -224,7 +224,7 @@ class Rc3AppearanceContracts(unittest.TestCase):
     def test_status_and_notification_panels_keep_text_on_solid_surfaces(self):
         for declaration in (
             "background: #F9FCFA;",
-            "background: #FFFFFF;",
+            "background: __MING_SURFACE__;",
             "background: #202824;",
             "background: #FCFEFC;",
         ):
@@ -298,7 +298,7 @@ class Rc3PicomReadabilityContracts(unittest.TestCase):
         self.assertGreaterEqual(launch.count("window.set_opacity(1.0)"), 2)
         self.assertNotIn("window.set_opacity(COMMON.ease_out_cubic(progress))", launch)
         self.assertNotIn("0.94 * COMMON.ease_out_cubic", launch)
-        self.assertIn("background: #F8FBF9;", drawer)
+        self.assertIn("background: @@surface@@;", drawer)
         self.assertIn("self.window.set_opacity(eased)", drawer)
         self.assertNotIn("0.98 * eased", drawer)
 
@@ -370,22 +370,3 @@ class Rc3StatusWidgetContracts(unittest.TestCase):
         self.assertIn("monitor_file", PHONE)
         self.assertIn(".ming-desktop-dark .status-widget", PHONE)
 
-    def test_expanded_widget_has_small_top_gap_and_low_frequency_resource_sampling(self):
-        widget = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
-        self.assertIn("CLOCK_MARGIN_Y = 8", PHONE)
-        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 220", PHONE)
-        self.assertIn("padding: 8px 16px", PHONE)
-        self.assertIn("STATUS_RESOURCE_REFRESH_SECONDS = 30", PHONE)
-        self.assertIn("MemAvailable", PHONE)
-
-    def test_volume_control_repairs_default_sink_before_writing(self):
-        widget = PHONE[PHONE.index("def set_control_value"):PHONE.index("class WallpaperCanvas")]
-        self.assertIn("audio_repair_playback", widget)
-        self.assertIn("confirmed_value", widget)
-        repair_branch = widget.split('elif kind == "volume":', 1)[1].split("else:", 1)[0]
-        self.assertIn('if repair.get("ok")', repair_branch)
-        self.assertIn("set_volume(value)", repair_branch)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -221,12 +221,202 @@ def write_final_blank_ab_grub(root, uuid, slot_b_uuid, extra=""):
     )
 
 
+def write_legacy_mbr_ab_install_contract(root, uuid, slot_b_uuid):
+    boot_uuid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+    home_uuid = "cccccccc-4444-5555-6666-dddddddddddd"
+    write(
+        root,
+        "etc/ming-update/install-mode.json",
+        json.dumps({
+            "schema": "ming-install-mode/v1",
+            "version": 1,
+            "mode": "legacy_mbr",
+            "major_ota": "ab_slot",
+            "message": "传统 BIOS / MBR A/B 安装，支持大版本 OTA 和自动回滚。",
+        }),
+    )
+    write(
+        root,
+        "etc/fstab",
+        f"UUID={uuid} / ext4 defaults 0 1\n"
+        f"UUID={boot_uuid} /boot ext4 defaults 0 2\n"
+        f"UUID={home_uuid} /home ext4 defaults 0 2\n",
+    )
+    write(
+        root,
+        "etc/ming-update/slots.json",
+        json.dumps({
+            "schema": 1,
+            "layout": "ming-ab-v1",
+            "slots": {"A": {"uuid": uuid}, "B": {"uuid": slot_b_uuid}},
+            "boot": {"uuid": boot_uuid},
+            "home": {"uuid": home_uuid},
+        }),
+    )
+    for slot in ("A", "B"):
+        write(root, f"boot/ming-slots/{slot}/vmlinuz", "kernel")
+        write(root, f"boot/ming-slots/{slot}/initrd.img", "initrd")
+    write(
+        root,
+        "etc/grub.d/09_ming_os",
+        "#!/bin/sh\nmenuentry 'Ming OS slot A' {\n"
+        f" linux /ming-slots/A/vmlinuz root=UUID={uuid} ro\n"
+        "}\nmenuentry 'Ming OS slot B' {\n"
+        f" linux /ming-slots/B/vmlinuz root=UUID={slot_b_uuid} ro\n"
+        "}\n",
+        executable=True,
+    )
+
+
+def legacy_mbr_storage_info(
+    *, partition_table="dos", partition_type="0x83", root_partition_number=2,
+    has_esp=False, has_bios_boot=False,
+):
+    return {
+        "available": True,
+        "disk": "/dev/mock-disk",
+        "partition_table": partition_table,
+        "root_partition_number": root_partition_number,
+        "root_partition_type": partition_type,
+        "partitions": [
+            {"number": number, "parttype": partition_type}
+            for number in range(1, 5)
+        ],
+        "esp_present": has_esp,
+        "bios_boot_present": has_bios_boot,
+    }
+
+
 def shell_executable():
     git_bash = pathlib.Path("C:/Program Files/Git/bin/bash.exe")
     return str(git_bash) if git_bash.is_file() else shutil.which("bash")
 
 
 class InstallerReceiptContracts(unittest.TestCase):
+    def test_legacy_mbr_installed_gate_accepts_ms_dos_ab_layout(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(target, uuid, slot_b_uuid)
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(),
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("legacy_mbr", result["install_mode"])
+        self.assertEqual("ab_slot", result["major_ota"])
+
+    def test_legacy_mbr_installed_gate_rejects_gpt_storage(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(
+                target, uuid, "2eab8945-5555-6666-7777-888888888888"
+            )
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(partition_table="gpt"),
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("msdos partition table" in error for error in result["errors"]))
+
+    def test_legacy_mbr_installed_gate_rejects_non_linux_partition_type(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(
+                target, uuid, "2eab8945-5555-6666-7777-888888888888"
+            )
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(partition_type="0x07"),
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("0x83" in error for error in result["errors"]))
+
+    def test_legacy_mbr_installed_gate_rejects_efi_or_bios_boot_partitions(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(
+                target, uuid, "2eab8945-5555-6666-7777-888888888888"
+            )
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(
+                    has_esp=True, has_bios_boot=True
+                ),
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("EFI System Partition" in error for error in result["errors"]))
+        self.assertTrue(any("BIOS Boot Partition" in error for error in result["errors"]))
+
+    def test_legacy_mbr_installed_gate_rejects_missing_slot_payload(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(
+                target, uuid, "2eab8945-5555-6666-7777-888888888888"
+            )
+            (target / "boot/ming-slots/B/initrd.img").unlink()
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(),
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("slot B initrd.img" in error for error in result["errors"]))
+
+    def test_legacy_mbr_final_boot_gate_accepts_bios_ab_grub(self):
+        verifier = load_verifier()
+        uuid = "790ec0ef-1111-2222-3333-444444444444"
+        slot_b_uuid = "2eab8945-5555-6666-7777-888888888888"
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            create_installed_root(target, uuid)
+            write_legacy_mbr_ab_install_contract(target, uuid, slot_b_uuid)
+            write_final_blank_ab_grub(target, uuid, slot_b_uuid)
+
+            result = verifier.verify_installed(
+                target,
+                expected_root_uuid=uuid,
+                final_boot=True,
+                root_source="/dev/mock-root-a",
+                storage_info_provider=lambda _source: legacy_mbr_storage_info(),
+            )
+
+        self.assertTrue(result["ok"], result)
+
     def test_installed_admin_gate_reads_only_boundary_checked_files(self):
         verifier = load_verifier()
         for relative in (
@@ -1342,7 +1532,7 @@ class InstallerReceiptContracts(unittest.TestCase):
             self.assertIn('mountPoint: "/home"', source)
             root_b = source.split('name: "MING-ROOT-B"', 1)[1].split("- name:", 1)[0]
             self.assertNotIn("mountPoint:", root_b)
-            self.assertIn("requiredStorage: 48", source)
+            self.assertIn("requiredStorage: 32", source)
             self.assertIn("initialPartitioningChoice: none", source)
             self.assertIn("allowManualPartitioning: false", source)
 

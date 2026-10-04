@@ -43,6 +43,7 @@ class HistoricalRegressionContracts(unittest.TestCase):
         self.assertIn('"runuser", "-u", user_name, "--", "env"', refresh)
         self.assertIn('"XDG_RUNTIME_DIR=" + str(runtime)', refresh)
         self.assertIn('"/usr/local/bin/ming-phone-desktop", "--sync"', refresh)
+        self.assertIn('"/usr/local/sbin/ming-refresh-dock-launchers", user_name', refresh)
         self.assertNotIn('"--refresh-apps"', refresh)
 
     def test_store_refresh_marks_missing_graphical_runtime_as_failed(self):
@@ -296,15 +297,6 @@ class HistoricalRegressionContracts(unittest.TestCase):
 
         self.assertNotEqual(0, completed.returncode)
 
-    def test_collapsed_widget_hides_and_zeroes_expanded_content(self):
-        state = PHONE.split("def apply_collapsed_state", 1)[1].split(
-            "    def on_resource_clicked", 1
-        )[0]
-        self.assertIn("set_reveal_child(False)", state)
-        self.assertIn("set_visible(False)", state)
-        self.assertIn("set_size_request(-1, 0)", state)
-        self.assertIn("content_height", PHONE)
-
     def test_drawer_has_no_large_bottom_dead_zone(self):
         source = (ROOT / "assets" / "ming-app-drawer.py").read_text(encoding="utf-8")
         match = re.search(r"DRAWER_BOTTOM_MARGIN\s*=\s*(\d+)", source)
@@ -332,7 +324,7 @@ class HistoricalRegressionContracts(unittest.TestCase):
         profile = DESKTOP.split("configure_ming_mint_dock_profile() {", 1)[1].split(
             "configure_ming_mint_desktop_icons()", 1)[0]
         self.assertIn("IconSize=40", profile)
-        self.assertIn("ZoomPercent=148", profile)
+        self.assertIn("ZoomPercent=136", profile)
         self.assertIn("Offset=12", profile)
         self.assertIn("Theme=Ming", profile)
         self.assertNotIn("Theme=Ming-Mint", profile)

@@ -168,6 +168,11 @@ class AccountControlTests(unittest.TestCase):
     def test_marker_update_is_private_atomic_and_regular(self):
         if os.name == "nt":
             self.skipTest("POSIX owner and mode semantics are unavailable")
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest(
+                "the atomic marker replacement writes through /proc/self/fd "
+                "(Linux); this host provides no /proc"
+            )
         with tempfile.TemporaryDirectory() as tempdir:
             config = pathlib.Path(tempdir) / "ming-os"
             config.mkdir(mode=0o700)
@@ -185,6 +190,11 @@ class AccountControlTests(unittest.TestCase):
     def test_migrate_skipped_is_one_shot(self):
         if os.name == "nt":
             self.skipTest("POSIX owner and mode semantics are unavailable")
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest(
+                "the atomic marker replacement writes through /proc/self/fd "
+                "(Linux); this host provides no /proc"
+            )
         calls = []
 
         def runner(command, input_text=None):

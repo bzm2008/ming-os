@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -87,6 +88,15 @@ def write_installed_desktop(root, uuid):
 
 
 class InstallerModeTests(unittest.TestCase):
+    def test_auto_select_targets_upper_erase_card_row_with_multi_point_retries(self):
+        self.assertIn("click_y=$((height * 75 / 1000))", DESKTOP)
+        self.assertIn("window_x=", DESKTOP)
+        self.assertIn("window_y=", DESKTOP)
+        self.assertIn("$((width * 300 / 1000))", DESKTOP)
+        self.assertIn("upper-row multi-point retries", DESKTOP)
+        self.assertIn("seq 1 960", DESKTOP)
+        self.assertIn("_ % 8", DESKTOP)
+
     def test_calamares_show_sequence_starts_at_partition_not_welcome(self):
         """The native welcome module can stall at "Remaining modules: welcome" in Live VMs."""
         base_settings = BASE.split("cat > /etc/calamares/settings.conf << 'CALAMARESSETTINGS'", 1)[1].split(
@@ -122,11 +132,39 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn('mountPoint: "/boot/efi"', partition)
         self.assertIn('name: "MING-ROOT-A"', partition)
         self.assertIn('name: "MING-ROOT-B"', partition)
-        self.assertIn("requiredStorage: 48", partition)
+        self.assertIn("requiredStorage: 32", partition)
+        self.assertIn("minSize: 10G", partition)
+        self.assertIn("minSize: 6G", partition)
         self.assertIn("allowManualPartitioning: false", partition)
         self.assertIn("enableLuksAutomatedPartitioning: false", partition)
         self.assertLess(partition.index('name: "MING-BIOSBOOT"'), partition.index('name: "MING-ESP"'))
         self.assertLess(partition.index('name: "MING-ESP"'), partition.index('name: "MING-BOOT"'))
+
+    def test_legacy_mbr_mode_exposes_an_explicit_msdos_manual_layout(self):
+        mode = load_mode()
+        payload = mode.build_mode_payload("legacy_mbr")
+        self.assertEqual("legacy_mbr", payload["mode"])
+        self.assertEqual("ab_slot", payload["major_ota"])
+        self.assertIn("A/B", payload["message"])
+        partition = mode.partition_config("legacy_mbr")
+        self.assertIn("defaultPartitionTableType: msdos", partition)
+        self.assertIn("requiredPartitionTableType: msdos", partition)
+        self.assertIn("allowManualPartitioning: false", partition)
+        self.assertIn('name: "MING-ROOT-A"', partition)
+        self.assertIn('name: "MING-ROOT-B"', partition)
+        self.assertIn('name: "MING-HOME"', partition)
+        self.assertIn("requiredStorage: 32", partition)
+        self.assertNotIn("MING-BIOSBOOT", partition)
+        self.assertNotIn("MING-ESP", partition)
+
+    def test_blank_ab_minimum_partition_budget_fits_32_gib_requirement(self):
+        mode = load_mode()
+        partition = mode.partition_config("blank_ab", firmware="bios")
+        self.assertIn("requiredStorage: 32", partition)
+        self.assertEqual(2, partition.count("minSize: 10G"))
+        self.assertEqual(1, partition.count("minSize: 6G"))
+        self.assertNotIn("minSize: 14G", partition)
+        self.assertNotIn("minSize: 8G", partition)
 
     def test_blank_ab_bios_uses_explicit_ming_esp_without_auto_esp_helper(self):
         mode = load_mode()
@@ -165,6 +203,15 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("MING-ESP:ef00", normalizer)
         self.assertIn("missing partition label ${label}", normalizer)
         self.assertIn('label: "MING-ESP"', mode.BLANK_AB_UEFI_ESP)
+
+    def test_partition_type_normalizer_checks_msdos_ab_primary_partitions(self):
+        normalizer = BASE.split(
+            "cat > /usr/local/sbin/ming-fix-partition-types << 'MINGFIXPARTTYPES'", 1
+        )[1].split("\nMINGFIXPARTTYPES", 1)[0]
+        self.assertIn("legacy_mbr", normalizer)
+        self.assertIn("msdos", normalizer)
+        self.assertIn("0x83", normalizer)
+        self.assertIn("four primary partitions", normalizer)
 
     def test_partition_type_normalizer_is_lf_only(self):
         normalizer = extract_heredoc_bytes(
@@ -266,6 +313,13 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("initialPartitioningChoice: none", partition)
         self.assertNotIn("initialPartitioningChoice: erase", partition)
 
+    def test_blank_ab_message_explains_whole_disk_automatic_layout(self):
+        mode = load_mode()
+        message = mode.build_mode_payload("blank_ab")["message"]
+        self.assertIn("整块磁盘", message)
+        self.assertIn("自动配置", message)
+        self.assertIn("清除", message)
+
     def test_live_session_auto_selects_blank_ab_erase_after_calamares_window(self):
         marker = "auto_select_blank_ab"
         self.assertIn(marker, DESKTOP)
@@ -308,7 +362,7 @@ class InstallerModeTests(unittest.TestCase):
             partition = pathlib.Path(directory) / "partition.conf"
             result = subprocess.run(
                 [
-                    "python", str(MODE_PATH), "write", "--mode", "blank_ab",
+                    sys.executable, str(MODE_PATH), "write", "--mode", "blank_ab",
                     "--state", str(state), "--partition", str(partition),
                 ],
                 capture_output=True,
@@ -336,6 +390,17 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("settings.conf", helper)
         self.assertIn("/usr/share/calamares/qml", helper)
         self.assertIn("/etc/calamares/qml", helper)
+
+    def test_launcher_accepts_legacy_mbr_mode(self):
+        launcher = DESKTOP.split(
+            "cat > /usr/local/bin/ming-calamares-launcher << 'CALAMARESLAUNCHER'", 1
+        )[1].split("\nCALAMARESLAUNCHER", 1)[0]
+        helper = DESKTOP.split(
+            "cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'", 1
+        )[1].split("\nLIVEINSTALLERROOT", 1)[0]
+        self.assertIn("blank_ab|dual_boot_preserve|legacy_mbr", launcher)
+        self.assertIn("blank_ab|dual_boot_preserve|legacy_mbr", helper)
+        self.assertIn("传统 BIOS / MBR", helper)
 
     def test_launcher_uses_keyboard_accessible_mode_chooser(self):
         launcher = DESKTOP.split(
@@ -394,6 +459,17 @@ class InstallerModeTests(unittest.TestCase):
         self.assertIn("disabled_dual_boot", OTA)
         self.assertIn("保留双系统模式，大版本 A/B OTA 已禁用", OTA)
 
+    def test_major_ota_accepts_legacy_mbr_ab_mode(self):
+        self.assertIn("legacy_mbr:ab_slot", OTA)
+
+    def test_mbr_bootloader_uses_bios_grub_and_a_b_final_checks(self):
+        bootloader = BASE.split(
+            "cat > /usr/local/sbin/ming-install-bootloader", 1
+        )[1].split("\nMINGBOOTLOADER", 1)[0]
+        self.assertIn('install_mode}" == "legacy_mbr"', bootloader)
+        self.assertIn("--target=i386-pc", bootloader)
+        self.assertIn('install_mode == "legacy_mbr"', bootloader)
+
     def test_live_verifier_accepts_selected_dual_boot_manual_mode(self):
         mode = load_mode()
         verifier = load_verifier()
@@ -419,6 +495,32 @@ class InstallerModeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("dual_boot_preserve", result["install_mode"])
         self.assertEqual("enabled", result["manual_partitioning"])
+
+    def test_live_verifier_accepts_selected_legacy_mbr_ab_mode(self):
+        mode = load_mode()
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "run/ming-installer/filesystem.squashfs"
+            source.parent.mkdir(parents=True)
+            source.write_text("rootfs", encoding="utf-8")
+            settings = root / "etc/calamares/settings.conf"
+            settings.parent.mkdir(parents=True)
+            settings.write_text("sequence:\n  - show:\n      - partition\n", encoding="utf-8")
+            partition = root / "etc/calamares/modules/partition.conf"
+            partition.parent.mkdir(parents=True)
+            partition.write_text(mode.partition_config("legacy_mbr"), encoding="utf-8")
+            unpack = root / "etc/calamares/modules/unpackfs.conf"
+            unpack.write_text(
+                "source: /run/ming-installer/filesystem.squashfs\n", encoding="utf-8"
+            )
+            mode.write_mode(root / "run/ming-installer/install-mode.json", "legacy_mbr")
+
+            result = verifier.verify_live(root=root, source=source)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("legacy_mbr", result["install_mode"])
+        self.assertEqual("disabled", result["manual_partitioning"])
 
     def test_live_verifier_accepts_blank_ab_uefi_auto_esp_layout(self):
         mode = load_mode()

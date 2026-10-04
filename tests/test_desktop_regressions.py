@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import pathlib
+import re
 import shutil
 import tempfile
 import unittest
@@ -31,6 +32,18 @@ def load_interaction_state():
     namespace = {}
     exec(compile(ast.fix_missing_locations(module), str(PHONE_DESKTOP), "exec"), namespace)
     return namespace["InteractionState"]
+
+
+def fake_absolute_root(*parts):
+    """Build an absolute fake root that is valid on POSIX and on Windows.
+
+    The product only treats a launcher as a system application when the path is
+    absolute (``is_system_application_path``), so a hard-coded ``C:/...`` literal
+    silently stops matching on Linux/macOS where ``Path("C:/x").is_absolute()``
+    is False. Anchoring at the current drive/root keeps the fake tree absolute on
+    every host.
+    """
+    return pathlib.Path(pathlib.Path.cwd().anchor).joinpath(*parts)
 
 
 def load_phone_dedup_functions():
@@ -136,7 +149,7 @@ class DesktopSourceTests(unittest.TestCase):
 
     def test_android_desktop_is_enabled(self):
         self.assertIn("Exec=/usr/local/bin/ming-session-healthcheck --session", self.desktop)
-        self.assertIn("X-Ming-Managed-Components=phone-desktop;plank;picom", self.desktop)
+        self.assertIn("X-Ming-Managed-Components=phone-desktop;taskbar;picom", self.desktop)
         self.assertIn("X-GNOME-Autostart-enabled=true", self.desktop)
         self.assertIn("Exec=/usr/bin/true", self.desktop)
         self.assertIn("ming-phone-desktop --sync", self.desktop)
@@ -318,16 +331,17 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                      str(PHONE_DESKTOP), "exec"), namespace)
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
+        fake_root = fake_absolute_root("ming-test")
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
         apps = []
         for stem in ("settings", "files", "terminal"):
             apps.extend([
                 {
-                    "path": f"C:/ming-test/applications/ming-{stem}.desktop",
+                    "path": str(fake_root / "applications" / f"ming-{stem}.desktop"),
                     "basename": f"ming-{stem}.desktop",
                 },
                 {
-                    "path": f"C:/ming-test/applications/ming-dock-ming-{stem}.desktop",
+                    "path": str(fake_root / "applications" / f"ming-dock-ming-{stem}.desktop"),
                     "basename": f"ming-dock-ming-{stem}.desktop",
                 },
             ])
@@ -359,20 +373,22 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                      str(PHONE_DESKTOP), "exec"), namespace)
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
-        namespace["DESKTOP_DIR"] = pathlib.Path("C:/ming-test/home/user/Desktop")
-        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
+        fake_root = fake_absolute_root("ming-test")
+        fake_home = fake_root / "home" / "user"
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
+        namespace["DESKTOP_DIR"] = fake_home / "Desktop"
+        namespace["HOME"] = fake_home
         apps = [
             {
-                "path": "C:/ming-test/home/user/Desktop/ming-settings.desktop",
+                "path": str(fake_home / "Desktop" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
             {
-                "path": "C:/ming-test/home/user/.local/share/applications/ming-settings.desktop",
+                "path": str(fake_home / ".local" / "share" / "applications" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
             {
-                "path": "C:/ming-test/applications/ming-settings.desktop",
+                "path": str(fake_root / "applications" / "ming-settings.desktop"),
                 "basename": "ming-settings.desktop",
             },
         ]
@@ -382,19 +398,21 @@ class DesktopSourceTests(unittest.TestCase):
         )
 
     def test_phone_desktop_deduplicates_store_and_toolbox_user_copies(self):
+        fake_root = fake_absolute_root("ming-test")
+        fake_home = fake_root / "home" / "user"
         namespace = load_phone_dedup_functions()
-        namespace["SYSTEM_APPLICATION_DIR"] = pathlib.Path("C:/ming-test/applications")
-        namespace["HOME"] = pathlib.Path("C:/ming-test/home/user")
+        namespace["SYSTEM_APPLICATION_DIR"] = fake_root / "applications"
+        namespace["HOME"] = fake_home
         apps = []
         for basename in ("ming-store.desktop", "ming-toolbox.desktop"):
             apps.extend([
                 {
-                    "path": f"C:/ming-test/applications/{basename}",
+                    "path": str(fake_root / "applications" / basename),
                     "basename": basename,
                     "diagnostic": "",
                 },
                 {
-                    "path": f"C:/ming-test/home/user/.local/share/applications/{basename}",
+                    "path": str(fake_home / ".local" / "share" / "applications" / basename),
                     "basename": basename,
                     "diagnostic": "",
                 },
@@ -407,7 +425,7 @@ class DesktopSourceTests(unittest.TestCase):
             [item["basename"] for item in selected],
         )
         self.assertTrue(all(
-            item["path"].startswith("C:/ming-test/applications/")
+            item["path"].startswith(str(fake_root / "applications"))
             for item in selected
         ))
 
@@ -634,24 +652,6 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertNotIn("COMMON.send_launch_request", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
 
-    def test_power_button_uses_ming_menu_before_session_logout_actions(self):
-        power_menu = self.phone[
-            self.phone.index("    def open_power_menu"):
-            self.phone.index("    def refresh", self.phone.index("    def open_power_menu"))
-        ]
-        self.assertIn("show_ming_power_menu", self.phone)
-        self.assertIn("include_update", self.phone)
-        self.assertNotIn('["xfce4-session-logout"]', power_menu)
-        self.assertNotIn("gnome-session-quit", power_menu)
-        self.assertNotIn("mate-session-save", power_menu)
-        self.assertNotIn("lxqt-leave", power_menu)
-
-    def test_status_panel_fills_its_allocated_width(self):
-        self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)
-        self.assertIn("box.set_hexpand(True)", self.phone)
-        self.assertIn("controls.attach(self.volume_scale, 0, 1, 3, 1)", self.phone)
-        self.assertIn("controls.attach(self.brightness_scale, 0, 3, 3, 1)", self.phone)
-
     def test_desktop_uses_cairo_for_the_single_tile_visual_source(self):
         fallback = self.phone[
             self.phone.index("def draw_icon_fallback"):
@@ -782,7 +782,11 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            # Canonicalize the temp root: the product resolves candidate paths
+            # before comparing them with SYSTEM_APPLICATION_DIR, so on hosts
+            # where the temp directory sits behind a symlink (macOS: /var ->
+            # /private/var) the unresolved form can never match.
+            root = pathlib.Path(temp_dir).resolve()
             state_dir = root / "state"
             system_dir = root / "usr" / "share" / "applications"
             desktop = root / "home" / "user" / "Desktop"
@@ -919,7 +923,7 @@ class DesktopSourceTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            root = pathlib.Path(temp_dir).resolve()
             system_dir = root / "usr" / "share" / "applications"
             desktop = root / "home" / "user" / "Desktop"
             state_dir = root / "state"
@@ -971,6 +975,12 @@ class DesktopSourceTests(unittest.TestCase):
                     self.assertEqual((777, 333, True), (restored["items"][0]["x"], restored["items"][0]["y"], restored["items"][0]["pinned"]))
                     self.assertEqual((600, 410), (restored["items"][1]["x"], restored["items"][1]["y"]))
                     self.assertEqual([str(system_papyrus)], restored["items"][1]["children"])
+
+    def test_new_catalog_apps_are_marked_for_desktop_visibility(self):
+        source = PHONE_DESKTOP.read_text(encoding="utf-8")
+        fresh_block = source.split("for app in visible_apps:", 1)[1].split("items.append(app)", 1)[0]
+        self.assertIn('newly_installed_paths.append(str(app["path"]))', fresh_block)
+        self.assertIn('str(item["path"]) in set(layout.get("newly_installed_paths", []))', source)
 
     def test_layout_save_is_atomic_and_bad_primary_keeps_last_good(self):
         source = PHONE_DESKTOP.read_text(encoding="utf-8")
@@ -1050,7 +1060,7 @@ class DesktopSourceTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(PHONE_DESKTOP), "exec"), namespace)
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = pathlib.Path(temp_dir)
+            root = pathlib.Path(temp_dir).resolve()
             desktop = root / "Desktop"
             source_dir = root / "source"
             source_dir.mkdir()
@@ -1190,39 +1200,6 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("X-Ming-Source-Desktop=", copier)
         self.assertIn("write_managed_launcher_copy", copier)
 
-    def test_status_widget_geometry_is_logged_and_asserted_top_aligned(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        placement = self.phone[self.phone.index("    def place_overlays"):
-                              self.phone.index("    @staticmethod", self.phone.index("    def place_overlays"))]
-        for marker in (
-            "def geometry_snapshot(self):",
-            '"outer_y"',
-            '"content_y"',
-            "geometry top-alignment failed",
-        ):
-            self.assertIn(marker, status)
-        self.assertIn("GLib.idle_add(self.status.verify_top_alignment)", placement)
-
-    def test_status_widget_all_layers_reject_vertical_stretch_and_top_margin(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        for marker in (
-            "self.set_margin_top(0)",
-            "box.set_margin_top(0)",
-            "expanded.set_margin_top(0)",
-            "self.content_revealer.set_valign(Gtk.Align.START)",
-            "self.content_revealer.set_vexpand(False)",
-        ):
-            self.assertIn(marker, status)
-
-    def test_status_widget_top_gap_is_capped_at_eight_pixels(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("STATUS_WIDGET_TOP_GAP_MAX = 8", self.phone)
-        self.assertIn("status_widget_top_gap_is_valid", self.phone)
-        self.assertIn("status_widget_top_gap_is_valid(", status)
-
     def test_blank_desktop_press_is_consumed_before_release_context_menu(self):
         fixed = self.phone[self.phone.index("    def on_fixed_button_press"):
                            self.phone.index("    def on_fixed_motion", self.phone.index("    def on_fixed_button_press"))]
@@ -1296,12 +1273,23 @@ class DesktopSourceTests(unittest.TestCase):
         ]
         self.assertIn("ming-live-installer-root", launcher)
         self.assertIn("/usr/local/bin/ming-install-mode-chooser", launcher)
-        self.assertIn("空白盘自动安装（支持 A/B OTA）", chooser)
+        self.assertIn("使用整块磁盘（自动配置系统与恢复布局）", chooser)
         self.assertIn("保留双系统（禁用 major A/B OTA）", chooser)
+        self.assertIn("传统 BIOS / MBR（自动配置 A/B 布局）", chooser)
+        self.assertIn("legacy_mbr", chooser)
         self.assertIn("self.blank_button.grab_focus()", chooser)
         self.assertNotIn("exec pkexec calamares -d", launcher)
         self.assertNotIn("sudo -n /usr/local/sbin/ming-calamares-preflight", launcher)
         self.assertNotIn("--radiolist", launcher)
+
+    def test_legacy_mbr_mode_is_rejected_when_live_media_booted_as_uefi(self):
+        launcher = self.desktop[
+            self.desktop.index("cat > /usr/local/sbin/ming-live-installer-root << 'LIVEINSTALLERROOT'"):
+            self.desktop.index("\nLIVEINSTALLERROOT", self.desktop.index("cat > /usr/local/sbin/ming-live-installer-root"))
+        ]
+        self.assertIn("legacy_mbr", launcher)
+        self.assertIn("/sys/firmware/efi", launcher)
+        self.assertIn("传统 BIOS / MBR", launcher)
 
     def test_installer_session_does_not_run_a_second_preflight(self):
         session = self.desktop[
@@ -1390,7 +1378,7 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("plank_window_visible", self.desktop)
         self.assertIn("IndicatorSize=4", self.desktop)
         self.assertIn("Offset=12", self.desktop)
-        self.assertIn("MingDockProfile=2641-responsive-centered", self.desktop)
+        self.assertIn("MingDockProfile=2641-calm-glass-rail", self.desktop)
         self.assertIn('gsettings set "${plank_schema}" alignment center', self.desktop)
         self.assertIn('gsettings set "${plank_schema}" offset "${offset:-0}"', self.desktop)
         self.assertIn("UrgentBounceTime=420", self.desktop)
@@ -1459,7 +1447,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     def test_launch_feedback_bounds_long_titles_and_details_inside_its_fixed_area(self):
         overlay = self.phone[
             self.phone.index("class LaunchFeedbackOverlay"):
-            self.phone.index("class StatusWidget")
+            self.phone.index("class WallpaperCanvas")
         ]
         self.assertIn("self.title.set_ellipsize(Pango.EllipsizeMode.END)", overlay)
         self.assertIn("self.title.set_max_width_chars(20)", overlay)
@@ -1485,11 +1473,6 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("if not self.launch_feedback.item:", self.phone)
         self.assertIn("self.launch_feedback.hide()", self.phone)
 
-    def test_status_widget_exposes_radio_battery_and_settings(self):
-        self.assertIn("class StatusWidget", self.phone)
-        for marker in ["nmcli", "bluetoothctl", "upower", "ming-control-center"]:
-            self.assertIn(marker, self.phone)
-
     def test_compact_status_pill_keeps_its_38px_visual_minimum(self):
         compact_style = self.phone[
             self.phone.index(".status-compact-pill {"):
@@ -1497,37 +1480,67 @@ class DesktopPolishContractTests(unittest.TestCase):
         ]
         self.assertIn("min-height: 38px", compact_style)
 
-    def test_status_widget_shows_battery_only_for_portable_host(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("self.header_battery_label", status)
-        self.assertIn("self.compact_battery_label", status)
-        self.assertIn('battery.get("portable")', status)
-        self.assertIn("self.header_battery_label.set_visible(show_battery)", status)
-        self.assertIn("self.compact_battery_label.set_visible(show_battery)", status)
-        self.assertIn("self.header_battery_label.set_text(battery_text)", status)
-        self.assertNotIn("self.battery_label = self.resource_label", status)
-
-    def test_status_compact_capsule_uses_ming_mark_and_short_status_fields(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('MING_WIDGET_MARK_ICON = "ming-mark"', self.phone)
-        for marker in (
-            "self.compact_wifi_icon",
-            "self.compact_battery_icon",
-            "self.compact_logo_image",
-            "self.compact_arrow_label",
-        ):
-            self.assertIn(marker, status)
-
     def test_phone_desktop_binds_win_key_to_status_widget_toggle(self):
+        # The floating status widget was retired (PhoneDesktop.status is
+        # None). The Win key must still be recognised and routed through the
+        # single toggle entry point — and that entry must stay an explicit
+        # no-op rather than silently regrowing widget logic.
         for marker in (
             "def is_status_widget_toggle_key",
             'self.connect("key-press-event", self.on_key_press)',
             "def on_key_press(self, _window, event)",
-            "self.status.set_collapsed(not self.status.collapsed)",
+            "self.toggle_status_widget()",
         ):
             self.assertIn(marker, self.phone)
+        # toggle_status_widget is a deliberate retired no-op whose body only
+        # returns False. Assert that contract explicitly so any resurrection
+        # of set_collapsed / self.status fails here first.
+        toggle = re.search(
+            r"def toggle_status_widget\(self\):\n(.*?)\n(?=\n    def )",
+            self.phone,
+            re.S,
+        )
+        self.assertIsNotNone(toggle, "toggle_status_widget not found")
+        body = toggle.group(1)
+        self.assertNotIn("set_collapsed", body)
+        self.assertNotIn("self.status", body)
+        self.assertIn("return False", body)
+
+    def test_retired_floating_status_widget_does_not_come_back(self):
+        """6724c3f retired the floating status widget; its remains are gone.
+
+        The Win-key route into the retired toggle stays, but none of the widget
+        implementation, its state marker or its dedup constant may reappear.
+        """
+        for retired in (
+            "class StatusWidget",
+            "class StatusSlider",
+            "class ControlRequestState",
+            "class ResourceMetricSampler",
+            "STATUS_TOGGLE_DEDUP_SECONDS",
+            "STATUS_WIDGET_COMPACT_WIDTH",
+            "STATUS_WIDGET_COMPACT_HEIGHT",
+            "STATUS_WIDGET_COMPACT_NARROW_WIDTH",
+            "WIDGET_STATE_SCHEMA_VERSION",
+            "COMPACT_BATTERY_REFRESH_SECONDS",
+            "STATUS_SUMMARY_REFRESH_SECONDS",
+            "STATUS_RESOURCE_REFRESH_SECONDS",
+            "MING_WIDGET_MARK_ICON",
+            "METRIC_MODES",
+            "normalize_metric_mode",
+            "read_resource_metric",
+            "load_widget_state",
+            "save_widget_state",
+            "widget_state_path",
+            "status_widget_overlay_geometry",
+            "status_widget_compact_geometry",
+            "self.status = None",
+            "_last_status_toggle_at",
+            "register_status_widget_pid",
+        ):
+            self.assertNotIn(retired, self.phone)
+        self.assertIn("def is_status_widget_toggle_key", self.phone)
+        self.assertIn("def toggle_status_widget", self.phone)
 
     def test_fullscreen_and_drawer_lower_the_dock_without_killing_plank(self):
         for marker in (
@@ -1540,45 +1553,6 @@ class DesktopPolishContractTests(unittest.TestCase):
             self.assertIn(marker, self.desktop)
         self.assertIn("apply_dock_immersive_state(True)", self.drawer)
         self.assertIn("apply_dock_immersive_state(False)", self.drawer)
-
-    def test_collapsed_status_widget_refreshes_low_frequency_network_and_battery_summary(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        refresh = status[status.index("    def refresh(self):"):
-                          status.index("    def collect_status", status.index("    def refresh(self):"))]
-        self.assertIn("self.refresh_compact_status()", refresh)
-        self.assertIn("def refresh_compact_status", status)
-        self.assertIn("threading.Thread(target=self.collect_compact_status, daemon=True).start()", status)
-        self.assertIn("controller.battery_status", status)
-        self.assertIn("controller.wifi_status", status)
-        self.assertIn("controller.ethernet_status", status)
-        self.assertIn("self.compact_network_text", status)
-
-    def test_collapsed_status_keeps_partial_results_when_one_probe_fails(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("def collect_compact_component", status)
-        self.assertIn("controller.wifi_status", status)
-        self.assertIn("controller.ethernet_status", status)
-
-    def test_collapsed_status_accepts_connected_ethernet_detail_states(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('startswith("connected")', status)
-
-    def test_status_wifi_button_uses_ming_diagnostics_not_empty_nm_editor(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('self.wifi_button = self.action_button("Wi-Fi --", "ming-control-center")', status)
-        self.assertNotIn('"nm-connection-editor"', status)
-
-    def test_status_widget_exposes_safe_power_menu(self):
-        self.assertIn("self.power_button", self.phone)
-        self.assertIn('"ming-power-action", "logout"', self.phone)
-        self.assertIn('"ming-power-action", "reboot"', self.phone)
-        self.assertIn('"ming-power-action", "poweroff"', self.phone)
-        self.assertNotIn('["xfce4-session-logout", "--reboot"]', self.phone)
-        self.assertNotIn('["gnome-session-quit", "--reboot"]', self.phone)
 
     def test_power_helper_logs_inhibitors_and_falls_back_to_logind(self):
         opener = "cat > /usr/local/bin/ming-power-action << 'MINGPOWERACTION'"
@@ -1751,16 +1725,6 @@ class WinToggleAndLiveSessionContractTests(unittest.TestCase):
         self.assertIn("ps -o args=", toggle)
         self.assertIn("ming-phone-desktop*", toggle)
         self.assertIn('[[ "${process_count}" == "1" ]] || exit 0', toggle)
-
-    def test_status_popup_is_opaque_and_not_modal_overlay(self):
-        popup = self.phone[self.phone.index("self.expanded_window = Gtk.Window"):
-                           self.phone.index("box.pack_start(self.compact_button")]
-        self.assertIn("self.expanded_window.set_opacity(1.0)", popup)
-        self.assertIn("self.expanded_window.set_modal(False)", popup)
-        self.assertIn("self.expanded_window.set_skip_taskbar_hint(True)", popup)
-        css = self.phone[self.phone.index(".status-expanded-panel {"):
-                         self.phone.index(".status-expanded-title {")]
-        self.assertIn("background: #FFFFFF", css)
 
     def test_installer_session_survives_calamares_exit_and_notifies_user(self):
         session = self.desktop[

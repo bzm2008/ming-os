@@ -15,6 +15,11 @@ STORE = (ROOT / "assets" / "ming-store.py").read_text(encoding="utf-8")
 STORE_CONTROL = (ROOT / "assets" / "ming-store-control.py").read_text(encoding="utf-8")
 GIT_BASH = pathlib.Path(r"C:\Program Files\Git\bin\bash.exe")
 
+NEEDS_GIT_BASH = (
+    "this regression runs the POSIX authorization bridge under Git Bash, which "
+    "only the Windows CI runner provides"
+)
+
 
 class PackageRuntimeContracts(unittest.TestCase):
     def test_desktop_catalog_scans_verified_opt_app_proxies(self):
@@ -135,6 +140,7 @@ class PackageRuntimeContracts(unittest.TestCase):
         )
         self.assertNotIn("pkexec", STORE)
 
+    @unittest.skipUnless(GIT_BASH.is_file(), NEEDS_GIT_BASH)
     def test_authorization_bridge_translates_headless_pkexec_failure(self):
         self.assertTrue(GIT_BASH.is_file(), "Git Bash is required for authorization regression")
         opener = "cat > /usr/local/bin/ming-authorized-action << 'MINGAUTHORIZE'"

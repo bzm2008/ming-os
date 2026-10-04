@@ -3,12 +3,30 @@
 
 import argparse
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import threading
 
 
 VERSION = "1.0"
+
+
+def _load_ui_tokens():
+    """Load the shared visual contract without importing the hyphenated module."""
+    path = Path(__file__).with_name("ming-ui-tokens.py")
+    try:
+        spec = importlib.util.spec_from_file_location("ming_ui_tokens", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return dict(module.TOKENS)
+    except (OSError, ImportError, AttributeError):
+        return {"canvas": "#F4F7F3", "surface": "#FFFFFF", "surface_subtle": "#EEF5F1",
+                "accent": "#2F8A7D", "text": "#1B2320", "muted": "#5B6B64",
+                "border": "#D7E4DE", "focus": "#3AAE99"}
+
+
+MING_UI_TOKENS = _load_ui_tokens()
 
 
 def _load_model_module():
@@ -77,6 +95,11 @@ if GTK_AVAILABLE:
             super().__init__(application=application, title="Ming 文件")
             self.set_default_size(1020, 680)
             self.set_size_request(620, 440)
+            self.add_css_class("ming-window-surface")
+            if os.environ.get("MING_LOW_RESOURCE") == "1":
+                self.add_css_class("ming-low-resource")
+            if os.environ.get("MING_REDUCED_MOTION") == "1":
+                self.add_css_class("ming-reduced-motion")
             self.model = MODEL.create_runtime_model()
             self.query_token = None
             self.query_generation = 0
@@ -1014,16 +1037,20 @@ if GTK_AVAILABLE:
                 value /= 1024
 
         def _install_css(self):
-            css = b"""
-            window { background: #f6f8f7; color: #18221f; }
-            .ming-sidebar { background: #edf2ef; border-right: 1px solid alpha(#18221f, .08); }
-            .ming-content { background: #ffffff; }
-            .ming-breadcrumb-scroll { border-bottom: 1px solid alpha(#18221f, .08); }
-            .ming-file-tile { padding: 10px; }
-            .ming-file-tile:hover { background: alpha(#2f8a7d, .08); }
-            .ming-progress { padding: 10px 14px; background: #edf5f2; border-top: 1px solid alpha(#18221f, .08); }
-            progressbar progress { background: #2f8a7d; }
-            """
+            css = f"""
+            window.ming-window-surface {{ background: {MING_UI_TOKENS['canvas']}; color: {MING_UI_TOKENS['text']}; }}
+            .ming-sidebar {{ background: {MING_UI_TOKENS['surface_subtle']}; border-right: 1px solid alpha({MING_UI_TOKENS['border']}, .9); min-width: 190px; }}
+            .ming-content {{ background: {MING_UI_TOKENS['surface']}; }}
+            .ming-breadcrumb-scroll {{ border-bottom: 1px solid alpha({MING_UI_TOKENS['border']}, .9); min-height: 34px; }}
+            .ming-file-tile {{ padding: 10px; border-radius: 10px; }}
+            .ming-file-tile:hover, .ming-file-tile:focus-within {{ background: alpha({MING_UI_TOKENS['accent']}, .08); }}
+            .ming-progress {{ padding: 10px 14px; background: {MING_UI_TOKENS['surface_subtle']}; border-top: 1px solid alpha({MING_UI_TOKENS['border']}, .9); }}
+            button:focus-visible, entry:focus-visible, row:focus-visible {{ outline: 2px solid {MING_UI_TOKENS['focus']}; outline-offset: 2px; }}
+            progressbar progress {{ background: {MING_UI_TOKENS['accent']}; }}
+            .ming-reduced-motion * {{ transition-duration: 0ms; animation-duration: 0ms; }}
+            .ming-low-resource {{ box-shadow: none; }}
+            @media (max-width: 760px) {{ .ming-sidebar {{ min-width: 150px; }} .ming-content {{ padding: 0; }} }}
+            """.encode("utf-8")
             provider = Gtk.CssProvider()
             provider.load_from_data(css)
             display = Gdk.Display.get_default()

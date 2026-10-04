@@ -234,6 +234,35 @@ signature
         self.assertTrue(items[0]["enabled"])
         self.assertIn("/store/Packages.xz", requested)
 
+    def test_default_fetcher_treats_compressed_packages_as_binary(self):
+        compressed = b"\xfd\x37\x7a\x58\x5a\x00"
+
+        class Response:
+            headers = {}
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://cdn.d.store.deepinos.org.cn/store/Packages.xz"
+
+            def read(self, _limit):
+                return compressed
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch.object(self.core.urllib.request, "urlopen", return_value=Response()):
+            provider = self.core.SparkPublicProvider(cache_root=pathlib.Path(tempfile.mkdtemp()))
+            response = provider._default_fetcher(
+                "https://cdn.d.store.deepinos.org.cn/store/Packages.xz")
+
+        self.assertEqual(compressed, response["_raw_body"])
+        self.assertEqual(compressed.decode("utf-8", errors="replace"), response["body"])
+
     def test_invalid_utf8_packages_survive_cache_and_offline_browse(self):
         """A successful binary index must remain readable after a network loss."""
         packages = self._packages().replace(
@@ -830,17 +859,20 @@ signature
 
         controller = self.ui.StoreController(
             catalog=type("Catalog", (), {"registry": Registry()})())
-        status = controller.refresh_section("spark")[0]
+        status = controller.refresh_section("official")[0]
         self.assertTrue(status["using_cache"])
         self.assertIn("来源暂不可用", status["message"])
         self.assertIn("使用缓存", status["message"])
 
-    def test_store_ui_exposes_two_top_level_source_sections(self):
-        self.assertEqual(("spark", "sources"), self.ui.STORE_SECTIONS)
-        self.assertEqual("星火应用", self.ui.STORE_SECTION_LABELS["spark"])
-        self.assertEqual("源应用", self.ui.STORE_SECTION_LABELS["sources"])
-        self.assertIn("spark-public", self.ui.SECTION_PROVIDERS["spark"])
-        self.assertNotIn("spark-public", self.ui.SECTION_PROVIDERS["sources"])
+    def test_store_ui_exposes_the_unified_official_section(self):
+        # The former split "spark" / "sources" sections were unified into a
+        # single official catalog; keep the legacy section ids out.
+        self.assertEqual(("official",), self.ui.STORE_SECTIONS)
+        self.assertEqual("官方软件与下载", self.ui.STORE_SECTION_LABELS["official"])
+        self.assertIn("ming-official", self.ui.SECTION_PROVIDERS["official"])
+        self.assertIn("debian-apt", self.ui.SECTION_PROVIDERS["official"])
+        self.assertNotIn("spark", self.ui.STORE_SECTION_LABELS)
+        self.assertNotIn("sources", self.ui.STORE_SECTION_LABELS)
 
 
 if __name__ == "__main__":
