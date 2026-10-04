@@ -81,24 +81,11 @@ jobs:
             libxkbcommon-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir apps/desktop build:agent
-      # build:hotkey 只在 macOS 有意义（热键守护进程随 .app 打包）；Linux/Windows 的
-      # externalBin 由各自平台的打包约定处理，见 platform/ming-tea/apps/hotkey-daemon/README。
-      - name: Build hotkey helper (macOS only)
-        if: runner.os == 'macOS'
-        run: pnpm --dir apps/desktop build:hotkey
-      - name: Build hotkey helper (Linux / Windows)
-        if: runner.os != 'macOS'
-        shell: bash
-        run: |
-          mkdir -p apps/desktop/src-tauri/binaries
-          cargo build --release --manifest-path apps/hotkey-daemon/Cargo.toml
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp apps/hotkey-daemon/target/release/ming-tea-hotkey.exe \
-              "apps/desktop/src-tauri/binaries/ming-tea-hotkey-${{ matrix.target }}.exe"
-          else
-            cp apps/hotkey-daemon/target/release/ming-tea-hotkey \
-              "apps/desktop/src-tauri/binaries/ming-tea-hotkey-${{ matrix.target }}"
-          fi
+      # externalBin 约定要求 binaries/ming-tea-hotkey-<target>。build:hotkey 脚本
+      # 接受目标三元组并从 target 专属输出目录拷贝（此前按 rustc host 命名，跨目标
+      # 构建——arm64 runner 出 x86_64 包——会找不到资源，首次 CI 即败在这里）。
+      - name: Build hotkey helper
+        run: pnpm --dir apps/desktop build:hotkey -- ${{ matrix.target }}
       - name: Tauri build
         run: >
           pnpm --filter @ming-tea/desktop exec tauri build
