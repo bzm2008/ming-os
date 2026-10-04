@@ -2000,46 +2000,6 @@ class DesktopWidgetContracts(unittest.TestCase):
         self.assertIn("self.resize(screen_w, screen_h)", window)
         self.assertNotIn("self.fullscreen()", window)
 
-    def test_status_widget_keeps_persistent_label_children(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        for marker in [
-            "self.wifi_label",
-            "self.bluetooth_label",
-            "self.resource_label",
-            "self.notification_label",
-            ".set_text(",
-        ]:
-            self.assertIn(marker, status)
-        self.assertNotIn(".set_label(", status)
-
-    def test_widget_actions_open_stable_settings_pages(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('["ming-control-center", "--page", "network"]', status)
-        self.assertIn('["ming-control-center", "--page", "display"]', status)
-        self.assertIn('["ming-control-center", "--page", "advanced"]', status)
-
-    def test_widget_monitors_fast_command_failure_and_notifies(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("monitor_action_process", status)
-        self.assertIn("process.wait(timeout=", status)
-        self.assertIn("process.returncode", status)
-        self.assertIn("notify-send", status)
-
-    def test_no_backlight_keeps_explanation_and_display_entry_visible(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        apply_status = status[status.index("    def apply_status"):]
-        self.assertIn('self.brightness_label.set_text(', apply_status)
-        self.assertIn('"当前设备不支持"', apply_status)
-        self.assertIn("self.brightness_scale.set_sensitive(brightness_available)", apply_status)
-        self.assertNotIn(
-            "for control in (self.brightness_label, self.brightness_scale, self.display_button)",
-            apply_status,
-        )
-
     def test_settings_reuses_device_control_wifi_state(self):
         helper = self.settings[self.settings.index("def wifi_diagnostic_snapshot"):
                                self.settings.index("class MingSettings")]

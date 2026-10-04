@@ -652,24 +652,6 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertNotIn("COMMON.send_launch_request", self.drawer)
         self.assertIn("无法打开此应用", self.drawer)
 
-    def test_power_button_uses_ming_menu_before_session_logout_actions(self):
-        power_menu = self.phone[
-            self.phone.index("    def open_power_menu"):
-            self.phone.index("    def refresh", self.phone.index("    def open_power_menu"))
-        ]
-        self.assertIn("show_ming_power_menu", self.phone)
-        self.assertIn("include_update", self.phone)
-        self.assertNotIn('["xfce4-session-logout"]', power_menu)
-        self.assertNotIn("gnome-session-quit", power_menu)
-        self.assertNotIn("mate-session-save", power_menu)
-        self.assertNotIn("lxqt-leave", power_menu)
-
-    def test_status_panel_fills_its_allocated_width(self):
-        self.assertIn("box.set_halign(Gtk.Align.FILL)", self.phone)
-        self.assertIn("box.set_hexpand(True)", self.phone)
-        self.assertIn("controls.attach(self.volume_scale, 0, 1, 3, 1)", self.phone)
-        self.assertIn("controls.attach(self.brightness_scale, 0, 3, 3, 1)", self.phone)
-
     def test_desktop_uses_cairo_for_the_single_tile_visual_source(self):
         fallback = self.phone[
             self.phone.index("def draw_icon_fallback"):
@@ -1218,42 +1200,6 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("X-Ming-Source-Desktop=", copier)
         self.assertIn("write_managed_launcher_copy", copier)
 
-    def test_status_widget_geometry_is_logged_and_asserted_top_aligned(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        placement = self.phone[self.phone.index("    def place_overlays"):
-                              self.phone.index("    @staticmethod", self.phone.index("    def place_overlays"))]
-        for marker in (
-            "def geometry_snapshot(self):",
-            '"outer_y"',
-            '"content_y"',
-            "geometry top-alignment failed",
-        ):
-            self.assertIn(marker, status)
-        # The floating status widget (and its placement/verification in the
-        # overlay host) was retired with the legacy dock, so the overlay host
-        # must no longer place or verify it.
-        self.assertNotIn("self.status", placement)
-
-    def test_status_widget_all_layers_reject_vertical_stretch_and_top_margin(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        for marker in (
-            "self.set_margin_top(0)",
-            "box.set_margin_top(0)",
-            "expanded.set_margin_top(0)",
-            "self.content_revealer.set_valign(Gtk.Align.START)",
-            "self.content_revealer.set_vexpand(False)",
-        ):
-            self.assertIn(marker, status)
-
-    def test_status_widget_top_gap_is_capped_at_eight_pixels(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("STATUS_WIDGET_TOP_GAP_MAX = 8", self.phone)
-        self.assertIn("status_widget_top_gap_is_valid", self.phone)
-        self.assertIn("status_widget_top_gap_is_valid(", status)
-
     def test_blank_desktop_press_is_consumed_before_release_context_menu(self):
         fixed = self.phone[self.phone.index("    def on_fixed_button_press"):
                            self.phone.index("    def on_fixed_motion", self.phone.index("    def on_fixed_button_press"))]
@@ -1501,7 +1447,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     def test_launch_feedback_bounds_long_titles_and_details_inside_its_fixed_area(self):
         overlay = self.phone[
             self.phone.index("class LaunchFeedbackOverlay"):
-            self.phone.index("class StatusWidget")
+            self.phone.index("class StatusSlider")
         ]
         self.assertIn("self.title.set_ellipsize(Pango.EllipsizeMode.END)", overlay)
         self.assertIn("self.title.set_max_width_chars(20)", overlay)
@@ -1527,40 +1473,12 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertIn("if not self.launch_feedback.item:", self.phone)
         self.assertIn("self.launch_feedback.hide()", self.phone)
 
-    def test_status_widget_exposes_radio_battery_and_settings(self):
-        self.assertIn("class StatusWidget", self.phone)
-        for marker in ["nmcli", "bluetoothctl", "upower", "ming-control-center"]:
-            self.assertIn(marker, self.phone)
-
     def test_compact_status_pill_keeps_its_38px_visual_minimum(self):
         compact_style = self.phone[
             self.phone.index(".status-compact-pill {"):
             self.phone.index(".status-compact-pill:hover")
         ]
         self.assertIn("min-height: 38px", compact_style)
-
-    def test_status_widget_shows_battery_only_for_portable_host(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("self.header_battery_label", status)
-        self.assertIn("self.compact_battery_label", status)
-        self.assertIn('battery.get("portable")', status)
-        self.assertIn("self.header_battery_label.set_visible(show_battery)", status)
-        self.assertIn("self.compact_battery_label.set_visible(show_battery)", status)
-        self.assertIn("self.header_battery_label.set_text(battery_text)", status)
-        self.assertNotIn("self.battery_label = self.resource_label", status)
-
-    def test_status_compact_capsule_uses_ming_mark_and_short_status_fields(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('MING_WIDGET_MARK_ICON = "ming-mark"', self.phone)
-        for marker in (
-            "self.compact_wifi_icon",
-            "self.compact_battery_icon",
-            "self.compact_logo_image",
-            "self.compact_arrow_label",
-        ):
-            self.assertIn(marker, status)
 
     def test_phone_desktop_binds_win_key_to_status_widget_toggle(self):
         # The floating status widget was retired (PhoneDesktop.status is
@@ -1588,6 +1506,23 @@ class DesktopPolishContractTests(unittest.TestCase):
         self.assertNotIn("self.status", body)
         self.assertIn("return False", body)
 
+    def test_retired_floating_status_widget_does_not_come_back(self):
+        """6724c3f retired the floating status widget; its remains are gone.
+
+        The Win-key route into the retired toggle stays, but none of the widget
+        implementation, its state marker or its dedup constant may reappear.
+        """
+        for retired in (
+            "class StatusWidget",
+            "STATUS_TOGGLE_DEDUP_SECONDS",
+            "self.status = None",
+            "_last_status_toggle_at",
+            "register_status_widget_pid",
+        ):
+            self.assertNotIn(retired, self.phone)
+        self.assertIn("def is_status_widget_toggle_key", self.phone)
+        self.assertIn("def toggle_status_widget", self.phone)
+
     def test_fullscreen_and_drawer_lower_the_dock_without_killing_plank(self):
         for marker in (
             "active_fullscreen_window",
@@ -1599,45 +1534,6 @@ class DesktopPolishContractTests(unittest.TestCase):
             self.assertIn(marker, self.desktop)
         self.assertIn("apply_dock_immersive_state(True)", self.drawer)
         self.assertIn("apply_dock_immersive_state(False)", self.drawer)
-
-    def test_collapsed_status_widget_refreshes_low_frequency_network_and_battery_summary(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        refresh = status[status.index("    def refresh(self):"):
-                          status.index("    def collect_status", status.index("    def refresh(self):"))]
-        self.assertIn("self.refresh_compact_status()", refresh)
-        self.assertIn("def refresh_compact_status", status)
-        self.assertIn("threading.Thread(target=self.collect_compact_status, daemon=True).start()", status)
-        self.assertIn("controller.battery_status", status)
-        self.assertIn("controller.wifi_status", status)
-        self.assertIn("controller.ethernet_status", status)
-        self.assertIn("self.compact_network_text", status)
-
-    def test_collapsed_status_keeps_partial_results_when_one_probe_fails(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn("def collect_compact_component", status)
-        self.assertIn("controller.wifi_status", status)
-        self.assertIn("controller.ethernet_status", status)
-
-    def test_collapsed_status_accepts_connected_ethernet_detail_states(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('startswith("connected")', status)
-
-    def test_status_wifi_button_uses_ming_diagnostics_not_empty_nm_editor(self):
-        status = self.phone[self.phone.index("class StatusWidget"):
-                            self.phone.index("class WallpaperCanvas")]
-        self.assertIn('self.wifi_button = self.action_button("Wi-Fi --", "ming-control-center")', status)
-        self.assertNotIn('"nm-connection-editor"', status)
-
-    def test_status_widget_exposes_safe_power_menu(self):
-        self.assertIn("self.power_button", self.phone)
-        self.assertIn('"ming-power-action", "logout"', self.phone)
-        self.assertIn('"ming-power-action", "reboot"', self.phone)
-        self.assertIn('"ming-power-action", "poweroff"', self.phone)
-        self.assertNotIn('["xfce4-session-logout", "--reboot"]', self.phone)
-        self.assertNotIn('["gnome-session-quit", "--reboot"]', self.phone)
 
     def test_power_helper_logs_inhibitors_and_falls_back_to_logind(self):
         opener = "cat > /usr/local/bin/ming-power-action << 'MINGPOWERACTION'"
@@ -1810,16 +1706,6 @@ class WinToggleAndLiveSessionContractTests(unittest.TestCase):
         self.assertIn("ps -o args=", toggle)
         self.assertIn("ming-phone-desktop*", toggle)
         self.assertIn('[[ "${process_count}" == "1" ]] || exit 0', toggle)
-
-    def test_status_popup_is_opaque_and_not_modal_overlay(self):
-        popup = self.phone[self.phone.index("self.expanded_window = Gtk.Window"):
-                           self.phone.index("box.pack_start(self.compact_button")]
-        self.assertIn("self.expanded_window.set_opacity(1.0)", popup)
-        self.assertIn("self.expanded_window.set_modal(False)", popup)
-        self.assertIn("self.expanded_window.set_skip_taskbar_hint(True)", popup)
-        css = self.phone[self.phone.index(".status-expanded-panel {"):
-                         self.phone.index(".status-expanded-title {")]
-        self.assertIn("background: #FFFFFF", css)
 
     def test_installer_session_survives_calamares_exit_and_notifies_user(self):
         session = self.desktop[

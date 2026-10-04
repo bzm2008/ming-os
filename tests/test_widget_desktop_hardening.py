@@ -40,22 +40,15 @@ class WidgetGeometryContracts(unittest.TestCase):
         self.assertGreaterEqual(geometry({"width": 320, "height": 240})["width"], 220)
 
     def test_win_key_dedup_window_covers_shortcut_and_signal_delivery(self):
-        self.assertIn("STATUS_TOGGLE_DEDUP_SECONDS = 0.65", PHONE)
+        # The retired widget's dedup window is gone with its implementation; the
+        # surviving contract is only that the Win key routes into a no-op entry
+        # point instead of mutating a widget.
+        self.assertNotIn("STATUS_TOGGLE_DEDUP_SECONDS", PHONE)
         toggle = PHONE.split("    def toggle_status_widget", 1)[1].split(
             "    def _on_toggle_signal", 1
         )[0]
         self.assertIn("return False", toggle)
         self.assertNotIn("self.status.set_collapsed", toggle)
-
-    def test_collapsing_widget_zeroes_popup_and_hides_all_expanded_children(self):
-        state = PHONE.split("    def apply_collapsed_state", 1)[1].split(
-            "    def on_resource_clicked", 1
-        )[0]
-        self.assertIn("set_reveal_child(False)", state)
-        self.assertIn("set_visible(False)", state)
-        self.assertIn("set_size_request(-1, 0)", state)
-        self.assertIn("expanded_window.hide()", state)
-
 
 class DesktopLayerContracts(unittest.TestCase):
     def test_feedback_surface_uses_an_opaque_non_rgba_window_on_xrender(self):

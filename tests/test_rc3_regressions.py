@@ -370,22 +370,3 @@ class Rc3StatusWidgetContracts(unittest.TestCase):
         self.assertIn("monitor_file", PHONE)
         self.assertIn(".ming-desktop-dark .status-widget", PHONE)
 
-    def test_expanded_widget_has_small_top_gap_and_low_frequency_resource_sampling(self):
-        widget = PHONE[PHONE.index("class StatusWidget"):PHONE.index("class WallpaperCanvas")]
-        self.assertIn("CLOCK_MARGIN_Y = 8", PHONE)
-        self.assertIn("STATUS_WIDGET_EXPANDED_HEIGHT = 220", PHONE)
-        self.assertIn("padding: 8px 16px", PHONE)
-        self.assertIn("STATUS_RESOURCE_REFRESH_SECONDS = 30", PHONE)
-        self.assertIn("MemAvailable", PHONE)
-
-    def test_volume_control_repairs_default_sink_before_writing(self):
-        widget = PHONE[PHONE.index("def set_control_value"):PHONE.index("class WallpaperCanvas")]
-        self.assertIn("audio_repair_playback", widget)
-        self.assertIn("confirmed_value", widget)
-        repair_branch = widget.split('elif kind == "volume":', 1)[1].split("else:", 1)[0]
-        self.assertIn('if repair.get("ok")', repair_branch)
-        self.assertIn("set_volume(value)", repair_branch)
-
-
-if __name__ == "__main__":
-    unittest.main()

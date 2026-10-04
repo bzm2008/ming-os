@@ -457,13 +457,6 @@ class HardwareBrightnessPrecedenceTests(unittest.TestCase):
 
 
 class SoftwareBrightnessIntegrationContracts(unittest.TestCase):
-    def test_widget_labels_software_backend_and_keeps_confirmed_fallback(self):
-        self.assertIn('self.brightness_backend = brightness.get("backend", "")', PHONE_SOURCE)
-        self.assertIn('"软件亮度" if self.brightness_backend == "xrandr-software"', PHONE_SOURCE)
-        self.assertIn("self.confirmed_value = None", PHONE_SOURCE)
-        self.assertIn("fallback_value = value if value is not None else state.confirmed_value", PHONE_SOURCE)
-        self.assertIn('"%s %d%%（设置失败）"', PHONE_SOURCE)
-
     def test_autostart_reapplies_after_the_x11_session_is_ready(self):
         self.assertIn("ming-software-brightness.desktop", DESKTOP_SOURCE)
         self.assertIn(

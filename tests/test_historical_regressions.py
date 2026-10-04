@@ -297,15 +297,6 @@ class HistoricalRegressionContracts(unittest.TestCase):
 
         self.assertNotEqual(0, completed.returncode)
 
-    def test_collapsed_widget_hides_and_zeroes_expanded_content(self):
-        state = PHONE.split("def apply_collapsed_state", 1)[1].split(
-            "    def on_resource_clicked", 1
-        )[0]
-        self.assertIn("set_reveal_child(False)", state)
-        self.assertIn("set_visible(False)", state)
-        self.assertIn("set_size_request(-1, 0)", state)
-        self.assertIn("content_height", PHONE)
-
     def test_drawer_has_no_large_bottom_dead_zone(self):
         source = (ROOT / "assets" / "ming-app-drawer.py").read_text(encoding="utf-8")
         match = re.search(r"DRAWER_BOTTOM_MARGIN\s*=\s*(\d+)", source)

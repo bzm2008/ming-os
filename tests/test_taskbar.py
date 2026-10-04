@@ -74,9 +74,13 @@ class MingTaskbarContracts(unittest.TestCase):
         for marker in (
             'self.taskbar_mode = os.environ.get("MING_TASKBAR_MODE", "0") == "1"',
             "if self.taskbar_mode:",
-            "self.status = None",
         ):
             self.assertIn(marker, source)
+        # The floating status widget was retired outright (6724c3f): neither the
+        # class nor its state marker may come back into the taskbar shell.
+        self.assertNotIn("class StatusWidget", source)
+        self.assertNotIn("self.status = None", source)
+        self.assertNotIn("STATUS_TOGGLE_DEDUP_SECONDS", source)
 
 
 if __name__ == "__main__":

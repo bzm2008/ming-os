@@ -113,15 +113,19 @@ class ReleaseGateContracts(unittest.TestCase):
         self.assertIn("exec /usr/local/bin/ming-settings", self.desktop)
         self.assertNotIn("'高级设置', 'ming-settings', '给懂电脑的人使用', 'xfce4-settings-manager'", self.desktop)
 
-    def test_status_widget_has_notifications_audio_and_brightness(self):
-        for marker in [
-            "load_notification_log",
-            "音量",
-            "亮度",
-            "免打扰",
-            "清空通知",
-        ]:
-            self.assertIn(marker, self.phone)
+    def test_status_surfaces_have_notifications_audio_and_brightness(self):
+        # The surfaces moved out of the retired floating widget: audio and
+        # brightness live in the taskbar, notifications in their own daemon and
+        # do-not-disturb in the settings hub.
+        taskbar = (ROOT / "assets" / "ming-taskbar.py").read_text(encoding="utf-8")
+        notifications = (ROOT / "assets" / "ming-notifications.py").read_text(encoding="utf-8")
+        settings = (ROOT / "assets" / "ming-settings.py").read_text(encoding="utf-8")
+        for marker in ("音量", "亮度"):
+            self.assertIn(marker, taskbar)
+        self.assertIn("parse_notification_log", notifications)
+        self.assertIn("免打扰", settings)
+        # The retired widget must not come back with its private copies.
+        self.assertNotIn("class StatusWidget", self.phone)
 
     def test_live_installer_session_warns_that_live_data_is_temporary(self):
         for marker in (
