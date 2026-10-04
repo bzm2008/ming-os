@@ -364,12 +364,20 @@ pub fn run() {
         .and_then(move |app| {
             let handle_for_events = app.handle().clone();
             let host_for_events = Arc::clone(&host_for_exit);
+            // macOS 专属事件单独拆出：RunEvent::Reopen 只在 macOS 存在（点 Dock 图标 /
+            // 从 Finder 重新打开），Windows/Linux 的枚举里没有这个变体——首次 Windows
+            // CI 因未加 cfg 门而 E0599。
+            #[cfg(target_os = "macos")]
             app.run(move |_app_handle, event| match event {
                 tauri::RunEvent::Exit => host_for_events.stop(),
-                // 点 Dock 图标 / 从 Finder 重新打开：把主窗口找回来
                 tauri::RunEvent::Reopen { .. } => {
                     let _ = summon::open_main_window(&handle_for_events, Arc::clone(&host_for_events));
                 }
+                _ => {}
+            });
+            #[cfg(not(target_os = "macos"))]
+            app.run(move |_app_handle, event| match event {
+                tauri::RunEvent::Exit => host_for_events.stop(),
                 _ => {}
             });
             Ok(())
