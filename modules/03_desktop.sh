@@ -4675,6 +4675,33 @@ MINGWINDOWMANAGERAUTO
         "${autostart_dir}/ming-window-manager.desktop"
 }
 
+retire_legacy_desktop_surfaces() {
+    # The GTK3 taskbar is the only bottom shell. Remove old Plank/custom Dock
+    # packages, launchers, themes and per-user state so upgrades cannot revive
+    # a second bar from a previous image.
+    if command -v dpkg-query >/dev/null 2>&1 \
+       && dpkg-query -W -f='${db:Status-Abbrev}' plank 2>/dev/null | grep -q '^ii '; then
+        apt-get purge -y --auto-remove plank libplank1 libplank-common >/dev/null 2>&1 || true
+    fi
+    rm -rf /usr/share/plank /usr/local/share/plank \
+        "/home/${MING_USER}/.config/plank" "/etc/skel/.config/plank" \
+        /usr/local/bin/ming-dock /usr/local/bin/ming-dock-watchdog \
+        /usr/local/bin/ming-plank-watchdog /usr/local/sbin/ming-refresh-dock-launchers \
+        /usr/local/bin/ming-dock-only-init \
+        /usr/local/bin/ming-status-widget-toggle /usr/local/bin/ming-status-center \
+        /usr/share/applications/ming-status-center.desktop \
+        "/home/${MING_USER}/.cache/ming-os/plank.log" 2>/dev/null || true
+    rm -f "/home/${MING_USER}/.config/autostart/ming-dock.desktop" \
+        "/home/${MING_USER}/.config/autostart/ming-dock-only.desktop" \
+        "/home/${MING_USER}/.config/autostart/plank.desktop" \
+        "/home/${MING_USER}/.local/share/applications/ming-status-center.desktop" \
+        "/etc/skel/.config/autostart/ming-dock.desktop" \
+        "/etc/skel/.config/autostart/plank.desktop" 2>/dev/null || true
+    rm -f "/home/${MING_USER}/.config/ming-os/status-widget.json" \
+        "/home/${MING_USER}/.config/ming-os/status-widget.pid" \
+        "/home/${MING_USER}/.cache/ming-os/ming-phone-desktop.pid" 2>/dev/null || true
+}
+
 # ======================== Ming GTK3/X11 底部任务栏 ========================
 
 configure_ming_taskbar() {
@@ -4710,33 +4737,6 @@ export MING_TASKBAR_MODE MING_TASKBAR_LOW_RESOURCE
 
 log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${log_file}" 2>/dev/null || true
-}
-
-retire_legacy_desktop_surfaces() {
-    # The GTK3 taskbar is the only bottom shell. Remove old Plank/custom Dock
-    # packages, launchers, themes and per-user state so upgrades cannot revive
-    # a second bar from a previous image.
-    if command -v dpkg-query >/dev/null 2>&1 \
-       && dpkg-query -W -f='${db:Status-Abbrev}' plank 2>/dev/null | grep -q '^ii '; then
-        apt-get purge -y --auto-remove plank libplank1 libplank-common >/dev/null 2>&1 || true
-    fi
-    rm -rf /usr/share/plank /usr/local/share/plank \
-        "/home/${MING_USER}/.config/plank" "/etc/skel/.config/plank" \
-        /usr/local/bin/ming-dock /usr/local/bin/ming-dock-watchdog \
-        /usr/local/bin/ming-plank-watchdog /usr/local/sbin/ming-refresh-dock-launchers \
-        /usr/local/bin/ming-dock-only-init \
-        /usr/local/bin/ming-status-widget-toggle /usr/local/bin/ming-status-center \
-        /usr/share/applications/ming-status-center.desktop \
-        "/home/${MING_USER}/.cache/ming-os/plank.log" 2>/dev/null || true
-    rm -f "/home/${MING_USER}/.config/autostart/ming-dock.desktop" \
-        "/home/${MING_USER}/.config/autostart/ming-dock-only.desktop" \
-        "/home/${MING_USER}/.config/autostart/plank.desktop" \
-        "/home/${MING_USER}/.local/share/applications/ming-status-center.desktop" \
-        "/etc/skel/.config/autostart/ming-dock.desktop" \
-        "/etc/skel/.config/autostart/plank.desktop" 2>/dev/null || true
-    rm -f "/home/${MING_USER}/.config/ming-os/status-widget.json" \
-        "/home/${MING_USER}/.config/ming-os/status-widget.pid" \
-        "/home/${MING_USER}/.cache/ming-os/ming-phone-desktop.pid" 2>/dev/null || true
 }
 
 taskbar_process_running() {
