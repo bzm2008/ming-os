@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 import { ComputerUseGuard } from "../src/computer-use-guard.js";
 import { resolveDshCommand } from "../src/dsh-adapter.js";
 import { PluginRegistry } from "../src/plugin-registry.js";
@@ -6,7 +7,8 @@ import { PluginRegistry } from "../src/plugin-registry.js";
 describe("DSH adapters", () => {
   it("boots the audited ming-tea profile when a local runtime is configured", () => {
     expect(resolveDshCommand({MING_TEA_DSH_RUNTIME_DIR: "/opt/ming-tea/runtime"})).toEqual([
-      "/opt/ming-tea/runtime/node_modules/.bin/dsh", "--profile", "ming-tea",
+      join("/opt/ming-tea/runtime", "node_modules", ".bin", process.platform === "win32" ? "dsh.cmd" : "dsh"),
+      "--profile", "ming-tea",
     ]);
   });
 

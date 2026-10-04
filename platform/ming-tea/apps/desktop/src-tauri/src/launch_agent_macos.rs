@@ -68,16 +68,8 @@ fn candidate_repo_roots() -> Vec<PathBuf> {
     roots
 }
 
-#[derive(Clone, serde::Serialize)]
-pub struct LaunchAgentStatus {
-    pub installed: bool,
-    pub loaded: bool,
-    pub helper: Option<String>,
-    /// 守护进程实际注册成功的那个键（读它写的 hotkey-state.json）：
-    /// 首选键被别的应用占用时会退到备用键，界面据此告诉用户「按哪个键」。
-    pub active_hotkey: Option<String>,
-    pub detail: String,
-}
+// LaunchAgentStatus 已上提到 launch_agent.rs 的平台无关层（非 macOS 的 platform
+// 模块也要返回它）；本文件直接用外层 use 进来的定义。
 
 /// 读守护进程落盘的生效热键。
 fn active_hotkey() -> Option<String> {

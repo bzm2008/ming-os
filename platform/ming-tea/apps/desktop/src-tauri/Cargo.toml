@@ -22,6 +22,9 @@ tauri-plugin-deep-link = "2.6.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+# 时间戳（localtime_r/strftime）与 dup2 重定向 —— logging.rs 的这些调用是 cfg(unix)，
+# Linux/macOS 都要用，不能放在 macOS 专属段（首次 Linux CI 因 libc 被 macos-gate 而编不过）。
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 只用于「真实探测麦克风授权状态」；辅助功能与屏幕录制用直接 FFI，不需要 crate。
@@ -29,5 +32,3 @@ dirs = "6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-av-foundation = { version = "0.3", features = ["AVMediaFormat"] }
-# 只为把 stderr 重定向到 app.log 时用 dup2（日志文件是打包版唯一能看到现场的途径）
-libc = "0.2"

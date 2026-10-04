@@ -18,6 +18,8 @@
 use std::path::PathBuf;
 
 /// 读守护进程落盘的生效热键（三个平台语义相同：state 文件由守护进程写）。
+/// macOS 的 platform 模块 include 自带同名实现，此版本只服务非 macOS 平台。
+#[cfg(not(target_os = "macos"))]
 fn active_hotkey() -> Option<String> {
     let path = dirs::data_dir()?.join("铭荼").join("hotkey-state.json");
     let text = std::fs::read_to_string(path).ok()?;
@@ -86,9 +88,22 @@ fn candidate_repo_roots() -> Vec<PathBuf> {
     roots
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct LaunchAgentStatus {
+    pub installed: bool,
+    pub loaded: bool,
+    pub helper: Option<String>,
+    /// 守护进程实际注册成功的那个键（读它写的 hotkey-state.json）：
+    /// 首选键被别的应用占用时会退到备用键，界面据此告诉用户「按哪个键」。
+    pub active_hotkey: Option<String>,
+    pub detail: String,
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     // macOS 原实现（LaunchAgent）整体 include 进来，直接作为平台实现。
+    // LaunchAgentStatus 定义在外层（平台无关层），这里 pub use 让平台模块重导出它。
+    use super::LaunchAgentStatus;
     include!("launch_agent_macos.rs");
 }
 
@@ -96,9 +111,6 @@ mod platform {
 mod platform {
     use super::{active_hotkey, resolve_helper, LaunchAgentStatus};
     use std::path::PathBuf;
-
-    /// Linux：`/etc/xdg/autostart`（ming-os 构建时装）或 `~/.config/autostart`（用户级）。
-    /// Windows：HKCU Run 键（打包阶段写）。
     fn autostart_marker() -> Option<PathBuf> {
         if cfg!(target_os = "linux") {
             let system = PathBuf::from("/etc/xdg/autostart/ming-tea.desktop");
@@ -159,4 +171,6 @@ mod platform {
     }
 }
 
-pub use platform::{install, installed_helper_path, status, uninstall, LaunchAgentStatus};
+pub use platform::{install, installed_helper_path, status, uninstall};
+// LaunchAgentStatus 定义在本文件的平台无关层（非 macOS 的 platform 模块与 macOS 实现
+// 都返回它），不需要从 platform 重导出。
