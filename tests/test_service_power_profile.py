@@ -32,6 +32,30 @@ class ServiceProfileContracts(unittest.TestCase):
         self.assertIn("After=local-fs.target", unit)
         self.assertIn("Before=display-manager.service", unit)
         self.assertNotIn("network-online.target", unit)
+        # The transient live medium must not run the persistent service policy
+        # (the 2026-10-04 VM run reported this unit failed at first boot).
+        self.assertIn("ConditionKernelCommandLine=!boot=live", unit)
+
+    def test_service_profile_script_cannot_fail_the_unit_by_its_last_command(self):
+        script = BASE.split(
+            "cat > /usr/local/sbin/ming-service-profile << 'MINGSERVICEPROFILE'", 1
+        )[1].split("\nMINGSERVICEPROFILE", 1)[0]
+        apply_branch = script.split("    apply)", 1)[1].split(";;", 1)[0]
+        self.assertIn("apply_optional_services", apply_branch)
+        # Type=oneshot inherits the script's exit status, so success must be
+        # explicit instead of depending on whichever command runs last.
+        self.assertIn("exit 0", apply_branch)
+
+    def test_bluetooth_mechanism_is_gated_on_adapter_presence(self):
+        """No adapter must mean "skipped", not "failed" (2026-10-04 VM run)."""
+        parts = BASE.split(
+            "cat > /etc/systemd/system/blueman-mechanism.service.d/10-ming-hardware.conf",
+            1,
+        )
+        self.assertEqual(2, len(parts), "blueman-mechanism hardware guard drop-in is missing")
+        body = parts[1].split("\nBLUEMANGUARD", 1)[0]
+        self.assertIn("[Unit]", body)
+        self.assertIn("ConditionPathExists=/sys/class/bluetooth/hci0", body)
 
     def test_bluetooth_enablement_happens_after_verified_bluez_runtime(self):
         desktop = BASE  # base must keep its own post-package BlueZ guard

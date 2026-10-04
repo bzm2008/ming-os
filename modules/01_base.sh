@@ -1236,6 +1236,17 @@ ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
 ExecStartPost=-/bin/sh -c 'command -v btmgmt >/dev/null 2>&1 && btmgmt power on || true'
 BTUNBLOCK
 
+    # Blueman's mechanism daemon manages adapters; on a host without one it has
+    # nothing to do, and the 2026-10-04 VM run reported the unit as failed purely
+    # because no Bluetooth hardware exists.  Skip it instead of failing:
+    # conditions are re-evaluated on every start attempt, so a hotplugged
+    # adapter still activates the D-Bus service later.
+    mkdir -p /etc/systemd/system/blueman-mechanism.service.d
+    cat > /etc/systemd/system/blueman-mechanism.service.d/10-ming-hardware.conf << 'BLUEMANGUARD'
+[Unit]
+ConditionPathExists=/sys/class/bluetooth/hci0
+BLUEMANGUARD
+
     if dpkg-query -W -f='${db:Status-Abbrev}' bluez 2>/dev/null | grep -qx 'ii '; then
         systemctl enable bluetooth.service 2>/dev/null || true
     else
@@ -1388,6 +1399,10 @@ load_config
 case "${MODE}" in
     apply)
         apply_optional_services >/dev/null
+        # This is a Type=oneshot unit: without an explicit success the unit would
+        # inherit the exit status of whatever command happened to run last.
+        log "optional service profile applied"
+        exit 0
         ;;
     status)
         [[ "${2:-}" == --json ]] && status_json || status_json
@@ -1403,6 +1418,10 @@ MINGSERVICEPROFILE
     cat > /etc/systemd/system/ming-service-profile.service << 'MINGSERVICEPROFILESVC'
 [Unit]
 Description=Ming OS hardware-aware optional service profile
+# Live media is a transient environment: service policy changes do not persist
+# there, and the 2026-10-04 VM run reported this unit failed at first boot.
+# Same gating as ming-hardware-preload / ming-intel-xorg-migration.
+ConditionKernelCommandLine=!boot=live
 After=local-fs.target
 Before=display-manager.service
 
