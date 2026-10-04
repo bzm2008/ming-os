@@ -1245,6 +1245,28 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("xsetroot -solid '#eff7f2'", installer)
         self.assertIn("Live wallpaper failed", installer)
         self.assertNotIn("ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png || true", installer)
+        # The fallback must be diagnosable instead of silent (2026-10-04 VM run).
+        self.assertIn("/tmp/ming-installer-wallpaper.log", installer)
+
+    def test_live_wallpaper_helper_owns_display_and_verifies_the_root_pixmap(self):
+        helper = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-apply-wallpaper"):
+            self.desktop.index("\nAPPLYWALLPAPER", self.desktop.index("cat > /usr/local/bin/ming-apply-wallpaper"))
+        ]
+        # Own the display: the live session was observed running without DISPLAY,
+        # which is what made xfdesktop die with "cannot open display:".
+        self.assertIn('display="${DISPLAY:-:0}"', helper)
+        self.assertIn("export DISPLAY=", helper)
+        self.assertIn('xfdesktop --display "${display}"', helper)
+        # A fresh live boot has an empty xfconf database, so the property sweep
+        # alone matches nothing; the connector list is what hits the real monitor.
+        self.assertIn("xrandr --listmonitors", helper)
+        self.assertIn("Virtual-1", helper)
+        self.assertIn("workspace0 workspace1", helper)
+        # Success must prove an effect, not merely that a process was spawned.
+        self.assertIn("_XROOTPMAP_ID", helper)
+        self.assertIn('"0x0"', helper)
+        self.assertIn("wallpaper_log=/tmp/ming-installer-wallpaper.log", helper)
 
     def test_live_installer_session_starts_the_complete_desktop_stack(self):
         installer = self.desktop[

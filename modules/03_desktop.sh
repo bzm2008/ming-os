@@ -9557,11 +9557,22 @@ LIVENOTICE
 #!/usr/bin/env bash
 set -u
 wallpaper="${1:-/usr/share/backgrounds/ming-os/default.png}"
+wallpaper_log=/tmp/ming-installer-wallpaper.log
+# The live session was observed to run without DISPLAY, which made every GTK
+# consumer fall over ("cannot open display:").  Own the display here so the
+# helper works no matter how the caller was started.
+display="${DISPLAY:-:0}"
+export DISPLAY="${display}"
+log_line() {
+    printf '[ming-apply-wallpaper] %s\n' "$*" | tee -a "${wallpaper_log}" >&2
+}
 [[ -r "${wallpaper}" ]] || {
-    echo "wallpaper not readable: ${wallpaper}" >&2
+    log_line "wallpaper not readable: ${wallpaper}"
     exit 1
 }
+log_line "applying ${wallpaper} on DISPLAY=${display}"
 if command -v xfconf-query >/dev/null 2>&1; then
+    # 1) every backdrop property that already exists (real monitor names).
     while IFS= read -r property; do
         case "${property}" in
             */last-image|*/image-path)
@@ -9569,21 +9580,59 @@ if command -v xfconf-query >/dev/null 2>&1; then
                 ;;
         esac
     done < <(xfconf-query -c xfce4-desktop -l 2>/dev/null || true)
-    xfconf-query -c xfce4-desktop \
-        -p /backdrop/screen0/monitor0/workspace0/last-image \
-        -n -t string -s "${wallpaper}" 2>/dev/null || true
-    xfconf-query -c xfce4-desktop \
-        -p /backdrop/screen0/monitor0/workspace0/image-style \
-        -n -t int -s 5 2>/dev/null || true
+    # 2) A fresh live boot has an empty xfconf database, so nothing above matches
+    #    and xfdesktop would keep painting only its default colour.  Write the
+    #    real connector names reported by X plus the usual fallbacks, so at least
+    #    one entry matches whatever the VM/hardware calls this monitor.
+    monitors=()
+    if command -v xrandr >/dev/null 2>&1; then
+        while IFS= read -r connector; do
+            [[ -n "${connector}" ]] && monitors+=("${connector}")
+        done < <(xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}' || true)
+    fi
+    monitors+=(screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1)
+    for monitor in "${monitors[@]}"; do
+        for workspace in workspace0 workspace1; do
+            base="/backdrop/screen0/monitor${monitor}/${workspace}"
+            xfconf-query -c xfce4-desktop -p "${base}/last-image" -n -t string -s "${wallpaper}" 2>/dev/null || true
+            xfconf-query -c xfce4-desktop -p "${base}/image-path" -n -t string -s "${wallpaper}" 2>/dev/null || true
+            xfconf-query -c xfce4-desktop -p "${base}/image-style" -n -t int -s 5 2>/dev/null || true
+        done
+    done
 fi
-if pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1; then
-    xfdesktop --reload >/dev/null 2>&1 || true
+desktop_running() {
+    pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1
+}
+root_pixmap() {
+    command -v xprop >/dev/null 2>&1 || return 1
+    xprop -root _XROOTPMAP_ID 2>/dev/null | sed -n 's/.*# *\(0x[0-9a-fA-F]*\).*/\1/p'
+}
+if desktop_running; then
+    xfdesktop --display "${display}" --reload >/tmp/ming-installer-xfdesktop.log 2>&1 || true
 elif command -v xfdesktop >/dev/null 2>&1; then
-    (nohup xfdesktop >/tmp/ming-installer-xfdesktop.log 2>&1 &) || exit 1
+    (nohup xfdesktop --display "${display}" >/tmp/ming-installer-xfdesktop.log 2>&1 &) || true
 else
-    echo "xfdesktop is unavailable" >&2
+    log_line "xfdesktop is unavailable; cannot render ${wallpaper}"
     exit 1
 fi
+# Returning success after merely spawning xfdesktop is how the 2026-10-04 VM
+# shipped a blank desktop: the helper exited 0 while _XROOTPMAP_ID stayed 0x0.
+# Wait (bounded) for the root pixmap, and only report failure when nothing is
+# running that could still paint it.
+for _attempt in $(seq 1 20); do
+    pixmap="$(root_pixmap || true)"
+    if [[ -n "${pixmap}" && "${pixmap}" != "0x0" ]]; then
+        log_line "root pixmap is set (${pixmap})"
+        exit 0
+    fi
+    sleep 0.5
+done
+if desktop_running; then
+    log_line "xfdesktop is running but _XROOTPMAP_ID is still unset on DISPLAY=${display}; leaving it to repaint"
+    exit 0
+fi
+log_line "failed to render ${wallpaper}: no xfdesktop process and _XROOTPMAP_ID=$(root_pixmap || printf 'none') on DISPLAY=${display} (see /tmp/ming-installer-xfdesktop.log)"
+exit 1
 APPLYWALLPAPER
     chmod 0755 /usr/local/bin/ming-apply-wallpaper
 
@@ -9596,11 +9645,13 @@ if command -v ming-install-disable-locking >/dev/null 2>&1; then
 fi
 if command -v ming-apply-wallpaper >/dev/null 2>&1; then
     if ! ming-apply-wallpaper /usr/share/backgrounds/ming-os/default.png; then
-        echo "Live wallpaper failed; using light fallback" >&2
+        printf '[ming-installer-session] Live wallpaper failed; using light fallback (details: /tmp/ming-installer-wallpaper.log)\n' \
+            | tee -a /tmp/ming-installer-wallpaper.log >&2
         xsetroot -solid '#eff7f2' 2>/dev/null || true
     fi
 else
-    echo "Live wallpaper failed; helper unavailable" >&2
+    printf '[ming-installer-session] Live wallpaper failed; helper unavailable\n' \
+        | tee -a /tmp/ming-installer-wallpaper.log >&2
     xsetroot -solid '#eff7f2' 2>/dev/null || true
 fi
 if command -v xfwm4 >/dev/null 2>&1; then
