@@ -3562,6 +3562,13 @@ cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'
 #!/usr/bin/env bash
 set -u
 
+# Normalise the GUI environment before any child is spawned (same idiom as the
+# session healthcheck): the xfdesktop fallback below used to inherit an empty
+# DISPLAY, which is how it died with "cannot open display:".
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+
 ming_log_dir() {
     local primary="${HOME}/.cache/ming-os"
     if mkdir -p "${primary}" 2>/dev/null && [[ -w "${primary}" ]]; then
@@ -4837,6 +4844,13 @@ configure_session_healthcheck() {
 #!/usr/bin/env bash
 # Ming OS unified session startup and health coordinator.
 set -u
+
+# Supervised GUI children (xfdesktop, xfce4-panel, taskbar, picom, the phone
+# desktop) must never inherit an empty display or session bus: the 2026-10-04 VM
+# run lost xfdesktop to "cannot open display:".
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 
 readonly PHONE_STARTUP_DEADLINE=8
 readonly PLANK_STARTUP_DEADLINE=8
@@ -9640,6 +9654,13 @@ APPLYWALLPAPER
     # mouse focus. Calamares is maximized and automatically restarted on exit.
 cat > /usr/local/bin/ming-installer-session << 'KIOSK'
 #!/usr/bin/env bash
+# Normalise the GUI environment for the whole session first: the wallpaper
+# helper, the window manager, xfdesktop and every supervised child inherit it.
+# lightdm normally exports DISPLAY, but the 2026-10-04 VM run showed children
+# starting with an empty display.
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 if command -v ming-install-disable-locking >/dev/null 2>&1; then
     ming-install-disable-locking >/tmp/ming-installer-disable-locking.log 2>&1 || true
 fi
@@ -9656,6 +9677,13 @@ else
 fi
 if command -v xfwm4 >/dev/null 2>&1; then
     xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &
+else
+    # Never skip silently: without a window manager the session has no window
+    # decorations, focus handling or EWMH, which also breaks the window-control
+    # and taskbar visibility probes. The build gate now rejects such an image,
+    # so this warning is the runtime counterpart for an already-booted system.
+    printf '[ming-installer-session] xfwm4 is missing: running without a window manager (no decorations/focus/EWMH). Check the image build (modules/02_apps.sh).\n' \
+        | tee -a /tmp/ming-installer-xfwm4.log >&2
 fi
 if command -v ming-desktop-organizer >/dev/null 2>&1; then
     ming-desktop-organizer >/tmp/ming-installer-desktop-organizer.log 2>&1 || true
@@ -10142,6 +10170,11 @@ configure_appearance_enforcer() {
 #!/usr/bin/env bash
 # Ming OS 外观强制应用 - 每次登录运行，确保美化生效
 set -u
+# Same normalisation as the session healthcheck: this script also spawns
+# xfdesktop, which must never inherit an empty DISPLAY.
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 appearance_log="${HOME}/.cache/ming-os/appearance.log"
 mkdir -p "$(dirname "${appearance_log}")" 2>/dev/null || true
 appearance_reapply_ok=false

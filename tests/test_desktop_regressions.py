@@ -1268,6 +1268,43 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn('"0x0"', helper)
         self.assertIn("wallpaper_log=/tmp/ming-installer-wallpaper.log", helper)
 
+    def test_supervised_gui_children_get_a_normalised_display_environment(self):
+        """No script that spawns a GUI child may rely on an inherited display."""
+        for opener, marker in (
+            ("cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'", "MINGSESSIONHEALTH"),
+            ("cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'", "PHONEDESKWATCH"),
+            ("cat > /usr/local/bin/ming-apply-appearance << 'APPLYAPPEARANCE'", "APPLYAPPEARANCE"),
+            ("cat > /usr/local/bin/ming-installer-session << 'KIOSK'", "KIOSK"),
+        ):
+            with self.subTest(script=opener.split("/")[-1].split(" ")[0]):
+                self.assertIn(opener, self.desktop)
+                body = self.desktop.split(opener, 1)[1].split("\n" + marker, 1)[0]
+                self.assertIn('export DISPLAY="${DISPLAY:-:0}"', body)
+                self.assertIn(
+                    'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"', body
+                )
+                self.assertIn(
+                    'export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"',
+                    body,
+                )
+
+    def test_live_installer_session_warns_when_xfwm4_is_missing(self):
+        session = self.desktop[
+            self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
+            self.desktop.index("\nKIOSK", self.desktop.index("cat > /usr/local/bin/ming-installer-session"))
+        ]
+        self.assertIn('if command -v xfwm4 >/dev/null 2>&1; then', session)
+        # Missing window manager must be audible at runtime, not silently skipped.
+        self.assertIn("xfwm4 is missing", session)
+        self.assertIn("no decorations/focus/EWMH", session)
+        self.assertIn("/tmp/ming-installer-xfwm4.log", session)
+        self.assertNotIn(
+            'if command -v xfwm4 >/dev/null 2>&1; then\n'
+            '    xfwm4 --replace >/tmp/ming-installer-xfwm4.log 2>&1 &\n'
+            'fi',
+            session,
+        )
+
     def test_live_installer_session_starts_the_complete_desktop_stack(self):
         installer = self.desktop[
             self.desktop.index("cat > /usr/local/bin/ming-installer-session"):
