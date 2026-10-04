@@ -3443,11 +3443,11 @@ for marker in ["ming-display-control", "100% 标准", "1920 × 1080", "保留此
     if marker not in settings:
         errors.append(f"ming-settings missing display control marker {marker}")
 for marker in [
-    "self.status = None",
+    'self.taskbar_mode = os.environ.get("MING_TASKBAR_MODE", "0") == "1"',
     "dispatch_activation",
 ]:
     if marker not in phone_desktop:
-        errors.append(f"ming-phone-desktop missing compact widget marker {marker}")
+        errors.append(f"ming-phone-desktop missing taskbar-shell marker {marker}")
 
 window_control = require_file("usr/local/bin/ming-window-control", "_NET_SUPPORTING_WM_CHECK")
 for marker in ["status --json", "xfwm4 --replace", "_NET_CLOSE_WINDOW", "x11_call()", "x11_id_is_valid()", "timeout --foreground 2s", "json.dumps"]:

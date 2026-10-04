@@ -3692,6 +3692,40 @@ case "${1:-start}" in
         ;;
 esac
 PHONEDESKWATCH
+    local autostart_dir="/home/${MING_USER}/.config/autostart"
+    mkdir -p "${autostart_dir}"
+    rm -f "${autostart_dir}/plank.desktop"
+    # Compatibility filename retained for upgrades; the direct Dock session
+    # loop is disabled so only ming-session-healthcheck owns the long-lived
+    # Plank lifecycle.
+    cat > "${autostart_dir}/ming-dock.desktop" << 'MINGDOCKAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Dock
+Exec=/usr/bin/true
+Comment=Ming OS Dock; legacy ming-plank-watchdog --session is one-shot only
+Icon=ming-os-menu
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+X-Ming-Managed-By=ming-session-healthcheck
+MINGDOCKAUTO
+
+    cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
+[Desktop Entry]
+Type=Application
+Name=Ming Window Manager Health
+Comment=检测并保守恢复 Xfwm 窗口控制
+Exec=/usr/local/bin/ming-window-manager-watchdog --session
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
+MINGWINDOWMANAGERAUTO
+
+    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
+        "${autostart_dir}/ming-dock.desktop" \
+        "${autostart_dir}/ming-window-manager.desktop"
     chmod 0755 /usr/local/bin/ming-phone-desktop-watchdog
 }
 
@@ -4646,42 +4680,6 @@ case "${1:-start}" in
 esac
 PLANKWATCH
     chmod 0755 /usr/local/bin/ming-plank-watchdog
-
-    # Plank is the primary Dock: it owns zoom, running indicators and minimized-window restore.
-    local autostart_dir="/home/${MING_USER}/.config/autostart"
-    mkdir -p "${autostart_dir}"
-    rm -f "${autostart_dir}/plank.desktop"
-    # Compatibility filename retained for upgrades; the direct Dock session
-    # loop is disabled so only ming-session-healthcheck owns the long-lived
-    # Plank lifecycle.
-    cat > "${autostart_dir}/ming-dock.desktop" << 'MINGDOCKAUTO'
-[Desktop Entry]
-Type=Application
-Name=Ming Dock
-Exec=/usr/bin/true
-Comment=Ming OS Dock; legacy ming-plank-watchdog --session is one-shot only
-Icon=ming-os-menu
-Hidden=true
-NoDisplay=true
-X-GNOME-Autostart-enabled=false
-X-Ming-Managed-By=ming-session-healthcheck
-MINGDOCKAUTO
-
-    cat > "${autostart_dir}/ming-window-manager.desktop" << 'MINGWINDOWMANAGERAUTO'
-[Desktop Entry]
-Type=Application
-Name=Ming Window Manager Health
-Comment=检测并保守恢复 Xfwm 窗口控制
-Exec=/usr/local/bin/ming-window-manager-watchdog --session
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-MINGWINDOWMANAGERAUTO
-
-    chown -R "${MING_USER}:${MING_USER}" "/home/${MING_USER}/.config/plank" \
-        "${autostart_dir}/ming-dock.desktop" \
-        "${autostart_dir}/ming-window-manager.desktop"
 }
 
 retire_legacy_desktop_surfaces() {
