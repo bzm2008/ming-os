@@ -11,34 +11,6 @@ DESKTOP = (ROOT / "modules" / "03_desktop.sh").read_text(encoding="utf-8")
 
 
 class WidgetGeometryContracts(unittest.TestCase):
-    def test_compact_capsule_has_a_stable_responsive_geometry_contract(self):
-        self.assertIn("STATUS_WIDGET_COMPACT_WIDTH", PHONE)
-        self.assertIn("def status_widget_compact_geometry", PHONE)
-        tree = ast.parse(PHONE)
-        function = next(
-            node for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "status_widget_compact_geometry"
-        )
-        namespace = {
-            "max": max,
-            "min": min,
-            "int": int,
-            "STATUS_WIDGET_COMPACT_WIDTH": 252,
-            "STATUS_WIDGET_COMPACT_NARROW_WIDTH": 242,
-            "STATUS_WIDGET_COMPACT_HEIGHT": 58,
-            "CLOCK_MARGIN_X": 26,
-        }
-        module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
-        exec(compile(module, "<phone-layout>", "exec"), namespace)
-        geometry = namespace["status_widget_compact_geometry"]
-        self.assertEqual(
-            geometry({"width": 1024, "height": 768}),
-            geometry({"width": 1024, "height": 600}),
-        )
-        self.assertLessEqual(geometry({"width": 1024, "height": 768})["width"], 260)
-        self.assertGreaterEqual(geometry({"width": 320, "height": 240})["width"], 220)
-
     def test_win_key_dedup_window_covers_shortcut_and_signal_delivery(self):
         # The retired widget's dedup window is gone with its implementation; the
         # surviving contract is only that the Win key routes into a no-op entry

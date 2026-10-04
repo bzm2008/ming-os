@@ -11,38 +11,7 @@ DESKTOP = ROOT / "modules" / "03_desktop.sh"
 FINALIZE = ROOT / "modules" / "07_finalize.sh"
 
 
-class StatusWidgetLayoutV2Tests(unittest.TestCase):
-    def test_compact_geometry_respects_screen_margins_on_very_narrow_displays(self):
-        source = PHONE.read_text(encoding="utf-8")
-        prefix = source.split("\nimport gi\n", 1)[0]
-        namespace = {"__file__": str(PHONE)}
-        exec(compile(prefix, str(PHONE), "exec"), namespace)
-
-        geometry = namespace["status_widget_compact_geometry"](
-            {"width": 240, "height": 180})
-
-        self.assertLessEqual(
-            geometry["width"], 240 - 2 * 26)
-
-    def test_expanded_panel_never_overlaps_capsule_when_screen_is_short(self):
-        source = PHONE.read_text(encoding="utf-8")
-        prefix = source.split("\nimport gi\n", 1)[0]
-        namespace = {"__file__": str(PHONE)}
-        exec(compile(prefix, str(PHONE), "exec"), namespace)
-
-        pill = {"x": 24, "y": 8, "width": 240, "height": 58}
-        screen = {"width": 320, "height": 180}
-        geometry = namespace["status_widget_overlay_geometry"](
-            pill, {"width": 330, "height": 220}, screen)
-        panel = geometry["panel"]
-
-        self.assertLessEqual(panel["width"], screen["width"])
-        self.assertTrue(
-            panel["y"] >= pill["y"] + pill["height"]
-            or panel["y"] + panel["height"] <= pill["y"])
-        self.assertGreaterEqual(panel["y"], 0)
-        self.assertLessEqual(panel["y"] + panel["height"], screen["height"])
-
+class PhoneDesktopLayoutTests(unittest.TestCase):
     def test_desktop_creation_avoids_collisions(self):
         source = PHONE.read_text(encoding="utf-8")
         prefix = source.split("\nimport gi\n", 1)[0]

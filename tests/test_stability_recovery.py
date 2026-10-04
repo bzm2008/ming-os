@@ -193,24 +193,6 @@ class DisplayControlPureTests(unittest.TestCase):
             self.assertEqual(1, len(cancelled))
 
 
-class StatusWidgetStatePureTests(unittest.TestCase):
-    def test_widget_state_is_schema_v2_and_recovers_collapsed_from_corruption(self):
-        prefix = PHONE.split("\nimport gi\n", 1)[0]
-        self.assertIn("def load_widget_state", prefix)
-        self.assertIn("def save_widget_state", prefix)
-        namespace = {"__file__": str(ROOT / "assets" / "ming-phone-desktop.py")}
-        exec(prefix, namespace)
-        with tempfile.TemporaryDirectory() as temporary:
-            state_path = pathlib.Path(temporary) / "status-widget.json"
-            default_state = {"schema_version": 2, "collapsed": True, "metric_mode": "memory"}
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
-            state_path.write_text("not json", encoding="utf-8")
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
-            namespace["save_widget_state"](True, state_path)
-            self.assertEqual(default_state, json.loads(state_path.read_text(encoding="utf-8")))
-            self.assertEqual(default_state, namespace["load_widget_state"](state_path))
-
-
 class ApplicationCatalogRefreshTests(unittest.TestCase):
     @staticmethod
     def load_phone_catalog_functions():

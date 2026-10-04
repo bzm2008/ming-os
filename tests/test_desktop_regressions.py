@@ -1447,7 +1447,7 @@ class DesktopPolishContractTests(unittest.TestCase):
     def test_launch_feedback_bounds_long_titles_and_details_inside_its_fixed_area(self):
         overlay = self.phone[
             self.phone.index("class LaunchFeedbackOverlay"):
-            self.phone.index("class StatusSlider")
+            self.phone.index("class WallpaperCanvas")
         ]
         self.assertIn("self.title.set_ellipsize(Pango.EllipsizeMode.END)", overlay)
         self.assertIn("self.title.set_max_width_chars(20)", overlay)
@@ -1514,7 +1514,26 @@ class DesktopPolishContractTests(unittest.TestCase):
         """
         for retired in (
             "class StatusWidget",
+            "class StatusSlider",
+            "class ControlRequestState",
+            "class ResourceMetricSampler",
             "STATUS_TOGGLE_DEDUP_SECONDS",
+            "STATUS_WIDGET_COMPACT_WIDTH",
+            "STATUS_WIDGET_COMPACT_HEIGHT",
+            "STATUS_WIDGET_COMPACT_NARROW_WIDTH",
+            "WIDGET_STATE_SCHEMA_VERSION",
+            "COMPACT_BATTERY_REFRESH_SECONDS",
+            "STATUS_SUMMARY_REFRESH_SECONDS",
+            "STATUS_RESOURCE_REFRESH_SECONDS",
+            "MING_WIDGET_MARK_ICON",
+            "METRIC_MODES",
+            "normalize_metric_mode",
+            "read_resource_metric",
+            "load_widget_state",
+            "save_widget_state",
+            "widget_state_path",
+            "status_widget_overlay_geometry",
+            "status_widget_compact_geometry",
             "self.status = None",
             "_last_status_toggle_at",
             "register_status_widget_pid",
