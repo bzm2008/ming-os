@@ -3586,12 +3586,17 @@ ming_log() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"${file}" 2>/dev/null || true
 }
 
-stop_xfdesktop() {
-    # Ming Phone Desktop owns wallpaper, icons and click handling.
-    # Stop xfdesktop only after Ming Phone Desktop is confirmed alive; otherwise
-    # the user would be left with a black root window.
-    xfdesktop --quit >/dev/null 2>&1 || true
-    pkill -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || true
+keep_xfdesktop_backdrop_owner() {
+    # Ming Phone Desktop owns the visible wallpaper, icons and click handling,
+    # but xfdesktop owns the *root window* backdrop (_XROOTPMAP_ID).  Quitting it
+    # once the phone desktop was ready left the root pixmap unset (2026-10-04 VM
+    # run), so keep it running as the backdrop owner with its own icons disabled:
+    # the phone desktop remains the single visible desktop surface.
+    xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
+    start_xfdesktop_fallback
+    if command -v xfdesktop >/dev/null 2>&1; then
+        xfdesktop --reload >/dev/null 2>&1 || true
+    fi
 }
 
 start_xfdesktop_fallback() {
@@ -3660,7 +3665,7 @@ start_phone_desktop() {
     log_file="$(ming_log_dir)/ming-phone-desktop.log"
     if phone_desktop_running; then
         if wait_phone_desktop_ready "${log_file}"; then
-            stop_xfdesktop
+            keep_xfdesktop_backdrop_owner
             return 0
         fi
         start_xfdesktop_fallback
@@ -3670,7 +3675,7 @@ start_phone_desktop() {
     ming_log "${log_file}" "starting ming-phone-desktop DISPLAY=${DISPLAY}"
     (nohup ming-phone-desktop >>"${log_file}" 2>&1 &) || (nohup ming-phone-desktop >/dev/null 2>&1 &)
     if wait_phone_desktop_ready "${log_file}"; then
-        stop_xfdesktop
+        keep_xfdesktop_backdrop_owner
     else
         ming_log "${log_file}" "ming-phone-desktop did not stay running; keeping xfdesktop fallback"
         start_xfdesktop_fallback
@@ -5338,10 +5343,18 @@ start_xfdesktop_fallback() {
     return 0
 }
 
-stop_xfdesktop_after_phone_ready() {
-    phone_desktop_ready || return 1
-    probe_timeout xfdesktop --quit >/dev/null 2>&1 || true
-    probe_timeout pkill -TERM -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || true
+ensure_xfdesktop_backdrop_owner() {
+    # xfdesktop owns the root-window backdrop (_XROOTPMAP_ID).  Quitting it once
+    # the phone desktop was ready left that pixmap unset (2026-10-04 VM run:
+    # _XROOTPMAP_ID = 0x0 with the helper reporting "xfdesktop is running but
+    # still unset").  Keep the daemon alive as the backdrop owner, and switch its
+    # desktop icons off so the phone desktop stays the single visible surface.
+    xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
+    if ! xfdesktop_running; then
+        start_xfdesktop_fallback || true
+    fi
+    probe_timeout xfdesktop --reload >/dev/null 2>&1 || true
+    return 0
 }
 
 plank_running() {
@@ -5476,7 +5489,7 @@ start_phone_desktop() {
     stop_duplicate_phone_desktops
     if phone_desktop_ready; then
         phone_recovered=true
-        stop_xfdesktop_after_phone_ready || true
+        ensure_xfdesktop_backdrop_owner || true
         return 0
     fi
     phone_restarts=$((phone_restarts + 1))
@@ -5489,7 +5502,7 @@ start_phone_desktop() {
         finished_at="$(now_ms)"
         phone_elapsed_ms=$((finished_at - started_at))
         phone_recovered=true
-        stop_xfdesktop_after_phone_ready || true
+        ensure_xfdesktop_backdrop_owner || true
         log 'Ming Phone Desktop ready'
         return 0
     fi
@@ -9604,12 +9617,15 @@ if command -v xfconf-query >/dev/null 2>&1; then
             [[ -n "${connector}" ]] && monitors+=("${connector}")
         done < <(xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}' || true)
     fi
-    monitors+=(screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1)
+    monitors+=(0 1 screen Virtual-1 VGA-1 VGA1 HDMI-1 HDMI1 DP-1 DP1 eDP-1 eDP1 LVDS-1 LVDS1 DVI-1 DVI1 DVI-D-1)
     for monitor in "${monitors[@]}"; do
         for workspace in workspace0 workspace1; do
             base="/backdrop/screen0/monitor${monitor}/${workspace}"
             xfconf-query -c xfce4-desktop -p "${base}/last-image" -n -t string -s "${wallpaper}" 2>/dev/null || true
             xfconf-query -c xfce4-desktop -p "${base}/image-path" -n -t string -s "${wallpaper}" 2>/dev/null || true
+            # xfdesktop only paints when image-show is true; the packaged
+            # desktop-base default points at a file this image does not ship.
+            xfconf-query -c xfce4-desktop -p "${base}/image-show" -n -t bool -s true 2>/dev/null || true
             xfconf-query -c xfce4-desktop -p "${base}/image-style" -n -t int -s 5 2>/dev/null || true
         done
     done
@@ -9913,6 +9929,29 @@ XFWM4CFG
 <channel name="xfce4-desktop" version="1.0">
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
+      <!-- Numeric keys first: xfdesktop 4.20 indexes backdrops as
+           monitor0/monitor1.  Connector-name keys alone were never read, so the
+           packaged desktop-base default (/usr/share/images/desktop-base/default,
+           absent from this image) stayed in effect and the root window kept no
+           pixmap (2026-10-04 VM evidence). -->
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
+      <property name="monitor1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+          <property name="image-path" type="string" value="/usr/share/backgrounds/ming-os/default.png"/>
+        </property>
+      </property>
       <!-- 覆盖所有常见显示器连接器名称，确保任何机器都能应用壁纸 -->
       <!-- screen / Virtual（VirtualBox/QEMU）-->
       <property name="monitorscreen" type="empty">
@@ -10287,8 +10326,8 @@ if [[ "${MEM_MB}" -le 2600 && -f "${PLANK_SETTINGS}" ]]; then
     printf '[ming-appearance] low-memory host keeps approved legacy Dock geometry\n' >&2
 fi
 
-# Ming 手机桌面接管壁纸、图标和点击。watchdog 只会在确认它就绪后
-# 停止 xfdesktop，因此启动失败时仍保留原生桌面作为安全后备。
+# Ming 手机桌面接管壁纸、图标和点击。xfdesktop 现在保留为根窗口壁纸属主
+# （_XROOTPMAP_ID 需要它常驻），其桌面图标已关闭，因此不会出现第二个可见桌面。
 xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
 
 # Dock-only 桌面：Xfce 面板只作为兼容组件安装，不作为可见任务栏运行。

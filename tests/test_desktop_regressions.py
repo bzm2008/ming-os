@@ -1267,6 +1267,38 @@ class DesktopSourceTests(unittest.TestCase):
         self.assertIn("_XROOTPMAP_ID", helper)
         self.assertIn('"0x0"', helper)
         self.assertIn("wallpaper_log=/tmp/ming-installer-wallpaper.log", helper)
+        # xfdesktop 4.20 indexes backdrops numerically (monitor0/monitor1); writing
+        # connector names alone left the packaged desktop-base default in effect
+        # (2026-10-04 VM phase 2 evidence).
+        self.assertIn("monitors+=(0 1 screen Virtual-1", helper)
+        self.assertIn('/image-show" -n -t bool -s true', helper)
+
+    def test_shipped_backdrop_defaults_use_numeric_keys_and_a_real_file(self):
+        xml = self.desktop.split(
+            "xfce-perchannel-xml/xfce4-desktop.xml\" << 'DESKTOPCFG'", 1
+        )[1].split("\nDESKTOPCFG", 1)[0]
+        for numeric_key in ('name="monitor0"', 'name="monitor1"'):
+            self.assertIn(numeric_key, xml)
+        self.assertIn('name="image-show" type="bool" value="true"', xml)
+        self.assertIn("/usr/share/backgrounds/ming-os/default.png", xml)
+        # The packaged default points at a file this image does not ship; it must
+        # not survive as an actual property value (the comment may name it).
+        self.assertNotIn('value="/usr/share/images/desktop-base/default"', xml)
+
+    def test_supervisors_keep_xfdesktop_as_the_root_backdrop_owner(self):
+        """Quitting xfdesktop leaves _XROOTPMAP_ID unset (2026-10-04 VM run)."""
+        health = self.desktop.split(
+            "cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'", 1
+        )[1].split("\nMINGSESSIONHEALTH", 1)[0]
+        watchdog = self.desktop.split(
+            "cat > /usr/local/bin/ming-phone-desktop-watchdog << 'PHONEDESKWATCH'", 1
+        )[1].split("\nPHONEDESKWATCH", 1)[0]
+        self.assertIn("ensure_xfdesktop_backdrop_owner", health)
+        self.assertIn("keep_xfdesktop_backdrop_owner", watchdog)
+        for script in (health, watchdog):
+            self.assertNotIn("xfdesktop --quit", script)
+            self.assertNotIn("stop_xfdesktop", script)
+            self.assertIn("/desktop-icons/style", script)
 
     def test_supervised_gui_children_get_a_normalised_display_environment(self):
         """No script that spawns a GUI child may rely on an inherited display."""
