@@ -84,6 +84,42 @@ class DesktopSessionStabilityContracts(unittest.TestCase):
             self.assertIn("ming-session-healthcheck", source)
             self.assertIn("session_ready", source)
 
+    def test_taskbar_visibility_failure_path_backs_off_instead_of_retrying_forever(self):
+        """The 2026-10-04 VM run retried the taskbar repair every ~25s forever."""
+        session = generated_script(
+            "cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'",
+            "MINGSESSIONHEALTH",
+        )
+        self.assertIn("taskbar_in_cooldown() {", session)
+        self.assertIn("taskbar_repair_cooldown=60", session)
+        start = session.split("start_taskbar_dock() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("taskbar_in_cooldown", start)          # skip while cooling down
+        self.assertIn('>"${taskbar_cooldown_file}"', start)  # record the failure
+        self.assertIn('rm -f "${taskbar_cooldown_file}"', start)  # clear on success
+        self.assertIn("next repair in ${taskbar_repair_cooldown}s", start)
+        # A fresh session must still get one real attempt.
+        startup = session.split("startup_once() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('rm -f "${taskbar_cooldown_file}"', startup)
+
+    def test_retired_plank_fallback_claim_is_gone(self):
+        """Plank is purged by this module, so no dock fallback can exist."""
+        self.assertNotIn("Plank fallback remains available", DESKTOP)
+        self.assertIn("no dock fallback is installed", DESKTOP)
+
+    def test_backdrop_diagnostics_are_advisory_and_do_not_gate_healthy(self):
+        session = generated_script(
+            "cat > /usr/local/bin/ming-session-healthcheck << 'MINGSESSIONHEALTH'",
+            "MINGSESSIONHEALTH",
+        )
+        self.assertIn('"backdrop": {', session)
+        # Probe the X root window, not one particular owner: task-5 phase 2 is
+        # still deciding whether xfdesktop stays resident.
+        self.assertIn("_XROOTPMAP_ID", session)
+        self.assertIn("MING_WALLPAPER_PRESENT", session)
+        healthy = session.split('payload["healthy"] = (', 1)[1].split("\n)", 1)[0]
+        self.assertNotIn("backdrop", healthy)
+        self.assertNotIn("MING_ROOT_PIXMAP", healthy)
+
 
 if __name__ == "__main__":
     unittest.main()

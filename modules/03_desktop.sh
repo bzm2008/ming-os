@@ -4888,6 +4888,8 @@ session_ready_file="${session_runtime_dir}/ming-session-healthcheck.ready"
 phone_ready_file="${HOME}/.cache/ming-os/ming-phone-desktop.ready"
 picom_policy_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-policy"
 picom_cooldown_file="${XDG_RUNTIME_DIR:-/tmp}/ming-picom-cooldown"
+taskbar_cooldown_file="${XDG_RUNTIME_DIR:-/tmp}/ming-taskbar-cooldown"
+taskbar_repair_cooldown=60
 drawer_state_file="${XDG_RUNTIME_DIR:-/tmp}/ming-app-drawer-open"
 dock_immersive_state=unknown
 dock_immersive_window_id=""
@@ -5429,6 +5431,18 @@ picom_in_cooldown() {
     (( now - failed_at < 60 ))
 }
 
+taskbar_in_cooldown() {
+    # Same pattern as the Picom cooldown.  A failed visibility repair must not be
+    # retried on every supervisor pass: the 2026-10-04 VM run retried every ~25s
+    # forever, which burned CPU and flooded session-health.log.
+    local failed_at now
+    [[ -r "${taskbar_cooldown_file}" ]] || return 1
+    read -r failed_at <"${taskbar_cooldown_file}" || return 1
+    now="$(date +%s 2>/dev/null || printf '0')"
+    [[ "${failed_at}" =~ ^[0-9]+$ && "${now}" =~ ^[0-9]+$ ]] || return 1
+    (( now - failed_at < taskbar_repair_cooldown ))
+}
+
 wait_for_picom_exit() {
     local deadline_at=$(( $(now_ms) + 2000 )) current_ms
     while [[ "$(process_count picom)" -gt 0 ]]; do
@@ -5516,6 +5530,11 @@ start_phone_desktop() {
 
 start_taskbar_dock() {
     local started_at finished_at deadline_at was_running=false
+    if taskbar_in_cooldown; then
+        taskbar_recovered=false
+        log "Ming Taskbar repair is cooling down after a recent failure (${taskbar_repair_cooldown}s)"
+        return 1
+    fi
     stop_duplicate_taskbar
     taskbar_running && was_running=true
     command -v ming-taskbar-watchdog >/dev/null 2>&1 || {
@@ -5534,6 +5553,7 @@ start_taskbar_dock() {
         finished_at="$(now_ms)"
         taskbar_elapsed_ms=$((finished_at - started_at))
         taskbar_recovered=true
+        rm -f "${taskbar_cooldown_file}" 2>/dev/null || true
         stop_plank || true
         log 'Ming Taskbar ready'
         return 0
@@ -5541,7 +5561,10 @@ start_taskbar_dock() {
     finished_at="$(now_ms)"
     taskbar_elapsed_ms=$((finished_at - started_at))
     taskbar_recovered=false
-    log 'Ming Taskbar startup failed; Plank fallback remains available'
+    printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" >"${taskbar_cooldown_file}" 2>/dev/null || true
+    # Plank was retired (modules/03_desktop.sh purges it), so there is no dock
+    # fallback; say so instead of advertising one that cannot be installed.
+    log "Ming Taskbar startup failed; no dock fallback is installed, next repair in ${taskbar_repair_cooldown}s"
     return 1
 }
 
@@ -5647,6 +5670,8 @@ write_metrics() {
     local phone_enabled=false phone_running=false phone_ready=false
     local xfdesktop=false dock=false dock_visible=false taskbar=false taskbar_visible=false compositor=false panel_running=false
     local compositor_backend=none
+    local backdrop_owner=false root_pixmap=none
+    local wallpaper_path=/usr/share/backgrounds/ming-os/default.png wallpaper_present=false
     local phone_pid_count=0 plank_pid_count=0 taskbar_pid_count=0 picom_pid_count=0
     local phone_duplicates=0 plank_duplicates=0 taskbar_duplicates=0 picom_duplicates=0
     [[ "${MING_PHONE_DESKTOP:-1}" == "1" ]] && phone_enabled=true
@@ -5667,6 +5692,14 @@ write_metrics() {
     (( plank_pid_count > 1 )) && plank_duplicates=$((plank_pid_count - 1))
     (( taskbar_pid_count > 1 )) && taskbar_duplicates=$((taskbar_pid_count - 1))
     (( picom_pid_count > 1 )) && picom_duplicates=$((picom_pid_count - 1))
+    xfdesktop_running && backdrop_owner=true
+    # Read the root pixmap itself rather than trusting any single owner: this
+    # stays valid whichever component paints the backdrop (task-5 phase 2 is
+    # still deciding between a resident xfdesktop and the phone desktop).
+    root_pixmap="$(probe_timeout xprop -root _XROOTPMAP_ID 2>/dev/null \
+        | sed -n 's/.*# *\(0x[0-9a-fA-F]*\).*/\1/p' || true)"
+    [[ -n "${root_pixmap}" ]] || root_pixmap=none
+    [[ -f "${wallpaper_path}" ]] && wallpaper_present=true
     if picom_user_disabled; then
         compositor_backend=disabled-by-user
     elif picom_policy_disabled; then
@@ -5699,6 +5732,8 @@ write_metrics() {
     MING_PICOM_RECOVERED="${picom_recovered}" MING_PANEL_RUNNING="${panel_running}" \
     MING_TASKBAR_RECOVERED="${taskbar_recovered}" MING_TASKBAR_RESTARTS="${taskbar_restarts}" \
     MING_TASKBAR_ELAPSED_MS="${taskbar_elapsed_ms}" \
+    MING_BACKDROP_OWNER="${backdrop_owner}" MING_ROOT_PIXMAP="${root_pixmap}" \
+    MING_WALLPAPER_PATH="${wallpaper_path}" MING_WALLPAPER_PRESENT="${wallpaper_present}" \
     MING_HEALTH_LOG="${health_log}" python3 - <<'PY'
 import json
 import os
@@ -5751,6 +5786,18 @@ payload = {
         "taskbar": integer("MING_TASKBAR_DUPLICATES"),
         "picom": integer("MING_PICOM_DUPLICATES"),
     },
+    "backdrop": {
+        # Advisory diagnostics, deliberately NOT part of "healthy": a missing
+        # wallpaper does not make the session unusable, and the 2026-10-05
+        # re-verification reported healthy:True without a running xfdesktop.
+        # root_pixmap is read from the X root window, so it stays valid whichever
+        # component owns the backdrop (task-5 phase 2 is still deciding).
+        "owner_running": boolean("MING_BACKDROP_OWNER"),
+        "root_pixmap": os.environ.get("MING_ROOT_PIXMAP", "none"),
+        "pixmap_present": os.environ.get("MING_ROOT_PIXMAP", "none") not in ("", "none", "0x0"),
+        "wallpaper": os.environ.get("MING_WALLPAPER_PATH", ""),
+        "wallpaper_present": boolean("MING_WALLPAPER_PRESENT"),
+    },
 }
 
 payload["healthy"] = (
@@ -5801,6 +5848,9 @@ PY
 startup_once() {
     local phone_fallback=false
     log 'session startup check begin'
+    # A fresh session always gets one real attempt, even if a previous session
+    # failed inside the cooldown window.
+    rm -f "${taskbar_cooldown_file}" 2>/dev/null || true
     refresh_session_profile
     stop_legacy_ming_dock
     suppress_xfce_panel || log 'Xfce panel remained visible in Phone Desktop mode'
